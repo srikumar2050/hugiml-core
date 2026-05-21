@@ -65,19 +65,10 @@ is_macos = platform.system() == "Darwin"
 
 # ── Compiler selection ────────────────────────────────────────────────────────
 
-
-def _wrap_ccache(var: str, fallback: str) -> str:
-    if os.environ.get(var):
-        return os.environ[var]
-    if shutil.which("ccache") and shutil.which(fallback):
-        return f"ccache {fallback}"
-    return fallback
-
-
 if not is_windows:
     os.environ["CC"] = "gcc"
     os.environ["CXX"] = "g++"
-    
+
 # ── Base flags (platform-specific) ───────────────────────────────────────────
 
 if is_windows:
@@ -88,8 +79,15 @@ if is_windows:
     _opt_bind = ["/Od", "/W3"]
     _opt_debug = ["/Od", "/Zi", "/DHUGIML_DEBUG"]
 elif is_macos:
-    omp_compile = ["-Xpreprocessor", "-fopenmp"]
-    omp_link = ["-lomp"]
+    import subprocess
+    try:
+        libomp_prefix = subprocess.check_output(
+            ["brew", "--prefix", "libomp"], stderr=subprocess.DEVNULL
+        ).decode().strip()
+    except Exception:
+        libomp_prefix = "/opt/homebrew/opt/libomp"
+    omp_compile = [f"-I{libomp_prefix}/include", "-Xpreprocessor", "-fopenmp"]
+    omp_link = [f"-L{libomp_prefix}/lib", "-lomp"]
     _opt_release = ["-O2", "-Wall", "-Wextra", "-Wno-unused-parameter"]
     _opt_fast = ["-O1", "-Wall", "-Wno-unused-parameter"]
     _opt_bind = ["-O0", "-g0", "-Wall", "-Wno-unused-parameter"]
