@@ -100,15 +100,14 @@ test-requires = ["numpy", "scipy", "scikit-learn", "pandas", "pytest", "packagin
 build-verbosity = 1
 
 [tool.cibuildwheel.linux]
-before-build = "pip install pybind11 && apt-get install -y ccache || yum install -y ccache || true"
-environment = { CC = "ccache gcc", CXX = "ccache g++" }
-manylinux-x86_64-image = "manylinux2014"
+before-build = "pip install pybind11"
+environment = { CC = "gcc", CXX = "g++" }manylinux-x86_64-image = "manylinux2014"
 manylinux-aarch64-image = "manylinux2014"
 archs = ["x86_64", "aarch64"]
 
 [tool.cibuildwheel.macos]
-before-build = "pip install pybind11 && brew install ccache libomp || true"
-environment = { CC = "ccache gcc", CXX = "ccache g++", MACOSX_DEPLOYMENT_TARGET = "11.0" }
+before-build = "pip install pybind11 && brew install libomp || true"
+environment = { CC = "gcc", CXX = "g++", MACOSX_DEPLOYMENT_TARGET = "11.0" }
 archs = ["x86_64", "arm64"]
 
 [tool.cibuildwheel.windows]
