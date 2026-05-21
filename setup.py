@@ -68,6 +68,10 @@ is_macos = platform.system() == "Darwin"
 if not is_windows:
     os.environ["CC"] = "gcc"
     os.environ["CXX"] = "g++"
+    # strip any accidental 'ccache' prefix
+    for var in ("CC", "CXX"):
+        os.environ[var] = os.environ[var].split()[-1]
+
 
 # ── Base flags (platform-specific) ───────────────────────────────────────────
 
