@@ -75,8 +75,10 @@ def _wrap_ccache(var: str, fallback: str) -> str:
 
 
 if not is_windows:
-    os.environ.setdefault("CC", _wrap_ccache("CC", "gcc"))
-    os.environ.setdefault("CXX", _wrap_ccache("CXX", "g++"))
+    #os.environ.setdefault("CC", _wrap_ccache("CC", "gcc"))
+    #os.environ.setdefault("CXX", _wrap_ccache("CXX", "g++"))
+    os.environ.setdefault("CC", "gcc")
+    os.environ.setdefault("CXX", "g++")
 
 # ── Base flags (platform-specific) ───────────────────────────────────────────
 
