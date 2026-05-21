@@ -1,0 +1,192 @@
+[build-system]
+requires = ["setuptools>=77", "pybind11>=2.12", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hugiml-core"
+version = "2.1.0"
+description = "High-performance interpretable rule-based ML infrastructure based on the HUG-IML algorithm (IEEE Access 2024)"
+readme = "README.md"
+# {text = ...} form works on setuptools 61-76 without error;
+# setuptools>=77 (enforced by build-system.requires) also accepts it.
+# The SPDX string form "Apache-2.0" requires setuptools>=77 and breaks
+# direct `python setup.py` invocations which use the system setuptools.
+license = {text = "Apache-2.0"}
+authors = [{ name = "Srikumar Krishnamoorthy" }]
+requires-python = ">=3.9"
+keywords = [
+    "machine-learning",
+    "interpretable-ml",
+    "rule-based",
+    "classification",
+    "pattern-mining",
+    "HUG-IML",
+    "high-utility",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: C++",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Operating System :: OS Independent",
+]
+dependencies = [
+    "numpy>=1.22",
+    "scipy>=1.8",
+    "scikit-learn>=1.0",
+    "pandas>=1.4",
+    "packaging>=21.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "pytest-xdist>=3.0",
+    "pytest-cov>=4.0",
+    "hypothesis>=6.100",
+    "build",
+    "cibuildwheel>=2.20",
+    "ruff>=0.4",
+    "mypy>=1.8",
+    "pandas-stubs",
+    "types-setuptools",
+    "check-manifest>=0.49",
+]
+telemetry = [
+    "opentelemetry-api>=1.20",
+    "opentelemetry-sdk>=1.20",
+    "prometheus-client>=0.19",
+]
+server = [
+    "fastapi>=0.111",
+    "uvicorn[standard]>=0.29",
+    "slowapi>=0.1.9",
+]
+explainability = [
+    "shap>=0.44",
+]
+mlflow = [
+    "mlflow>=2.10",
+]
+all = [
+    "hugiml-core[dev,telemetry,server,explainability,mlflow]",
+]
+
+[project.urls]
+Homepage = "https://github.com/srikumar2050/hugiml-core"
+Repository = "https://github.com/srikumar2050/hugiml-core"
+"Bug Tracker" = "https://github.com/srikumar2050/hugiml-core/issues"
+Paper = "https://doi.org/10.1109/ACCESS.2024.3455563"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"hugiml" = ["py.typed"]
+
+[tool.cibuildwheel]
+build = "cp39-* cp310-* cp311-* cp312-* cp313-*"
+skip = "*-musllinux_i686"
+test-command = "python {project}/scripts/wheel_smoke_test.py"
+test-requires = ["numpy", "scipy", "scikit-learn", "pandas", "pytest", "packaging"]
+build-verbosity = 1
+
+[tool.cibuildwheel.linux]
+before-build = "pip install pybind11 && apt-get install -y ccache || yum install -y ccache || true"
+environment = { CC = "ccache gcc", CXX = "ccache g++" }
+manylinux-x86_64-image = "manylinux2014"
+manylinux-aarch64-image = "manylinux2014"
+archs = ["x86_64", "aarch64"]
+
+[tool.cibuildwheel.macos]
+before-build = "pip install pybind11 && brew install ccache libomp || true"
+environment = { CC = "ccache gcc", CXX = "ccache g++", MACOSX_DEPLOYMENT_TARGET = "11.0" }
+archs = ["x86_64", "arm64"]
+
+[tool.cibuildwheel.windows]
+before-build = "pip install pybind11"
+archs = ["AMD64"]
+
+[tool.check-manifest]
+ignore = [
+    "*.egg-info/*",
+    ".github/*",
+    ".gitignore",
+    "benchmarks/results/*",
+    "docker/*",
+    "kubernetes/*",
+    "scripts/*",
+    "native/*.gch",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+addopts = "--tb=short -q"
+markers = [
+    "integration: end-to-end tests on real datasets (deselect with '-m not integration')",
+    "stress: memory, concurrency and large-batch tests (deselect with '-m not stress')",
+]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "always::UserWarning:hugiml",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py39"
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "UP"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true
+no_strict_optional = false
+warn_unused_ignores = true
+warn_return_any = true
+disallow_untyped_defs = true
+
+[tool.coverage.run]
+source_pkgs = ["hugiml"]
+omit = ["*/tests/*", "*/_compat.py"]
+relative_files = true
+
+[tool.coverage.paths]
+source = [
+    "src/hugiml",
+    "*/site-packages/hugiml",
+    "*/hugiml/src/hugiml",
+]
+
+[tool.coverage.report]
+fail_under = 80
+show_missing = true
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+]
+
+[tool.bandit]
+targets = ["src/hugiml"]
+exclude_dirs = ["tests", "benchmarks", "scripts", "docker"]
+skips = [
+    # B101: assert statements are used in internal validation helpers
+    "B101",
+    # B324: hashlib.sha256 is used for HMAC; not a password hash
+    "B324",
+    # B603/B607: subprocess.run is used in setup.py for PCH building only
+    "B603",
+    "B607",
+]

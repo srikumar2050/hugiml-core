@@ -1,0 +1,55 @@
+{
+  "_comment": "Benchmark regression baselines. Values represent wall-clock seconds on a single-core reference machine (GitHub Actions ubuntu-latest, Python 3.11). The bench_regression.py script fails CI when measured time exceeds baseline_seconds * CLI --threshold (default 1.5x). The per-benchmark regression_factor is informational only and does not override the CLI threshold.",
+  "metadata": {
+    "generated_by": "benchmarks/bench_core.py",
+    "platform": "ubuntu-latest / Python 3.11 / single core",
+    "hugiml_version": "2.1.0"
+  },
+  "benchmarks": {
+    "fit_german_credit": {
+      "description": "HUGIMLClassifierNative.fit() L=1 on German Credit 800-sample training split",
+      "baseline_seconds": 5.0,
+      "regression_factor": 2.0
+    },
+    "fit_heloc_full": {
+      "description": "HUGIMLClassifierNative.fit() L=1 on HELOC 8000-sample training split",
+      "baseline_seconds": 30.0,
+      "regression_factor": 2.0
+    },
+    "fit_german_l2": {
+      "description": "HUGIMLClassifierNative.fit() L=2 on German Credit 800-sample training split (depth-2 compound patterns)",
+      "baseline_seconds": 20.0,
+      "regression_factor": 2.5
+    },
+    "predict_proba_german_1k": {
+      "description": "predict_proba on 1000 German Credit samples (post-fit, L=1)",
+      "baseline_seconds": 0.5,
+      "regression_factor": 3.0
+    },
+    "predict_proba_german_l2_500": {
+      "description": "predict_proba on 500 German Credit samples (post-fit, L=2)",
+      "baseline_seconds": 0.5,
+      "regression_factor": 3.0
+    },
+    "predict_proba_heloc_10k": {
+      "description": "predict_proba on 10 000 HELOC samples (post-fit)",
+      "baseline_seconds": 2.0,
+      "regression_factor": 3.0
+    },
+    "transform_german_1k": {
+      "description": "transform() on 1000 German Credit samples",
+      "baseline_seconds": 0.3,
+      "regression_factor": 3.0
+    },
+    "prepareXy_german": {
+      "description": "prepareXy() on full German Credit dataset",
+      "baseline_seconds": 1.0,
+      "regression_factor": 2.0
+    },
+    "serialise_roundtrip": {
+      "description": "save_model() + load_model() round-trip (v3 ZIP format)",
+      "baseline_seconds": 0.5,
+      "regression_factor": 3.0
+    }
+  }
+}

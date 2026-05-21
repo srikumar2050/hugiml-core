@@ -1,0 +1,1677 @@
+# Copyright 2026 Srikumar Krishnamoorthy
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""HUGIMLClassifierNative — C++ accelerated, scikit-learn compatible classifier.
+
+Implements the High Utility Gain Interpretable Machine Learning (HUG-IML)
+algorithm from:
+
+    Krishnamoorthy, S. (2024). Interpretable Classifier Models for Decision
+    Support Using High Utility Gain Patterns. IEEE Access, 12, 126088–126107.
+    DOI: 10.1109/ACCESS.2024.3455563
+
+Computationally intensive stages (discretisation, transaction construction,
+pattern mining, matrix assembly) run at native speed via a compiled C++
+extension with optional OpenMP parallelism.  The Python layer handles
+DataFrame ingestion, column-type detection, downstream estimation,
+explanation methods, monitoring, and drift detection.
+
+Architecture
+------------
+C++ extension (_hugiml_core):
+    Discretisation, transaction construction, top-K HUI pattern mining with
+    information-gain filtering, bitmap-accelerated matrix assembly, OpenMP
+    parallel pattern matching.
+
+Python layer:
+    Column-type detection (prepareXy), NaN/Inf imputation, downstream sklearn
+    estimator (LogisticRegression default), explanation methods
+    (get_hug_features, get_pattern_info, feature_importances), versioned
+    model serialisation, prediction monitoring, multi-method drift detection,
+    latency SLA enforcement, and graceful degradation under memory pressure.
+
+Quick start
+-----------
+Two usage paths are supported:
+
+**Path A — prepareXy** (recommended when the full dataset is available upfront)::
+
+    from hugiml import HUGIMLClassifierNative
+
+    clf = HUGIMLClassifierNative()
+    X, y = clf.prepareXy(X_df, y_series)
+    X_tr, X_te, y_tr, y_te = train_test_split(X, y, stratify=y)
+    clf.fit(X_tr, y_tr)
+    proba = clf.predict_proba(X_te)
+
+    print(clf.model_summary())
+    print(clf.feature_importances())
+
+**Path B — allCols + origColumns** (cross-validation loops)::
+
+    clf = HUGIMLClassifierNative(
+        allCols=[int_cols, float_cols, cat_cols],
+        origColumns=X_df.columns.tolist(),
+    )
+    clf.fit(X_train, y_train)
+
+Monitoring and drift detection::
+
+    clf.enable_monitoring()
+    clf.predict_proba(X_new)
+    print(clf.monitor.report())
+
+    drift = clf.detect_drift(X_new)
+    print(drift)
+
+Versioned serialisation::
+
+    clf.save_model("model.hugiml")
+    clf2 = HUGIMLClassifierNative.load_model("model.hugiml")
+"""
+
+from __future__ import annotations
+
+import copy
+import dataclasses
+import logging
+import math
+import os
+import threading
+import time
+import tracemalloc
+import warnings
+from typing import Any
+
+import numpy as np
+import pandas as pd
+from scipy.sparse import csr_matrix
+from sklearn.base import BaseEstimator, ClassifierMixin, TransformerMixin
+from sklearn.linear_model import LogisticRegression
+from sklearn.pipeline import Pipeline
+from sklearn.utils.validation import check_is_fitted
+
+from hugiml._compat import check_array, check_X_y
+from hugiml.exceptions import (
+    HUGIMLConvergenceWarning,
+    HUGIMLDtypeDriftWarning,
+    HUGIMLMiningError,
+    HUGIMLParamError,
+    HUGIMLPredictionError,
+    HUGIMLRangeWarning,
+    HUGIMLSchemaError,
+    HUGIMLTimeoutError,
+    HUGIMLValidationError,
+    HUGIMLVersionError,
+    HUGIMLWarning,
+)
+from hugiml.monitoring import DriftDetector, PredictionMonitor
+from hugiml.serialization import MIN_SCHEMA_VERSION, MODEL_SCHEMA_VERSION
+from hugiml.serialization import load_model as _load_model
+from hugiml.serialization import save_model as _save_model
+
+try:
+    import _hugiml_core as _core
+
+    _CORE_AVAILABLE: bool = True
+except ImportError:
+    _core = None
+    _CORE_AVAILABLE = False
+
+# ---------------------------------------------------------------------------
+# Helpers: RSS memory (Unix) with Windows fallback
+# ---------------------------------------------------------------------------
+try:
+    import resource as _resource
+
+    def _get_peak_rss_kb() -> int:
+        return int(_resource.getrusage(_resource.RUSAGE_SELF).ru_maxrss)
+
+except ImportError:
+
+    def _get_peak_rss_kb() -> int:
+        try:
+            import psutil
+
+            return int(psutil.Process().memory_info().peak_wset) // 1024
+        except ImportError:
+            return 0
+
+
+logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# Configuration presets
+# =============================================================================
+
+_PRESETS: dict[str, dict] = {
+    "quick": dict(B=5, L=1, G=1e-2, topK=50),
+    "balanced": dict(B=7, L=1, G=5e-3, topK=-1),
+    "thorough": dict(B=-1, L=2, G=1e-4, topK=-1),
+}
+
+
+# =============================================================================
+# Fit metadata
+# =============================================================================
+
+
+@dataclasses.dataclass(frozen=True)
+class FitMetadata:
+    """Immutable record of everything that happened during fit().
+
+    Attributes
+    ----------
+    n_samples, n_features : int
+        Training set dimensions.
+    n_classes : int
+        Number of distinct target classes.
+    n_items : int
+        Number of utility-annotated items (bins + categories).
+    n_patterns : int
+        Number of HUG patterns mined and retained.
+    n_compound : int
+        Compound patterns (length > 1).
+    topK_used : int
+        Effective topK budget used during mining.
+    stage_times_ms : dict[str, float]
+        Wall-clock milliseconds per fit stage.
+    total_fit_ms : float
+        Total fit wall-clock milliseconds.
+    matrix_density : float
+        Fraction of non-zero entries in the training pattern matrix.
+    config : dict
+        Snapshot of (B, L, G, topK) as used.
+    memory_peak_mb : float
+        Python-traced peak memory during fit.
+    memory_rss_mb : float
+        RSS delta during fit (Unix only).
+    memory_cpp_mb : float
+        Estimated C++ extension memory usage.
+    openmp_threads : int
+        Number of OpenMP threads used.
+    degraded : bool
+        True when fit fell back to reduced parameters.
+    """
+
+    n_samples: int
+    n_features: int
+    n_classes: int
+    n_items: int
+    n_patterns: int
+    n_compound: int
+    topK_used: int
+    stage_times_ms: dict
+    total_fit_ms: float
+    matrix_density: float
+    config: dict
+    memory_peak_mb: float = 0.0
+    memory_rss_mb: float = 0.0
+    memory_cpp_mb: float = 0.0
+    openmp_threads: int = 1
+    degraded: bool = False
+
+    def summary(self) -> str:
+        """Return a single-line human-readable summary of the fit outcome."""
+        return (
+            f"{self.n_patterns} patterns "
+            f"({self.n_compound} compound) from "
+            f"{self.n_samples}×{self.n_features} in "
+            f"{self.total_fit_ms:.0f} ms  "
+            f"[density={self.matrix_density:.4f}]"
+        )
+
+
+# =============================================================================
+# Memory profiling context manager
+# =============================================================================
+
+# tracemalloc is a process-global resource.  Concurrent fits on separate
+# instances would race on is_tracing / start / stop without this lock.
+_tracemalloc_lock = threading.Lock()
+
+
+class _MemoryTracker:
+    """Track peak memory during a code block via tracemalloc + RSS.
+
+    Thread-safe: a module-level lock ensures that only one fit() at a time
+    owns the tracemalloc session.  Other concurrent fits skip tracing and
+    report traced_peak_mb = 0.0, which is clearly distinguished from a
+    real measurement rather than a corrupted one.
+    """
+
+    def __enter__(self) -> _MemoryTracker:
+        self._rss_before = _get_peak_rss_kb()
+        self._lock_acquired = _tracemalloc_lock.acquire(blocking=False)
+        self._snap_before: tracemalloc.Snapshot | None = None
+        if self._lock_acquired:
+            if not tracemalloc.is_tracing():
+                tracemalloc.start()
+                self._started = True
+            else:
+                self._started = False
+            self._snap_before = tracemalloc.take_snapshot()
+        else:
+            self._started = False
+            self._snap_before = None
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        if self._lock_acquired:
+            try:
+                if self._snap_before is not None:
+                    snap_after = tracemalloc.take_snapshot()
+                    stats = snap_after.compare_to(self._snap_before, "lineno")
+                    self.traced_peak_mb = sum(s.size for s in stats if s.size > 0) / 1e6
+                else:
+                    self.traced_peak_mb = 0.0
+            finally:
+                if self._started:
+                    tracemalloc.stop()
+                _tracemalloc_lock.release()
+        else:
+            self.traced_peak_mb = 0.0
+        self.rss_mb = (_get_peak_rss_kb() - self._rss_before) / 1024
+
+    @staticmethod
+    def estimate_fit_mb(n: int, p: int, n_items: int, K: int) -> float:
+        """Rough peak-memory estimate in MB for a fit() call."""
+        disc_mb = n * p * 4 / 1e6
+        trans_mb = n * p * 16 / 1e6
+        ul_mb = n_items * n * 24 / 1e6
+        matrix_mb = n * min(K, n_items) * 4 / 1e6
+        overhead = 50
+        return disc_mb + trans_mb + ul_mb + matrix_mb + overhead
+
+
+# =============================================================================
+# Transaction data wrapper (C++ ↔ Python bridge)
+# =============================================================================
+
+
+class _TransactionDataWrapper:
+    """Augments native TransactionDataCpp with Python-compatible attributes.
+
+    Stores exact C++ state (prefixed _cpp_) so that deserialized models can
+    still run predict() via the pure-Python fallback transform.
+    """
+
+    def __init__(self, td_native: Any, classifier: HUGIMLClassifierNative) -> None:
+        self._td = td_native
+        self._clf = classifier
+
+        self._cpp_bn2id = dict(td_native.bn2id)
+        self._cpp_bkey_stride = int(td_native.bkey_stride)
+        self._cpp_col_min = np.array(td_native.col_min, dtype=np.float64)
+        self._cpp_col_range = np.array(td_native.col_range, dtype=np.float64)
+        self._cpp_all_edges = [np.array(e, dtype=np.float64) for e in td_native.all_edges]
+        self._cpp_nb_col = list(td_native.nb_col)
+        self._cpp_is_cat = list(td_native.is_cat_v)
+        self._cpp_is_int = list(td_native.is_int_v)
+        self._cpp_cat_categories = [list(c) for c in td_native.cat_categories]
+
+        self.bn2id = self._build_compat_bn2id()
+        self.all_edges = self._cpp_all_edges
+        self.col_range = self._cpp_col_range
+        self.col_min = self._cpp_col_min
+        self.is_cat = classifier.cat_cols_mask_
+        self.is_int = classifier.is_int_mask_
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._td, name)
+
+    def __getstate__(self) -> dict:
+        state = {k: v for k, v in self.__dict__.items() if k not in ("_td", "_clf")}
+        if self._td is not None:
+            state["item_map"] = dict(self._td.item_map)
+            state["item_twu"] = list(self._td.item_twu)
+            state["nb_col"] = list(self._td.nb_col)
+        return state
+
+    def __setstate__(self, state: dict) -> None:
+        for k, v in state.items():
+            setattr(self, k, v)
+        self._td = None
+
+    def _build_compat_bn2id(self) -> dict:
+        bn2id: dict = {}
+        item_map = self._td.item_map
+        feature_items: dict[str, list] = {}
+        for item_id, label in item_map.items():
+            if "=" in label:
+                feat_name = label.split("=")[0]
+                feature_items.setdefault(feat_name, []).append(item_id)
+        feature_names = getattr(self._clf, "feature_names_in_", None) or self._clf.origColumns
+        if feature_names is None:
+            return bn2id
+        stride = self._cpp_bkey_stride
+        for col_idx, feat_name in enumerate(feature_names):
+            if feat_name in feature_items:
+                for bin_idx, item_id in enumerate(sorted(feature_items[feat_name])):
+                    bn2id[(col_idx * stride) + bin_idx] = item_id
+        return bn2id
+
+
+# =============================================================================
+# HUGIMLClassifierNative
+# =============================================================================
+
+
+class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
+    """HUG-IML interpretable classifier — C++ accelerated, scikit-learn compatible.
+
+    Extracts High Utility Gain (HUG) patterns from labelled tabular data,
+    transforms the input into a binary pattern-presence matrix, and fits an
+    interpretable downstream classifier.  The mined patterns are human-readable
+    and serve as the primary source of model explanations.
+
+    Parameters
+    ----------
+    allCols : list of 3 lists, optional
+        ``[int_col_names, float_col_names, cat_col_names]``.
+        Must be paired with ``origColumns``.
+    origColumns : list of str, optional
+        Ordered column names matching the columns of X passed to fit/predict.
+    B : int, default 8
+        Number of quantile bins per numerical feature.
+        Use -1 for supervised auto-selection (maximises IG over [2, 20]).
+    L : int, default 2
+        Maximum HUG pattern length.  1 = singletons; 2 = pairs; -1 = unlimited.
+    G : float, default 1e-4
+        Minimum information-gain threshold.
+    topK : int, default 200
+        Maximum number of patterns to retain.  -1 computes automatically.
+    base_estimator : sklearn estimator, optional
+        Downstream classifier trained on the binary pattern matrix.
+        Defaults to LogisticRegression.
+    n_jobs : int, default 1
+        Number of OpenMP threads.  -1 uses all available cores.
+    max_predict_ms : float or None
+        Prediction latency budget in milliseconds.
+    max_fit_seconds : float or None
+        Wall-clock budget for the pattern-mining stage of fit().  Transaction
+        preparation and downstream model fitting (e.g. LogisticRegression) are
+        not bounded — total fit() time may exceed this value.  When the budget
+        is exhausted mid-mine, graceful degradation produces a smaller pattern
+        set; if even the minimal fallback cannot finish in time,
+        ``HUGIMLTimeoutError`` is raised.
+    verbose : bool, default False
+        Emit INFO-level log messages during fit.
+
+    Attributes (available after fit)
+    ----------------------------------
+    classes_           : ndarray — unique class labels.
+    n_features_in_     : int — number of input features.
+    feature_names_in_  : list or None — column names from training data.
+    cat_cols_mask_     : ndarray[bool] — True for categorical columns.
+    is_int_mask_       : ndarray[bool] — True for integer columns.
+    td_                : _TransactionDataWrapper — discretisation artefacts.
+    patterns_          : list — mined HUG patterns.
+    x_train_hup_       : csr_matrix — binary training pattern matrix.
+    model_             : Pipeline — fitted downstream estimator.
+    fit_metadata_      : FitMetadata — timings, memory, pattern stats.
+    monitor            : PredictionMonitor or None — prediction statistics.
+    """
+
+    _fit_lock: threading.RLock  # per-instance, created in __init__
+    monitor: PredictionMonitor | None  # set by enable_monitoring() / disable_monitoring()
+    feature_names_in_: list[str] | None  # set by prepareXy / _resolve_col_meta after fit
+
+    def __init__(
+        self,
+        allCols: list | None = None,
+        origColumns: list | None = None,
+        B: int = 8,
+        L: int = 2,
+        G: float = 1e-4,
+        topK: int = 200,
+        base_estimator: Any = None,
+        n_jobs: int = 1,
+        max_predict_ms: float | None = None,
+        max_fit_seconds: float | None = None,
+        verbose: bool = False,
+    ) -> None:
+        self.allCols = allCols
+        self.origColumns = origColumns
+        self.B = B
+        self.L = L
+        self.G = G
+        self.topK = topK
+        self.base_estimator = base_estimator
+        self.n_jobs = n_jobs
+        self.max_predict_ms = max_predict_ms
+        self.max_fit_seconds = max_fit_seconds
+        self.verbose = verbose
+        self._fit_lock = threading.RLock()
+
+    # ── Class methods ─────────────────────────────────────────────────────────
+
+    @classmethod
+    def from_preset(cls, name: str, **overrides: Any) -> HUGIMLClassifierNative:
+        """Create a classifier from a named configuration preset.
+
+        Parameters
+        ----------
+        name : {'quick', 'balanced', 'thorough'}
+            quick     — B=5, L=1, G=1e-2, topK=50
+            balanced  — B=7, L=1, G=5e-3, topK=-1
+            thorough  — B=-1, L=2, G=1e-4, topK=-1
+
+        Returns
+        -------
+        HUGIMLClassifierNative
+        """
+        if name not in _PRESETS:
+            raise HUGIMLParamError(f"Unknown preset '{name}'.  Available: {list(_PRESETS)}")
+        params = {**_PRESETS[name], **overrides}
+        return cls(**params)
+
+    # ── Representation ────────────────────────────────────────────────────────
+
+    def __repr__(self) -> str:
+        fitted = hasattr(self, "patterns_")
+        status = f", {len(self.patterns_)} patterns" if fitted else ", not fitted"
+        return f"HUGIMLClassifierNative(B={self.B}, L={self.L}, G={self.G}{status})"
+
+    # ── sklearn protocol ──────────────────────────────────────────────────────
+
+    def get_params(self, deep: bool = True) -> dict:
+        """Return constructor parameters as a dict (sklearn protocol)."""
+        return dict(
+            allCols=self.allCols,
+            origColumns=self.origColumns,
+            B=self.B,
+            L=self.L,
+            G=self.G,
+            topK=self.topK,
+            base_estimator=(copy.deepcopy(self.base_estimator) if deep else self.base_estimator),
+            n_jobs=self.n_jobs,
+            max_predict_ms=self.max_predict_ms,
+            max_fit_seconds=self.max_fit_seconds,
+            verbose=self.verbose,
+        )
+
+    def set_params(self, **params: Any) -> HUGIMLClassifierNative:
+        """Set constructor parameters in-place and return self (sklearn protocol)."""
+        for k, v in params.items():
+            setattr(self, k, v)
+        return self
+
+    def _more_tags(self) -> dict:
+        return {
+            "requires_y": True,
+            "binary_only": False,
+            "poor_score": False,
+            "X_types": ["2darray", "dataframe"],
+            "allow_nan": False,
+        }
+
+    def __sklearn_tags__(self) -> Any:
+        """Declare sklearn 1.6+ Tags, including TransformerTags for transform().
+
+        ``__sklearn_tags__`` was introduced in sklearn 1.6.  Base classes on
+        older installations do not implement it, so ``super().__sklearn_tags__()``
+        raises ``AttributeError``.  Guard that call and return ``None`` when the
+        parent chain does not support the protocol — callers must handle ``None``.
+        """
+        try:
+            tags = super().__sklearn_tags__()
+        except AttributeError:
+            logger.debug(
+                "super().__sklearn_tags__() raised AttributeError; "
+                "sklearn base classes do not implement the tag protocol "
+                "(expected sklearn >= 1.6).",
+            )
+            return None
+        try:
+            from sklearn.utils._tags import TransformerTags
+
+            tags.transformer_tags = TransformerTags()
+        except ImportError:
+            logger.debug(
+                "sklearn.utils._tags.TransformerTags not available; "
+                "TransformerTags will not be declared.",
+                exc_info=True,
+            )
+        return tags
+
+    # ── Pickle protocol ───────────────────────────────────────────────────────
+
+    def __getstate__(self) -> dict:
+        state = self.__dict__.copy()
+        state.pop("_fit_lock", None)
+        # Strip instance-level method patches set by instrument_classifier():
+        # these are closures and are not picklable.
+        state.pop("predict_proba", None)
+        state.pop("predict", None)
+        state["_schema_version_"] = MODEL_SCHEMA_VERSION
+        if "patterns_" in state and state["patterns_"]:
+            state["patterns_"] = [
+                {"utility": pe.utility, "items": list(pe.items), "ig": pe.ig}
+                for pe in state["patterns_"]
+            ]
+            state["_patterns_pickled_"] = True
+        return state
+
+    def __setstate__(self, state: dict) -> None:
+        schema_ver = state.pop("_schema_version_", 1)
+        if schema_ver < MIN_SCHEMA_VERSION:
+            raise HUGIMLVersionError(
+                f"Model schema version {schema_ver} is too old.  "
+                f"Minimum supported: {MIN_SCHEMA_VERSION}.  Re-fit the model."
+            )
+
+        if state.pop("_patterns_pickled_", False):
+
+            class _PE:
+                __slots__ = ("utility", "items", "ig")
+
+                def __init__(self, d: dict) -> None:
+                    self.utility = d["utility"]
+                    self.items = d["items"]
+                    self.ig = d["ig"]
+
+            state["patterns_"] = [_PE(d) for d in state["patterns_"]]
+
+        self.__dict__.update(state)
+        self._fit_lock = threading.RLock()
+
+        if hasattr(self, "td_") and self.td_ is not None:
+            td = self.td_
+            self._native_available_ = not (hasattr(td, "_td") and td._td is None)
+        else:
+            self._native_available_ = False
+
+    # ── Versioned save / load ─────────────────────────────────────────────────
+
+    def save_model(self, path: str | os.PathLike) -> None:
+        """Persist the fitted model to a binary file with schema versioning.
+
+        Parameters
+        ----------
+        path : str or Path
+
+        Raises
+        ------
+        HUGIMLSerializationError
+        """
+        _save_model(self, path)
+
+    @classmethod
+    def load_model(cls, path: str | os.PathLike) -> HUGIMLClassifierNative:
+        """Load a model previously saved with :meth:`save_model`.
+
+        Parameters
+        ----------
+        path : str or Path
+
+        Returns
+        -------
+        HUGIMLClassifierNative
+
+        Raises
+        ------
+        HUGIMLVersionError, HUGIMLSerializationError
+        """
+        return _load_model(path, expected_type=cls)  # type: ignore[no-any-return]
+
+    # ── Data preparation ──────────────────────────────────────────────────────
+
+    def prepareXy(self, X: pd.DataFrame, y: Any) -> tuple[pd.DataFrame, np.ndarray]:
+        """Detect column types and encode the target variable.
+
+        Call on the full dataset **before** any train/test split.  Records
+        which columns are integer, float, or categorical, and performs
+        basic label validation.
+
+        Parameters
+        ----------
+        X : pd.DataFrame
+        y : pd.Series or array-like
+
+        Returns
+        -------
+        X : pd.DataFrame (copy with string column names)
+        y : np.ndarray of int64
+        """
+        if not isinstance(X, pd.DataFrame):
+            raise HUGIMLParamError(f"X must be a pandas DataFrame, got {type(X).__name__}")
+
+        X = X.copy()
+        X.columns = [str(c) for c in X.columns]
+
+        if len(set(X.columns)) < len(X.columns):
+            dups = {c for c in X.columns if list(X.columns).count(c) > 1}
+            warnings.warn(
+                f"Duplicate column names detected: {dups}.  Results may be unreliable.",
+                HUGIMLWarning,
+                stacklevel=2,
+            )
+
+        catCols = [
+            c
+            for idx, c in enumerate(X.columns)
+            if pd.api.types.is_object_dtype(X.iloc[:, idx])
+            or pd.api.types.is_string_dtype(X.iloc[:, idx])
+            or isinstance(X.iloc[:, idx].dtype, pd.CategoricalDtype)
+        ]
+        intCols = [
+            c for idx, c in enumerate(X.columns) if pd.api.types.is_integer_dtype(X.iloc[:, idx])
+        ]
+
+        for idx, c in enumerate(X.columns):
+            if c not in catCols and X.iloc[:, idx].nunique() <= 1:
+                warnings.warn(
+                    f"Column '{c}' is constant and will produce zero utility.",
+                    HUGIMLConvergenceWarning,
+                    stacklevel=2,
+                )
+
+        X = X.reset_index(drop=True)
+        self.feature_names_in_ = X.columns.tolist()
+        self.cat_cols_mask_ = np.array([c in set(catCols) for c in X.columns], dtype=bool)
+        self.is_int_mask_ = np.array([c in set(intCols) for c in X.columns], dtype=bool)
+
+        y = np.asarray(y)
+        try:
+            y_float = y.astype(float)
+            if np.isnan(y_float).any():
+                raise HUGIMLValidationError("y contains NaN values.")
+        except (ValueError, TypeError) as e:
+            if "NaN" in str(e):
+                raise
+
+        if np.issubdtype(y.dtype, np.floating):
+            if np.allclose(y, y.astype(int)):
+                y = y.astype(np.int64)
+            else:
+                raise HUGIMLValidationError(
+                    "y contains non-integer float values.  HUG-IML requires integer class labels."
+                )
+
+        return X, y
+
+    # ── Internal helpers ──────────────────────────────────────────────────────
+
+    @staticmethod
+    def _to_float_array(arr: Any, cat_mask: np.ndarray | None = None) -> tuple:
+        """Split input into a float64 numeric array and raw categorical arrays.
+
+        Adversarial-input hardening:
+        - Forces writable copies of read-only column views.
+        - All-NaN / all-Inf columns are filled with 0.0.
+        - Mixed Inf/NaN columns use median imputation from finite values.
+        """
+        is_df = isinstance(arr, pd.DataFrame)
+        n = len(arr)
+        if is_df:
+            p = len(arr.columns)
+            arr_np: np.ndarray | None = None
+        else:
+            arr_np = np.asarray(arr)
+            p = arr_np.shape[1]
+
+        if cat_mask is None:
+            cat_mask = np.zeros(p, dtype=bool)
+
+        X_num = np.zeros((n, p), dtype=np.float64)
+        X_cat_raw = [None] * p
+
+        for j in range(p):
+            if is_df:
+                raw = arr.iloc[:, j]
+            else:
+                assert arr_np is not None  # nosec B101 – guaranteed by control flow
+                raw = arr_np[:, j]
+            if cat_mask[j]:
+                col_obj = np.asarray(raw, dtype=object).copy()
+                for i, v in enumerate(col_obj):
+                    if v is None or (isinstance(v, float) and math.isnan(v)):
+                        col_obj[i] = np.nan
+                X_cat_raw[j] = col_obj
+                X_num[:, j] = 0.0
+            else:
+                col = np.array(raw, dtype=np.float64, copy=True)
+                bad = ~np.isfinite(col)
+                if bad.any():
+                    good = col[~bad]
+                    col[bad] = float(np.median(good)) if good.size > 0 else 0.0
+                X_num[:, j] = col
+
+        return X_num, X_cat_raw
+
+    def _effective_topK(self) -> int:
+        if self.topK != -1:
+            return self.topK
+        nitems = 100
+        lsize: dict[int, int] = {i: math.comb(nitems, i) for i in range(1, 7)}
+        if self.L in (-1, 1):
+            return lsize[1]
+        elif isinstance(self.L, int) and 2 <= self.L <= 6:
+            return lsize[self.L]
+        else:
+            return lsize[2]
+
+    def _make_estimator(self, n_cls: int) -> Any:
+        if self.base_estimator is not None:
+            return copy.deepcopy(self.base_estimator)
+        solver = "liblinear" if n_cls == 2 else "lbfgs"
+        return LogisticRegression(solver=solver, random_state=0, max_iter=500)
+
+    def _validate_params(self) -> None:
+        if not isinstance(self.B, int):
+            raise HUGIMLParamError(f"B must be int, got {type(self.B).__name__}")
+        if self.B != -1 and self.B < 2:
+            raise HUGIMLParamError(f"B must be -1 (auto) or >= 2, got {self.B}")
+        if not isinstance(self.L, int):
+            raise HUGIMLParamError(f"L must be int, got {type(self.L).__name__}")
+        if not isinstance(self.G, (float, int)):
+            raise HUGIMLParamError(f"G must be numeric, got {type(self.G).__name__}")
+        if self.G < 0:
+            raise HUGIMLParamError(f"G must be >= 0, got {self.G}")
+        if self.allCols is not None or self.origColumns is not None:
+            if self.allCols is None or self.origColumns is None:
+                raise HUGIMLParamError("allCols and origColumns must both be supplied together.")
+            if not (isinstance(self.allCols, list) and len(self.allCols) == 3):
+                raise HUGIMLParamError("allCols must be [int_cols, float_cols, cat_cols].")
+
+    def _resolve_col_meta(self, X_train: Any) -> np.ndarray:
+        """Determine column names and type masks from whichever setup path was used."""
+        if hasattr(self, "cat_cols_mask_"):
+            return self.cat_cols_mask_
+
+        if self.allCols is not None and self.origColumns is not None:
+            cat_set = set(self.allCols[2])
+            int_set = set(self.allCols[0])
+            col_list = list(self.origColumns)
+            self.cat_cols_mask_ = np.array([c in cat_set for c in col_list], dtype=bool)
+            self.is_int_mask_ = np.array([c in int_set for c in col_list], dtype=bool)
+            self.feature_names_in_ = col_list
+            return self.cat_cols_mask_
+
+        if isinstance(X_train, pd.DataFrame):
+            col_list = X_train.columns.astype(str).tolist()
+            self.cat_cols_mask_ = np.array(
+                [
+                    pd.api.types.is_object_dtype(X_train[c])
+                    or pd.api.types.is_string_dtype(X_train[c])
+                    or isinstance(X_train[c].dtype, pd.CategoricalDtype)
+                    for c in X_train.columns
+                ],
+                dtype=bool,
+            )
+            self.is_int_mask_ = np.array(
+                [pd.api.types.is_integer_dtype(X_train[c]) for c in X_train.columns],
+                dtype=bool,
+            )
+            self.feature_names_in_ = col_list
+            return self.cat_cols_mask_
+
+        arr = np.asarray(X_train)
+        if arr.ndim < 2:
+            raise ValueError(
+                f"HUGIMLClassifierNative expects a 2D array, got array of shape {arr.shape}."
+            )
+        p = arr.shape[1]
+        self.cat_cols_mask_ = np.zeros(p, dtype=bool)
+        self.is_int_mask_ = np.zeros(p, dtype=bool)
+        if not hasattr(self, "feature_names_in_"):
+            self.feature_names_in_ = None
+        return self.cat_cols_mask_
+
+    @staticmethod
+    def _timer() -> Any:
+        """Return a lightweight timer object."""
+
+        class _T:
+            def __init__(self) -> None:
+                self.start = time.perf_counter()
+
+            @property
+            def ms(self) -> float:
+                return (time.perf_counter() - self.start) * 1000
+
+        return _T()
+
+    # ── Core fit ──────────────────────────────────────────────────────────────
+
+    def _require_core(self) -> None:
+        """Raise a clear ImportError if the native extension is absent."""
+        if not _CORE_AVAILABLE:
+            raise ImportError(
+                "HUGIMLClassifierNative requires the compiled C++ extension "
+                "'_hugiml_core'.\n"
+                "Build it with:  pip install . --no-build-isolation\n"
+                "Or for development:  HUGIML_FAST_BUILD=1 python setup.py "
+                "build_ext --inplace"
+            )
+
+    def fit(self, X: Any, y: Any) -> HUGIMLClassifierNative:
+        """Fit the HUG-IML model on training data.
+
+        Parameters
+        ----------
+        X : pd.DataFrame or ndarray, shape (n_samples, n_features)
+        y : array-like of int, shape (n_samples,)
+
+        Returns
+        -------
+        self
+
+        Thread safety
+        -------------
+        fit() acquires an exclusive lock.  Concurrent fit() calls on the same
+        instance are serialized.  predict/predict_proba/transform are read-only
+        on fitted state and safe for concurrent use after fit() returns.
+        """
+        self._require_core()
+        with self._fit_lock:
+            return self._fit_impl(X, y)
+
+    def _fit_impl(self, X_train: Any, y_train: Any) -> HUGIMLClassifierNative:
+        t_total = self._timer()
+        stage_times: dict[str, float] = {}
+
+        # Reject sparse matrices with an informative message
+        from scipy.sparse import issparse as _issparse
+
+        if _issparse(X_train):
+            raise ValueError(
+                "HUGIMLClassifierNative does not support sparse input.  "
+                "Convert to a dense array via X.toarray() first."
+            )
+
+        # Reject complex-valued arrays
+        if hasattr(X_train, "dtype") and np.iscomplexobj(X_train):
+            raise ValueError("Complex data not supported by HUGIMLClassifierNative.")
+
+        self._validate_params()
+
+        n_threads = _core.openmp_get_max_threads() if self.n_jobs == -1 else self.n_jobs
+        if n_threads > 0:
+            _core.openmp_set_num_threads(n_threads)
+        actual_threads = _core.openmp_get_max_threads()
+
+        mem = _MemoryTracker()
+        with mem:
+            # Stage 1: resolve column metadata
+            t = self._timer()
+            cat_mask = self._resolve_col_meta(X_train)
+            int_mask = getattr(self, "is_int_mask_", None)
+
+            X_num, X_cat_raw = self._to_float_array(X_train, cat_mask)
+            y_train = np.asarray(y_train, dtype=np.int64)
+            X_num, y_train = check_X_y(X_num, y_train, dtype=None)
+
+            self.n_features_in_ = X_num.shape[1]
+            self.classes_ = np.unique(y_train)
+            n_cls = len(self.classes_)
+            stage_times["resolve_meta"] = t.ms
+
+            if n_cls < 2:
+                raise HUGIMLValidationError(
+                    f"y contains only {n_cls} class(es).  At least 2 are required."
+                )
+            if X_num.shape[0] < n_cls:
+                raise HUGIMLValidationError(
+                    f"Fewer samples ({X_num.shape[0]}) than classes ({n_cls})."
+                )
+
+            est_mb = _MemoryTracker.estimate_fit_mb(
+                X_num.shape[0], X_num.shape[1], X_num.shape[1] * 10, self._effective_topK()
+            )
+            if est_mb > 4000:
+                warnings.warn(
+                    f"Estimated peak memory ~{est_mb:.0f} MB.  "
+                    "Consider reducing topK or dataset size.",
+                    HUGIMLWarning,
+                    stacklevel=4,
+                )
+
+            if self.verbose:
+                logger.info(
+                    "HUGIMLClassifierNative.fit — %dx%d, %d classes",
+                    X_num.shape[0],
+                    X_num.shape[1],
+                    n_cls,
+                )
+
+            # Stage 2: prepare transactions (C++)
+            t = self._timer()
+            rss_before = _get_peak_rss_kb()
+            col_names = getattr(self, "feature_names_in_", None)
+            is_cat_np = cat_mask.astype(np.uint8)
+            is_int_np = (
+                int_mask if int_mask is not None else np.zeros(X_num.shape[1], dtype=bool)
+            ).astype(np.uint8)
+
+            self.td_ = _core.prepare_transactions(
+                X_num,
+                y_train,
+                self.B,
+                col_names,
+                is_cat_np,
+                is_int_np,
+                X_cat_raw if any(v is not None for v in X_cat_raw) else None,
+            )
+            stage_times["prepare_transactions"] = t.ms
+            cpp_mem_bytes = self.td_.memory_usage_bytes()
+
+            K = self._effective_topK()
+            n_items = len(self.td_.item_twu)
+
+            if self.verbose:
+                logger.info("  items=%d, K=%d, td_mem=%.1fMB", n_items, K, cpp_mem_bytes / 1e6)
+
+            # Stage 3: mine patterns (C++) with graceful degradation
+            t = self._timer()
+            fit_deadline = (
+                time.perf_counter() + self.max_fit_seconds if self.max_fit_seconds else None
+            )
+            raw_patterns = self._mine_with_fallback(y_train, n_cls, K, fit_deadline)
+            self.patterns_ = sorted(raw_patterns, key=lambda pe: (pe.utility, pe.items))
+            stage_times["mine_patterns"] = t.ms
+
+            if len(self.patterns_) == 0:
+                raise HUGIMLMiningError(
+                    "No HUG patterns found.  Try reducing G, increasing topK, or adjusting B / L."
+                )
+
+            degraded = hasattr(self, "_degraded_reason")
+            if degraded and self.verbose:
+                logger.warning("  DEGRADED: %s", self._degraded_reason)
+
+            if self.verbose:
+                logger.info(
+                    "  %d patterns in %.0f ms",
+                    len(self.patterns_),
+                    stage_times["mine_patterns"],
+                )
+
+            # Stage 4: build binary pattern matrix (C++)
+            t = self._timer()
+            n_train = len(y_train)
+            n_pats = len(self.patterns_)
+            rows, cols = _core.build_train_matrix(self.td_, self.patterns_)
+            data = np.ones(len(rows), dtype=np.float32)
+            self.x_train_hup_ = csr_matrix(
+                (data, (rows, cols)), shape=(n_train, n_pats), dtype=np.float32
+            )
+            stage_times["build_matrix"] = t.ms
+
+            # Stage 5: fit downstream classifier
+            t = self._timer()
+            self.model_ = Pipeline([("clf", self._make_estimator(n_cls))])
+            self.model_.fit(self.x_train_hup_, y_train)
+            stage_times["fit_downstream"] = t.ms
+
+            # Stage 6: wrap C++ td_ for Python compatibility
+            t = self._timer()
+            self.td_ = _TransactionDataWrapper(self.td_, self)
+            self._native_available_ = True
+            stage_times["compat"] = t.ms
+
+            # Drift baseline
+            self._drift_det = DriftDetector()
+            self._drift_det.fit_baseline(
+                X_num,
+                cat_mask,
+                getattr(self, "feature_names_in_", None)
+                or [f"col{j}" for j in range(X_num.shape[1])],
+                y=y_train,
+            )
+
+        rss_delta_mb = (_get_peak_rss_kb() - rss_before) / 1024
+
+        n_compound = sum(1 for pe in self.patterns_ if len(pe.items) > 1)
+        nnz = self.x_train_hup_.nnz
+        density = nnz / (n_train * n_pats) if (n_train * n_pats) > 0 else 0.0
+
+        self.fit_metadata_ = FitMetadata(
+            n_samples=n_train,
+            n_features=X_num.shape[1],
+            n_classes=n_cls,
+            n_items=n_items,
+            n_patterns=n_pats,
+            n_compound=n_compound,
+            topK_used=K,
+            stage_times_ms=stage_times,
+            total_fit_ms=t_total.ms,
+            matrix_density=density,
+            config=dict(B=self.B, L=self.L, G=self.G, topK=self.topK),
+            memory_peak_mb=round(mem.traced_peak_mb, 1),
+            memory_rss_mb=round(rss_delta_mb, 1),
+            memory_cpp_mb=round(cpp_mem_bytes / 1e6, 2),
+            openmp_threads=actual_threads,
+            degraded=degraded,
+        )
+
+        if self.verbose:
+            logger.info("  fit complete: %s", self.fit_metadata_.summary())
+
+        return self
+
+    def _mine_with_fallback(
+        self, y_train: np.ndarray, n_cls: int, K: int, deadline: float | None
+    ) -> list:
+        """Mine patterns with graceful degradation on OOM or timeout.
+
+        The ``deadline`` is forwarded into the C++ mining engine as a
+        wall-clock ``timeout_s`` budget so the native layer can abort
+        mid-run rather than only being checked between attempts.
+        """
+        attempts = [
+            (K, self.L, self.G, "full"),
+            (max(K // 2, 10), self.L, self.G, "K//2"),
+            (max(K // 4, 10), 1, self.G, "K//4,L=1"),
+            (50, 1, 0.0, "minimal"),
+        ]
+        for attempt_K, attempt_L, attempt_G, label in attempts:
+            if deadline and time.perf_counter() > deadline:
+                # Time budget exhausted — skip to minimal attempt immediately.
+                minimal_K, minimal_L, minimal_G = 50, 1, 0.0
+                self._degraded_reason = (
+                    f"Time budget exceeded at '{label}'; "
+                    f"falling back to minimal (K={minimal_K}, L={minimal_L})."
+                )
+                logger.warning("  fit timeout: %s", self._degraded_reason)
+                # Give the minimal attempt a fixed 5-second window; it is
+                # cheap and must not run indefinitely on degenerate data.
+                try:
+                    return list(
+                        _core.mine_patterns(
+                            self.td_,
+                            y_train,
+                            n_cls,
+                            minimal_K,
+                            minimal_L,
+                            minimal_G,
+                            5.0,
+                        )
+                    )
+                except Exception as exc:
+                    raise HUGIMLTimeoutError(
+                        f"fit() exceeded max_fit_seconds and the minimal fallback "
+                        f"also failed: {exc}"
+                    ) from exc
+            # Compute remaining budget and pass it to the C++ engine so it
+            # can abort mid-run rather than running past the wall-clock limit.
+            remaining_s = max(deadline - time.perf_counter(), 0.0) if deadline else 0.0
+            try:
+                patterns: list = list(
+                    _core.mine_patterns(
+                        self.td_,
+                        y_train,
+                        n_cls,
+                        attempt_K,
+                        attempt_L,
+                        attempt_G,
+                        remaining_s,
+                    )
+                )
+                if label != "full" and len(patterns) > 0:
+                    self._degraded_reason = (
+                        f"Recovered with {label}: K={attempt_K}, L={attempt_L}, G={attempt_G}"
+                    )
+                return patterns
+            except MemoryError:
+                logger.warning("MemoryError during mining (%s), retrying…", label)
+                continue
+            except Exception as e:
+                if "bad_alloc" in str(e).lower() or "memory" in str(e).lower():
+                    logger.warning("C++ memory error during mining (%s), retrying…", label)
+                    continue
+                raise
+        return []
+
+    # ── Prediction ────────────────────────────────────────────────────────────
+
+    def predict_proba(self, X_test: Any) -> np.ndarray:
+        """Predict class probabilities for X_test.
+
+        When ``max_predict_ms`` is set large batches are processed in chunks.
+        Rows exceeding the time budget receive uniform probabilities and a
+        warning is emitted.
+
+        Parameters
+        ----------
+        X_test : array-like or DataFrame
+
+        Returns
+        -------
+        np.ndarray, shape (n_samples, n_classes)
+        """
+        check_is_fitted(self)
+        t0 = time.perf_counter()
+
+        budget_ms = self.max_predict_ms
+        if budget_ms is None or not isinstance(X_test, (pd.DataFrame, np.ndarray)):
+            proba = np.asarray(self.model_.predict_proba(self._build_test_hup(X_test)))
+            _mon = getattr(self, "monitor", None)
+            if _mon is not None:
+                _mon.record(proba, (time.perf_counter() - t0) * 1000)
+            return proba
+
+        n = len(X_test)
+        n_cls = len(self.classes_)
+        chunk_size = max(100, n // 10)
+        result = np.full((n, n_cls), 1.0 / n_cls, dtype=np.float64)
+        completed = 0
+        is_df = isinstance(X_test, pd.DataFrame)
+
+        for start in range(0, n, chunk_size):
+            elapsed_ms = (time.perf_counter() - t0) * 1000
+            if elapsed_ms > budget_ms:
+                warnings.warn(
+                    f"Prediction SLA exceeded ({elapsed_ms:.0f}ms > {budget_ms}ms) "
+                    f"after {completed}/{n} rows.  Remaining rows filled with uniform.",
+                    HUGIMLWarning,
+                    stacklevel=2,
+                )
+                break
+            end = min(start + chunk_size, n)
+            chunk = X_test.iloc[start:end] if is_df else X_test[start:end]  # type: ignore[union-attr]
+            result[start:end] = self.model_.predict_proba(self._build_test_hup(chunk))
+            completed = end
+
+        _mon = getattr(self, "monitor", None)
+        if _mon is not None:
+            _mon.record(result[:completed], (time.perf_counter() - t0) * 1000)
+        return result
+
+    def predict(self, X_test: Any) -> np.ndarray:
+        """Predict class labels for X_test.
+
+        Parameters
+        ----------
+        X_test : array-like or DataFrame
+
+        Returns
+        -------
+        np.ndarray, shape (n_samples,)
+        """
+        check_is_fitted(self)
+        return np.asarray(self.model_.predict(self._build_test_hup(X_test)))
+
+    def transform(self, X: Any) -> csr_matrix:
+        """Return the binary HUG pattern matrix for X.
+
+        Each column corresponds to one mined pattern.  Entry (i, j) is 1 when
+        all items of pattern j appear in row i.
+
+        Parameters
+        ----------
+        X : array-like or DataFrame
+
+        Returns
+        -------
+        csr_matrix, shape (n_samples, n_patterns)
+        """
+        check_is_fitted(self)
+        return self._build_test_hup(X)
+
+    def _build_test_hup(self, X_test: Any) -> csr_matrix:
+        """Build the sparse binary pattern matrix for test data."""
+        self._check_health()
+        self._validate_test_input(X_test)
+        cat_mask = getattr(self, "cat_cols_mask_", None)
+        X_num, X_cat_raw = self._to_float_array(X_test, cat_mask)
+        X_num = check_array(X_num, dtype=None)
+
+        n = X_num.shape[0]
+        n_pats = len(self.patterns_)
+
+        if getattr(self, "_native_available_", True):
+            try:
+                rows, cols = _core.build_test_matrix(
+                    X_num,
+                    self.td_,
+                    X_cat_raw if any(v is not None for v in X_cat_raw) else None,
+                    self.patterns_,
+                )
+                data = np.ones(len(rows), dtype=np.float32)
+                return csr_matrix((data, (rows, cols)), shape=(n, n_pats), dtype=np.float32)
+            except Exception:
+                logger.debug(
+                    "Native build_test_matrix failed; falling back to Python path.",
+                    exc_info=True,
+                )
+
+        return self._build_test_hup_fallback(X_num, X_cat_raw, n, n_pats)
+
+    def _build_test_hup_fallback(
+        self,
+        X_num: np.ndarray,
+        X_cat_raw: list,
+        n: int,
+        n_pats: int,
+    ) -> csr_matrix:
+        """Pure-Python fallback for deserialized models without C++ extension."""
+        td = self.td_
+        p = X_num.shape[1]
+
+        cpp_bn2id = td._cpp_bn2id
+        cpp_stride = td._cpp_bkey_stride
+        cpp_all_edges = td._cpp_all_edges
+        cpp_nb_col = td._cpp_nb_col
+        cpp_col_min = td._cpp_col_min
+        cpp_col_range = td._cpp_col_range
+        cpp_is_cat = td._cpp_is_cat
+        cpp_is_int = td._cpp_is_int
+        cpp_cat_cats = td._cpp_cat_categories
+
+        label2code: list[dict[object, int] | None] = [None] * p
+        for j in range(p):
+            if j < len(cpp_is_cat) and cpp_is_cat[j]:
+                if j < len(cpp_cat_cats) and cpp_cat_cats[j]:
+                    label2code[j] = {v: i for i, v in enumerate(cpp_cat_cats[j])}
+
+        def bkey(bi: int, j: int) -> int:
+            return int(bi * cpp_stride + j)
+
+        test_trans_sets = []
+        for r in range(n):
+            items: set = set()
+            for j in range(p):
+                if j < len(cpp_is_cat) and cpp_is_cat[j]:
+                    if X_cat_raw[j] is None:
+                        continue
+                    v = X_cat_raw[j][r]
+                    if v is None or (isinstance(v, float) and math.isnan(v)):
+                        continue
+                    _lc = label2code[j]
+                    if _lc is None:
+                        continue
+                    lc: dict[object, int] = _lc
+                    code = lc.get(v)
+                    if code is None:
+                        continue
+                    bi = code + 1
+                else:
+                    edges = cpp_all_edges[j]
+                    if edges is None or len(edges) < 2:
+                        continue
+                    nb = cpp_nb_col[j]
+                    if j < len(cpp_is_int) and cpp_is_int[j]:
+                        val = X_num[r, j]
+                    else:
+                        val = (X_num[r, j] - cpp_col_min[j]) / cpp_col_range[j]
+                    inner = edges[1:-1] if isinstance(edges, np.ndarray) else np.array(edges[1:-1])
+                    bi = int(np.searchsorted(inner, val, side="right")) + 1
+                    bi = max(1, min(bi, nb))
+
+                bk = bkey(bi, j)
+                iid = cpp_bn2id.get(bk)
+                if iid is not None:
+                    items.add(iid)
+            test_trans_sets.append(frozenset(items))
+
+        rows_v, cols_v = [], []
+        for pi, pe in enumerate(self.patterns_):
+            pat_items = frozenset(pe.items)
+            for tid, ts in enumerate(test_trans_sets):
+                if pat_items.issubset(ts):
+                    rows_v.append(tid)
+                    cols_v.append(pi)
+
+        data = np.ones(len(rows_v), dtype=np.float32)
+        return csr_matrix((data, (rows_v, cols_v)), shape=(n, n_pats), dtype=np.float32)
+
+    def _check_health(self) -> None:
+        check_is_fitted(self)
+        if not hasattr(self, "patterns_") or len(self.patterns_) == 0:
+            raise HUGIMLPredictionError("Model has no patterns — fit() may have failed.")
+        if not hasattr(self, "model_"):
+            raise HUGIMLPredictionError("Downstream model missing — fit() incomplete.")
+        if not hasattr(self, "td_") or self.td_ is None:
+            raise HUGIMLPredictionError("Transaction data missing — model state corrupt.")
+
+    def _validate_test_input(self, X_test: Any) -> None:
+        """Validate test-time input against training schema."""
+        from scipy.sparse import issparse as _issparse
+
+        if _issparse(X_test):
+            raise ValueError(
+                "HUGIMLClassifierNative does not support sparse input.  "
+                "Convert to a dense array via X.toarray() first."
+            )
+        is_df = isinstance(X_test, pd.DataFrame)
+        arr = None
+        if not is_df:
+            arr = np.asarray(X_test)
+            if arr.ndim == 1:
+                raise ValueError(
+                    f"HUGIMLClassifierNative expects a 2D array, got 1D array of shape {arr.shape}."
+                )
+        n_test_features = (
+            len(X_test.columns) if is_df else arr.shape[1]  # type: ignore[union-attr]
+        )
+
+        expected = getattr(self, "n_features_in_", None)
+        if expected is not None and n_test_features != expected:
+            raise HUGIMLSchemaError(
+                f"X has {n_test_features} features, but the model was fitted "
+                f"with {expected} features."
+            )
+
+        expected_names = getattr(self, "feature_names_in_", None)
+        if is_df and expected_names is not None:
+            test_names = [str(c) for c in X_test.columns]
+            if test_names != expected_names:
+                missing = set(expected_names) - set(test_names)
+                extra = set(test_names) - set(expected_names)
+                parts = []
+                if missing:
+                    parts.append(f"missing: {sorted(missing)}")
+                if extra:
+                    parts.append(f"unexpected: {sorted(extra)}")
+                if not missing and not extra:
+                    parts.append("columns in different order")
+                raise HUGIMLSchemaError(
+                    "Column mismatch between training and test data.  " + "; ".join(parts)
+                )
+
+        cat_mask = getattr(self, "cat_cols_mask_", None)
+        if is_df and cat_mask is not None:
+            for j, is_cat in enumerate(cat_mask):
+                if j >= n_test_features:
+                    break
+                col = X_test.iloc[:, j]
+                if is_cat and pd.api.types.is_numeric_dtype(col):
+                    warnings.warn(
+                        f"Column '{X_test.columns[j]}' was categorical during "
+                        f"training but has numeric dtype ({col.dtype}) in test data.",
+                        HUGIMLDtypeDriftWarning,
+                        stacklevel=4,
+                    )
+
+        if is_df and cat_mask is not None:
+            td = self.td_
+            cpp_all_edges = getattr(td, "_cpp_all_edges", None)
+            if cpp_all_edges is not None:
+                for j in range(min(n_test_features, len(cat_mask))):
+                    if cat_mask[j]:
+                        continue
+                    edges = cpp_all_edges[j] if j < len(cpp_all_edges) else None
+                    if edges is None or len(edges) < 2:
+                        continue
+                    train_min = float(edges[0])
+                    train_max = float(edges[-1])
+                    train_span = train_max - train_min
+                    if train_span <= 0:
+                        continue
+                    col = pd.to_numeric(X_test.iloc[:, j], errors="coerce")
+                    finite = col[np.isfinite(col)]
+                    if finite.empty:
+                        continue
+                    test_min, test_max = float(finite.min()), float(finite.max())
+                    if (
+                        test_min < train_min - train_span * 0.5
+                        or test_max > train_max + train_span * 0.5
+                    ):
+                        warnings.warn(
+                            f"Column '{X_test.columns[j]}' has values "
+                            f"[{test_min:.4g}, {test_max:.4g}] outside training "
+                            f"range [{train_min:.4g}, {train_max:.4g}].",
+                            HUGIMLRangeWarning,
+                            stacklevel=4,
+                        )
+
+    # ── Monitoring and drift ──────────────────────────────────────────────────
+
+    def enable_monitoring(self, window_size: int = 1000) -> HUGIMLClassifierNative:
+        """Enable prediction monitoring.  Access via ``self.monitor``."""
+        self.monitor = PredictionMonitor(window_size=window_size)
+        return self
+
+    def disable_monitoring(self) -> HUGIMLClassifierNative:
+        """Disable prediction monitoring."""
+        self.monitor = None
+        return self
+
+    def detect_drift(
+        self,
+        X_test: Any,
+        y_test: np.ndarray | None = None,
+        threshold: float = 0.1,
+    ) -> str:
+        """Run multi-method drift detection and return a human-readable report.
+
+        Uses PSI + KL divergence.  When ``y_test`` is provided, also checks
+        label distribution drift.
+
+        Parameters
+        ----------
+        X_test : array-like or DataFrame
+        y_test : array-like, optional
+        threshold : float
+
+        Returns
+        -------
+        str
+        """
+        check_is_fitted(self)
+        if getattr(self, "_drift_det", None) is None:
+            return "Drift detection unavailable (no baseline stored)."
+        cat_mask = getattr(self, "cat_cols_mask_", np.zeros(0, dtype=bool))
+        X_num, _ = self._to_float_array(X_test, cat_mask)
+        y_arr = np.asarray(y_test) if y_test is not None else None
+        report = self._drift_det.detect(X_num, y_test=y_arr, threshold=threshold)
+        return str(report)
+
+    def get_drift_psi(self, X_test: Any) -> dict:
+        """Return per-feature PSI values as a dict."""
+        check_is_fitted(self)
+        if getattr(self, "_drift_det", None) is None:
+            return {}
+        cat_mask = getattr(self, "cat_cols_mask_", np.zeros(0, dtype=bool))
+        X_num, _ = self._to_float_array(X_test, cat_mask)
+        return self._drift_det.compute_psi(X_num)
+
+    def cross_validate_monitored(
+        self,
+        X: Any,
+        y: Any,
+        cv: Any = None,
+        scoring: str = "roc_auc",
+    ) -> dict:
+        """Cross-validation with per-fold monitoring and drift detection.
+
+        Parameters
+        ----------
+        X : pd.DataFrame or ndarray
+        y : array-like
+        cv : int or CV splitter (default: StratifiedKFold(5))
+        scoring : str
+
+        Returns
+        -------
+        dict with keys: test_scores, fit_times_ms, fold_monitors, fold_drift, fold_metadata
+        """
+        from sklearn.metrics import get_scorer
+        from sklearn.model_selection import StratifiedKFold
+
+        y = np.asarray(y)
+        if cv is None:
+            cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+        elif isinstance(cv, int):
+            cv = StratifiedKFold(n_splits=cv, shuffle=True, random_state=42)
+
+        scorer = get_scorer(scoring)
+        results: dict = {
+            "test_scores": [],
+            "fit_times_ms": [],
+            "fold_monitors": [],
+            "fold_drift": [],
+            "fold_metadata": [],
+        }
+
+        for train_idx, test_idx in cv.split(X, y):
+            if isinstance(X, pd.DataFrame):
+                X_tr, X_te = X.iloc[train_idx], X.iloc[test_idx]
+            else:
+                X_tr, X_te = X[train_idx], X[test_idx]
+            y_tr, y_te = y[train_idx], y[test_idx]
+
+            fold_clf = self.__class__(
+                **{
+                    k: v
+                    for k, v in self.get_params().items()
+                    if k not in ("allCols", "origColumns")
+                }
+            )
+            t0 = time.perf_counter()
+            fold_clf.fit(X_tr, y_tr)
+            results["fit_times_ms"].append((time.perf_counter() - t0) * 1000)
+            results["test_scores"].append(scorer(fold_clf, X_te, y_te))
+            results["fold_metadata"].append(fold_clf.fit_metadata_)
+
+            fold_clf.enable_monitoring()
+            fold_clf.predict_proba(X_te)
+            fold_mon = fold_clf.monitor
+            results["fold_monitors"].append(fold_mon.stats if fold_mon is not None else {})
+
+            if fold_clf._drift_det is not None:
+                cat_mask = getattr(fold_clf, "cat_cols_mask_", np.zeros(0, dtype=bool))
+                X_te_num, _ = fold_clf._to_float_array(X_te, cat_mask)
+                results["fold_drift"].append(fold_clf._drift_det.compute_psi(X_te_num))
+            else:
+                results["fold_drift"].append({})
+
+        return results
+
+    # ── Explanation methods ───────────────────────────────────────────────────
+
+    def get_hug_features(self) -> list[str]:
+        """Return a human-readable label for each mined HUG pattern.
+
+        Singleton patterns use the format ``feature=[lo,hi]`` for numerical
+        columns (e.g. ``age=[35,50]``) and ``feature=value`` for categorical
+        columns (e.g. ``gender=F``).  Compound patterns (L > 1) are
+        comma-separated, e.g. ``age=[35,50], gender=F``.
+
+        Returns
+        -------
+        list of str
+        """
+        check_is_fitted(self)
+        item_map = self.td_.item_map
+        return [", ".join(item_map.get(it, str(it)) for it in pe.items) for pe in self.patterns_]
+
+    def get_transformed_shape(self) -> tuple[int, int]:
+        """Return (n_samples, n_patterns) of the training pattern matrix."""
+        check_is_fitted(self)
+        shape = self.x_train_hup_.shape
+        return int(shape[0]), int(shape[1])
+
+    def get_pattern_info(self) -> pd.DataFrame:
+        """Summary DataFrame with one row per mined HUG pattern.
+
+        Columns: pattern, utility, information_gain, support.
+        """
+        check_is_fitted(self)
+        n_train = self.x_train_hup_.shape[0]
+        features = self.get_hug_features()
+        records: list[dict[str, object]] = []
+        for i, pe in enumerate(self.patterns_):
+            support = float(self.x_train_hup_[:, i].sum()) / n_train
+            records.append(
+                {
+                    "pattern": features[i],
+                    "utility": round(pe.utility, 6),
+                    "information_gain": round(pe.ig, 6),
+                    "support": round(support, 4),
+                }
+            )
+        return pd.DataFrame(records)
+
+    def feature_importances(self) -> pd.DataFrame:
+        """Map downstream LR coefficients back to HUG pattern labels.
+
+        Returns a DataFrame sorted by absolute coefficient magnitude with
+        columns: pattern, coefficient, abs_coefficient, support.
+
+        Raises
+        ------
+        AttributeError
+            When the downstream estimator does not expose ``coef_``
+            (e.g. non-linear models).
+        """
+        check_is_fitted(self)
+        clf_step = self.model_.named_steps.get("clf")
+        if not hasattr(clf_step, "coef_"):
+            raise AttributeError(
+                "feature_importances requires the downstream estimator "
+                "to expose coef_ (e.g. LogisticRegression)."
+            )
+
+        raw_coef = clf_step.coef_
+        coef = (
+            raw_coef.mean(axis=0)
+            if raw_coef.ndim == 2 and raw_coef.shape[0] > 1
+            else raw_coef.ravel()
+        )
+        features = self.get_hug_features()
+        n_train = self.x_train_hup_.shape[0]
+
+        rows: list[dict[str, object]] = []
+        for i, (feat, c) in enumerate(zip(features, coef)):
+            support = float(self.x_train_hup_[:, i].sum()) / n_train
+            rows.append(
+                {
+                    "pattern": feat,
+                    "coefficient": round(float(c), 6),
+                    "abs_coefficient": round(abs(float(c)), 6),
+                    "support": round(support, 4),
+                }
+            )
+        result: pd.DataFrame = pd.DataFrame(rows)
+        result = result.sort_values("abs_coefficient", ascending=False)
+        return pd.DataFrame(result.reset_index(drop=True))
+
+    def model_summary(self) -> str:
+        """Human-readable model summary including top patterns."""
+        check_is_fitted(self)
+        lines = [
+            "HUGIMLClassifierNative — Model Summary",
+            "=" * 50,
+            f"Config:       B={self.B}, L={self.L}, G={self.G}",
+            f"Training:     {self.fit_metadata_.n_samples} samples, "
+            f"{self.fit_metadata_.n_features} features, "
+            f"{self.fit_metadata_.n_classes} classes",
+            f"Patterns:     {self.fit_metadata_.n_patterns} "
+            f"({self.fit_metadata_.n_compound} compound)",
+            f"Matrix:       {self.x_train_hup_.shape} "
+            f"(density={self.fit_metadata_.matrix_density:.4f})",
+            f"Fit time:     {self.fit_metadata_.total_fit_ms:.0f} ms",
+            "",
+            "Stage breakdown (ms):",
+        ]
+        for stage, ms in self.fit_metadata_.stage_times_ms.items():
+            lines.append(f"  {stage:<25} {ms:>8.1f}")
+        lines += ["", "Top 10 patterns by importance:"]
+
+        try:
+            imp = self.feature_importances().head(10)
+            for _, row in imp.iterrows():
+                lines.append(
+                    f"  {row['pattern']:<40} "
+                    f"coef={row['coefficient']:>+8.4f}  "
+                    f"sup={row['support']:.3f}"
+                )
+        except AttributeError:
+            lines.append("  (not available — non-LR downstream estimator)")
+
+        return "\n".join(lines)
