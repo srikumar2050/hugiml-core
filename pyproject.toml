@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hugiml-core"
-version = "2.1.0"
+version = "1.0.0"
 description = "High-performance interpretable rule-based ML infrastructure based on the HUG-IML algorithm (IEEE Access 2024)"
 readme = "README.md"
 # {text = ...} form works on setuptools 61-76 without error;
