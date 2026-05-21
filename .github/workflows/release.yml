@@ -52,7 +52,7 @@ jobs:
         env:
           CIBW_BUILD: "cp39-* cp310-* cp311-* cp312-* cp313-*"
           CIBW_SKIP: "*-musllinux_i686"
-          CIBW_BEFORE_BUILD: "pip install pybind11"
+          CIBW_BEFORE_BUILD: "pip install pybind11 && brew install ccache || true"
           CIBW_TEST_REQUIRES: "numpy scipy scikit-learn pandas pytest packaging"
           CIBW_TEST_COMMAND: "python {project}/scripts/wheel_smoke_test.py"
 
