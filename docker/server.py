@@ -232,7 +232,7 @@ app = FastAPI(
         "High-performance interpretable rule-based ML inference server "
         "powered by HUGIMLClassifierNative."
     ),
-    version="2.1.0",
+    version="1.0.0",
     docs_url="/docs" if _ENABLE_DOCS else None,
     redoc_url="/redoc" if _ENABLE_DOCS else None,
     openapi_url="/openapi.json" if _ENABLE_DOCS else None,
