@@ -52,10 +52,13 @@ jobs:
         env:
           CIBW_BUILD: "cp39-* cp310-* cp311-* cp312-* cp313-*"
           CIBW_SKIP: "*-musllinux_i686"
-          CIBW_BEFORE_BUILD: "pip install pybind11 && brew install libomp || true"
-          CIBW_BEFORE_TEST_MACOS: "brew install libomp || true"
+          CIBW_BEFORE_BUILD_LINUX: "yum install -y ccache || true && pip install pybind11"
+          CIBW_BEFORE_BUILD_MACOS: "pip install pybind11 && (arch -x86_64 brew install libomp || brew install libomp || true)"
+          CIBW_BEFORE_BUILD_WINDOWS: "pip install pybind11"
+          CIBW_BEFORE_TEST_MACOS: "arch -x86_64 brew install libomp || brew install libomp || true"
           CIBW_ENVIRONMENT: "CC=gcc CXX=g++"
-          CIBW_ENVIRONMENT_MACOS: "CC=gcc CXX=g++ MACOSX_DEPLOYMENT_TARGET=11.0 DYLD_LIBRARY_PATH=/opt/homebrew/opt/libomp/lib:$DYLD_LIBRARY_PATH"
+          CIBW_ENVIRONMENT_MACOS: "CC=gcc CXX=g++ MACOSX_DEPLOYMENT_TARGET=11.0"
+          CIBW_REPAIR_WHEEL_COMMAND_MACOS: "DYLD_LIBRARY_PATH=/opt/homebrew/opt/libomp/lib:/usr/local/opt/libomp/lib delocate-wheel --require-archs {delocate_archs} -w {dest_dir} -v {wheel}"
           CIBW_TEST_REQUIRES: "numpy scipy scikit-learn pandas pytest packaging"
           CIBW_TEST_COMMAND: "python {project}/scripts/wheel_smoke_test.py"
           
