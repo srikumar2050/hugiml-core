@@ -96,6 +96,9 @@ elif is_macos:
     _opt_fast = ["-O1", "-Wall", "-Wno-unused-parameter"]
     _opt_bind = ["-O0", "-g0", "-Wall", "-Wno-unused-parameter"]
     _opt_debug = ["-O0", "-g", "-DHUGIML_DEBUG"]
+
+    # Add rpath so wheels know where to load libomp.dylib
+    omp_link += [f"-Wl,-rpath,{libomp_prefix}/lib"]
 else:
     omp_compile = ["-fopenmp"]
     omp_link = ["-fopenmp"]
