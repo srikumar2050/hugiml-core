@@ -3,7 +3,7 @@
   "metadata": {
     "generated_by": "benchmarks/bench_core.py",
     "platform": "ubuntu-latest / Python 3.11 / single core",
-    "hugiml_version": "2.1.0"
+    "hugiml_version": "1.0.0"
   },
   "benchmarks": {
     "fit_german_credit": {
