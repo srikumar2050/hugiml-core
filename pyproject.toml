@@ -100,8 +100,8 @@ test-requires = ["numpy", "scipy", "scikit-learn", "pandas", "pytest", "packagin
 build-verbosity = 1
 
 [tool.cibuildwheel.linux]
-before-build = "pip install pybind11"
-environment = { CC = "gcc", CXX = "g++" }
+before-build = "pip install pybind11 && (apt-get install -y ccache || yum install -y ccache || true)"
+environment = { CC = "ccache gcc", CXX = "ccache g++" }
 manylinux-x86_64-image = "manylinux2014"
 manylinux-aarch64-image = "manylinux2014"
 archs = ["x86_64", "aarch64"]
