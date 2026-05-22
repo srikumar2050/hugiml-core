@@ -98,7 +98,7 @@ build-verbosity = 1
 [tool.cibuildwheel.linux]
 before-build = "pip install pybind11"
 environment = { CC = "gcc", CXX = "g++" }
-manylinux-x86_64-image = "manylinux2014"
+manylinux-x86_64-image = "manylinux_2_28"
 archs = ["x86_64"]
 
 [tool.cibuildwheel.macos]
