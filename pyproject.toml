@@ -89,16 +89,16 @@ where = ["src"]
 "hugiml" = ["py.typed"]
 
 [tool.cibuildwheel]
-build = "cp39-* cp310-*"
+build = "cp310-* cp39-*"
 skip = "*-musllinux*"
 test-command = "python {project}/scripts/wheel_smoke_test.py"
-test-requires = ["numpy", "scipy", "scikit-learn", "pandas", "pytest", "packaging"]
+test-requires = ["numpy", "scipy", "scikit-learn>=1.0,<1.8", "pandas", "pytest", "packaging"]
 build-verbosity = 1
 
 [tool.cibuildwheel.linux]
 before-build = "pip install pybind11"
 environment = { CC = "gcc", CXX = "g++" }
-manylinux-x86_64-image = "quay.io/pypa/manylinux_2_34_x86_64"
+manylinux-x86_64-image = "manylinux_2_28"
 archs = ["x86_64"]
 
 [tool.cibuildwheel.macos]
