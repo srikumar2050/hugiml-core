@@ -90,7 +90,7 @@ where = ["src"]
 
 [tool.cibuildwheel]
 build = "cp39-* cp310-*"
-skip = "*-musllinux_i686"
+skip = "*-musllinux*"
 test-command = "python {project}/scripts/wheel_smoke_test.py"
 test-requires = ["numpy", "scipy", "scikit-learn", "pandas", "pytest", "packaging"]
 build-verbosity = 1
@@ -98,7 +98,7 @@ build-verbosity = 1
 [tool.cibuildwheel.linux]
 before-build = "pip install pybind11"
 environment = { CC = "gcc", CXX = "g++" }
-manylinux-x86_64-image = "manylinux_2_28"
+manylinux-x86_64-image = "manylinux_2_34"
 archs = ["x86_64"]
 
 [tool.cibuildwheel.macos]
