@@ -25,6 +25,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /build
 
+# Upgrade pip/setuptools/wheel to fix CVEs in base image vendored copies
+RUN pip install --no-cache-dir --upgrade "pip>=26.1" "setuptools>=78.0" "wheel>=0.46.2"
+
 # Copy only the files needed to build the wheel
 COPY pyproject.toml setup.py MANIFEST.in README.md LICENSE NOTICE ./
 COPY src/ ./src/
@@ -49,6 +52,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN useradd --create-home --shell /bin/bash --uid 1001 hugiml
 
 WORKDIR /app
+
+# Upgrade pip/setuptools/wheel to fix CVEs in base image vendored copies
+RUN pip install --no-cache-dir --upgrade "pip>=26.1" "setuptools>=78.0" "wheel>=0.46.2"
 
 # Copy entire dist directory — avoids glob-matches-nothing silently copying 0 files
 COPY --from=builder /dist/ /staging/
