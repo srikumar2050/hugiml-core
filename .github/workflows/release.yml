@@ -195,11 +195,6 @@ jobs:
       - name: List dist contents
         run: ls -la dist/
 
-      - name: Sign distributions with Sigstore
-        uses: sigstore/gh-action-sigstore-python@v3.2.0
-        with:
-          inputs: dist/*.whl dist/*.tar.gz
-
       - name: Generate build provenance attestations
         uses: actions/attest-build-provenance@v1
         with:
@@ -215,6 +210,13 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/') || github.event.inputs.target == 'pypi'
         uses: pypa/gh-action-pypi-publish@release/v1
 
+      - name: Sign distributions with Sigstore
+        if: startsWith(github.ref, 'refs/tags/') || github.event.inputs.target == 'pypi'
+        uses: sigstore/gh-action-sigstore-python@v3.2.0
+        with:
+          inputs: dist/*.whl dist/*.tar.gz
+          output-directory: signatures/
+
       - name: Create GitHub Release
         if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
@@ -222,6 +224,6 @@ jobs:
           files: |
             dist/*.whl
             dist/*.tar.gz
-            dist/*.sigstore.json
+            signatures/*.sigstore.json
             sbom/sbom.json
           generate_release_notes: true
