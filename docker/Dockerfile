@@ -31,7 +31,8 @@ COPY src/ ./src/
 COPY native/ ./native/
 
 RUN pip install --no-cache-dir --upgrade pip build \
-    && python -m build --wheel --outdir /dist
+    && python -m build --wheel --outdir /dist \
+    && ls /dist/*.whl
 
 # ---------------------------------------------------------------------------
 # Stage 2 — Runtime image
@@ -49,9 +50,13 @@ RUN useradd --create-home --shell /bin/bash --uid 1001 hugiml
 
 WORKDIR /app
 
-# Install the wheel from the build stage
-COPY --from=builder /dist/*.whl /staging/
-RUN pip install --no-cache-dir /staging/*.whl[server,telemetry] \
+# Copy entire dist directory — avoids glob-matches-nothing silently copying 0 files
+COPY --from=builder /dist/ /staging/
+
+# Resolve the wheel path with find so the shell glob never reaches pip as a literal
+RUN whl=$(find /staging -name "*.whl" | head -1) \
+    && [ -n "$whl" ] || { echo "ERROR: no wheel found in /staging"; exit 1; } \
+    && pip install --no-cache-dir "${whl}[server,telemetry]" \
     && rm -rf /staging
 
 # Copy inference server
