@@ -7,10 +7,6 @@ name = "hugiml-core"
 version = "1.0.0"
 description = "High-performance interpretable rule-based ML infrastructure based on the HUG-IML algorithm (IEEE Access 2024)"
 readme = "README.md"
-# {text = ...} form works on setuptools 61-76 without error;
-# setuptools>=77 (enforced by build-system.requires) also accepts it.
-# The SPDX string form "Apache-2.0" requires setuptools>=77 and breaks
-# direct `python setup.py` invocations which use the system setuptools.
 license = {text = "Apache-2.0"}
 authors = [{ name = "Srikumar Krishnamoorthy" }]
 requires-python = ">=3.9"
@@ -93,7 +89,7 @@ where = ["src"]
 "hugiml" = ["py.typed"]
 
 [tool.cibuildwheel]
-build = "cp39-* cp310-* cp311-* cp312-* cp313-*"
+build = "cp39-* cp310-*"
 skip = "*-musllinux_i686"
 test-command = "python {project}/scripts/wheel_smoke_test.py"
 test-requires = ["numpy", "scipy", "scikit-learn", "pandas", "pytest", "packaging"]
@@ -103,13 +99,13 @@ build-verbosity = 1
 before-build = "pip install pybind11"
 environment = { CC = "gcc", CXX = "g++" }
 manylinux-x86_64-image = "manylinux2014"
-manylinux-aarch64-image = "manylinux2014"
 archs = ["x86_64"]
 
 [tool.cibuildwheel.macos]
 before-build = "pip install pybind11 && brew install libomp || true"
-environment = { CC = "gcc", CXX = "g++", MACOSX_DEPLOYMENT_TARGET = "11.0" }
-archs = ["x86_64", "arm64"]
+environment = { MACOSX_DEPLOYMENT_TARGET = "11.0" }
+repair-wheel-command = "DYLD_LIBRARY_PATH=$(brew --prefix libomp)/lib delocate-wheel --require-archs {delocate_archs} -w {dest_dir} -v {wheel}"
+archs = ["arm64", "x86_64"]
 
 [tool.cibuildwheel.windows]
 before-build = "pip install pybind11"
@@ -182,11 +178,8 @@ exclude_lines = [
 targets = ["src/hugiml"]
 exclude_dirs = ["tests", "benchmarks", "scripts", "docker"]
 skips = [
-    # B101: assert statements are used in internal validation helpers
     "B101",
-    # B324: hashlib.sha256 is used for HMAC; not a password hash
     "B324",
-    # B603/B607: subprocess.run is used in setup.py for PCH building only
     "B603",
     "B607",
 ]
