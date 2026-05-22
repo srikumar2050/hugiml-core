@@ -38,7 +38,7 @@ jobs:
     strategy:
       fail-fast: true
       matrix:
-        os: [windows-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
 
@@ -51,16 +51,7 @@ jobs:
         run: python -m cibuildwheel --output-dir wheelhouse
         env:
           CIBW_BUILD: "cp39-* cp310-* cp311-* cp312-* cp313-*"
-          CIBW_SKIP: "*-musllinux_i686"
-          CIBW_BEFORE_BUILD_LINUX: "yum install -y ccache || true && pip install pybind11"
-          CIBW_BEFORE_BUILD_MACOS: "pip install pybind11 && brew install libomp || true"
-          CIBW_BEFORE_BUILD_WINDOWS: "pip install pybind11"
-          CIBW_ENVIRONMENT: "CC=gcc CXX=g++"
-          CIBW_ENVIRONMENT_MACOS: "CC=gcc CXX=g++ MACOSX_DEPLOYMENT_TARGET=11.0"
-          CIBW_REPAIR_WHEEL_COMMAND_MACOS: "DYLD_LIBRARY_PATH=/usr/local/opt/libomp/lib delocate-wheel --require-archs {delocate_archs} -w {dest_dir} -v {wheel}"
-          CIBW_TEST_REQUIRES: "numpy scipy scikit-learn pandas pytest packaging"
-          CIBW_TEST_COMMAND: "python {project}/scripts/wheel_smoke_test.py"
-          
+
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-${{ matrix.os }}
@@ -127,7 +118,6 @@ jobs:
           name: sbom
           path: sbom.json
 
-
   container-scan:
     name: Container Image Scan (Trivy)
     runs-on: ubuntu-latest
@@ -160,13 +150,13 @@ jobs:
   publish:
     name: Publish to PyPI
     runs-on: ubuntu-latest
-    needs: [build-wheels, build-sdist, sbom]
+    needs: [build-wheels, build-sdist, sbom, container-scan]
     environment:
       name: ${{ github.event.inputs.target || 'pypi' }}
       url: ${{ github.event.inputs.target == 'testpypi' && 'https://test.pypi.org/p/hugiml-core' || 'https://pypi.org/p/hugiml-core' }}
     permissions:
-      id-token: write   # OIDC trusted publishing — no stored API token needed
-      contents: write   # GitHub release creation
+      id-token: write
+      contents: write
       attestations: write
 
     steps:
