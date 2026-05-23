@@ -35,7 +35,6 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-
 __all__ = [
     "MulticlassHUGReport",
     "make_imbalanced_pipeline",
@@ -234,11 +233,11 @@ class _ImbalancedHUGPipeline:
             from imblearn.under_sampling import RandomUnderSampler
             return RandomUnderSampler(sampling_strategy=ratio, random_state=self._rs)
 
-    def fit(self, X: Any, y: Any) -> "_ImbalancedHUGPipeline":
+    def fit(self, X: Any, y: Any) -> _ImbalancedHUGPipeline:
+
         from scipy.sparse import csr_matrix
-        from sklearn.pipeline import Pipeline
         from sklearn.linear_model import LogisticRegression
-        import copy
+        from sklearn.pipeline import Pipeline
 
         y_arr = np.asarray(y, dtype=np.int64)
 

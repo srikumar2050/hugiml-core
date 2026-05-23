@@ -43,7 +43,6 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-
 __all__ = [
     "InterpretabilityMetrics",
     "compute_all_metrics",
@@ -302,7 +301,7 @@ def compute_all_metrics(clf: Any, X: Any) -> InterpretabilityMetrics:
     )
 
 
-def metrics_dataframe(results: dict[str, "InterpretabilityMetrics"]) -> pd.DataFrame:
+def metrics_dataframe(results: dict[str, InterpretabilityMetrics]) -> pd.DataFrame:
     """Convert a mapping of {model_name: InterpretabilityMetrics} to a DataFrame.
 
     Useful for side-by-side comparisons across models or configurations.

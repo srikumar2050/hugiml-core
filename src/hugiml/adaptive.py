@@ -73,18 +73,16 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from hugiml.classifier import HUGIMLClassifierNative
-
 # Re-export the binning helpers that were previously defined locally here.
 # Tests do ``from hugiml.adaptive import _information_gain``; this import
 # keeps that working while the canonical implementation lives in _binning.
 from hugiml._binning import (  # noqa: F401  (public re-export)
-    _information_gain,
-    _select_b,
-    _quantile_edges,
     _apply_edges,
+    _information_gain,
+    _quantile_edges,
+    _select_b,
 )
-
+from hugiml.classifier import HUGIMLClassifierNative
 
 __all__ = [
     "HUGIMLAdaptive",
@@ -191,7 +189,7 @@ class HUGIMLAdaptive(HUGIMLClassifierNative):
 
     # ── fit ───────────────────────────────────────────────────────────────────
 
-    def fit(self, X_train: Any, y_train: Any) -> "HUGIMLAdaptive":
+    def fit(self, X_train: Any, y_train: Any) -> HUGIMLAdaptive:
         """Fit with per-feature adaptive binning.
 
         Delegates entirely to ``HUGIMLClassifierNative.fit`` with
@@ -225,7 +223,7 @@ class HUGIMLAdaptive(HUGIMLClassifierNative):
     # ── Backward-compatibility shim ───────────────────────────────────────────
 
     @property
-    def clf_(self) -> "HUGIMLAdaptive":
+    def clf_(self) -> HUGIMLAdaptive:
         """Backward-compatibility alias.
 
         Old code that accessed ``adaptive_clf.clf_`` to reach the inner

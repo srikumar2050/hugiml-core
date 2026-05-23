@@ -57,7 +57,6 @@ import numpy as np
 import pandas as pd
 from scipy.sparse import csr_matrix
 
-
 __all__ = [
     "PatternEditor",
     "RemovalRecord",
@@ -118,7 +117,7 @@ class PatternEditor:
         self,
         pattern_indices: list[int],
         reason: str = "unspecified",
-    ) -> "PatternEditor":
+    ) -> PatternEditor:
         """Remove patterns by index (0-based, relative to the *current* working set).
 
         Parameters
@@ -172,7 +171,7 @@ class PatternEditor:
         keyword: str,
         reason: str = "keyword match",
         case_sensitive: bool = False,
-    ) -> "PatternEditor":
+    ) -> PatternEditor:
         """Remove all patterns whose label contains ``keyword``.
 
         Parameters
@@ -200,7 +199,7 @@ class PatternEditor:
         self,
         min_support: float = 0.01,
         reason: str = "support below threshold",
-    ) -> "PatternEditor":
+    ) -> PatternEditor:
         """Remove patterns with training support below ``min_support``.
 
         Parameters
@@ -231,7 +230,7 @@ class PatternEditor:
         X_tr: Any,
         y_tr: Any,
         estimator: Any = None,
-    ) -> "PatternEditor":
+    ) -> PatternEditor:
         """Refit the downstream classifier on the (pruned) pattern matrix.
 
         The HUG mining results (patterns_) are unchanged; only the downstream
@@ -253,6 +252,7 @@ class PatternEditor:
         self._check_not_finalized()
         clf = self._working_clf
         import copy as _copy
+
         from sklearn.pipeline import Pipeline
 
         # Build pattern matrix for training data
@@ -285,7 +285,7 @@ class PatternEditor:
         X_cal: Any,
         y_cal: Any,
         method: str = "isotonic",
-    ) -> "PatternEditor":
+    ) -> PatternEditor:
         """Wrap the refitted downstream model with probability calibration.
 
         Uses ``sklearn.calibration.CalibratedClassifierCV`` applied *post-fit*
@@ -430,7 +430,7 @@ class PatternEditor:
     # Context manager support (optional)
     # ------------------------------------------------------------------
 
-    def __enter__(self) -> "PatternEditor":
+    def __enter__(self) -> PatternEditor:
         return self
 
     def __exit__(self, *exc) -> None:

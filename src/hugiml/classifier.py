@@ -102,8 +102,16 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.pipeline import Pipeline
 from sklearn.utils.validation import check_is_fitted
 
+from hugiml._binning import (
+    _apply_edges as _adap_apply_edges,
+)
+from hugiml._binning import (
+    _quantile_edges as _adap_quantile_edges,
+)
+from hugiml._binning import (
+    _select_b as _adap_select_b,
+)
 from hugiml._compat import check_array, check_X_y
-
 
 __all__ = [
     "HUGIMLClassifierNative",
@@ -384,11 +392,6 @@ class _TransactionDataWrapper:
 #
 # =============================================================================
 
-from hugiml._binning import (
-    _select_b as _adap_select_b,
-    _quantile_edges as _adap_quantile_edges,
-    _apply_edges as _adap_apply_edges,
-)
 
 class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
     """HUG-IML interpretable classifier — C++ accelerated, scikit-learn compatible.
@@ -921,8 +924,8 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
     # ── v1.1.0  Adaptive binning methods ─────────────────────────────────────
 
     def _apply_adaptive_binning(
-        self, X_train: "Any", y_arr: np.ndarray
-    ) -> "Any":
+        self, X_train: Any, y_arr: np.ndarray
+    ) -> Any:
         """Pre-discretise numerical features using per-feature IG-selected B_j.
 
         Called by _fit_impl when adaptive_binning=True.  The method:
@@ -987,7 +990,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                 X_pre[name] = _adap_apply_edges(col, edges)
         return X_pre if is_df else X_pre
 
-    def _prebin_for_predict(self, X: "Any") -> "Any":
+    def _prebin_for_predict(self, X: Any) -> Any:
         """Apply stored bin edges to X before the C++ inference path.
 
         Called at the top of predict_proba / predict / transform when
@@ -1033,7 +1036,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
     # The old median imputation in _to_float_array is removed entirely.
     # ────────────────────────────────────────────────────────────────────────────
 
-    def _prebin_nan_cols(self, X_train: "Any") -> "Any":
+    def _prebin_nan_cols(self, X_train: Any) -> Any:
         """Pre-bin ALL numerical columns to string quantile labels.
 
         Called in _fit_impl (non-adaptive path) after _resolve_col_meta.
@@ -1088,7 +1091,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             X_pre[name] = _adap_apply_edges(col, edges)
         return X_pre if is_df else X_pre
 
-    def _handle_test_nan(self, X_test: "Any") -> "tuple":
+    def _handle_test_nan(self, X_test: Any) -> tuple:
         """Apply training-time bin edges to all pre-binned columns at test time.
 
         All numerical columns are pre-binned during _fit_impl (non-adaptive path),
@@ -2162,7 +2165,6 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
 
         # ── v1.1.0 adaptive binning section ──────────────────────────────
         if getattr(self, "_missing_col_edges_", None):
-            n_nan = sum(1 for e in self._missing_col_edges_.values() if True)
             lines += [
                 "",
                 f"NaN handling: {len(self._missing_col_edges_)} numerical column(s) "

@@ -33,7 +33,6 @@ Public API
 """
 from __future__ import annotations
 
-import warnings
 from typing import Any
 
 import numpy as np
@@ -42,7 +41,6 @@ import pandas as pd
 try:
     import plotly.graph_objects as go
     from plotly.subplots import make_subplots
-    import plotly.io as pio
     _PLOTLY = True
 except ImportError:
     _PLOTLY = False
@@ -174,7 +172,7 @@ class HUGPlotter:
         X: Any | None = None,
         height: int | None = None,
         title: str | None = None,
-    ) -> "go.Figure":
+    ) -> go.Figure:
         """1-D HUG profile — EBM shape function equivalent.
 
         For a given feature, shows every singleton pattern bin as a bar
@@ -340,7 +338,7 @@ class HUGPlotter:
         top_n: int = 25,
         height: int | None = None,
         title: str | None = None,
-    ) -> "go.Figure":
+    ) -> go.Figure:
         """Compound patterns that include a specific feature.
 
         Each bar = one compound pattern; bars coloured by the number of
@@ -436,7 +434,7 @@ class HUGPlotter:
         top_n: int = 15,
         height: int | None = None,
         title: str | None = None,
-    ) -> "go.Figure":
+    ) -> go.Figure:
         """Feature importance: mean utility per feature, coloured by mean IG.
 
         Matches the "Feature Importance" card in the governance dashboard.
@@ -477,12 +475,6 @@ class HUGPlotter:
         df = (pd.DataFrame(rows)
               .sort_values("mean_util", ascending=False)
               .head(top_n)[::-1])
-
-        max_ig = df["mean_ig"].max()
-        colors = [
-            f"rgba({int(48+160*g/(max_ig+1e-9))},{int(69+100*g/(max_ig+1e-9))},255,0.9)"
-            for g in df["mean_ig"]
-        ]
 
         fig = go.Figure(go.Bar(
             x=df["mean_util"],
@@ -527,7 +519,7 @@ class HUGPlotter:
         feature_filter: str | None = None,
         height: int | None = None,
         title: str | None = None,
-    ) -> "go.Figure":
+    ) -> go.Figure:
         """Scatter: utility (x) × information gain (y), coloured by support.
 
         Matches the "Utility vs Info Gain" card in the governance dashboard.
@@ -600,7 +592,7 @@ class HUGPlotter:
         top_n: int = 20,
         height: int | None = None,
         title: str | None = None,
-    ) -> "go.Figure":
+    ) -> go.Figure:
         """Horizontal bar chart of top-N patterns by utility, coloured by IG.
 
         Matches the "Top Patterns" card in the governance dashboard.
@@ -655,7 +647,7 @@ class HUGPlotter:
 
         fig.update_layout(
             **_LAYOUT_BASE,
-            title=_title(title or f"Top Patterns"),
+            title=_title(title or "Top Patterns"),
             height=height or max(280, len(df) * 24 + 80),
             margin=dict(l=44, r=20, t=76, b=40),
         )
@@ -675,7 +667,7 @@ class HUGPlotter:
         top_n: int = 15,
         height: int | None = None,
         title: str | None = None,
-    ) -> "go.Figure":
+    ) -> go.Figure:
         """Horizontal bar: how many patterns reference each feature.
 
         Matches the "Feature Coverage" card in the governance dashboard.
@@ -723,7 +715,7 @@ class HUGPlotter:
         self,
         height: int | None = None,
         title: str | None = None,
-    ) -> "go.Figure":
+    ) -> go.Figure:
         """Bar chart of pattern length distribution.
 
         Matches the "Pattern Lengths" card in the governance dashboard.
@@ -760,7 +752,7 @@ class HUGPlotter:
         self,
         height: int | None = None,
         title: str | None = None,
-    ) -> "go.Figure":
+    ) -> go.Figure:
         """Histogram of pattern support values.
 
         Matches the "Support Distribution" card in the governance dashboard.
@@ -799,7 +791,7 @@ class HUGPlotter:
         max_patterns: int = 20,
         height: int | None = None,
         title: str | None = None,
-    ) -> "go.Figure":
+    ) -> go.Figure:
         """Local explanation: active HUG patterns for a single sample.
 
         Shows active patterns sorted by |coefficient|, coloured blue (positive)
@@ -883,7 +875,7 @@ class HUGPlotter:
         metrics: dict,
         dataset_name: str = "Dataset",
         height: int | None = None,
-    ) -> "go.Figure":
+    ) -> go.Figure:
         """Radar / spider chart of classification performance metrics.
 
         Matches the "Performance" card in the governance dashboard.
@@ -915,7 +907,7 @@ class HUGPlotter:
             r=vals,
             theta=cats,
             fill="toself",
-            fillcolor=f"rgba(88,166,255,.12)",
+            fillcolor="rgba(88,166,255,.12)",
             line=dict(color=_T["a1"], width=2),
         ))
 
@@ -944,7 +936,7 @@ class HUGPlotter:
         feature_b: str,
         height: int | None = None,
         title: str | None = None,
-    ) -> "go.Figure":
+    ) -> go.Figure:
         """2-D HUG profile heatmap for compound patterns involving two features.
 
         Parameters
