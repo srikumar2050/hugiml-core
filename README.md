@@ -23,7 +23,7 @@ checking_status=no_checking          coef= +1.12     support=0.39
 ```
 
 <p align="left">
-  <img src="docs/images/positioning-mosaic.png" alt="Where HUGIML fits" width="750" height="400">
+  <img src="docs/images/positioning-mosaic.png" alt="Where HUGIML fits" width="800" height="500">
 </p>
 
 ---
