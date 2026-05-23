@@ -7,15 +7,13 @@ Test suite for the adaptive_binning integration in HUGIMLClassifierNative.
 Run with:
     pytest tests/test_adaptive_native.py -v
 """
-import json
 import warnings
 
 import numpy as np
-import pandas as pd
 import pytest
 from sklearn.datasets import load_breast_cancer, load_wine
-from sklearn.model_selection import train_test_split
 from sklearn.metrics import roc_auc_score
+from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import label_binarize
 
 from hugiml.classifier import HUGIMLClassifierNative
@@ -92,7 +90,8 @@ class TestAdaptiveParams:
         with pytest.raises(Exception):
             from sklearn.datasets import load_breast_cancer
             bc = load_breast_cancer(as_frame=True)
-            Xtr = bc.data.iloc[:400]; ytr = bc.target.values[:400]
+            Xtr = bc.data.iloc[:400]
+            ytr = bc.target.values[:400]
             clf.fit(Xtr, ytr)
 
     def test_validation_bad_ratio(self):

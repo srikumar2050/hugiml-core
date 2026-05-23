@@ -6,13 +6,13 @@ Run with:  pytest tests/ -v --ignore=tests/test_adaptive_native.py
 """
 import json
 import warnings
+
 import numpy as np
 import pandas as pd
 import pytest
 from sklearn.datasets import load_breast_cancer, load_wine
-from sklearn.model_selection import train_test_split
 from sklearn.metrics import roc_auc_score
-from sklearn.preprocessing import label_binarize
+from sklearn.model_selection import train_test_split
 
 warnings.filterwarnings("ignore")
 
@@ -63,7 +63,7 @@ def fitted_multiclass(wine_data):
 
 class TestMetrics:
     def test_compute_all_metrics_types(self, fitted_clf):
-        from hugiml.metrics import compute_all_metrics, InterpretabilityMetrics
+        from hugiml.metrics import InterpretabilityMetrics, compute_all_metrics
         clf, Xtr, Xte, ytr, yte = fitted_clf
         m = compute_all_metrics(clf, Xte)
         assert isinstance(m, InterpretabilityMetrics)
@@ -136,9 +136,14 @@ class TestMetrics:
 
     def test_individual_functions(self, fitted_clf):
         from hugiml.metrics import (
-            n_patterns, avg_pattern_length, max_pattern_length,
-            coverage, overlap_rate, explanation_sparsity,
-            active_patterns_per_prediction, top_k_cumulative_contribution,
+            active_patterns_per_prediction,
+            avg_pattern_length,
+            coverage,
+            explanation_sparsity,
+            max_pattern_length,
+            n_patterns,
+            overlap_rate,
+            top_k_cumulative_contribution,
         )
         clf, Xtr, Xte, ytr, yte = fitted_clf
         assert n_patterns(clf) == len(clf.patterns_)
@@ -423,8 +428,10 @@ class TestAdaptiveStandalone:
 
     def test_plot_bin_profiles(self, bc_data):
         pytest.importorskip("matplotlib")
+        import matplotlib
+
         from hugiml.adaptive import HUGIMLAdaptive
-        import matplotlib; matplotlib.use("Agg")
+        matplotlib.use("Agg")
         X, y = bc_data
         Xtr, *_ = train_test_split(X, y, test_size=0.25, random_state=42)
         clf = HUGIMLAdaptive(b_candidates=[3, 5, 7], L=1, G=1e-2)
@@ -434,8 +441,10 @@ class TestAdaptiveStandalone:
 
     def test_ig_heatmap(self, bc_data):
         pytest.importorskip("matplotlib")
+        import matplotlib
+
         from hugiml.adaptive import HUGIMLAdaptive
-        import matplotlib; matplotlib.use("Agg")
+        matplotlib.use("Agg")
         X, y = bc_data
         Xtr, *_ = train_test_split(X, y, test_size=0.25, random_state=42)
         clf = HUGIMLAdaptive(b_candidates=[3, 5, 7], L=1, G=1e-2)
@@ -498,7 +507,8 @@ class TestMulticlass:
         from hugiml import HUGIMLClassifierNative
         from hugiml.multiclass import make_imbalanced_pipeline
         X, y = bc_data
-        y_imbal = y.copy(); y_imbal[:100] = 0  # make more imbalanced
+        y_imbal = y.copy()
+        y_imbal[:100] = 0  # make more imbalanced
         Xtr, Xte, ytr, yte = train_test_split(X, y_imbal, test_size=0.25,
                                                 stratify=y_imbal, random_state=42)
         clf_proto = HUGIMLClassifierNative(B=4, L=1, G=1e-2, topK=20)
@@ -523,7 +533,7 @@ class TestMulticlass:
         assert proba.shape == (len(yte), 2)
 
     def test_encode_high_cardinality_target_mean(self):
-        from hugiml.multiclass import encode_high_cardinality, apply_encoding
+        from hugiml.multiclass import apply_encoding, encode_high_cardinality
         rng = np.random.default_rng(0)
         n = 500
         X = pd.DataFrame({
@@ -541,7 +551,7 @@ class TestMulticlass:
         assert X_test_enc["city"].dtype != object
 
     def test_encode_high_cardinality_frequency(self):
-        from hugiml.multiclass import encode_high_cardinality, apply_encoding
+        from hugiml.multiclass import encode_high_cardinality
         rng = np.random.default_rng(1)
         n = 400
         X = pd.DataFrame({
@@ -567,7 +577,7 @@ class TestMulticlass:
 
     def test_apply_encoding_unseen_values(self):
         """Unseen values at test time get fill_value (default 0)."""
-        from hugiml.multiclass import encode_high_cardinality, apply_encoding
+        from hugiml.multiclass import apply_encoding, encode_high_cardinality
         rng = np.random.default_rng(2)
         n = 200
         X_tr = pd.DataFrame({"cat": [f"v{i}" for i in rng.integers(0, 25, n)]})
@@ -668,7 +678,6 @@ class TestPlots:
 
     def test_no_plotly_raises(self, fitted_clf, monkeypatch):
         """HUGPlotter raises a clear ImportError when plotly is absent."""
-        import sys, importlib
         from hugiml.plots import _PLOTLY
         if not _PLOTLY:
             pytest.skip("plotly not installed")
@@ -709,8 +718,8 @@ class TestBenchmarkRunner:
         assert set(BUILDERS.keys()) == expected
 
     def test_hugiml_builder_returns_fitted_type(self):
-        from hugiml.benchmarks.runner import _build_hugiml
         from hugiml import HUGIMLClassifierNative
+        from hugiml.benchmarks.runner import _build_hugiml
         clf = _build_hugiml()
         assert isinstance(clf, HUGIMLClassifierNative)
 
@@ -732,7 +741,7 @@ class TestBenchmarkRunner:
             assert result is None or hasattr(result, "fit")
 
     def test_evaluate_returns_dict(self, bc_data):
-        from hugiml.benchmarks.runner import _evaluate, _build_rf
+        from hugiml.benchmarks.runner import _build_rf, _evaluate
         X, y = bc_data
         Xtr, Xte, ytr, yte = train_test_split(X, y, test_size=0.25,
                                                 stratify=y, random_state=42)
@@ -745,10 +754,10 @@ class TestBenchmarkRunner:
 
     def test_run_benchmark_breast_cancer(self, tmp_path):
         """Minimal 2-fold run on breast_cancer — checks output DataFrame."""
-        from hugiml.benchmarks.runner import run_benchmark, BUILDERS
+
         # Override BUILDERS temporarily to only run fast models
         import hugiml.benchmarks.runner as runner
-        import copy
+        from hugiml.benchmarks.runner import run_benchmark
         orig = runner.BUILDERS
         runner.BUILDERS = {
             "HUG-IML":      runner._build_hugiml,
@@ -781,8 +790,8 @@ class TestBenchmarkRunner:
 
     def test_unknown_dataset_handled(self, capsys):
         """Unknown dataset name should not crash the whole run."""
+
         from hugiml.benchmarks.runner import main
-        import sys
         with pytest.raises(SystemExit):
             # argparse exits on bad args, that's fine
             main()
@@ -806,7 +815,8 @@ class TestMissingValues:
         from hugiml import HUGIMLClassifierNative
         X, y = bc_data
         rng = np.random.default_rng(0)
-        Xn = X.copy(); Xn[rng.random(Xn.shape) < 0.05] = np.nan
+        Xn = X.copy()
+        Xn[rng.random(Xn.shape) < 0.05] = np.nan
         clf = HUGIMLClassifierNative()
         X_enc, y_enc = clf.prepareXy(Xn, y)
         Xtr, Xte, ytr, yte = train_test_split(X_enc, y_enc, test_size=0.25,
@@ -861,7 +871,8 @@ class TestMissingValues:
         clf = HUGIMLClassifierNative(B=5, L=2, G=1e-4, topK=80)
         clf.fit(Xtr, ytr)
         Xte_nan = Xte.copy()
-        Xte_nan.iloc[:10, 0] = np.nan; Xte_nan.iloc[:5, 5] = np.nan
+        Xte_nan.iloc[:10, 0] = np.nan
+        Xte_nan.iloc[:5, 5] = np.nan
         p_with = clf.predict_proba(Xte_nan)
         p_without = clf.predict_proba(Xte)
         no_nan = ~Xte_nan.isna().any(axis=1)
@@ -876,14 +887,15 @@ class TestMissingValues:
                                                 stratify=y_enc, random_state=42)
         clf = HUGIMLClassifierNative(B=5, L=2, G=1e-4, topK=80)
         clf.fit(Xtr, ytr)
-        Xte_nan = Xte.copy(); Xte_nan.iloc[0, 0] = np.nan
+        Xte_nan = Xte.copy()
+        Xte_nan.iloc[0, 0] = np.nan
         p_batch = clf.predict_proba(Xte_nan)[0]
         p_single = clf.predict_proba(Xte_nan.iloc[[0]])[0]
         assert np.allclose(p_batch, p_single, atol=1e-9)
 
     def test_nan_not_mined_as_item(self, nan_fitted):
         clf, *_ = nan_fitted
-        nan_pats = [l for l in clf.get_hug_features() if 'nan' in l.lower()]
+        nan_pats = [feat for feat in clf.get_hug_features() if 'nan' in feat.lower()]
         assert len(nan_pats) == 0, f"nan-string patterns: {nan_pats}"
 
     def test_save_load_preserves_edges(self, nan_fitted, tmp_path):
@@ -899,6 +911,7 @@ class TestMissingValues:
 
     def test_backward_compat_missing_attr(self, nan_fitted):
         import copy
+
         from hugiml import HUGIMLClassifierNative
         clf, *_ = nan_fitted
         state = copy.deepcopy(clf.__getstate__())
@@ -916,18 +929,19 @@ class TestMissingValues:
         Xtr, Xte, ytr, yte = nan_split
         clf = HUGIMLClassifierNative(B=8, L=2, G=1e-4, topK=-1, adaptive_binning=True)
         clf.fit(Xtr, ytr)
-        assert not any('=nan' in l.lower() for l in clf.get_hug_features())
+        assert not any('=nan' in feat.lower() for feat in clf.get_hug_features())
         assert roc_auc_score(yte, clf.predict_proba(Xte)[:,1]) > 0.90
 
     def test_adaptive_standalone_no_nan_patterns(self, bc_data):
         from hugiml.adaptive import HUGIMLAdaptive
         X, y = bc_data
         rng = np.random.default_rng(0)
-        X_nan = X.copy(); X_nan[rng.random(X_nan.shape) < 0.05] = np.nan
+        X_nan = X.copy()
+        X_nan[rng.random(X_nan.shape) < 0.05] = np.nan
         clf = HUGIMLAdaptive(b_candidates=[3, 5, 7], L=2, G=1e-4)
         X_enc, y_enc = clf.prepareXy(X_nan, y)
         Xtr, Xte, ytr, yte = train_test_split(X_enc, y_enc, test_size=0.25,
                                                 stratify=y_enc, random_state=42)
         clf.fit(Xtr, ytr)
-        assert not any('=nan' in l.lower() for l in clf.get_hug_features())
+        assert not any('=nan' in feat.lower() for feat in clf.get_hug_features())
         assert roc_auc_score(yte, clf.predict_proba(Xte)[:,1]) > 0.90
