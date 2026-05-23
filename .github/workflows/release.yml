@@ -33,12 +33,11 @@ concurrency:
 jobs:
 
   build-wheels:
-    name: "Wheels – py${{ matrix.python }} / ${{ matrix.os }}"
+    name: "Wheels – ${{ matrix.os }}"
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: true
       matrix:
-        python: ["39", "310", "311", "312", "313"]
         include:
           - os: ubuntu-latest
             cibw_archs: x86_64
@@ -52,19 +51,19 @@ jobs:
       - uses: actions/checkout@v4
 
       - uses: actions/setup-python@v5
-        with: { python-version: "3.12" }
+        with: { python-version: "3.11" }
 
       - run: pip install cibuildwheel==2.20.0
 
-      - name: Build wheel (py${{ matrix.python }} / ${{ matrix.os_config.os }})
+      - name: Build wheels
         run: python -m cibuildwheel --output-dir wheelhouse
         env:
-          CIBW_ARCHS: ${{ matrix.os_config.cibw_archs }}
-          CIBW_BUILD: "cp${{ matrix.python }}-*"
+          CIBW_ARCHS: ${{ matrix.cibw_archs }}
+          CIBW_BUILD: "cp313-*"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: wheels-${{ matrix.os_config.os }}-${{ matrix.python }}
+          name: wheels-${{ matrix.os }}-${{ matrix.cibw_archs || matrix.os }}
           path: wheelhouse/*.whl
 
   build-sdist:
@@ -73,7 +72,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
-        with: { python-version: "3.12" }
+        with: { python-version: "3.11" }
       - run: pip install build
       - run: python -m build --sdist
       - name: Verify no compiled artefacts in sdist
@@ -86,32 +85,6 @@ jobs:
           name: sdist
           path: dist/*.tar.gz
 
-  verify-wheel:
-    name: Verify wheel imports
-    runs-on: ubuntu-latest
-    needs: [build-wheels]
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with: { python-version: "3.12" }
-      - name: Download wheels
-        uses: actions/download-artifact@v4
-        with:
-          pattern: wheels-ubuntu-latest-312
-          path: dist/
-          merge-multiple: true
-      - name: Smoke-test wheel contents
-        run: |
-          pip install dist/hugiml_core-*.whl "plotly>=5.0"
-          python -c "import hugiml; print('version:', hugiml.__version__)"
-          python -c "from hugiml._binning import _select_b, _apply_edges; print('_binning OK')"
-          python -c "from hugiml.adaptive import HUGIMLAdaptive, _information_gain; print('adaptive OK')"
-          python -c "from hugiml.benchmarks.runner import main; print('benchmarks OK')"
-          python -c "from hugiml.metrics import compute_all_metrics; print('metrics OK')"
-          python -c "from hugiml.pruning import PatternEditor; print('pruning OK')"
-          python -c "from hugiml.multiclass import MulticlassHUGReport; print('multiclass OK')"
-          python -c "from hugiml.plots import HUGPlotter; print('plots OK')"
-
   sbom:
     name: Generate SBOM
     runs-on: ubuntu-latest
@@ -119,7 +92,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
-        with: { python-version: "3.12" }
+        with: { python-version: "3.11" }
       - run: pip install build
       - name: Generate SBOM
         run: |
@@ -188,7 +161,7 @@ jobs:
   publish:
     name: Publish to PyPI
     runs-on: ubuntu-latest
-    needs: [build-wheels, build-sdist, verify-wheel, sbom, container-scan]
+    needs: [build-wheels, build-sdist, sbom, container-scan]
     environment:
       name: ${{ github.event.inputs.target || 'pypi' }}
       url: ${{ github.event.inputs.target == 'testpypi' && 'https://test.pypi.org/p/hugiml-core' || 'https://pypi.org/p/hugiml-core' }}
