@@ -62,7 +62,11 @@ jobs:
         run: pip install -e ".[dev,plots]"
 
       # Core tests + extension tests (auto-discovered under tests/)
+      # shell: bash required on Windows — PowerShell does not support backslash
+      # line continuation, so the multi-line pytest command fails in pwsh.
+      # Git Bash is always available on GitHub Windows runners.
       - name: Run tests
+        shell: bash
         run: |
           pytest tests/ \
             --cov=hugiml \
