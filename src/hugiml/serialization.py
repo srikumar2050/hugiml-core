@@ -469,6 +469,33 @@ def save_model(clf: Any, path: str | os.PathLike) -> None:
         import dataclasses
 
         fit_state["fit_metadata_"] = dataclasses.asdict(clf.fit_metadata_)
+    # ── v1.1.0 missing value handling state ──────────────────────────────
+    # _missing_col_edges_ stores quantile edges for columns that had NaN/Inf
+    # in training data.  Serialised as float lists for JSON compatibility.
+    if getattr(clf, "_missing_col_edges_", None):
+        fit_state["missing_col_edges"] = {
+            name: edges.tolist()
+            for name, edges in clf._missing_col_edges_.items()
+        }
+    # ─────────────────────────────────────────────────────────────────────
+    # ── v1.1.0 adaptive binning state ────────────────────────────────────
+    # _bin_edges_ (dict[str, np.ndarray]) is serialised as JSON-compatible
+    # lists.  per_feature_b_ and ig_scores_ are plain dicts.  JSON object
+    # keys must be strings so ig_scores_ int keys are stringified here and
+    # converted back to int in load_model.
+    if getattr(clf, "adaptive_binning", False) and getattr(clf, "_bin_edges_", None):
+        fit_state["adaptive_binning_state"] = {
+            "bin_edges": {
+                name: edges.tolist()
+                for name, edges in clf._bin_edges_.items()
+            },
+            "per_feature_b": dict(clf.per_feature_b_),
+            "ig_scores": {
+                name: {str(b): float(v) for b, v in sc.items()}
+                for name, sc in clf.ig_scores_.items()
+            },
+        }
+    # ────────────────────────────────────────────────────────────────────
     members["clf_fit.json"] = _json_dumps(fit_state)
 
     # Patterns
@@ -699,6 +726,30 @@ def _load_v3(path: str | os.PathLike) -> Any:
             )
         except Exception as exc:
             logger.debug("Could not restore FitMetadata: %s", exc, exc_info=True)
+
+    # ── v1.1.0 missing value handling state ──────────────────────────────
+    missing_edges = clf_fit.get("missing_col_edges")
+    if missing_edges:
+        clf._missing_col_edges_ = {
+            name: np.array(edges, dtype=np.float64)
+            for name, edges in missing_edges.items()
+        }
+    else:
+        clf._missing_col_edges_ = {}
+    # ─────────────────────────────────────────────────────────────────────
+    # ── v1.1.0 adaptive binning state ────────────────────────────────────
+    adap = clf_fit.get("adaptive_binning_state")
+    if adap:
+        clf._bin_edges_ = {
+            name: np.array(edges, dtype=np.float64)
+            for name, edges in adap["bin_edges"].items()
+        }
+        clf.per_feature_b_ = dict(adap["per_feature_b"])
+        clf.ig_scores_ = {
+            name: {int(b): float(v) for b, v in sc.items()}
+            for name, sc in adap["ig_scores"].items()
+        }
+    # ────────────────────────────────────────────────────────────────────
 
     # TransactionDataWrapper
     clf.td_ = _deserialize_td(td_config, td_arrays)

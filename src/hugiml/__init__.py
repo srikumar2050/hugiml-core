@@ -27,44 +27,61 @@ Core classifier::
 
     from hugiml import HUGIMLClassifierNative
 
-    clf = HUGIMLClassifierNative(B=8, L=2, G=1e-4)
-    X, y = clf.prepareXy(X_df, y_series)
-    clf.fit(X_train, y_train)
+    clf = HUGIMLClassifierNative(B=7, L=1, G=5e-3)
+    X, y = clf.prepareXy(X_df, y_series)   # schema/type prep — no fitting
+    clf.fit(X_train, y_train)               # discretisation + mining + downstream fit
     proba = clf.predict_proba(X_test)
     print(clf.model_summary())
 
-Calibration::
+Adaptive binning (v1.1.0)::
 
-    from hugiml.calibration import evaluate_calibration
-    result = evaluate_calibration(y_test, proba)
-    print(result.summary())
+    clf = HUGIMLClassifierNative(
+        adaptive_binning=True,
+        b_candidates=[2, 3, 5, 7, 10, 15],
+        min_marginal_gain_ratio=0.02,
+        L=2, G=1e-4,
+    )
+    clf.fit(X_train, y_train)
+    print(clf.per_feature_b_)   # chosen B_j per feature
 
-Explainability::
+Visualisations (requires plotly)::
 
-    from hugiml.explainability import HUGPatternExplainer
-    explainer = HUGPatternExplainer(clf)
-    report = explainer.generate_report("my_model")
+    from hugiml.plots import HUGPlotter
+    plotter = HUGPlotter(clf)
+    plotter.plot_marginal_bin_profile("age").show()
+    plotter.plot_dashboard().show()
 
-Governance::
+Interpretability metrics::
 
-    from hugiml.governance import generate_model_card, package_audit_artifacts
-    card = generate_model_card(clf, "my_model", intended_use="credit scoring")
-    card.save("model_card.md", fmt="md")
+    from hugiml.metrics import compute_all_metrics
+    m = compute_all_metrics(clf, X_test)
+    print(m)
 
-Serialisation::
+Pattern pruning::
 
-    from hugiml.serialization import generate_sbom
-    sbom = generate_sbom(output_path="sbom.json")
+    from hugiml.pruning import PatternEditor
+    editor = PatternEditor(clf, operator_name="analyst")
+    editor.remove_by_keyword("gender", reason="protected attribute")
+    new_clf = editor.refit(X_tr, y_tr).calibrate(X_cal, y_cal).finalize()
 
-Telemetry::
+Standalone adaptive wrapper::
 
-    from hugiml.telemetry import instrument_classifier
-    clf = instrument_classifier(clf, model_id="v1")
+    from hugiml.adaptive import HUGIMLAdaptive
+    clf = HUGIMLAdaptive(b_candidates=[2, 3, 5, 7, 10, 15], L=2, G=1e-4)
+    clf.fit(X_train, y_train)
+
+Multiclass / imbalanced / high-cardinality::
+
+    from hugiml.multiclass import MulticlassHUGReport, make_imbalanced_pipeline
+
+Benchmark runner (CLI)::
+
+    python -m hugiml.benchmarks.runner --datasets breast_cancer adult
 """
 
 from __future__ import annotations
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 __author__ = "Srikumar Krishnamoorthy"
 __license__ = "Apache-2.0"
 __paper__ = (
@@ -93,31 +110,41 @@ from hugiml.exceptions import (
 )
 from hugiml.monitoring import DriftDetector, DriftReport, PredictionMonitor
 
+
+def __getattr__(name: str):
+    """Lazy import gate for optional-dependency sub-modules."""
+    _lazy = {
+        "HUGPlotter":              ("hugiml.plots",     "HUGPlotter"),
+        "InterpretabilityMetrics": ("hugiml.metrics",   "InterpretabilityMetrics"),
+        "compute_all_metrics":     ("hugiml.metrics",   "compute_all_metrics"),
+        "metrics_dataframe":       ("hugiml.metrics",   "metrics_dataframe"),
+        "PatternEditor":           ("hugiml.pruning",   "PatternEditor"),
+        "HUGIMLAdaptive":          ("hugiml.adaptive",  "HUGIMLAdaptive"),
+        "MulticlassHUGReport":     ("hugiml.multiclass","MulticlassHUGReport"),
+        "make_imbalanced_pipeline":("hugiml.multiclass","make_imbalanced_pipeline"),
+        "encode_high_cardinality": ("hugiml.multiclass","encode_high_cardinality"),
+        "apply_encoding":          ("hugiml.multiclass","apply_encoding"),
+    }
+    if name in _lazy:
+        import importlib
+        mod = importlib.import_module(_lazy[name][0])
+        return getattr(mod, _lazy[name][1])
+    raise AttributeError(f"module 'hugiml' has no attribute {name!r}")
+
+
 __all__ = [
-    # Classifier
-    "HUGIMLClassifierNative",
-    "FitMetadata",
-    # Monitoring
-    "PredictionMonitor",
-    "DriftDetector",
-    "DriftReport",
-    # Exceptions
-    "HUGIMLError",
-    "HUGIMLFitError",
-    "HUGIMLMiningError",
-    "HUGIMLTimeoutError",
-    "HUGIMLValidationError",
-    "HUGIMLSchemaError",
-    "HUGIMLParamError",
-    "HUGIMLSerializationError",
-    "HUGIMLVersionError",
-    "HUGIMLPredictionError",
-    "HUGIMLWarning",
-    "HUGIMLConvergenceWarning",
-    "HUGIMLDtypeDriftWarning",
-    "HUGIMLRangeWarning",
-    "HUGIMLDegradedWarning",
-    # Version
-    "__version__",
-    "__paper__",
+    "HUGIMLClassifierNative", "FitMetadata",
+    "PredictionMonitor", "DriftDetector", "DriftReport",
+    "HUGIMLError", "HUGIMLFitError", "HUGIMLMiningError",
+    "HUGIMLTimeoutError", "HUGIMLValidationError", "HUGIMLSchemaError",
+    "HUGIMLParamError", "HUGIMLSerializationError", "HUGIMLVersionError",
+    "HUGIMLPredictionError", "HUGIMLWarning", "HUGIMLConvergenceWarning",
+    "HUGIMLDtypeDriftWarning", "HUGIMLRangeWarning", "HUGIMLDegradedWarning",
+    "HUGPlotter",
+    "InterpretabilityMetrics", "compute_all_metrics", "metrics_dataframe",
+    "PatternEditor",
+    "HUGIMLAdaptive",
+    "MulticlassHUGReport", "make_imbalanced_pipeline",
+    "encode_high_cardinality", "apply_encoding",
+    "__version__", "__paper__",
 ]

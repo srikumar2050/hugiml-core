@@ -103,6 +103,12 @@ from sklearn.pipeline import Pipeline
 from sklearn.utils.validation import check_is_fitted
 
 from hugiml._compat import check_array, check_X_y
+
+
+__all__ = [
+    "HUGIMLClassifierNative",
+    "FitMetadata",
+]
 from hugiml.exceptions import (
     HUGIMLConvergenceWarning,
     HUGIMLDtypeDriftWarning,
@@ -369,6 +375,21 @@ class _TransactionDataWrapper:
 # =============================================================================
 
 
+# =============================================================================
+# ── v1.1.0  Per-feature adaptive binning — module-level helpers ──────────────
+#
+# Imported from hugiml._binning — the single source of truth for all
+# adaptive-binning maths.  Local aliases preserve every existing call-site
+# inside this file without modification.
+#
+# =============================================================================
+
+from hugiml._binning import (
+    _select_b as _adap_select_b,
+    _quantile_edges as _adap_quantile_edges,
+    _apply_edges as _adap_apply_edges,
+)
+
 class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
     """HUG-IML interpretable classifier — C++ accelerated, scikit-learn compatible.
 
@@ -442,6 +463,16 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         max_predict_ms: float | None = None,
         max_fit_seconds: float | None = None,
         verbose: bool = False,
+        # ── v1.1.0 adaptive binning ───────────────────────────────────────
+        # When adaptive_binning=True each numerical feature is pre-discretised
+        # to B_j quantile bins chosen by elbow-stopping IG search.  The
+        # pre-binned columns are declared categorical before the C++ layer
+        # (global B is overridden to sentinel 2).  Bin edges are stored in
+        # _bin_edges_ and reapplied identically at predict/transform time.
+        # ─────────────────────────────────────────────────────────────────
+        adaptive_binning: bool = False,
+        b_candidates: list | None = None,
+        min_marginal_gain_ratio: float = 0.02,
     ) -> None:
         self.allCols = allCols
         self.origColumns = origColumns
@@ -454,6 +485,9 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         self.max_predict_ms = max_predict_ms
         self.max_fit_seconds = max_fit_seconds
         self.verbose = verbose
+        self.adaptive_binning = adaptive_binning
+        self.b_candidates = b_candidates
+        self.min_marginal_gain_ratio = min_marginal_gain_ratio
         self._fit_lock = threading.RLock()
 
     # ── Class methods ─────────────────────────────────────────────────────────
@@ -483,7 +517,8 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
     def __repr__(self) -> str:
         fitted = hasattr(self, "patterns_")
         status = f", {len(self.patterns_)} patterns" if fitted else ", not fitted"
-        return f"HUGIMLClassifierNative(B={self.B}, L={self.L}, G={self.G}{status})"
+        adap = ", adaptive" if self.adaptive_binning else ""
+        return f"HUGIMLClassifierNative(B={self.B}, L={self.L}, G={self.G}{adap}{status})"
 
     # ── sklearn protocol ──────────────────────────────────────────────────────
 
@@ -501,6 +536,9 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             max_predict_ms=self.max_predict_ms,
             max_fit_seconds=self.max_fit_seconds,
             verbose=self.verbose,
+            adaptive_binning=self.adaptive_binning,
+            b_candidates=self.b_candidates,
+            min_marginal_gain_ratio=self.min_marginal_gain_ratio,
         )
 
     def set_params(self, **params: Any) -> HUGIMLClassifierNative:
@@ -587,6 +625,19 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
 
         self.__dict__.update(state)
         self._fit_lock = threading.RLock()
+
+        # ── v1.1.0 backward compatibility ─────────────────────────────────
+        # Models saved with v1.0.0 have no adaptive_binning in their pickle
+        # state.  Initialise all adaptive attrs to their off-state defaults
+        # so the model behaves identically to a v1.0.0 model after restore.
+        if not hasattr(self, "adaptive_binning"):
+            self.adaptive_binning = False
+            self.b_candidates = None
+            self.min_marginal_gain_ratio = 0.02
+        # v1.1.0 missing value handling — absent in models saved before this version
+        if not hasattr(self, "_missing_col_edges_"):
+            self._missing_col_edges_ = {}
+        # ──────────────────────────────────────────────────────────────────
 
         if hasattr(self, "td_") and self.td_ is not None:
             td = self.td_
@@ -711,8 +762,10 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
 
         Adversarial-input hardening:
         - Forces writable copies of read-only column views.
-        - All-NaN / all-Inf columns are filled with 0.0.
-        - Mixed Inf/NaN columns use median imputation from finite values.
+        - Non-finite cells (NaN/Inf) in numerical columns are pre-converted
+          to np.nan string-label bins by _prebin_nan_cols (fit) or
+          _handle_test_nan (predict), so they arrive here as categorical.
+          No median imputation is performed (removed in v1.1.0).
         """
         is_df = isinstance(arr, pd.DataFrame)
         n = len(arr)
@@ -744,10 +797,9 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                 X_num[:, j] = 0.0
             else:
                 col = np.array(raw, dtype=np.float64, copy=True)
-                bad = ~np.isfinite(col)
-                if bad.any():
-                    good = col[~bad]
-                    col[bad] = float(np.median(good)) if good.size > 0 else 0.0
+                # v1.1.0: non-finite cells (NaN/Inf) are pre-handled by
+                # _prebin_nan_cols (fit) and _handle_test_nan (predict)
+                # before reaching here.  No median imputation.
                 X_num[:, j] = col
 
         return X_num, X_cat_raw
@@ -786,6 +838,25 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                 raise HUGIMLParamError("allCols and origColumns must both be supplied together.")
             if not (isinstance(self.allCols, list) and len(self.allCols) == 3):
                 raise HUGIMLParamError("allCols must be [int_cols, float_cols, cat_cols].")
+        # ── v1.1.0 adaptive binning params ────────────────────────────────
+        if not isinstance(self.adaptive_binning, bool):
+            raise HUGIMLParamError("adaptive_binning must be bool.")
+        if self.b_candidates is not None:
+            if (
+                not isinstance(self.b_candidates, list)
+                or len(self.b_candidates) == 0
+                or not all(isinstance(b, int) and b >= 2 for b in self.b_candidates)
+            ):
+                raise HUGIMLParamError(
+                    "b_candidates must be a non-empty list of int >= 2."
+                )
+        if not isinstance(self.min_marginal_gain_ratio, (float, int)):
+            raise HUGIMLParamError("min_marginal_gain_ratio must be numeric.")
+        if not 0 < float(self.min_marginal_gain_ratio) < 1:
+            raise HUGIMLParamError(
+                f"min_marginal_gain_ratio must be in (0, 1), "
+                f"got {self.min_marginal_gain_ratio}."
+            )
 
     def _resolve_col_meta(self, X_train: Any) -> np.ndarray:
         """Determine column names and type masks from whichever setup path was used."""
@@ -847,6 +918,236 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
 
     # ── Core fit ──────────────────────────────────────────────────────────────
 
+    # ── v1.1.0  Adaptive binning methods ─────────────────────────────────────
+
+    def _apply_adaptive_binning(
+        self, X_train: "Any", y_arr: np.ndarray
+    ) -> "Any":
+        """Pre-discretise numerical features using per-feature IG-selected B_j.
+
+        Called by _fit_impl when adaptive_binning=True.  The method:
+
+        1. Iterates over numerical columns, runs _adap_select_b to choose B_j.
+        2. Computes quantile edges on the training column and stores them in
+           _bin_edges_ so they can be reapplied at predict time.
+        3. Replaces each numerical column with string bin labels ([lo,hi)).
+        4. Updates cat_cols_mask_ and is_int_mask_ to mark pre-binned features
+           as categorical, so Stage 1 of _fit_impl routes them through the
+           C++ categorical path.
+
+        Returns the pre-binned DataFrame (or the input unchanged if no
+        numerical features are found).
+        """
+        is_df = isinstance(X_train, pd.DataFrame)
+        X_df = X_train if is_df else pd.DataFrame(X_train)
+        candidates = sorted(set(self.b_candidates or [2, 3, 5, 7, 10, 15]))
+        ratio = self.min_marginal_gain_ratio
+        cat_mask = self.cat_cols_mask_
+        col_names = list(X_df.columns)
+
+        self._bin_edges_: dict = {}
+        self.per_feature_b_: dict = {}
+        self.ig_scores_: dict = {}
+        pre_binned: set = set()
+
+        for j, name in enumerate(col_names):
+            if j < len(cat_mask) and cat_mask[j]:
+                continue  # leave existing categorical columns untouched
+            col = pd.to_numeric(X_df.iloc[:, j], errors="coerce").values
+            finite = np.isfinite(col)
+            if finite.sum() < 10:
+                chosen = candidates[len(candidates) // 2]
+                self.ig_scores_[name] = {b: 0.0 for b in candidates}
+            else:
+                chosen, scores = _adap_select_b(
+                    col[finite], y_arr[finite], candidates, ratio
+                )
+                self.ig_scores_[name] = scores
+            edges = _adap_quantile_edges(col, chosen)
+            self.per_feature_b_[name] = len(edges) - 1
+            self._bin_edges_[name] = edges
+            pre_binned.add(name)
+
+        # Update masks so Stage 1 treats pre-binned features as categorical
+        new_cat = cat_mask.copy()
+        new_int = getattr(
+            self, "is_int_mask_", np.zeros(len(col_names), dtype=bool)
+        ).copy()
+        for j, name in enumerate(col_names):
+            if name in pre_binned:
+                new_cat[j] = True
+                new_int[j] = False
+        self.cat_cols_mask_ = new_cat
+        self.is_int_mask_ = new_int
+
+        X_pre = X_df.copy()
+        for name, edges in self._bin_edges_.items():
+            if name in X_df.columns:
+                col = pd.to_numeric(X_df[name], errors="coerce").values
+                X_pre[name] = _adap_apply_edges(col, edges)
+        return X_pre if is_df else X_pre
+
+    def _prebin_for_predict(self, X: "Any") -> "Any":
+        """Apply stored bin edges to X before the C++ inference path.
+
+        Called at the top of predict_proba / predict / transform when
+        adaptive_binning=True.  Accepts raw (un-binned) input in any form
+        that _build_test_hup accepts, and returns a DataFrame with string
+        bin labels for the features that were pre-binned during fit().
+        """
+        bin_edges = getattr(self, "_bin_edges_", {})
+        if not bin_edges:
+            return X
+        is_df = isinstance(X, pd.DataFrame)
+        feat_names = getattr(self, "feature_names_in_", None)
+        if is_df:
+            X_df = X
+        else:
+            arr = np.asarray(X)
+            cols = feat_names or [f"col{j}" for j in range(arr.shape[1])]
+            X_df = pd.DataFrame(arr, columns=cols)
+        X_out = X_df.copy()
+        for name, edges in bin_edges.items():
+            if name in X_df.columns:
+                col = pd.to_numeric(X_df[name], errors="coerce").values
+                X_out[name] = _adap_apply_edges(col, edges)
+        return X_out if is_df else X_out
+
+    # ── v1.1.0  Missing value handling methods ──────────────────────────────────
+    #
+    # NaN (and Inf) in a numerical feature is treated as "not observed" —
+    # no item is generated in the transaction for that (row, feature) pair.
+    # This matches the categorical path, where np.nan in X_cat_raw is already
+    # silently skipped by the C++ transaction builder.
+    #
+    # Numerical columns that contain non-finite values in training are
+    # pre-binned to string labels (same mechanism as adaptive_binning) so the
+    # C++ sees them as categorical.  Non-finite cells become np.nan in the
+    # label array → C++ skips → no item.  Edges are stored in
+    # _missing_col_edges_ and reused at predict time.
+    #
+    # At predict time, columns that were non-finite-free in training but
+    # receive non-finite test values are handled dynamically using the C++
+    # edge arrays stored in td_._cpp_all_edges[j].
+    #
+    # The old median imputation in _to_float_array is removed entirely.
+    # ────────────────────────────────────────────────────────────────────────────
+
+    def _prebin_nan_cols(self, X_train: "Any") -> "Any":
+        """Pre-bin ALL numerical columns to string quantile labels.
+
+        Called in _fit_impl (non-adaptive path) after _resolve_col_meta.
+
+        Every numerical column is discretised into B equal-frequency bins
+        using the finite training values.  Non-finite cells (NaN, Inf) become
+        ``np.nan`` in the label array; the C++ transaction builder skips those
+        cells, generating no item for that (row, feature) pair.
+
+        By pre-binning all numerical columns unconditionally, NaN at *any*
+        point — training or test time, whatever columns — is handled correctly
+        and identically: the item is simply absent from the transaction.
+
+        Stores edges in ``self._missing_col_edges_[feature_name]``.
+        Updates ``self.cat_cols_mask_`` to mark all pre-binned columns as
+        categorical so the C++ routes them through the string-label path.
+        """
+        is_df = isinstance(X_train, pd.DataFrame)
+        X_df = X_train if is_df else pd.DataFrame(X_train)
+        cat_mask = self.cat_cols_mask_
+        col_names = list(X_df.columns)
+        n_cols = len(col_names)
+
+        self._missing_col_edges_: dict = {}
+        new_cat = cat_mask.copy()
+        new_int = getattr(
+            self, "is_int_mask_", np.zeros(n_cols, dtype=bool)
+        ).copy()
+        modified = False
+
+        for j, name in enumerate(col_names):
+            if j >= len(cat_mask) or cat_mask[j]:
+                continue  # already categorical — C++ handles np.nan natively
+
+            col = pd.to_numeric(X_df.iloc[:, j], errors="coerce").values
+            finite = col[np.isfinite(col)]
+            edges = _adap_quantile_edges(finite, self.B) if finite.size > 0                 else np.array([0.0, 1.0])
+            self._missing_col_edges_[name] = edges
+            new_cat[j] = True
+            new_int[j] = False
+            modified = True
+
+        if not modified:
+            return X_train
+
+        self.cat_cols_mask_ = new_cat
+        self.is_int_mask_ = new_int
+
+        X_pre = X_df.copy()
+        for name, edges in self._missing_col_edges_.items():
+            col = pd.to_numeric(X_df[name], errors="coerce").values
+            X_pre[name] = _adap_apply_edges(col, edges)
+        return X_pre if is_df else X_pre
+
+    def _handle_test_nan(self, X_test: "Any") -> "tuple":
+        """Apply training-time bin edges to all pre-binned columns at test time.
+
+        All numerical columns are pre-binned during _fit_impl (non-adaptive path),
+        so ``_missing_col_edges_`` contains edges for every numerical column.
+
+        At test time the input still carries raw float values.  This method
+        converts every pre-binned column to its string bin labels using the
+        stored training edges.  Non-finite values (NaN, Inf) become ``np.nan``
+        → C++ skips → no item for that (row, feature) pair.
+
+        Returns ``(X_modified, local_cat_mask)``.  ``self.cat_cols_mask_``
+        is never mutated; ``local_cat_mask`` is a per-call copy.
+        """
+        base_cat = getattr(self, "cat_cols_mask_", None)
+        if base_cat is None:
+            return X_test, base_cat
+
+        is_df = isinstance(X_test, pd.DataFrame)
+        feat_names = getattr(self, "feature_names_in_", None)
+        if is_df:
+            X_df = X_test
+        else:
+            arr = np.asarray(X_test)
+            cols = feat_names or [f"col{j}" for j in range(arr.shape[1])]
+            X_df = pd.DataFrame(arr, columns=cols)
+
+        col_names = list(X_df.columns)
+        missing_edges = getattr(self, "_missing_col_edges_", {})
+        local_cat = base_cat.copy()
+        modified = False
+
+        for j, name in enumerate(col_names):
+            if j >= len(base_cat):
+                continue
+
+            # Column was pre-binned at training time: convert ALL raw float
+            # values to string bin labels so C++ item lookups match.
+            # base_cat[j] is already True (set by _prebin_nan_cols); we
+            # still need to apply edges because test data arrives as raw floats.
+            if name in missing_edges:
+                col = pd.to_numeric(X_df.iloc[:, j], errors="coerce").values
+                if not modified:
+                    X_df = X_df.copy()
+                    modified = True
+                X_df[name] = _adap_apply_edges(col, missing_edges[name])
+                local_cat[j] = True
+                continue
+
+            # Genuinely categorical column or column not in model:
+            # C++ already handles np.nan natively — no action needed.
+
+        if not modified:
+            return X_test, base_cat
+        return (X_df if is_df else X_df), local_cat
+
+    # ── End v1.1.0 missing value handling methods ─────────────────────────────
+
+    # ── End v1.1.0 adaptive binning methods ──────────────────────────────────
+
     def _require_core(self) -> None:
         """Raise a clear ImportError if the native extension is absent."""
         if not _CORE_AVAILABLE:
@@ -898,6 +1199,33 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             raise ValueError("Complex data not supported by HUGIMLClassifierNative.")
 
         self._validate_params()
+
+        # ── v1.1.0 adaptive pre-binning ───────────────────────────────────
+        # Must run before Stage 1 (_resolve_col_meta) so that the updated
+        # cat_cols_mask_ (pre-binned features → categorical) is already in
+        # place when Stage 1 short-circuits on the existing mask.
+        if self.adaptive_binning:
+            self._resolve_col_meta(X_train)   # prime cat_cols_mask_ first
+            _y_for_ig = np.asarray(y_train, dtype=np.int64)
+            X_train = self._apply_adaptive_binning(X_train, _y_for_ig)
+            if self.verbose:
+                logger.info(
+                    "  adaptive binning: %d features pre-binned, B_j in [%d, %d]",
+                    len(self._bin_edges_),
+                    min(self.per_feature_b_.values(), default=0),
+                    max(self.per_feature_b_.values(), default=0),
+                )
+        # ─────────────────────────────────────────────────────────────────
+
+        # ── v1.1.0 missing value pre-binning (non-adaptive path) ──────────
+        # Adaptive path handles non-finite values in _apply_adaptive_binning
+        # (via _adap_apply_edges which now maps non-finite → np.nan).
+        # Non-adaptive path: pre-bin NaN-containing columns here so the C++
+        # receives them as categorical with np.nan → no item generated.
+        if not self.adaptive_binning:
+            self._resolve_col_meta(X_train)   # ensure cat_cols_mask_ exists
+            X_train = self._prebin_nan_cols(X_train)
+        # ─────────────────────────────────────────────────────────────────
 
         n_threads = _core.openmp_get_max_threads() if self.n_jobs == -1 else self.n_jobs
         if n_threads > 0:
@@ -960,7 +1288,11 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             self.td_ = _core.prepare_transactions(
                 X_num,
                 y_train,
-                self.B,
+                # v1.1.0: when adaptive_binning=True all numerical features
+                # are already pre-binned as categorical; B=2 is the sentinel
+                # value that satisfies the C++ >=2 constraint while having
+                # no effect on already-categorical columns.
+                2 if self.adaptive_binning else self.B,
                 col_names,
                 is_cat_np,
                 is_int_np,
@@ -1050,7 +1382,10 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             stage_times_ms=stage_times,
             total_fit_ms=t_total.ms,
             matrix_density=density,
-            config=dict(B=self.B, L=self.L, G=self.G, topK=self.topK),
+            config=dict(
+                B=self.B, L=self.L, G=self.G, topK=self.topK,
+                adaptive_binning=self.adaptive_binning,
+            ),
             memory_peak_mb=round(mem.traced_peak_mb, 1),
             memory_rss_mb=round(rss_delta_mb, 1),
             memory_cpp_mb=round(cpp_mem_bytes / 1e6, 2),
@@ -1154,6 +1489,10 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         np.ndarray, shape (n_samples, n_classes)
         """
         check_is_fitted(self)
+        # ── v1.1.0 adaptive pre-binning ───────────────────────────────────
+        if getattr(self, "adaptive_binning", False) and getattr(self, "_bin_edges_", None):
+            X_test = self._prebin_for_predict(X_test)
+        # ─────────────────────────────────────────────────────────────────
         t0 = time.perf_counter()
 
         budget_ms = self.max_predict_ms
@@ -1203,6 +1542,10 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         np.ndarray, shape (n_samples,)
         """
         check_is_fitted(self)
+        # ── v1.1.0 adaptive pre-binning ───────────────────────────────────
+        if getattr(self, "adaptive_binning", False) and getattr(self, "_bin_edges_", None):
+            X_test = self._prebin_for_predict(X_test)
+        # ─────────────────────────────────────────────────────────────────
         return np.asarray(self.model_.predict(self._build_test_hup(X_test)))
 
     def transform(self, X: Any) -> csr_matrix:
@@ -1220,14 +1563,27 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         csr_matrix, shape (n_samples, n_patterns)
         """
         check_is_fitted(self)
+        # ── v1.1.0 adaptive pre-binning ───────────────────────────────────
+        if getattr(self, "adaptive_binning", False) and getattr(self, "_bin_edges_", None):
+            X = self._prebin_for_predict(X)
+        # ─────────────────────────────────────────────────────────────────
         return self._build_test_hup(X)
 
     def _build_test_hup(self, X_test: Any) -> csr_matrix:
         """Build the sparse binary pattern matrix for test data."""
         self._check_health()
+        # ── v1.1.0 non-finite handling ────────────────────────────────────
+        # Adaptive: X_test already pre-binned by _prebin_for_predict
+        #           (called in predict_proba/predict/transform before here).
+        # Non-adaptive: apply stored or reconstructed edges; non-finite
+        #               cells become np.nan → C++ generates no item.
+        if not getattr(self, "adaptive_binning", False):
+            X_test, _cat_mask = self._handle_test_nan(X_test)
+        else:
+            _cat_mask = getattr(self, "cat_cols_mask_", None)
+        # ─────────────────────────────────────────────────────────────────
         self._validate_test_input(X_test)
-        cat_mask = getattr(self, "cat_cols_mask_", None)
-        X_num, X_cat_raw = self._to_float_array(X_test, cat_mask)
+        X_num, X_cat_raw = self._to_float_array(X_test, _cat_mask)
         X_num = check_array(X_num, dtype=None)
 
         n = X_num.shape[0]
@@ -1641,6 +1997,136 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         result = result.sort_values("abs_coefficient", ascending=False)
         return pd.DataFrame(result.reset_index(drop=True))
 
+    # ── v1.1.0  Adaptive-binning diagnostic plots ─────────────────────────────
+    # These methods are available on any fitted HUGIMLClassifierNative instance
+    # when adaptive_binning=True.  HUGIMLAdaptive inherits them automatically
+    # as a subclass.  Both require matplotlib (optional dependency).
+
+    def plot_bin_profiles(self, figsize: tuple | None = None):
+        """Bar chart of the chosen B per numerical feature (adaptive binning only).
+
+        Colour encodes position in the candidate range:
+        blue = coarse end, green = mid, amber/red = fine end.
+
+        Returns
+        -------
+        (fig, ax)
+
+        Raises
+        ------
+        RuntimeError
+            When called on a non-adaptive or unfitted model.
+        ImportError
+            When matplotlib is not installed.
+        """
+        self._check_adaptive_fitted("plot_bin_profiles")
+        self._require_mpl()
+        import matplotlib.pyplot as plt
+
+        feats = list(self.per_feature_b_.keys())
+        bvals = [self.per_feature_b_[f] for f in feats]
+        cands = self.b_candidates or [2, 15]
+        lo, hi = min(cands), max(cands)
+
+        colors = [
+            "#2166ac" if b <= lo + (hi - lo) / 3
+            else "#1a9641" if b <= lo + 2 * (hi - lo) / 3
+            else "#d7191c"
+            for b in bvals
+        ]
+
+        fig, ax = plt.subplots(figsize=figsize or (max(7, len(feats) * 0.5 + 2), 4))
+        ax.bar(range(len(feats)), bvals, color=colors, edgecolor="white", linewidth=0.5)
+        ax.set_xticks(range(len(feats)))
+        ax.set_xticklabels(feats, rotation=45, ha="right", fontsize=8)
+        ax.set_ylabel("Chosen B_j", fontsize=10)
+        ax.set_title(
+            f"Adaptive binning — chosen B per feature  "
+            f"(threshold={self.min_marginal_gain_ratio:.0%})",
+            fontsize=11,
+        )
+        for i, b in enumerate(bvals):
+            ax.text(i, b + 0.05, str(b), ha="center", fontsize=8)
+        fig.tight_layout()
+        return fig, ax
+
+    def ig_heatmap(self, figsize: tuple | None = None):
+        """Heatmap of IG score at every (feature, B) grid point (adaptive binning only).
+
+        The chosen B per feature is highlighted with a bounding box.
+
+        Returns
+        -------
+        (fig, ax)
+
+        Raises
+        ------
+        RuntimeError
+            When called on a non-adaptive or unfitted model, or when
+            ``ig_scores_`` is empty.
+        ImportError
+            When matplotlib is not installed.
+        """
+        self._check_adaptive_fitted("ig_heatmap")
+        if not getattr(self, "ig_scores_", None):
+            raise RuntimeError("ig_scores_ is empty — call fit() first.")
+        self._require_mpl()
+        import matplotlib.pyplot as plt
+
+        feats = sorted(self.ig_scores_)
+        bs = sorted({b for sc in self.ig_scores_.values() for b in sc})
+        grid = np.array([[self.ig_scores_[f].get(b, 0.0) for b in bs] for f in feats])
+
+        fig, ax = plt.subplots(
+            figsize=figsize or (max(6, len(bs) * 0.9), max(4, len(feats) * 0.45))
+        )
+        im = ax.imshow(grid, aspect="auto", cmap="YlOrRd")
+        ax.set_xticks(range(len(bs)))
+        ax.set_xticklabels([str(b) for b in bs], fontsize=9)
+        ax.set_yticks(range(len(feats)))
+        ax.set_yticklabels(feats, fontsize=8)
+        ax.set_xlabel("B candidates", fontsize=10)
+        ax.set_title("IG score per (feature, B)  — box = chosen B", fontsize=11)
+        for i, f in enumerate(feats):
+            chosen = self.per_feature_b_.get(f)
+            if chosen and chosen in bs:
+                j = bs.index(chosen)
+                ax.add_patch(plt.Rectangle(
+                    (j - 0.5, i - 0.5), 1, 1,
+                    fill=False, edgecolor="black", linewidth=2,
+                ))
+        plt.colorbar(im, ax=ax, label="Information gain")
+        fig.tight_layout()
+        return fig, ax
+
+    def _check_adaptive_fitted(self, method_name: str) -> None:
+        """Raise a clear error when an adaptive-only method is called incorrectly."""
+        check_is_fitted(self)
+        if not getattr(self, "adaptive_binning", False):
+            raise RuntimeError(
+                f"{method_name}() is only available when adaptive_binning=True.  "
+                f"Re-fit with HUGIMLClassifierNative(adaptive_binning=True, ...) "
+                f"or use HUGIMLAdaptive."
+            )
+        if not getattr(self, "per_feature_b_", None):
+            raise RuntimeError(
+                f"{method_name}() requires per_feature_b_ — call fit() first."
+            )
+
+    @staticmethod
+    def _require_mpl() -> None:
+        """Raise ImportError when matplotlib is not installed."""
+        try:
+            import matplotlib  # noqa: F401
+        except ImportError:
+            raise ImportError(
+                "matplotlib is required for diagnostic plots. "
+                "Install with:  pip install matplotlib  "
+                "or:  pip install 'hugiml-core[plots]'"
+            )
+
+    # ── End v1.1.0 adaptive-binning diagnostic plots ──────────────────────────
+
     def model_summary(self) -> str:
         """Human-readable model summary including top patterns."""
         check_is_fitted(self)
@@ -1673,5 +2159,26 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                 )
         except AttributeError:
             lines.append("  (not available — non-LR downstream estimator)")
+
+        # ── v1.1.0 adaptive binning section ──────────────────────────────
+        if getattr(self, "_missing_col_edges_", None):
+            n_nan = sum(1 for e in self._missing_col_edges_.values() if True)
+            lines += [
+                "",
+                f"NaN handling: {len(self._missing_col_edges_)} numerical column(s) "
+                f"pre-binned (NaN/Inf generates no transaction item at train or test time).",
+            ]
+        if self.adaptive_binning and getattr(self, "per_feature_b_", None):
+            lines += ["", "Adaptive binning — chosen B per feature:"]
+            for feat, b in sorted(
+                self.per_feature_b_.items(), key=lambda kv: -kv[1]
+            ):
+                edges = self._bin_edges_.get(feat, [])
+                rng = (
+                    f"  [{float(edges[0]):.4g}…{float(edges[-1]):.4g}]"
+                    if len(edges) >= 2 else ""
+                )
+                lines.append(f"  {feat:<35} B={b:<3}{rng}")
+        # ─────────────────────────────────────────────────────────────────
 
         return "\n".join(lines)
