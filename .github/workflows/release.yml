@@ -33,11 +33,12 @@ concurrency:
 jobs:
 
   build-wheels:
-    name: "Wheels – ${{ matrix.os }}"
+    name: "Wheels – py${{ matrix.python }} / ${{ matrix.os }}"
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: true
       matrix:
+        python: ["39", "310", "311", "312", "313"]
         include:
           - os: ubuntu-latest
             cibw_archs: x86_64
@@ -55,15 +56,15 @@ jobs:
 
       - run: pip install cibuildwheel==2.20.0
 
-      - name: Build wheels
+      - name: Build wheel (py${{ matrix.python }} / ${{ matrix.os_config.os }})
         run: python -m cibuildwheel --output-dir wheelhouse
         env:
-          CIBW_ARCHS: ${{ matrix.cibw_archs }}
-          CIBW_BUILD: "cp313-*"
+          CIBW_ARCHS: ${{ matrix.os_config.cibw_archs }}
+          CIBW_BUILD: "cp${{ matrix.python }}-*"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: wheels-${{ matrix.os }}-${{ matrix.cibw_archs || matrix.os }}
+          name: wheels-${{ matrix.os_config.os }}-${{ matrix.python }}
           path: wheelhouse/*.whl
 
   build-sdist:
@@ -96,7 +97,7 @@ jobs:
       - name: Download wheels
         uses: actions/download-artifact@v4
         with:
-          pattern: wheels-ubuntu-*
+          pattern: wheels-ubuntu-latest-312
           path: dist/
           merge-multiple: true
       - name: Smoke-test wheel contents
