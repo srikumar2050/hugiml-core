@@ -1185,6 +1185,26 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             return self._fit_impl(X, y)
 
     def _fit_impl(self, X_train: Any, y_train: Any) -> HUGIMLClassifierNative:
+        # Clear all fitted state so that re-fitting the same instance is
+        # idempotent.  Without this, _resolve_col_meta() short-circuits on
+        # the cached cat_cols_mask_ from the previous fit, causing the column
+        # type masks to carry over and producing non-reproducible results.
+        for _attr in (
+            "cat_cols_mask_",
+            "is_int_mask_",
+            "feature_names_in_",
+            "_bin_edges_",
+            "_missing_col_edges_",
+            "per_feature_b_",
+            "ig_scores_",
+            "patterns_",
+            "model_",
+            "classes_",
+            "x_train_hup_",
+            "fit_metadata_",
+        ):
+            self.__dict__.pop(_attr, None)
+
         t_total = self._timer()
         stage_times: dict[str, float] = {}
 
