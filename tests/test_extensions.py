@@ -254,7 +254,7 @@ class TestPruning:
         editor.remove([0], reason="test")
         path = str(tmp_path / "audit.json")
         editor.save_audit_report(path)
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             data = json.load(f)
         assert "removals" in data
 
@@ -700,7 +700,7 @@ class TestPlots:
         plotter.plot_dashboard(Xte, dataset_name="test",
                                feature_names_for_profile=None,
                                output_path=out)
-        with open(out) as f:
+        with open(out, encoding="utf-8") as f:
             content = f.read()
         assert "<html" in content.lower() or "<!doctype" in content.lower()
         assert len(content) > 1000

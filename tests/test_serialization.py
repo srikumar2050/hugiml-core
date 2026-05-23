@@ -381,7 +381,12 @@ class TestSBOMGeneration:
         out = tmp_path / "sbom.json"
         generate_sbom(output_path=str(out))
         assert out.exists()
-        assert json.loads(out.read_text()) == sbom
+        saved = json.loads(out.read_text())
+        # Drop timestamp from both sides — generate_sbom() is called twice so
+        # the clocks may differ by a second, causing a spurious mismatch.
+        for d in (sbom, saved):
+            d.get("metadata", {}).pop("timestamp", None)
+        assert saved == sbom
 
     def test_sbom_contains_hugiml(self):
         sbom = generate_sbom()
