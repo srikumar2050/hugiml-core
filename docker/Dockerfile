@@ -15,7 +15,12 @@
 # ---------------------------------------------------------------------------
 # Stage 1 — Build wheel
 # ---------------------------------------------------------------------------
-FROM python:3.11-slim AS builder
+FROM python:3.12-slim AS builder
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
 
 # System build dependencies for the C++ extension
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -40,7 +45,12 @@ RUN pip install --no-cache-dir --upgrade pip build \
 # ---------------------------------------------------------------------------
 # Stage 2 — Runtime image
 # ---------------------------------------------------------------------------
-FROM python:3.11-slim AS runtime
+FROM python:3.12-slim AS runtime
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
 
 # Runtime: libgomp for OpenMP parallelism
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -64,6 +74,15 @@ RUN whl=$(find /staging -name "*.whl" | head -1) \
     && [ -n "$whl" ] || { echo "ERROR: no wheel found in /staging"; exit 1; } \
     && pip install --no-cache-dir "${whl}[server,telemetry]" \
     && rm -rf /staging
+
+# Smoke-test: core + new modules import cleanly
+RUN python -c "\
+from hugiml import HUGIMLClassifierNative; \
+from hugiml.metrics import compute_all_metrics; \
+from hugiml.pruning import PatternEditor; \
+from hugiml.adaptive import HUGIMLAdaptive; \
+from hugiml.multiclass import MulticlassHUGReport; \
+import hugiml; print('hugiml', hugiml.__version__, 'runtime image OK')"
 
 # Copy inference server
 COPY docker/server.py ./server.py
