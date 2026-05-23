@@ -59,7 +59,6 @@ jobs:
         run: python -m cibuildwheel --output-dir wheelhouse
         env:
           CIBW_ARCHS: ${{ matrix.cibw_archs }}
-          CIBW_BUILD: "cp313-*"
 
       - uses: actions/upload-artifact@v4
         with:
