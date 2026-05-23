@@ -25,10 +25,8 @@ Usage
 from __future__ import annotations
 
 import argparse
-import json
-import os
-import time
 import copy
+import time
 import warnings
 from pathlib import Path
 
@@ -37,8 +35,12 @@ import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (
-    roc_auc_score, average_precision_score, brier_score_loss,
-    accuracy_score, f1_score, balanced_accuracy_score,
+    accuracy_score,
+    average_precision_score,
+    balanced_accuracy_score,
+    brier_score_loss,
+    f1_score,
+    roc_auc_score,
 )
 from sklearn.model_selection import StratifiedKFold
 from sklearn.pipeline import Pipeline
@@ -75,7 +77,8 @@ def _load_adult():
             X[c] = X[c].astype("category").cat.codes
         return X, y
     except Exception:
-        np.random.seed(42); n = 3000
+        np.random.seed(42)
+        n = 3000
         X = pd.DataFrame({
             "age": np.random.randint(18, 80, n),
             "edu_num": np.random.randint(1, 16, n),
@@ -93,7 +96,8 @@ def _load_credit():
                             as_frame=True, parser="auto")
         return data.data.astype(float), data.target.astype(int).values
     except Exception:
-        np.random.seed(7); n = 3000
+        np.random.seed(7)
+        n = 3000
         X = pd.DataFrame({
             "limit_bal": np.random.exponential(100000, n),
             "age": np.random.randint(21, 75, n),
