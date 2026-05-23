@@ -14,6 +14,9 @@
 
 """Coverage gap tests.
 
+Targets three 0%-or-low-coverage modules that are not exercised by the
+main test suite:
+
 * hugiml.exceptions  — exception/warning hierarchy (0% previously)
 * hugiml.__init__    — lazy-import __getattr__ gate (0% previously)
 * hugiml.monitoring  — PredictionMonitor.stats/report, DriftDetector
@@ -26,7 +29,6 @@ import warnings
 
 import numpy as np
 import pytest
-
 
 # =============================================================================
 # exceptions.py  — full hierarchy
