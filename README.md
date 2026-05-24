@@ -58,6 +58,22 @@ EBM learns smooth additive shape functions. HUGIML learns threshold/category pro
 
 EBM is excellent for smooth effect inspection; HUGIML is strong when the explanation needs to be reviewed as a set of readable thresholds and pattern contributions.
 
+### Real-world and synthetic non-monotonic benchmarks
+
+The following benchmark panels compare HUGIML with LR, XGBoost, LightGBM, Random Forest, and EBM under explicit fitted-complexity budgets. They are intended as validation visuals, not as a universal ranking of models.
+
+<p align="left">
+  <img src="docs/images/realworld-credit-risk-benchmark.png" alt="Real-world credit risk benchmark comparing HUGIML, LR, XGBoost, LightGBM, Random Forest, and EBM" width="800">
+</p>
+
+**Real-world credit-risk benchmark.** On Give Me Some Credit and Taiwan Credit Card Default, LightGBM and XGBoost achieve the highest raw ROC-AUC. HUGIML improves over LR while remaining in a compact fitted-complexity range. EBM is shown with capped bins (`max_bins=8`, `interactions=0`) so that it is assessed as a competitive interpretable baseline rather than being penalized by excessive bin-score complexity.
+
+<p align="left">
+  <img src="docs/images/synthetic-nonmonotonic-benchmark.png" alt="Synthetic non-monotonic benchmark comparing HUGIML, LR, XGBoost, LightGBM, Random Forest, and EBM" width="800">
+</p>
+
+**Synthetic non-monotonic benchmark.** The synthetic panels use two controlled datasets with interval-like and oscillatory feature effects. They illustrate model behavior when LR is structurally misspecified by a single global slope. HUGIML provides a compact nonlinear lift over LR, while LightGBM and XGBoost remain strongest in raw ROC-AUC. EBM is shown with capped bins (`max_bins=16`, `interactions=0`) to provide a fairer interpretable baseline.
+
 ### Native missing-value handling
 
 HUGIML, XGBoost, LightGBM, and EBM can all operate without an external imputation pipeline, but they treat missingness differently.
