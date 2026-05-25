@@ -412,9 +412,45 @@ This differs from median/mean imputation: HUGIML does not fabricate replacement 
 
 See the benchmark section below for missing-value robustness.
 
+### Mining Patterns About Missingness
+
+In healthcare and finance, **absence of data is often informative**, a missing
+critical lab may indicate the patient was too unstable for testing, or a missing
+field in a credit application may signal intentional concealment.
+
+To mine patterns that **involve** missingness (e.g., `Glucose_MISSING=1 AND HeartRate=[110,140]`),
+add binary missingness indicators as preprocessing features:
+
+```python
+def add_missingness_indicators(X, threshold=0.05):
+    X_aug = X.copy()
+    for col in X.columns:
+        if X[col].isna().mean() > threshold:
+            X_aug[f"{col}__MISSING"] = X[col].isna().astype(int)
+    return X_aug
+
+# Usage
+X_with_indicators = add_missingness_indicators(X_raw)
+clf = HUGIMLClassifierNative(B=7, L=2, G=1e-4)  
+clf.fit(X_with_indicators, y)
+
+# Extract missingness-related patterns
+all_patterns = clf.get_hug_features()
+missing_patterns = [p for p in all_patterns if '__MISSING' in p]
+
+# Example patterns discovered:
+# ['Glucose__MISSING=1 AND Age=[50,65] AND EmergencyAdmit=1',
+#  'Troponin__MISSING=1 AND HeartRate=[110,140]',
+#  'CurrentDebt__MISSING=1 AND Income=low']
+```
+
+**Note:** Apply the same `add_missingness_indicators()` transformation to test/production data. Use `sklearn.pipeline.Pipeline` with `FunctionTransformer` to ensure consistency.
+
 ---
 
 ## Multiclass, Imbalanced Data, High-Cardinality Categoricals
+
+### Multiclass Classification
 
 ```python
 from hugiml.multiclass import (
@@ -427,15 +463,56 @@ from hugiml.multiclass import (
 report = MulticlassHUGReport(clf)
 print(report.importances_for_class(class_label=2, top_n=10))
 print(report.summary())
+```
 
+### Imbalanced Data Handling
+
+```python
+from hugiml.multiclass import make_imbalanced_pipeline
 clf_bal = make_imbalanced_pipeline(clf_proto, strategy="smote")
 clf_bal.fit(X_tr, y_tr)
+```
 
-X_enc, enc_map = encode_high_cardinality(
-    X_tr, y_tr, threshold=20, method="target_mean"
-)
+### High-Cardinality Categorical Reduction
+
+When categorical features have hundreds or thousands of unique values (ZIP codes, ICD-10 diagnoses, merchant IDs), the pattern mining engine faces combinatorial explosion and dramatically slower mining. To reduce cardinality while **preserving discriminative signal**, group rare categories as '__OTHER__':
+
+```python
+def reduce_high_cardinality(X, y, threshold=50, min_frequency=0.01):
+    """Group rare categories (<min_frequency) as '__OTHER__' for high-cardinality columns"""
+    X_reduced = X.copy()
+    
+    for col in X.select_dtypes(include=['object', 'category']).columns:
+        if X[col].nunique() <= threshold:
+            continue  # Skip low-cardinality columns
+        
+        # Compute frequency per category
+        value_counts = X[col].value_counts()
+        min_count = len(X) * min_frequency
+        
+        # Map rare categories to '__OTHER__'
+        rare_categories = value_counts[value_counts < min_count].index
+        X_reduced[col] = X[col].apply(
+            lambda x: '__OTHER__' if x in rare_categories else x
+        )
+    
+    return X_reduced
+
+# Usage
+X_reduced = reduce_high_cardinality(X_raw, y, threshold=50, min_frequency=0.01)
+clf = HUGIMLClassifierNative(B=7, L=2, G=1e-4)
+clf.fit(X_reduced, y)
+
+# Example: 10,000 ZIP codes → ~100 frequent ZIPs + '__OTHER__'
+# Patterns: "ZIP_CODE=10001 AND Income=low" or "ZIP_CODE=__OTHER__ AND CreditScore=[600,650]"
+
+# Or use existing utility (basic target encoding):
+from hugiml.multiclass import encode_high_cardinality, apply_encoding
+X_enc, enc_map = encode_high_cardinality(X_tr, y_tr, threshold=20, method="target_mean")
 X_te_enc = apply_encoding(X_te, enc_map)
 ```
+
+**Note:** Learn category groupings on training data only, then apply the same mapping to test/production data. Use a custom sklearn transformer or save the learned `rare_categories` mapping separately to ensure consistency.
 
 ---
 
