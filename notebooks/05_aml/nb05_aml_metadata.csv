@@ -1,0 +1,14 @@
+column_name,data_type,description,possible_values,example,role,importance,notes
+amount,numerical,Transaction amount in USD,"$1 - $50,000",9125.50,feature,Critical,"Amounts $9,000-$9,950 indicate structuring (CTR evasion)"
+velocity_24h,numerical,Number of transactions in past 24 hours,0-20,12,feature,High,High velocity (9-16) indicates suspicious activity
+structuring_score,numerical,Composite structuring detection score,0.0-1.0,0.85,feature,Critical,Scores >0.73 are highest risk indicator
+account_age_days,numerical,Age of account in days,"0-1,825 days (5 years)",15,feature,High,Accounts <20 days with high activity are suspicious
+avg_monthly_balance,numerical,Average monthly account balance in USD,"$100 - $500,000",15000,feature,Medium,Low balances with high transactions suspicious
+num_previous_transactions,numerical,Total historical transaction count,0-200,8,feature,Medium,Low history (<2) with large amounts suspicious
+customer_age,numerical,Customer age in years,18-85,38,feature,Low,Younger customers (18-27) slightly elevated risk
+hour_of_day,numerical,Transaction hour (24-hour format),0-23,2,feature,Medium,"Off-hours (0-3, 22-24) are suspicious"
+high_risk_country,binary,Transaction involves high-risk jurisdiction,"0 (no), 1 (yes - VG/KY/PA)",1,feature,High,"Offshore financial centers (Virgin Islands, Cayman, Panama)"
+country,categorical,Country code for transaction,"US, UK, CA, DE, VG, KY, PA",VG,feature,High,Used to derive high_risk_country flag
+customer_type,categorical,Customer category,"retail, business",retail,feature,Low,Business accounts may have different patterns
+transaction_type,categorical,Type of transaction,"wire, ach, check, cash",wire,feature,Medium,Wire and cash transfers elevated risk
+suspicious,binary,TARGET: Suspicious activity flag,"0 (clean), 1 (suspicious)",1,target,N/A - Target variable,5% suspicious rate (realistic for AML systems)

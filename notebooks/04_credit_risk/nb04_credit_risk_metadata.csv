@@ -1,0 +1,22 @@
+column_name,data_type,description,possible_values,example,role,importance,notes
+checking_acct,categorical,Status of existing checking account,"A11 (<0 DM), A12 (0-200 DM), A13 (>=200 DM), A14 (no account)",A11,feature,High - strong default predictor,A11 (overdrawn) is highest risk indicator
+duration_months,numerical,Duration of credit in months,6-72 months,18,feature,Medium,Longer duration increases risk
+credit_history,categorical,Credit history status,"A30 (no credits/all paid), A31 (all paid at bank), A32 (paid duly), A33 (delay), A34 (critical)",A32,feature,High,A34 (critical) strongly predicts default
+purpose,categorical,Purpose of credit,"A40 (new car), A41 (used car), A42 (furniture), A43 (radio/TV), A44 (appliances), A45 (repairs), A46 (education), A47 (vacation), A48 (retraining), A49 (business), A410 (others)",A41,feature,High,A41 (used car) is positive indicator
+credit_amount,numerical,Credit amount in Deutsche Marks (DM),"250-18,424 DM",3271,feature,Medium,Higher amounts increase risk
+savings,categorical,Savings account/bonds status,"A61 (<100 DM), A62 (100-500 DM), A63 (500-1000 DM), A64 (>=1000 DM), A65 (unknown/none)",A61,feature,Medium,Higher savings reduce risk
+employment,categorical,Present employment duration,"A71 (unemployed), A72 (<1 year), A73 (1-4 years), A74 (4-7 years), A75 (>=7 years)",A73,feature,Medium,Longer employment is positive
+installment_rate,numerical,Installment rate as percentage of disposable income,1-4 (percentage categories),2,feature,Medium,Higher rates indicate strain
+personal_status,categorical,Personal status and sex,A91-A95 (various combinations),A93,feature,Low,Demographic variable
+other_debtors,categorical,Other debtors or guarantors,"A101 (none), A102 (co-applicant), A103 (guarantor)",A103,feature,High,A103 (guarantor) strongly reduces risk
+residence_since,numerical,Present residence since (years),1-4,3,feature,Low,Stability indicator
+property,categorical,Property ownership,"A121 (real estate), A122 (building society/insurance), A123 (car/other), A124 (unknown/none)",A121,feature,Medium,A121 (real estate) is positive
+age,numerical,Age in years,19-75 years,35,feature,Low-Medium,Older age slightly reduces risk
+other_installments,categorical,Other installment plans,"A141 (bank), A142 (stores), A143 (none)",A143,feature,Low,Multiple obligations increase risk
+housing,categorical,Housing situation,"A151 (rent), A152 (own), A153 (for free)",A152,feature,Low-Medium,A152 (own) is positive
+num_credits,numerical,Number of existing credits at this bank,1-4,1,feature,Low,More credits can indicate risk
+job,categorical,Job category,"A171 (unemployed/unskilled), A172 (unskilled resident), A173 (skilled), A174 (management/self-employed)",A173,feature,Medium,Higher skill levels reduce risk
+num_dependents,numerical,Number of people liable to provide maintenance for,1-2,1,feature,Low,More dependents increase strain
+telephone,categorical,Telephone availability,"A191 (none), A192 (yes, registered)",A192,feature,Low,A192 indicates contactability
+foreign_worker,categorical,Foreign worker status,"A201 (yes), A202 (no)",A201,feature,Low,Demographic variable
+credit_risk,binary,TARGET: Credit risk assessment,"0 (bad credit/default risk), 1 (good credit/approved)",1,target,N/A - Target variable,"70% good, 30% bad in dataset"
