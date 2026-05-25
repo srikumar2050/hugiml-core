@@ -1,0 +1,16 @@
+column_name,role,data_type,description,used_in_model,governance_note
+policy_id,identifier,string,Synthetic policy identifier.,No,Excluded from modeling; audit traceability only.
+exposure,predictor,numeric,Policy exposure period used to normalize claim experience.,Yes,Core actuarial context variable.
+area,predictor,categorical,Territory-area grouping similar to motor insurance rating areas.,Yes,Governance-sensitive; requires proxy-risk review.
+region,predictor,categorical,Regional policy grouping.,Yes,Governance-sensitive geography variable.
+vehicle_power,predictor,integer,Vehicle power class.,Yes,Actuarially recognizable vehicle-risk factor.
+vehicle_age,predictor,numeric,Vehicle age in years.,Yes,Vehicle condition and replacement-cost proxy.
+driver_age,predictor,integer,Driver age.,Yes,Governance-sensitive; requires jurisdiction-specific review.
+bonus_malus,predictor,numeric,Prior-risk / bonus-malus style risk index.,Yes,Strong actuarial risk signal.
+density,predictor,numeric,Territory density / urbanicity proxy.,Yes,Governance-sensitive geography-related variable.
+vehicle_brand,predictor,categorical,Vehicle brand grouping.,Yes,Rating factor; support and stability should be checked.
+renewal_period,predictor / monitoring dimension,categorical,Current/prior renewal period indicator.,Yes,Used for renewal stability and monitoring review.
+claim_count,outcome,integer,Observed claim count.,No,Excluded from predictors to avoid target leakage.
+claim_amount,outcome,numeric,Observed claim amount.,No,Excluded from predictors to avoid target leakage.
+annualized_loss_cost,derived outcome,numeric,Loss cost normalized for exposure.,No,Used for target construction and validation only.
+material_loss_flag,target,binary integer,1=materially elevated loss-cost concern; 0=not flagged.,Yes,Primary target variable.

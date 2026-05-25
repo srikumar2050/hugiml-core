@@ -1,0 +1,10 @@
+column_name,role,data_type,description,used_in_model,governance_note
+patient_id,identifier,string,Synthetic patient/sample identifier for traceability in the notebook outputs.,No,Used only for audit traceability; excluded from model predictors.
+diagnosis_malignant,target,binary integer,"Clinical diagnosis label recoded for malignant-case review: 1=malignant, 0=benign.",Yes,Primary target variable.
+diagnosis_label,label,string,Human-readable diagnosis label.,No,Used for tables and reporting only.
+diagnosis_original_sklearn_target,source label,integer,Original sklearn target encoding retained for provenance.,No,Excluded to avoid duplicate target information.
+mean radius / texture / perimeter / area,predictor group,numeric,Mean morphology measures from diagnostic imaging-derived features.,Yes,Clinically interpretable tumor-size/shape evidence.
+mean smoothness / compactness / concavity / concave points,predictor group,numeric,Mean contour and boundary-irregularity morphology measures.,Yes,Supports transparent clinical risk pattern review.
+radius / texture / perimeter / area error,predictor group,numeric,Standard-error style morphology variation measures.,Yes,Used as measurable diagnostic morphology evidence.
+worst radius / texture / perimeter / area,predictor group,numeric,Worst-case morphology measurements across the sample.,Yes,Often high-signal clinical morphology indicators.
+worst smoothness / compactness / concavity / concave points / symmetry / fractal dimension,predictor group,numeric,Worst-case boundary and contour measurements.,Yes,Supports patient-level explanation and clinical validation review.
