@@ -20,7 +20,6 @@ import matplotlib.pyplot as plt
 
 from sklearn.calibration import calibration_curve
 from sklearn.compose import ColumnTransformer
-from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (
     accuracy_score,
     auc,
@@ -78,32 +77,19 @@ def load_analysis_data(path: Path = DATA_PATH) -> tuple[pd.DataFrame, pd.Series]
 
 
 def fit_model(X_train: pd.DataFrame, y_train: pd.Series):
-    try:
-        from hugiml import HUGIMLClassifierNative  # type: ignore
-        model = HUGIMLClassifierNative(
-            B=10,
-            L=1,
-            G=1e-4,
-            topK=120,
-            adaptive_binning=True,
-            b_candidates=[3, 5, 7, 10, 15],
-            origColumns=X_train.columns.tolist(),
-        )
-        model.fit(X_train, y_train)
-        return model, "hugiml-core HUGIMLClassifierNative"
-    except Exception as exc:  # pragma: no cover - portable review fallback
-        warnings.warn(
-            f"hugiml-core was not available or failed to fit ({exc}). "
-            "Using transparent standardized logistic baseline for reproducibility."
-        )
-        model = Pipeline([
-            ("scale", StandardScaler()),
-            ("lr", LogisticRegression(max_iter=3000, class_weight="balanced", random_state=RANDOM_STATE)),
-        ])
-        model.fit(X_train, y_train)
-        return model, "transparent sklearn logistic fallback"
-
-
+    from hugiml import HUGIMLClassifierNative  # type: ignore
+    model = HUGIMLClassifierNative(
+        B=10,
+        L=1,
+        G=1e-4,
+        topK=120,
+        adaptive_binning=True,
+        b_candidates=[3, 5, 7, 10, 15],
+        origColumns=X_train.columns.tolist(),
+    )
+    model.fit(X_train, y_train)
+    return model, "hugiml-core HUGIMLClassifierNative"
+    
 def predict_probability(model, X: pd.DataFrame) -> np.ndarray:
     proba = model.predict_proba(X)
     if proba.ndim == 2:
