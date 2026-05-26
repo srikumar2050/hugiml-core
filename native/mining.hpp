@@ -51,8 +51,9 @@ public:
     double sR   = 0.0;
     double ig   = 0.0;
 
-    // els is used only during construction (add/seal/compute_ig).
-    // After sealing it is cleared to reclaim memory on large datasets.
+    // els is used only as a construction/staging buffer.
+    // After sealing, tid_arr/iu_arr/ru_arr are the canonical data used by
+    // recursion and information-gain computation; els may be released.
     std::vector<El>      els;
     std::vector<int32_t> tid_arr;
     std::vector<double>  iu_arr, ru_arr;
@@ -68,7 +69,8 @@ public:
     void compute_ig(const UL* parent,
                     const std::vector<int>& y_arr, int n_cls);
 
-    // Release the els staging buffer after compute_ig to free memory.
+    // Release the els staging buffer after sealing/IG computation to free memory.
+    // Correctness must not depend on els after seal(); use tid_arr instead.
     void release_els() { std::vector<El>().swap(els); }
 };
 

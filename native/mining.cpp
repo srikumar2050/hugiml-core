@@ -69,11 +69,15 @@ void UL::seal_from_arrays(std::vector<int32_t>&& ta,
 
 void UL::compute_ig(const UL* parent,
                      const std::vector<int>& y_arr, int n_cls) {
-    if (els.empty()) { ig = 0.0; return; }
+    // Use the sealed tid arrays, not the transient els staging buffer.
+    // The modularized miner releases els to save memory before recursive
+    // exploration; compound-pattern IG must therefore be computed from
+    // tid_arr.  This also keeps IG correct for L >= 2 patterns.
+    if (tid_arr.empty()) { ig = 0.0; return; }
 
     std::vector<int> y_in;
-    y_in.reserve(els.size());
-    for (auto& e : els) y_in.push_back(y_arr[e.tid]);
+    y_in.reserve(tid_arr.size());
+    for (int32_t tid : tid_arr) y_in.push_back(y_arr[tid]);
 
     double base;
     int    n_parent;
@@ -81,18 +85,19 @@ void UL::compute_ig(const UL* parent,
         base     = entropy_vec(y_arr, n_cls);
         n_parent = static_cast<int>(y_arr.size());
     } else {
+        if (parent->tid_arr.empty()) { ig = 0.0; return; }
         std::vector<int> py_v;
-        py_v.reserve(parent->els.size());
-        for (auto& e : parent->els) py_v.push_back(y_arr[e.tid]);
+        py_v.reserve(parent->tid_arr.size());
+        for (int32_t tid : parent->tid_arr) py_v.push_back(y_arr[tid]);
         base     = entropy_vec(py_v, n_cls);
-        n_parent = static_cast<int>(parent->els.size());
+        n_parent = static_cast<int>(parent->tid_arr.size());
     }
     if (n_parent == 0) { ig = 0.0; return; }
 
     // y_out: elements in parent (or all) NOT in this UL
     std::unordered_set<int> tid_set;
-    tid_set.reserve(els.size());
-    for (auto& e : els) tid_set.insert(e.tid);
+    tid_set.reserve(tid_arr.size());
+    for (int32_t tid : tid_arr) tid_set.insert(tid);
 
     std::vector<int> y_out;
     if (parent == nullptr) {
@@ -100,9 +105,9 @@ void UL::compute_ig(const UL* parent,
             if (tid_set.find(i) == tid_set.end())
                 y_out.push_back(y_arr[i]);
     } else {
-        for (auto& e : parent->els)
-            if (tid_set.find(e.tid) == tid_set.end())
-                y_out.push_back(y_arr[e.tid]);
+        for (int32_t tid : parent->tid_arr)
+            if (tid_set.find(tid) == tid_set.end())
+                y_out.push_back(y_arr[tid]);
     }
 
     double ce = (static_cast<double>(y_in.size())  / n_parent
@@ -234,7 +239,8 @@ void THUIsl::mine(const TransList& transactions,
         }
     }
 
-    // Seal all 1-item ULs, compute IG, then release staging buffers
+    // Seal all 1-item ULs, compute IG, then release transient els buffers.
+    // compute_ig uses tid_arr, so recursive child IG remains correct after release.
     for (auto& kv : ul_map) kv.second.seal();
     for (auto& kv : ul_map) {
         kv.second.compute_ig(nullptr, ytrain, n_cls);
@@ -298,7 +304,7 @@ void THUIsl::explore(std::vector<int>  prefix,
             }
             auto ch = std::make_unique<UL>(child_ul(*ux, *uy));
             if (ch->sI + ch->sR >= minU) {
-                // Rebuild els from arrays for compute_ig, then release
+                // compute_ig uses sealed tid arrays, so els can be released afterwards
                 ch->compute_ig(ux, y_arr, n_cls);
                 ch->release_els();
                 ext.push_back(ch.get());

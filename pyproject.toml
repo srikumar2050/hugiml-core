@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hugiml-core"
-version = "1.1.0"
+version = "1.1.1"
 description = "High-performance interpretable rule-based ML — HUG-IML classifier, adaptive binning, EBM-style plots, pattern pruning, and benchmark runner (IEEE Access 2024)."
 readme = "README.md"
 license = {text = "Apache-2.0"}
@@ -22,8 +22,10 @@ keywords = [
     "xai",
 ]
 classifiers = [
-    "Development Status :: 4 - Beta",
-    "Intended Audience :: Science/Research",
+	"Development Status :: 5 - Production/Stable", 
+	"Intended Audience :: Financial and Insurance Industry", 
+	"Intended Audience :: Legal Industry",                 
+	"Intended Audience :: Science/Research",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
