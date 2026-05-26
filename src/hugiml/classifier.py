@@ -1037,21 +1037,22 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
     # ────────────────────────────────────────────────────────────────────────────
 
     def _prebin_nan_cols(self, X_train: Any) -> Any:
-        """Pre-bin only numerical columns that contain non-finite values.
+        """Pre-bin ALL numerical columns to string quantile labels.
 
         Called in _fit_impl (non-adaptive path) after _resolve_col_meta.
 
-        The normal, no-missing-data path must be left untouched so that fixed-B
-        numerical discretisation is performed by the native C++ transaction
-        builder.  Earlier v1.1.0 code pre-binned *all* numerical columns into
-        string labels here, marked them categorical, and therefore bypassed the
-        C++ fixed-B numeric path.  That changed bin counts, utilities, and the
-        top-K pattern list even when the input had no NaN/Inf values.
+        Every numerical column is discretised into B equal-frequency bins
+        using the finite training values.  Non-finite cells (NaN, Inf) become
+        ``np.nan`` in the label array; the C++ transaction builder skips those
+        cells, generating no item for that (row, feature) pair.
 
-        Only columns with at least one non-finite training value are converted
-        to categorical bin-label strings.  Finite-only numerical columns remain
-        numerical and are handled by C++ exactly as in the monolithic native
-        implementation.
+        By pre-binning all numerical columns unconditionally, NaN at *any*
+        point — training or test time, whatever columns — is handled correctly
+        and identically: the item is simply absent from the transaction.
+
+        Stores edges in ``self._missing_col_edges_[feature_name]``.
+        Updates ``self.cat_cols_mask_`` to mark all pre-binned columns as
+        categorical so the C++ routes them through the string-label path.
         """
         is_df = isinstance(X_train, pd.DataFrame)
         X_df = X_train if is_df else pd.DataFrame(X_train)
@@ -1065,37 +1066,29 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             self, "is_int_mask_", np.zeros(n_cols, dtype=bool)
         ).copy()
         modified = False
-        X_pre = X_df.copy()
 
         for j, name in enumerate(col_names):
             if j >= len(cat_mask) or cat_mask[j]:
                 continue  # already categorical — C++ handles np.nan natively
 
             col = pd.to_numeric(X_df.iloc[:, j], errors="coerce").values
-            finite_mask = np.isfinite(col)
-
-            # Critical: do not pre-bin finite-only numeric columns.  Let the
-            # native C++ fixed-B numeric path choose bins and compute utilities.
-            if finite_mask.all():
-                continue
-
-            finite = col[finite_mask]
-            edges = (
-                _adap_quantile_edges(finite, self.B)
-                if finite.size > 0
-                else np.array([0.0, 1.0])
-            )
+            finite = col[np.isfinite(col)]
+            edges = _adap_quantile_edges(finite, self.B) if finite.size > 0                 else np.array([0.0, 1.0])
             self._missing_col_edges_[name] = edges
             new_cat[j] = True
             new_int[j] = False
             modified = True
-            X_pre[name] = _adap_apply_edges(col, edges)
 
         if not modified:
             return X_train
 
         self.cat_cols_mask_ = new_cat
         self.is_int_mask_ = new_int
+
+        X_pre = X_df.copy()
+        for name, edges in self._missing_col_edges_.items():
+            col = pd.to_numeric(X_df[name], errors="coerce").values
+            X_pre[name] = _adap_apply_edges(col, edges)
         return X_pre if is_df else X_pre
 
     def _handle_test_nan(self, X_test: Any) -> tuple:
