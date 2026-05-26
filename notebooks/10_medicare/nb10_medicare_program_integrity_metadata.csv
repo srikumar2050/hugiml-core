@@ -1,0 +1,18 @@
+column_name,role,data_type,description,used_in_model,governance_note
+provider_id,identifier,string,Synthetic provider identifier.,No,Excluded from model; used for investigation traceability.
+specialty,predictor,categorical,Provider specialty peer group.,Yes,Necessary for specialty-adjusted interpretation.
+region,predictor,categorical,Provider region.,Yes,Monitoring dimension; should not be overinterpreted without local context.
+beneficiary_count,predictor,integer,Approximate provider panel size.,Yes,Volume context for billing intensity.
+claims_per_beneficiary,predictor,numeric,Billing intensity per beneficiary.,Yes,Potential overutilization signal.
+avg_allowed_amount,predictor,numeric,Average allowed amount per claim/service.,Yes,Cost-intensity signal.
+risk_adjustment_score,predictor,numeric,Case-mix adjustment proxy.,Yes,Helps avoid penalizing clinically complex panels.
+high_level_code_rate,predictor,numeric,Share of high-level billing codes.,Yes,Upcoding-style signal.
+duplicate_claim_rate,predictor,numeric,Duplicate-claim pattern rate.,Yes,Potential duplicate billing signal.
+modifier_59_rate,predictor,numeric,Modifier use rate related to unbundling review.,Yes,Potential unbundling signal.
+weekend_service_rate,predictor,numeric,Weekend-service billing share.,Yes,Temporal anomaly signal.
+denial_rate,predictor,numeric,Claim denial rate.,Yes,Prior payment/review friction signal.
+referral_concentration,predictor,numeric,Referral concentration measure.,Yes,Potential network-pattern signal.
+peer_z_allowed,predictor,numeric,Specialty-adjusted allowed-amount deviation.,Yes,Peer comparison signal.
+total_allowed_amount,predictor / materiality,numeric,Total allowed amount associated with provider.,Yes,Financial materiality for review prioritization.
+injected_typology,validation label,categorical,Controlled synthetic typology label.,No,Excluded from model to avoid leakage; used for validation/explanation.
+review_flag,target,binary integer,1=provider prioritized for integrity review; 0=not prioritized.,Yes,Primary target variable.
