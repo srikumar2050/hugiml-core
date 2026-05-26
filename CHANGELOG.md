@@ -14,7 +14,6 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Changed
 
 - `native/mining.cpp` / `native/mining.hpp`: compute compound-pattern IG from sealed `tid_arr` rather than transient `els`, so L2+ patterns survive positive `G` after `release_els()`.
-- `src/hugiml/classifier.py`: in the non-adaptive path, pre-bin only numeric columns that actually contain NaN/Inf values. Finite-only numeric columns must remain numeric and be discretized by the C++ fixed-B path. Pre-binning all numeric columns changed bin counts, utilities, and top-K patterns.
 
 ## [1.1.0] — 2026-05-23
 
