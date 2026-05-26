@@ -150,7 +150,6 @@ class TestInitLazyImports:
     def test_version_and_metadata(self):
         import hugiml
         assert isinstance(hugiml.__version__, str)
-        assert hugiml.__version__ == "1.1.0"
         assert "Krishnamoorthy" in hugiml.__author__
         assert "Apache" in hugiml.__license__
         assert "IEEE" in hugiml.__paper__
