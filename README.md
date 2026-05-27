@@ -75,6 +75,9 @@ The following benchmark panels compare HUGIML with LR, XGBoost, LightGBM, Random
 
 **Synthetic non-monotonic benchmark.** The synthetic panels use two controlled datasets with interval-like and oscillatory feature effects. They illustrate model behavior when LR is structurally misspecified by a single global slope. HUGIML provides a compact nonlinear lift over LR, while LightGBM and XGBoost remain strongest in raw ROC-AUC. EBM is shown with capped bins (`max_bins=16`, `interactions=0`) to provide a fairer interpretable baseline.
 
+For a detailed benchmark analysis results, refer to the interactive benchmark dashboard here:
+[Open the HUGIML Benchmark Analysis Dashboard](https://srikumar2050.github.io/hugiml-core/hugiml_benchmark_analysis_dashboard.html)
+
 ### Native missing-value handling
 
 HUGIML, XGBoost, LightGBM, and EBM can all operate without an external imputation pipeline, but they treat missingness differently.
