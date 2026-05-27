@@ -5,6 +5,31 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [1.1.2] — 2026-05-27
+
+### Added
+
+- Added `feature_mode` to `HUGIMLClassifierNative` with three downstream feature modes:
+  - `patterns_only` — default, backward-compatible mode using only the HUGIML binary pattern matrix.
+  - `original_plus_patterns` — hybrid mode using standardized original features plus all mined binary patterns.
+  - `original_plus_interactions` — hybrid mode using standardized original features plus higher-order (`L > 1`) mined patterns.
+- Added feature-mode regression tests covering fit, predict, predict_proba, transform, fit_transform, feature_importances, model_summary, sklearn clone compatibility, invalid-mode validation, and save/load behavior.
+
+### Changed
+
+- `HUGIMLClassifierNative.fit`, `predict`, `predict_proba`, and `score` now route the downstream estimator through the selected `feature_mode` while preserving the existing pattern-mining pipeline.
+- `transform(X)`, `fit_transform(X, y)`, `get_hug_features()`, and `get_pattern_info()` remain pattern-space APIs and continue to return/report only HUGIML binary pattern features.
+- `feature_importances()` now reports downstream feature names correctly for both pattern-only and hybrid modes.
+- `model_summary()` now reports the active feature mode and downstream feature shape.
+- `save_model()` / `load_model()` now persist and restore feature-mode metadata, original-feature preprocessing state, pattern-order masks, and hybrid downstream feature names.
+- README documentation updated with the three feature modes and revised notebook-folder descriptions.
+
+### Compatibility
+
+- Default behavior remains unchanged because `feature_mode="patterns_only"` is the default. Existing code that relies on `transform()` returning the HUGIML binary pattern matrix should continue to work unchanged.
+
+---
+
 ## [1.1.1] — 2026-05-26
 
 ### Added

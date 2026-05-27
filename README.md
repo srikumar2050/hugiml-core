@@ -131,6 +131,7 @@ Because HUGIML’s explanations are compact, they can be copied directly into mo
 | **Profile visualisations** | EBM-style 1-D/2-D HUG profiles, active-pattern explanations, coefficient-support views (Plotly) |
 | **Interpretability metrics** | Pattern count, coverage, overlap, sparsity, top-k cumulative contribution |
 | **Adaptive binning** | Per-feature supervised `B` selection — fixes the B-sensitivity trap |
+| **Feature modes** | Pattern-only, original-plus-patterns, and original-plus-interactions downstream representations |
 | **Pattern pruning** | Regulated remove/refit/calibrate workflow with full JSON audit trail |
 | **Multiclass & imbalance** | Multiclass report, SMOTE/class-weight pipeline, high-cardinality encoding |
 | **Benchmark suite** | Reproducible CV comparison vs EBM, XGBoost, RF, LR, RuleFit, GAM |
@@ -232,6 +233,55 @@ clf.fit(X_train, y_train)
 pred = clf.predict(X_test)
 proba = clf.predict_proba(X_test)
 ```
+
+
+## Feature Modes
+
+HUGIML can use the mined binary pattern matrix in three downstream feature modes. The default remains the original pattern-only behavior, so existing code keeps the same semantics unless `feature_mode` is set explicitly.
+
+| `feature_mode` | Downstream estimator input | When to use |
+|---|---|---|
+| `"patterns_only"` | HUGIML binary pattern matrix only | Standard HUGIML; best when the mined pattern space itself captures the decision boundary. |
+| `"original_plus_patterns"` | Original features plus all mined binary patterns | Useful when the original features contain strong marginal signal and HUGIML patterns add supervised nonlinear refinements. |
+| `"original_plus_interactions"` | Original features plus only `L > 1` mined patterns | Useful when original features should handle marginal effects and HUGIML should contribute interaction/compound-region features. |
+
+```python
+from hugiml import HUGIMLClassifierNative
+
+# Backward-compatible default: pattern matrix only
+clf = HUGIMLClassifierNative(
+    B=10,
+    L=2,
+    G=1e-3,
+    topK=150,
+    adaptive_binning=True,
+    feature_mode="patterns_only",
+)
+
+# Hybrid: original features + all binary HUGIML patterns
+clf_hybrid_all = HUGIMLClassifierNative(
+    B=10,
+    L=2,
+    G=1e-3,
+    topK=150,
+    adaptive_binning=True,
+    feature_mode="original_plus_patterns",
+)
+
+# Hybrid: original features + higher-order/interaction patterns only
+clf_hybrid_interactions = HUGIMLClassifierNative(
+    B=10,
+    L=2,
+    G=1e-3,
+    topK=150,
+    adaptive_binning=True,
+    feature_mode="original_plus_interactions",
+)
+```
+
+`transform(X)` always returns the HUGIML binary pattern matrix, regardless of `feature_mode`. The feature mode only changes the matrix passed to the downstream estimator inside `fit()`, `predict()`, `predict_proba()`, and `score()`.
+
+For hybrid modes, HUGIML standardizes numeric original features internally before concatenating them with the sparse binary pattern matrix. `feature_importances()` and `model_summary()` report the downstream feature representation used by the fitted model, while `get_hug_features()` and `get_pattern_info()` remain pattern-only APIs.
 
 ---
 
@@ -537,13 +587,22 @@ Or use the installed console script:
 hugiml-bench --datasets german_credit --output results/
 ```
 
-Worked notebooks in [`notebooks/`](notebooks/):
+Worked notebooks in [`notebooks/`](notebooks/) are organized as 12 self-contained folders. Each folder includes an `.ipynb` notebook and, where available, matching `.py`, `.html`, data, and metadata artifacts.
 
-| Notebook | Description |
-|---|---|
-| [`01_benchmark_baselines.ipynb`](notebooks/01_benchmark_baselines.ipynb) | 5-fold CV across HUG-IML, XGBoost, LightGBM, RF, LogReg on public tabular datasets |
-| [`02_hug_vs_ebm.ipynb`](notebooks/02_hug_vs_ebm.ipynb) | Side-by-side HUG-IML vs EBM: healthcare and credit-risk profile examples |
-| [`03_special_cases.ipynb`](notebooks/03_special_cases.ipynb) | Multiclass, imbalanced data, high-cardinality categoricals, adaptive binning, pattern pruning |
+| Folder | Notebook | Brief description |
+|---|---|---|
+| [`00_quickstart`](notebooks/00_quickstart/) | [`nb00_pattern_explanation_walkthrough.ipynb`](notebooks/00_quickstart/nb00_pattern_explanation_walkthrough.ipynb) | Quick end-to-end walkthrough of fitting HUGIML, extracting patterns, and reading pattern-level explanations. |
+| [`01_benchmark_baselines`](notebooks/01_benchmark_baselines/) | [`nb01_benchmark_baselines.ipynb`](notebooks/01_benchmark_baselines/nb01_benchmark_baselines.ipynb) | Benchmark comparison across HUGIML and common tabular baselines such as XGBoost, LightGBM, Random Forest, and logistic regression. |
+| [`02_hug_vs_ebm`](notebooks/02_hug_vs_ebm/) | [`nb02_hug_vs_ebm.ipynb`](notebooks/02_hug_vs_ebm/nb02_hug_vs_ebm.ipynb) | Side-by-side comparison of HUGIML pattern profiles and EBM-style additive shape functions. |
+| [`03_modeling_special_cases`](notebooks/03_modeling_special_cases/) | [`nb03_modeling_special_cases.ipynb`](notebooks/03_modeling_special_cases/nb03_modeling_special_cases.ipynb) | Practical modeling cases including multiclass targets, imbalance, high-cardinality categoricals, adaptive binning, and pruning workflows. |
+| [`04_credit_risk`](notebooks/04_credit_risk/) | [`nb04_credit_risk.ipynb`](notebooks/04_credit_risk/nb04_credit_risk.ipynb) | Credit-risk governance example using German Credit-style data, scorecard-style features, and auditable risk patterns. |
+| [`05_aml`](notebooks/05_aml/) | [`nb05_aml.ipynb`](notebooks/05_aml/nb05_aml.ipynb) | Anti-money-laundering example focused on suspicious transaction pattern discovery and model review artifacts. |
+| [`06_mobile_money`](notebooks/06_mobile_money/) | [`nb06_mobile_money_fraud.ipynb`](notebooks/06_mobile_money/nb06_mobile_money_fraud.ipynb) | Mobile-money fraud example showing compact transaction-risk patterns and operational fraud-review signals. |
+| [`07_basel_ca`](notebooks/07_basel_ca/) | [`nb07_basel_ca.ipynb`](notebooks/07_basel_ca/nb07_basel_ca.ipynb) | Basel capital-adequacy oriented example for regulated risk analytics and explainable model validation. |
+| [`08_clinical`](notebooks/08_clinical/) | [`nb08_healthcare_breast_cancer.ipynb`](notebooks/08_clinical/nb08_healthcare_breast_cancer.ipynb) | Clinical classification example using breast-cancer features to demonstrate interpretable healthcare pattern explanations. |
+| [`09_insurance`](notebooks/09_insurance/) | [`nb09_insurance_underwriting.ipynb`](notebooks/09_insurance/nb09_insurance_underwriting.ipynb) | Insurance underwriting example with risk-selection patterns and model-card-friendly feature narratives. |
+| [`10_medicare`](notebooks/10_medicare/) | [`nb10_medicare_program_integrity.ipynb`](notebooks/10_medicare/nb10_medicare_program_integrity.ipynb) | Medicare program-integrity example for suspicious provider/claim behavior and audit-ready pattern summaries. |
+| [`11_workforce_analytics`](notebooks/11_workforce_analytics/) | [`nb11_workforce_attrition.ipynb`](notebooks/11_workforce_analytics/nb11_workforce_attrition.ipynb) | Workforce attrition analytics example showing HR risk patterns, explanation tables, and governance-oriented summaries. |
 
 ### Observed results: public benchmark snapshot
 
@@ -659,8 +718,7 @@ Kubernetes manifests are in [`kubernetes/deployment.yaml`](kubernetes/deployment
 | Workflow | Trigger | What it does |
 |---|---|---|
 | [`ci.yml`](.github/workflows/ci.yml) | Every push / PR | Lint, type-check, coverage gate, native tests, sanitizer build, benchmark regression, wheel build |
-| [`release.yml`](.github/workflows/release.yml) | Git tag `v*.*.*` | Build platform wheels, generate SBOM, publish to PyPI, create GitHub Release |
-| [`nightly.yml`](.github/workflows/nightly.yml) | Nightly UTC | Property-based tests, calibration validation, memory safety, full benchmarks |
+| [`release.yml`](.github/workflows/release.yml) | Git tag `v*.*.*` | Build platform wheels, generate SBOM, publish to PyPI, create GitHub 
 
 ---
 

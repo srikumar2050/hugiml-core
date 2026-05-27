@@ -60,6 +60,7 @@ import zipfile
 from typing import Any
 
 import numpy as np
+import pandas as pd
 
 from hugiml.exceptions import HUGIMLSerializationError, HUGIMLVersionError
 
@@ -464,6 +465,11 @@ def save_model(clf: Any, path: str | os.PathLike) -> None:
         "_native_available_": bool(getattr(clf, "_native_available_", True)),
         "_degraded_reason": getattr(clf, "_degraded_reason", None),
         "n_categories_": getattr(clf, "n_categories_", None),
+        "feature_mode": getattr(clf, "feature_mode", "patterns_only"),
+        "original_numeric_cols": getattr(clf, "_original_numeric_cols_", []),
+        "original_cat_cols": getattr(clf, "_original_cat_cols_", []),
+        "original_dummy_columns": getattr(clf, "_original_dummy_columns_", []),
+        "original_feature_names_downstream": getattr(clf, "_original_feature_names_downstream_", []),
     }
     if hasattr(clf, "fit_metadata_") and clf.fit_metadata_ is not None:
         import dataclasses
@@ -513,6 +519,22 @@ def save_model(clf: Any, path: str | os.PathLike) -> None:
     }
     if hasattr(clf, "is_int_mask_") and clf.is_int_mask_ is not None:
         clf_arrays["is_int_mask_"] = clf.is_int_mask_.astype(np.bool_)
+    if hasattr(clf, "_pattern_orders_"):
+        clf_arrays["pattern_orders_"] = np.asarray(clf._pattern_orders_, dtype=np.int64)
+    if hasattr(clf, "_interaction_pattern_mask_"):
+        clf_arrays["interaction_pattern_mask_"] = np.asarray(clf._interaction_pattern_mask_, dtype=np.bool_)
+    if hasattr(clf, "_original_scaler_"):
+        scaler = clf._original_scaler_
+        if hasattr(scaler, "mean_"):
+            clf_arrays["original_scaler_mean_"] = np.asarray(scaler.mean_, dtype=np.float64)
+        if hasattr(scaler, "scale_"):
+            clf_arrays["original_scaler_scale_"] = np.asarray(scaler.scale_, dtype=np.float64)
+        if hasattr(scaler, "var_"):
+            clf_arrays["original_scaler_var_"] = np.asarray(scaler.var_, dtype=np.float64)
+        if hasattr(scaler, "n_features_in_"):
+            clf_arrays["original_scaler_n_features_in_"] = np.asarray([scaler.n_features_in_], dtype=np.int64)
+    if hasattr(clf, "_original_numeric_medians_"):
+        clf_arrays["original_numeric_medians_"] = np.asarray(clf._original_numeric_medians_, dtype=np.float64)
     members["arrays.npz"] = _npz_bytes(**clf_arrays)
 
     # TransactionDataWrapper
@@ -702,6 +724,30 @@ def _load_v3(path: str | os.PathLike) -> Any:
         clf._degraded_reason = clf_fit["_degraded_reason"]
     if clf_fit.get("n_categories_") is not None:
         clf.n_categories_ = clf_fit["n_categories_"]
+    clf.feature_mode = clf_fit.get("feature_mode", getattr(clf, "feature_mode", "patterns_only"))
+    clf._original_numeric_cols_ = clf_fit.get("original_numeric_cols", [])
+    clf._original_cat_cols_ = clf_fit.get("original_cat_cols", [])
+    clf._original_dummy_columns_ = clf_fit.get("original_dummy_columns", [])
+    clf._original_feature_names_downstream_ = clf_fit.get("original_feature_names_downstream", [])
+    if "pattern_orders_" in clf_arrays:
+        clf._pattern_orders_ = clf_arrays["pattern_orders_"].astype(int)
+    if "interaction_pattern_mask_" in clf_arrays:
+        clf._interaction_pattern_mask_ = clf_arrays["interaction_pattern_mask_"].astype(bool)
+    if "original_numeric_medians_" in clf_arrays:
+        clf._original_numeric_medians_ = pd.Series(
+            clf_arrays["original_numeric_medians_"],
+            index=clf._original_numeric_cols_,
+            dtype=float,
+        )
+    if "original_scaler_mean_" in clf_arrays:
+        from sklearn.preprocessing import StandardScaler
+
+        scaler = StandardScaler()
+        scaler.mean_ = clf_arrays["original_scaler_mean_"]
+        scaler.scale_ = clf_arrays.get("original_scaler_scale_", np.ones_like(scaler.mean_))
+        scaler.var_ = clf_arrays.get("original_scaler_var_", scaler.scale_ ** 2)
+        scaler.n_features_in_ = int(clf_arrays.get("original_scaler_n_features_in_", np.array([len(scaler.mean_)]))[0])
+        clf._original_scaler_ = scaler
 
     # Patterns
     class _PE:

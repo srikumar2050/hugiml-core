@@ -96,9 +96,10 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-from scipy.sparse import csr_matrix
+from scipy.sparse import csr_matrix, hstack, issparse
 from sklearn.base import BaseEstimator, ClassifierMixin, TransformerMixin
 from sklearn.linear_model import LogisticRegression
+from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import Pipeline
 from sklearn.utils.validation import check_is_fitted
 
@@ -476,6 +477,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         adaptive_binning: bool = False,
         b_candidates: list | None = None,
         min_marginal_gain_ratio: float = 0.02,
+        feature_mode: str = "patterns_only",
     ) -> None:
         self.allCols = allCols
         self.origColumns = origColumns
@@ -491,6 +493,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         self.adaptive_binning = adaptive_binning
         self.b_candidates = b_candidates
         self.min_marginal_gain_ratio = min_marginal_gain_ratio
+        self.feature_mode = feature_mode
         self._fit_lock = threading.RLock()
 
     # ── Class methods ─────────────────────────────────────────────────────────
@@ -521,7 +524,8 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         fitted = hasattr(self, "patterns_")
         status = f", {len(self.patterns_)} patterns" if fitted else ", not fitted"
         adap = ", adaptive" if self.adaptive_binning else ""
-        return f"HUGIMLClassifierNative(B={self.B}, L={self.L}, G={self.G}{adap}{status})"
+        mode = f", feature_mode={self.feature_mode}"
+        return f"HUGIMLClassifierNative(B={self.B}, L={self.L}, G={self.G}{adap}{mode}{status})"
 
     # ── sklearn protocol ──────────────────────────────────────────────────────
 
@@ -542,6 +546,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             adaptive_binning=self.adaptive_binning,
             b_candidates=self.b_candidates,
             min_marginal_gain_ratio=self.min_marginal_gain_ratio,
+            feature_mode=self.feature_mode,
         )
 
     def set_params(self, **params: Any) -> HUGIMLClassifierNative:
@@ -859,6 +864,16 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             raise HUGIMLParamError(
                 f"min_marginal_gain_ratio must be in (0, 1), "
                 f"got {self.min_marginal_gain_ratio}."
+            )
+        allowed_feature_modes = {
+            "patterns_only",
+            "original_plus_patterns",
+            "original_plus_interactions",
+        }
+        if self.feature_mode not in allowed_feature_modes:
+            raise HUGIMLParamError(
+                f"feature_mode must be one of {sorted(allowed_feature_modes)}, "
+                f"got {self.feature_mode!r}."
             )
 
     def _resolve_col_meta(self, X_train: Any) -> np.ndarray:
@@ -1202,6 +1217,11 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             "classes_",
             "x_train_hup_",
             "fit_metadata_",
+            "_original_scaler_",
+            "_original_feature_names_downstream_",
+            "_pattern_orders_",
+            "_interaction_pattern_mask_",
+            "x_train_downstream_",
         ):
             self.__dict__.pop(_attr, None)
 
@@ -1222,6 +1242,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             raise ValueError("Complex data not supported by HUGIMLClassifierNative.")
 
         self._validate_params()
+        X_train_original_for_downstream = self._copy_input_for_downstream(X_train)
 
         # ── v1.1.0 adaptive pre-binning ───────────────────────────────────
         # Must run before Stage 1 (_resolve_col_meta) so that the updated
@@ -1368,8 +1389,12 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
 
             # Stage 5: fit downstream classifier
             t = self._timer()
+            self._setup_feature_mode_metadata()
+            self.x_train_downstream_ = self._make_downstream_features(
+                X_train_original_for_downstream, self.x_train_hup_, fit=True
+            )
             self.model_ = Pipeline([("clf", self._make_estimator(n_cls))])
-            self.model_.fit(self.x_train_hup_, y_train)
+            self.model_.fit(self.x_train_downstream_, y_train)
             stage_times["fit_downstream"] = t.ms
 
             # Stage 6: wrap C++ td_ for Python compatibility
@@ -1408,6 +1433,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             config=dict(
                 B=self.B, L=self.L, G=self.G, topK=self.topK,
                 adaptive_binning=self.adaptive_binning,
+                feature_mode=self.feature_mode,
             ),
             memory_peak_mb=round(mem.traced_peak_mb, 1),
             memory_rss_mb=round(rss_delta_mb, 1),
@@ -1512,6 +1538,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         np.ndarray, shape (n_samples, n_classes)
         """
         check_is_fitted(self)
+        X_test_original_for_downstream = self._copy_input_for_downstream(X_test)
         # ── v1.1.0 adaptive pre-binning ───────────────────────────────────
         if getattr(self, "adaptive_binning", False) and getattr(self, "_bin_edges_", None):
             X_test = self._prebin_for_predict(X_test)
@@ -1520,7 +1547,11 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
 
         budget_ms = self.max_predict_ms
         if budget_ms is None or not isinstance(X_test, (pd.DataFrame, np.ndarray)):
-            proba = np.asarray(self.model_.predict_proba(self._build_test_hup(X_test)))
+            Z_test = self._build_test_hup(X_test)
+            X_downstream = self._make_downstream_features(
+                X_test_original_for_downstream, Z_test, fit=False
+            )
+            proba = np.asarray(self.model_.predict_proba(X_downstream))
             _mon = getattr(self, "monitor", None)
             if _mon is not None:
                 _mon.record(proba, (time.perf_counter() - t0) * 1000)
@@ -1545,7 +1576,14 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                 break
             end = min(start + chunk_size, n)
             chunk = X_test.iloc[start:end] if is_df else X_test[start:end]  # type: ignore[union-attr]
-            result[start:end] = self.model_.predict_proba(self._build_test_hup(chunk))
+            orig_chunk = (
+                X_test_original_for_downstream.iloc[start:end]
+                if isinstance(X_test_original_for_downstream, pd.DataFrame)
+                else X_test_original_for_downstream[start:end]
+            )
+            Z_chunk = self._build_test_hup(chunk)
+            X_downstream_chunk = self._make_downstream_features(orig_chunk, Z_chunk, fit=False)
+            result[start:end] = self.model_.predict_proba(X_downstream_chunk)
             completed = end
 
         _mon = getattr(self, "monitor", None)
@@ -1565,11 +1603,142 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         np.ndarray, shape (n_samples,)
         """
         check_is_fitted(self)
+        X_test_original_for_downstream = self._copy_input_for_downstream(X_test)
         # ── v1.1.0 adaptive pre-binning ───────────────────────────────────
         if getattr(self, "adaptive_binning", False) and getattr(self, "_bin_edges_", None):
             X_test = self._prebin_for_predict(X_test)
         # ─────────────────────────────────────────────────────────────────
-        return np.asarray(self.model_.predict(self._build_test_hup(X_test)))
+        Z_test = self._build_test_hup(X_test)
+        X_downstream = self._make_downstream_features(
+            X_test_original_for_downstream, Z_test, fit=False
+        )
+        return np.asarray(self.model_.predict(X_downstream))
+
+    # ── Downstream feature modes ─────────────────────────────────────────────
+
+    def _copy_input_for_downstream(self, X: Any) -> Any:
+        """Preserve raw input before adaptive/pre-binning for hybrid modes."""
+        if isinstance(X, pd.DataFrame):
+            return X.copy()
+        return np.array(X, copy=True)
+
+    def _pattern_order_from_label(self, label: str) -> int:
+        """Infer pattern order from a human-readable HUG pattern label."""
+        import re
+
+        matches = re.findall(r"\bcol\d+\s*=", str(label))
+        if matches:
+            return len(matches)
+        if "," in str(label):
+            return len([part for part in str(label).split(",") if part.strip()])
+        return 1
+
+    def _setup_feature_mode_metadata(self) -> None:
+        """Cache pattern-order masks used by hybrid feature modes."""
+        features = self.get_hug_features()
+        orders = np.asarray([self._pattern_order_from_label(f) for f in features], dtype=int)
+        if len(orders) != self.x_train_hup_.shape[1]:
+            orders = np.ones(self.x_train_hup_.shape[1], dtype=int)
+        self._pattern_orders_ = orders
+        self._interaction_pattern_mask_ = orders > 1
+
+    def _prepare_original_features_for_downstream(self, X: Any, fit: bool = False):
+        """Prepare original input features for hybrid downstream estimators.
+
+        This intentionally does not affect transform(), get_hug_features(), or
+        any pattern diagnostics.  It is used only by predict/fit when
+        feature_mode includes original features.
+        """
+        if isinstance(X, pd.DataFrame):
+            X_df = X.copy()
+        else:
+            names = getattr(self, "feature_names_in_", None)
+            arr = np.asarray(X)
+            if arr.ndim == 1:
+                arr = arr.reshape(1, -1)
+            if names is None or len(names) != arr.shape[1]:
+                names = [f"col{j}" for j in range(arr.shape[1])]
+            X_df = pd.DataFrame(arr, columns=list(names))
+
+        # Stabilize column order against training schema when available.
+        train_names = getattr(self, "feature_names_in_", None)
+        if train_names is not None:
+            for col in train_names:
+                if col not in X_df.columns:
+                    X_df[col] = np.nan
+            X_df = X_df[list(train_names)]
+
+        # Numeric columns are scaled; non-numeric columns are one-hot encoded.
+        numeric = X_df.apply(pd.to_numeric, errors="coerce")
+        numeric_cols = [c for c in X_df.columns if not numeric[c].isna().all()]
+        X_num = numeric[numeric_cols] if numeric_cols else pd.DataFrame(index=X_df.index)
+        X_cat = X_df.drop(columns=numeric_cols, errors="ignore")
+
+        if fit:
+            self._original_numeric_cols_ = list(X_num.columns)
+            self._original_cat_cols_ = list(X_cat.columns)
+            self._original_numeric_medians_ = X_num.median(numeric_only=True).fillna(0.0)
+            X_num_filled = X_num.fillna(self._original_numeric_medians_)
+            self._original_scaler_ = StandardScaler()
+            X_num_arr = self._original_scaler_.fit_transform(X_num_filled) if len(self._original_numeric_cols_) else np.empty((len(X_df), 0))
+            X_cat_dum = pd.get_dummies(X_cat.astype("string"), dummy_na=True) if len(self._original_cat_cols_) else pd.DataFrame(index=X_df.index)
+            self._original_dummy_columns_ = list(X_cat_dum.columns)
+        else:
+            num_cols = getattr(self, "_original_numeric_cols_", [])
+            med = getattr(self, "_original_numeric_medians_", pd.Series(dtype=float))
+            X_num = numeric.reindex(columns=num_cols)
+            X_num_filled = X_num.fillna(med).fillna(0.0)
+            if len(num_cols):
+                X_num_arr = self._original_scaler_.transform(X_num_filled)
+            else:
+                X_num_arr = np.empty((len(X_df), 0))
+            cat_cols = getattr(self, "_original_cat_cols_", [])
+            X_cat = X_df.reindex(columns=cat_cols)
+            X_cat_dum = pd.get_dummies(X_cat.astype("string"), dummy_na=True) if len(cat_cols) else pd.DataFrame(index=X_df.index)
+            dummy_cols = getattr(self, "_original_dummy_columns_", [])
+            X_cat_dum = X_cat_dum.reindex(columns=dummy_cols, fill_value=0)
+
+        X_cat_arr = X_cat_dum.to_numpy(dtype=np.float64, copy=False) if X_cat_dum.shape[1] else np.empty((len(X_df), 0))
+        X_base = np.hstack([X_num_arr, X_cat_arr]) if X_cat_arr.shape[1] else X_num_arr
+        if fit:
+            self._original_feature_names_downstream_ = list(getattr(self, "_original_numeric_cols_", [])) + list(getattr(self, "_original_dummy_columns_", []))
+        return csr_matrix(X_base.astype(np.float32, copy=False))
+
+    def _make_downstream_features(self, X_original: Any, Z_patterns: csr_matrix, fit: bool = False):
+        """Build the estimator input matrix for the configured feature_mode."""
+        mode = getattr(self, "feature_mode", "patterns_only")
+        if mode == "patterns_only":
+            return Z_patterns
+
+        X_base = self._prepare_original_features_for_downstream(X_original, fit=fit)
+        Z = Z_patterns if issparse(Z_patterns) else csr_matrix(Z_patterns)
+
+        if mode == "original_plus_patterns":
+            return hstack([X_base, Z], format="csr")
+
+        if mode == "original_plus_interactions":
+            mask = getattr(self, "_interaction_pattern_mask_", None)
+            if mask is None:
+                self._setup_feature_mode_metadata()
+                mask = self._interaction_pattern_mask_
+            return hstack([X_base, Z[:, mask]], format="csr")
+
+        raise HUGIMLParamError(f"Unknown feature_mode={mode!r}.")
+
+    def _get_downstream_feature_names(self) -> list[str]:
+        """Names aligned with coefficients of the downstream estimator."""
+        mode = getattr(self, "feature_mode", "patterns_only")
+        pattern_names = list(self.get_hug_features())
+        if mode == "patterns_only":
+            return pattern_names
+        original_names = [f"orig:{name}" for name in getattr(self, "_original_feature_names_downstream_", [])]
+        if mode == "original_plus_patterns":
+            return original_names + [f"pattern:{name}" for name in pattern_names]
+        if mode == "original_plus_interactions":
+            mask = getattr(self, "_interaction_pattern_mask_", np.ones(len(pattern_names), dtype=bool))
+            selected = [name for name, keep in zip(pattern_names, mask) if keep]
+            return original_names + [f"pattern:{name}" for name in selected]
+        return pattern_names
 
     def transform(self, X: Any) -> csr_matrix:
         """Return the binary HUG pattern matrix for X.
@@ -2002,15 +2171,31 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             if raw_coef.ndim == 2 and raw_coef.shape[0] > 1
             else raw_coef.ravel()
         )
-        features = self.get_hug_features()
+        features = self._get_downstream_feature_names()
         n_train = self.x_train_hup_.shape[0]
+        mode = getattr(self, "feature_mode", "patterns_only")
+        original_count = len(getattr(self, "_original_feature_names_downstream_", [])) if mode != "patterns_only" else 0
 
         rows: list[dict[str, object]] = []
         for i, (feat, c) in enumerate(zip(features, coef)):
-            support = float(self.x_train_hup_[:, i].sum()) / n_train
+            if i < original_count:
+                support = 1.0
+                ftype = "original"
+            else:
+                pat_idx = i - original_count
+                if mode == "original_plus_interactions":
+                    interaction_indices = np.where(getattr(self, "_interaction_pattern_mask_", []))[0]
+                    pat_idx = int(interaction_indices[pat_idx]) if pat_idx < len(interaction_indices) else pat_idx
+                support = (
+                    float(self.x_train_hup_[:, pat_idx].sum()) / n_train
+                    if 0 <= pat_idx < self.x_train_hup_.shape[1]
+                    else 1.0
+                )
+                ftype = "pattern"
             rows.append(
                 {
                     "pattern": feat,
+                    "feature_type": ftype,
                     "coefficient": round(float(c), 6),
                     "abs_coefficient": round(abs(float(c)), 6),
                     "support": round(support, 4),
@@ -2157,6 +2342,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             "HUGIMLClassifierNative — Model Summary",
             "=" * 50,
             f"Config:       B={self.B}, L={self.L}, G={self.G}",
+            f"Feature mode: {getattr(self, 'feature_mode', 'patterns_only')}",
             f"Training:     {self.fit_metadata_.n_samples} samples, "
             f"{self.fit_metadata_.n_features} features, "
             f"{self.fit_metadata_.n_classes} classes",
@@ -2164,6 +2350,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             f"({self.fit_metadata_.n_compound} compound)",
             f"Matrix:       {self.x_train_hup_.shape} "
             f"(density={self.fit_metadata_.matrix_density:.4f})",
+            f"Downstream:   {getattr(self, 'x_train_downstream_', self.x_train_hup_).shape}",
             f"Fit time:     {self.fit_metadata_.total_fit_ms:.0f} ms",
             "",
             "Stage breakdown (ms):",
