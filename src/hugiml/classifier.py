@@ -113,8 +113,6 @@ from hugiml._binning import (
     _select_b as _adap_select_b,
 )
 from hugiml._compat import check_array, check_X_y
-
-
 from hugiml.exceptions import (
     HUGIMLConvergenceWarning,
     HUGIMLDtypeDriftWarning,
