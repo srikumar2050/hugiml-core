@@ -99,8 +99,8 @@ import pandas as pd
 from scipy.sparse import csr_matrix, hstack, issparse
 from sklearn.base import BaseEstimator, ClassifierMixin, TransformerMixin
 from sklearn.linear_model import LogisticRegression
-from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
 from sklearn.utils.validation import check_is_fitted
 
 from hugiml._binning import (
@@ -114,10 +114,7 @@ from hugiml._binning import (
 )
 from hugiml._compat import check_array, check_X_y
 
-__all__ = [
-    "HUGIMLClassifierNative",
-    "FitMetadata",
-]
+
 from hugiml.exceptions import (
     HUGIMLConvergenceWarning,
     HUGIMLDtypeDriftWarning,
@@ -163,6 +160,10 @@ except ImportError:
         except ImportError:
             return 0
 
+__all__ = [
+    "HUGIMLClassifierNative",
+    "FitMetadata",
+]
 
 logger = logging.getLogger(__name__)
 
