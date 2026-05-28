@@ -772,6 +772,17 @@ Apache License 2.0 — see [LICENSE](LICENSE).
 If you use hugiml-core in research or commercial work, please cite:
 
 ```bibtex
+
+@article{krishnamoorthy2026interpretability,
+  title        = {Interpretability Myopia: Governance Fitness in Financial Risk Models},
+  author       = {Krishnamoorthy, Srikumar},
+  journal      = {SSRN Electronic Journal},
+  year         = {2026},
+  doi          = {10.2139/ssrn.6821418},
+  url          = {https://dx.doi.org/10.2139/ssrn.6821418},
+  keywords     = {Interpretable machine learning, analytics, financial risk governance, deployment evaluation, regulatory compliance, model risk management}
+}
+
 @article{krishnamoorthy2024hugIML,
   author  = {Krishnamoorthy, Srikumar},
   title   = {Interpretable Classifier Models for Decision Support Using High Utility Gain Patterns},
