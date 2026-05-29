@@ -234,7 +234,7 @@ class PatternEditor:
     ) -> PatternEditor:
         """Refit the downstream classifier on the (pruned) pattern matrix.
 
-        The HUG mining results (patterns_) are unchanged; only the downstream
+        The HUG mining results (``patterns_``) are unchanged; only the downstream
         ``Pipeline`` (``model_``) is replaced.
 
         Parameters

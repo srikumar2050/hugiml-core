@@ -90,7 +90,7 @@ class MulticlassHUGReport:
 
         Parameters
         ----------
-        class_label : class value in clf.classes_
+        class_label : class value in ``clf.classes_``
         top_n : int
 
         Returns

@@ -48,6 +48,8 @@ generating no item for that (row, feature) pair — semantically
 
 Usage
 -----
+Example::
+
     from hugiml.adaptive import HUGIMLAdaptive
 
     clf = HUGIMLAdaptive(b_candidates=[3, 5, 7, 10, 15],

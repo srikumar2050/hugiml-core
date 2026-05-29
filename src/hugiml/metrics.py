@@ -21,19 +21,22 @@ the model.
 
 Quick reference
 ---------------
+Example::
+
     from hugiml.metrics import compute_all_metrics
     m = compute_all_metrics(clf, X_test)
     print(m)
 
 Available metrics
 -----------------
-n_patterns                  — total mined patterns
-avg_pattern_length          — mean number of items per pattern
-coverage                    — fraction of samples matched by ≥1 pattern
-overlap_rate                — mean number of patterns active per sample
-top_k_cumulative_contribution(k) — cumulative |coef| share of top-k patterns
-active_patterns_per_prediction   — per-sample array
-explanation_sparsity        — fraction of patterns *never* active (dead patterns)
+
+* ``n_patterns`` — total mined patterns.
+* ``avg_pattern_length`` — mean number of items per pattern.
+* ``coverage`` — fraction of samples matched by at least one pattern.
+* ``overlap_rate`` — mean number of patterns active per sample.
+* ``top_k_cumulative_contribution(k)`` — cumulative absolute-coefficient share of top-k patterns.
+* ``active_patterns_per_prediction`` — per-sample array.
+* ``explanation_sparsity`` — fraction of patterns never active on the supplied data.
 """
 
 from __future__ import annotations
@@ -79,7 +82,7 @@ class InterpretabilityMetrics:
     explanation_sparsity : float
         Fraction of patterns that are never active on *X* ("dead" patterns).
     top_k_cumulative_contribution : dict[int, float]
-        Mapping from k → cumulative share of total |coef| for the top-k patterns.
+        Mapping from k to cumulative share of total absolute coefficient magnitude for the top-k patterns.
         Keys: [1, 5, 10, 20, 50].
     n_samples : int
         Number of rows in X used for sample-level metrics.

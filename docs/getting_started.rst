@@ -94,3 +94,26 @@ After fitting, inspect both predictive behavior and explanation complexity:
    print(clf.feature_importances().head(20))
    print(clf.get_pattern_info().head(20))
 
+
+
+Performance-oriented starting point
+-----------------------------------
+
+For the current 1.1.3 implementation, start with a bounded pattern budget and increase complexity only when validation results justify it:
+
+.. code-block:: python
+
+   clf = HUGIMLClassifierNative(
+       B=7,
+       L=1,
+       G=5e-3,
+       topK=100,
+       n_jobs=-1,
+   )
+
+   clf.fit(X_train, y_train)
+   print(clf.fit_metadata_.summary())
+
+Use ``L=2`` when interaction patterns are important, and compensate by tightening ``G`` or keeping ``topK`` bounded. Use ``topK=-1`` only for smaller datasets or controlled benchmark runs, because it allows the automatic budget to grow with the item universe.
+
+If your logs show ``HUGIMLConvergenceWarning`` for a constant column, the model is telling you that the column has zero utility. Drop the column upstream if it is expected; otherwise, treat it as a data-quality signal.

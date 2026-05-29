@@ -58,3 +58,19 @@ Interpretation notes
 
 ``get_hug_features`` and ``get_pattern_info`` are always pattern-only APIs. In hybrid modes, ``feature_importances`` and ``model_summary`` report the downstream feature representation used by the fitted model, which can include original features as well as mined patterns.
 
+
+
+Compatibility with transform
+----------------------------
+
+``transform(X)`` and ``fit_transform(X, y)`` intentionally remain pattern-space APIs in every feature mode. This means existing explanation workflows that expect the binary HUG pattern matrix continue to work after enabling a hybrid downstream representation.
+
+In hybrid modes, the fitted downstream estimator receives a private design matrix built from standardized original features plus the selected pattern columns. ``feature_importances()`` and ``model_summary()`` report that downstream feature space so that model diagnostics match what the estimator actually used.
+
+Operational guidance
+--------------------
+
+* Use ``patterns_only`` as the default for audits, model cards, and compact explanations.
+* Use ``original_plus_patterns`` when original columns contain strong marginal signal that should remain directly available to the downstream classifier.
+* Use ``original_plus_interactions`` when the original columns should carry marginal effects and HUGIML should contribute higher-order regions only.
+* Serialized models preserve the selected feature mode, original-feature preprocessing state, pattern-order masks, and downstream feature names.

@@ -67,8 +67,8 @@ Key hyperparameters
      - Minimum information gain threshold.
      - ``1e-3`` to ``1e-5``
    * - ``topK``
-     - Maximum number of retained patterns. ``-1`` keeps all patterns passing filters.
-     - ``100`` to ``300`` for compact audits
+     - Maximum number of retained patterns. In 1.1.3 this budget is applied inside native mining, so it is both an interpretability cap and a performance control. ``-1`` computes an automatic budget from the mined item universe.
+     - ``50`` to ``300`` for compact audits; use ``-1`` only when the candidate space is known to be manageable
    * - ``adaptive_binning``
      - Selects per-feature bin resolution with supervised information gain.
      - ``True`` when tuning ``B`` is undesirable
@@ -108,3 +108,18 @@ Adaptive binning selects a bin count per numerical feature by evaluating candida
        G=1e-4,
    )
 
+
+
+Performance and mining behavior
+--------------------------------
+
+Version 1.1.3 keeps the modeling interface stable but changes where work is bounded internally. The effective ``topK`` value is passed into the native mining stage before candidate retention, rather than being treated only as a post-processing cap. This is closer to the original HUGIML Java implementation and is important for larger datasets because fewer non-final candidates need to be materialized.
+
+Transaction construction is performed in row-stripe chunks. The resulting model is the same as the non-chunked construction path, but memory use is less bursty because the full transaction list is not assembled as one large Python-side object. This is most useful for wide data, large batches, and cross-validation loops.
+
+For interaction mining, structured constraints are applied exactly. EUCS pruning is disabled by default in 1.1.3 because aggressive pair-level pruning can remove valid higher-order patterns in edge cases. Prefer controlling complexity with ``L``, ``G``, and ``topK`` first.
+
+Constant and zero-utility columns
+---------------------------------
+
+A column that is constant after preprocessing cannot contribute useful pattern utility. The estimator may emit ``HUGIMLConvergenceWarning`` for these columns during ``prepareXy`` or ``fit``. This warning is expected: the column is ignored for pattern mining, while the rest of the dataset continues to train normally. In production pipelines, drop known constant columns before fitting if you want a quieter log.

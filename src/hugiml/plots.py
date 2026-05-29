@@ -187,7 +187,8 @@ class HUGPlotter:
         Parameters
         ----------
         feature_name : str
-        X : ignored (support uses training data stored in clf.x_train_hup_)
+        X : ignored
+            Support uses training data stored in ``clf.x_train_hup_``.
         height : int, optional
         title : str, optional
 
@@ -915,8 +916,8 @@ class HUGPlotter:
     ) -> go.Figure:
         """Local explanation: active HUG patterns for a single sample.
 
-        Shows active patterns sorted by |coefficient|, coloured blue (positive)
-        or red (negative).
+        Shows active patterns sorted by absolute coefficient magnitude, coloured blue
+        for positive coefficients and red for negative coefficients.
 
         Parameters
         ----------

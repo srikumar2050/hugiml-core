@@ -1,12 +1,15 @@
 API reference
 =============
 
+This page documents the public Python API exposed by ``hugiml-core``. The
+manual sections in the user guide explain how these APIs fit together in a
+modeling workflow; the reference below is generated from the source docstrings.
+
 Core estimator
 --------------
 
 .. automodule:: hugiml.classifier
    :members:
-   :undoc-members:
    :show-inheritance:
 
 Adaptive binning
@@ -14,7 +17,6 @@ Adaptive binning
 
 .. automodule:: hugiml.adaptive
    :members:
-   :undoc-members:
    :show-inheritance:
 
 Metrics
@@ -22,7 +24,6 @@ Metrics
 
 .. automodule:: hugiml.metrics
    :members:
-   :undoc-members:
    :show-inheritance:
 
 Calibration
@@ -30,7 +31,6 @@ Calibration
 
 .. automodule:: hugiml.calibration
    :members:
-   :undoc-members:
    :show-inheritance:
 
 Plots
@@ -38,7 +38,6 @@ Plots
 
 .. automodule:: hugiml.plots
    :members:
-   :undoc-members:
    :show-inheritance:
 
 Governance
@@ -46,7 +45,6 @@ Governance
 
 .. automodule:: hugiml.governance
    :members:
-   :undoc-members:
    :show-inheritance:
 
 Explainability
@@ -54,7 +52,6 @@ Explainability
 
 .. automodule:: hugiml.explainability
    :members:
-   :undoc-members:
    :show-inheritance:
 
 Monitoring
@@ -62,7 +59,6 @@ Monitoring
 
 .. automodule:: hugiml.monitoring
    :members:
-   :undoc-members:
    :show-inheritance:
 
 Multiclass and imbalance
@@ -70,7 +66,6 @@ Multiclass and imbalance
 
 .. automodule:: hugiml.multiclass
    :members:
-   :undoc-members:
    :show-inheritance:
 
 Pattern pruning
@@ -78,7 +73,6 @@ Pattern pruning
 
 .. automodule:: hugiml.pruning
    :members:
-   :undoc-members:
    :show-inheritance:
 
 Serialization
@@ -86,7 +80,6 @@ Serialization
 
 .. automodule:: hugiml.serialization
    :members:
-   :undoc-members:
    :show-inheritance:
 
 Telemetry
@@ -94,7 +87,6 @@ Telemetry
 
 .. automodule:: hugiml.telemetry
    :members:
-   :undoc-members:
    :show-inheritance:
 
 Exceptions
@@ -102,6 +94,4 @@ Exceptions
 
 .. automodule:: hugiml.exceptions
    :members:
-   :undoc-members:
    :show-inheritance:
-

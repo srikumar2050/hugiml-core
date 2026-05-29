@@ -14,8 +14,19 @@ Why HUGIML?
 
 * **Intrinsic interpretability:** learned HUG patterns are the model representation, not an after-the-fact explanation.
 * **Regulated-domain fit:** model cards, audit artifacts, pruning trails, calibration, drift monitoring, and deployment helpers are included.
-* **Native performance:** computationally intensive mining and matrix-building stages are C++ accelerated with optional OpenMP support.
+* **Native performance:** computationally intensive mining, transaction construction, and matrix-building stages are C++ accelerated with optional OpenMP support. Version 1.1.3 also applies the ``topK`` budget inside mining and uses chunked transaction construction to reduce avoidable memory pressure.
 * **Python ergonomics:** the estimator follows the scikit-learn API and works with pandas DataFrames or NumPy arrays.
+
+
+Current release focus
+---------------------
+
+The 1.1.3 release keeps the public estimator API stable while improving the native mining path:
+
+* ``topK`` is now pushed into the mining stage, matching the original Java implementation more closely and preventing unnecessary retention of candidates that cannot enter the final pattern set.
+* Transaction preparation uses row-stripe chunking, so large tabular inputs avoid building a single oversized intermediate representation.
+* Structured constraints for compound patterns are enforced exactly. EUCS pruning is currently disabled by default to favor correctness and predictable behavior across datasets.
+* The feature-mode APIs introduced in 1.1.2 remain unchanged: ``patterns_only``, ``original_plus_patterns``, and ``original_plus_interactions``.
 
 Installation
 ------------

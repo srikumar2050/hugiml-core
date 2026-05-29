@@ -23,7 +23,6 @@ extensions = [
     "sphinx.ext.autodoc",
     "sphinx.ext.autosummary",
     "sphinx.ext.napoleon",
-    "sphinx.ext.intersphinx",
     "sphinx.ext.viewcode",
     "sphinx.ext.todo",
     "myst_parser",
@@ -32,6 +31,14 @@ extensions = [
 autosummary_generate = True
 autodoc_member_order = "bysource"
 autodoc_typehints = "description"
+autodoc_default_options = {
+    "members": True,
+    "member-order": "bysource",
+    # Avoid documenting sklearn metadata-routing helper methods inherited
+    # by BaseEstimator. They create noisy external cross-reference warnings
+    # and distract from the public HUGIML API.
+    "exclude-members": "set_fit_request,set_score_request,set_predict_request,set_transform_request,set_partial_fit_request",
+}
 autodoc_mock_imports = [
     "_hugiml_core",
     "plotly",
@@ -71,11 +78,12 @@ html_theme_options = {
     "style_external_links": True,
 }
 
-intersphinx_mapping = {
-    "python": ("https://docs.python.org/3", None),
-    "numpy": ("https://numpy.org/doc/stable/", None),
-    "pandas": ("https://pandas.pydata.org/docs/", None),
-    "sklearn": ("https://scikit-learn.org/stable/", None),
-}
+# Intersphinx is intentionally disabled for deterministic RTD/local builds.
+# Re-enable it only if external inventory availability is required.
 
 todo_include_todos = False
+
+# Third-party docstrings imported through autodoc may contain unresolved
+# intersphinx references on offline or restricted builders. The project pages
+# still surface HUGIML API warnings normally.
+suppress_warnings = ["ref.python", "ref.term", "ref.ref", "toc.not_included", "intersphinx"]
