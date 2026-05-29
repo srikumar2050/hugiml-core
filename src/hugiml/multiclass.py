@@ -27,6 +27,7 @@ Helpers for three common HUG-IML deployment scenarios:
    columns with many unique values with target-mean encoding or a frequency
    encoding before passing data to ``prepareXy``.
 """
+
 from __future__ import annotations
 
 import warnings
@@ -109,12 +110,14 @@ class MulticlassHUGReport:
         rows = []
         for i, (lbl, c) in enumerate(zip(pattern_labels, coef_row)):
             sup = float(clf.x_train_hup_[:, i].sum()) / n_train
-            rows.append({
-                "pattern": lbl,
-                "coefficient": round(float(c), 6),
-                "abs_coefficient": round(abs(float(c)), 6),
-                "support": round(sup, 4),
-            })
+            rows.append(
+                {
+                    "pattern": lbl,
+                    "coefficient": round(float(c), 6),
+                    "abs_coefficient": round(abs(float(c)), 6),
+                    "support": round(sup, 4),
+                }
+            )
         df = pd.DataFrame(rows).sort_values("abs_coefficient", ascending=False)
         return df.head(top_n).reset_index(drop=True)
 
@@ -225,12 +228,15 @@ class _ImbalancedHUGPipeline:
         ratio = {"minority": self._ratio} if self._ratio < 1.0 else "auto"
         if self._strategy == "smote":
             from imblearn.over_sampling import SMOTE
+
             return SMOTE(sampling_strategy=ratio, random_state=self._rs)
         elif self._strategy == "random_oversample":
             from imblearn.over_sampling import RandomOverSampler
+
             return RandomOverSampler(sampling_strategy=ratio, random_state=self._rs)
         else:
             from imblearn.under_sampling import RandomUnderSampler
+
             return RandomUnderSampler(sampling_strategy=ratio, random_state=self._rs)
 
     def fit(self, X: Any, y: Any) -> _ImbalancedHUGPipeline:

@@ -3,10 +3,6 @@
  *
  * Copyright 2026 Srikumar Krishnamoorthy
  * Apache-2.0 License
- *
- * Split from bind_pattern.cpp so that the three heaviest pybind11 lambda TUs
- * can be compiled in parallel, reducing peak single-core build time from
- * ~55 s (O3, monolithic) to ~20 s per TU at O2.
  */
 
 #include "bind_helpers.hpp"
@@ -24,9 +20,9 @@ void bind_prepare_transactions(py::module_& m)
            py::object col_names,
            py::array_t<uint8_t, py::array::forcecast> is_cat,
            py::array_t<uint8_t, py::array::forcecast> is_int,
-           py::object X_cat_raw)
+           py::object X_cat_raw,
+           py::object is_precoded)
         {
-            // ── Step 1: validate with GIL held ────────────────────────────
             validate_2d_array(X_num, "X_num");
             validate_1d_array(y,      "y",      X_num.shape(0));
             validate_1d_array(is_cat, "is_cat", X_num.shape(1));
@@ -38,7 +34,7 @@ void bind_prepare_transactions(py::module_& m)
             int n = static_cast<int>(X_num.shape(0));
             int p = static_cast<int>(X_num.shape(1));
 
-            // ── Step 2: pre-extract Python objects to C++ (GIL held) ──────
+            // Column names
             std::vector<std::string> col_names_cpp;
             if (!col_names.is_none()) {
                 py::list lst = col_names.cast<py::list>();
@@ -47,21 +43,40 @@ void bind_prepare_transactions(py::module_& m)
                     col_names_cpp.push_back(item.cast<std::string>());
             }
 
+            // Categorical raw strings
             std::vector<std::vector<std::string>> cat_strs;
             std::vector<std::vector<bool>>        cat_valid;
             extract_cat_data(X_cat_raw, is_cat, n, p, cat_strs, cat_valid);
 
-            // ── Step 3: release GIL, call pure-C++ ───────────────────────
+            // Pre-coded mask: convert to std::vector<bool> with GIL held
+            std::vector<bool> ipc_vec(p, false);
+            if (!is_precoded.is_none()) {
+                auto ipc = is_precoded.cast<
+                    py::array_t<uint8_t, py::array::forcecast>>();
+                if (ipc.size() != p)
+                    throw std::invalid_argument(
+                        "is_precoded length must equal number of columns");
+                auto ipcb = ipc.unchecked<1>();
+                for (int j = 0; j < p; j++)
+                    ipc_vec[j] = static_cast<bool>(ipcb(j));
+            }
+
+            // Release GIL before the heavy C++ computation
             py::gil_scoped_release release;
             return prepare_transactions_cpp(
                 X_num, y, B,
                 std::move(col_names_cpp),
                 is_cat, is_int,
+                std::move(ipc_vec),
                 std::move(cat_strs),
                 std::move(cat_valid));
         },
         py::arg("X_num"), py::arg("y"), py::arg("B"),
         py::arg("col_names"), py::arg("is_cat"), py::arg("is_int"),
         py::arg("X_cat_raw"),
-        "Build utility-annotated TransactionDataCpp from training data.");
+        py::arg("is_precoded") = py::none(),
+        "Build utility-annotated TransactionDataCpp from training data.\n\n"
+        "is_precoded: optional uint8 array of length p. When is_precoded[j]=1,\n"
+        "column j contains pre-computed 0-indexed bin codes; the C++ layer skips\n"
+        "re-discretisation and uses the codes directly as bin indices.");
 }

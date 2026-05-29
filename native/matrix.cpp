@@ -190,12 +190,31 @@ COO build_test_matrix_cpp(
                 auto it = label2code[j].find(cat_strs[j][r]);
                 if (it == label2code[j].end()) continue;
                 bi = it->second + 1;
+            } else if (!td.is_precoded_v.empty() && td.is_precoded_v[j]) {
+                // Pre-coded column: Xb(r,j) is the 0-indexed bin code stored
+                // as float64.  np.nan encodes "no observation" — skip to
+                // generate no item for this (row, feature) pair, matching the
+                // behaviour of missing values on every other column type.
+                // static_cast<int>(NaN) is undefined behaviour in C++, so the
+                // finite check must come before the cast.
+                double v = Xb(r, j);
+                if (!std::isfinite(v)) continue;
+                int code = static_cast<int>(v);
+                int nb   = td.nb_col[j];
+                bi = std::max(1, std::min(code + 1, nb));
             } else {
+                // Numeric (float or integer) column.
+                // Non-finite values (NaN, Inf) must generate no item — the
+                // same "not observed" contract as every other column type.
+                // std::upper_bound with a NaN comparand has undefined
+                // behaviour, so guard before the binary search.
                 const auto& edges = td.all_edges[j];
                 int          nb   = td.nb_col[j];
+                double raw = Xb(r, j);
+                if (!std::isfinite(raw)) continue;
                 double val = td.is_int_v[j]
-                             ? Xb(r, j)
-                             : (Xb(r, j) - td.col_min[j]) / td.col_range[j];
+                             ? raw
+                             : (raw - td.col_min[j]) / td.col_range[j];
                 auto it = std::upper_bound(
                     edges.begin() + 1, edges.end() - 1, val);
                 bi = static_cast<int>(it - (edges.begin() + 1)) + 1;

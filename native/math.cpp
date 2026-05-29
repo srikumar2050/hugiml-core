@@ -25,7 +25,8 @@ namespace hugiml {
 
 double entropy_vec(const std::vector<int>& y, int n_cls) {
     if (y.empty()) return 0.0;
-    // Size to max(y)+1 so non-zero-based labels work (matches np.bincount)
+    // Java THUIsl's UtilityList.getEntropy uses natural-log Shannon entropy
+    // without normalising by log(num_classes).  Keep the miner on that scale
     int max_y = 0;
     for (int v : y)
         if (v > max_y) max_y = v;
@@ -33,12 +34,11 @@ double entropy_vec(const std::vector<int>& y, int n_cls) {
     for (int v : y)
         if (v >= 0) cnts[v] += 1.0;
     double total = static_cast<double>(y.size());
-    double base  = std::log(std::max(n_cls, 2));
     double h     = 0.0;
-    for (double p : cnts) {
-        if (p > 0.0) {
-            double pn = p / total;
-            h -= pn * std::log(pn) / base;
+    for (double c : cnts) {
+        if (c > 0.0) {
+            double p = c / total;
+            h -= p * std::log(p);
         }
     }
     return std::max(h, 0.0);

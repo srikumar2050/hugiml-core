@@ -44,6 +44,7 @@ Example
     print(editor.audit_report())
     new_clf.predict_proba(X_te)
 """
+
 from __future__ import annotations
 
 import copy
@@ -316,9 +317,7 @@ class PatternEditor:
             cal_clf = CalibratedClassifierCV(inner_clf, cv="prefit", method=method)
             cal_clf.fit(hup_cal, y_arr)
         except (ValueError, TypeError):
-            cal_clf = CalibratedClassifierCV(
-                inner_clf, cv=None, ensemble=False, method=method
-            )
+            cal_clf = CalibratedClassifierCV(inner_clf, cv=None, ensemble=False, method=method)
             cal_clf.fit(hup_cal, y_arr)
 
         clf.model_ = Pipeline([("clf", cal_clf)])
@@ -374,12 +373,14 @@ class PatternEditor:
             sup = sup_map.get(lbl, None)
             if sup is None and n_train and hasattr(clf, "x_train_hup_"):
                 sup = float(clf.x_train_hup_[:, i].sum()) / n_train
-            rows.append({
-                "idx": i,
-                "pattern": lbl,
-                "coefficient": coef_map.get(lbl, float("nan")),
-                "support": round(sup, 4) if sup is not None else float("nan"),
-            })
+            rows.append(
+                {
+                    "idx": i,
+                    "pattern": lbl,
+                    "coefficient": coef_map.get(lbl, float("nan")),
+                    "support": round(sup, 4) if sup is not None else float("nan"),
+                }
+            )
         return pd.DataFrame(rows)
 
     def diff(self) -> dict:

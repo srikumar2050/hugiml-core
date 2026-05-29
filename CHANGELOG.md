@@ -4,6 +4,13 @@ All notable changes to hugiml-core are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
+## [1.1.3] — 2026-05-29
+
+### Changed
+
+- Optimized code and pushed K value inside mining, in line with the original java implementation (hugiml)
+- Included performance and memory optimizations - chunked transaction processing, exact structured mining constraints, disabled eucs pruning by default 
+- Revised domain specific notebook examples 
 
 ## [1.1.2] — 2026-05-27
 

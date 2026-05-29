@@ -31,6 +31,7 @@ Public API
     fig = plotter.plot_active_patterns(X, sample_idx=0) # local explanation
     fig = plotter.plot_dashboard(X)                      # full multi-panel HTML
 """
+
 from __future__ import annotations
 
 from typing import Any
@@ -41,6 +42,7 @@ import pandas as pd
 try:
     import plotly.graph_objects as go
     from plotly.subplots import make_subplots
+
     _PLOTLY = True
 except ImportError:
     _PLOTLY = False
@@ -55,19 +57,19 @@ __all__ = [
 # ---------------------------------------------------------------------------
 
 _T = {
-    "bg":      "#0d1117",
-    "panel":   "#161b22",
-    "border":  "#30363d",
-    "grid":    "#21262d",
-    "text":    "#e6edf3",
-    "muted":   "#8b949e",
-    "a1":      "#58a6ff",   # blue  – utility / main bars
-    "a2":      "#3fb950",   # green – combinations +1
-    "a3":      "#f78166",   # red   – combinations +3 / negative
-    "a4":      "#d2a8ff",   # purple– support dist histogram
-    "a5":      "#ffa657",   # orange– support line overlay
-    "font_b":  "JetBrains Mono, monospace",
-    "font_t":  "Syne, sans-serif",
+    "bg": "#0d1117",
+    "panel": "#161b22",
+    "border": "#30363d",
+    "grid": "#21262d",
+    "text": "#e6edf3",
+    "muted": "#8b949e",
+    "a1": "#58a6ff",  # blue  – utility / main bars
+    "a2": "#3fb950",  # green – combinations +1
+    "a3": "#f78166",  # red   – combinations +3 / negative
+    "a4": "#d2a8ff",  # purple– support dist histogram
+    "a5": "#ffa657",  # orange– support line overlay
+    "font_b": "JetBrains Mono, monospace",
+    "font_t": "Syne, sans-serif",
 }
 
 # Plotly 6 rejects duplicate kwargs in update_layout(**_LAYOUT_BASE, margin=...).
@@ -80,7 +82,9 @@ _LAYOUT_BASE = dict(
     yaxis=dict(tickfont=dict(color=_T["muted"]), gridcolor=_T["grid"], linecolor=_T["border"]),
 )
 _LAYOUT_MARGIN = dict(l=44, r=20, t=50, b=40)
-_LAYOUT_LEGEND = dict(font=dict(color=_T["muted"]), bgcolor="rgba(0,0,0,0)", bordercolor=_T["border"])
+_LAYOUT_LEGEND = dict(
+    font=dict(color=_T["muted"]), bgcolor="rgba(0,0,0,0)", bordercolor=_T["border"]
+)
 
 
 def _title(text: str) -> dict:
@@ -205,12 +209,12 @@ class HUGPlotter:
                 continue
             parts = label.split(", ")
             if len(parts) == 1 and label.startswith(feature_name + "="):
-                bin_label = label[len(feature_name) + 1:]
+                bin_label = label[len(feature_name) + 1 :]
                 lo = _parse_bin_lower(bin_label)
                 util = float(pe.utility)
-                ig   = float(pe.ig)
-                sup  = float(clf.x_train_hup_[:, idx].sum()) / n_train * 100
-                key  = lo if lo is not None else float("inf")
+                ig = float(pe.ig)
+                sup = float(clf.x_train_hup_[:, idx].sum()) / n_train * 100
+                key = lo if lo is not None else float("inf")
                 mined[key] = (bin_label, util, ig, sup)
 
         # ── Step 2: build the dense ordered bin sequence ────────────────────
@@ -247,26 +251,36 @@ class HUGPlotter:
             # Fallback: only mined bins, sorted left-to-right by lower bound
             if not mined:
                 fig = go.Figure()
-                fig.update_layout(**_LAYOUT_BASE,
+                fig.update_layout(
+                    **_LAYOUT_BASE,
                     title=_title(title or f"Marginal Bin Profile · {feature_name}"),
-                    height=height or self._h)
+                    height=height or self._h,
+                )
                 fig.add_annotation(
                     text=f"No singleton patterns for '{feature_name}'. "
-                         "Try reducing G or increasing topK.",
-                    xref="paper", yref="paper", x=0.5, y=0.5,
-                    showarrow=False, font=dict(color=_T["muted"]))
+                    "Try reducing G or increasing topK.",
+                    xref="paper",
+                    yref="paper",
+                    x=0.5,
+                    y=0.5,
+                    showarrow=False,
+                    font=dict(color=_T["muted"]),
+                )
                 return fig
             sorted_items = sorted(mined.items(), key=lambda kv: kv[0])
-            bins_x    = [v[0] for _, v in sorted_items]
+            bins_x = [v[0] for _, v in sorted_items]
             bins_util = [v[1] for _, v in sorted_items]
-            bins_ig   = [v[2] for _, v in sorted_items]
-            bins_sup  = [v[3] for _, v in sorted_items]
+            bins_ig = [v[2] for _, v in sorted_items]
+            bins_sup = [v[3] for _, v in sorted_items]
             bins_mined = [True] * len(bins_x)
 
-        n_mined  = sum(bins_mined)
-        n_total  = len(bins_x)
-        subtitle = (f"{n_mined}/{n_total} bins have patterns"
-                    if n_mined < n_total else f"All {n_total} bins have patterns")
+        n_mined = sum(bins_mined)
+        n_total = len(bins_x)
+        subtitle = (
+            f"{n_mined}/{n_total} bins have patterns"
+            if n_mined < n_total
+            else f"All {n_total} bins have patterns"
+        )
 
         # ── Step 3: colours — IG intensity for mined bins, gray for empty ───
         max_ig = max(bins_ig) if any(bins_ig) else 1
@@ -276,7 +290,7 @@ class HUGPlotter:
                 alpha = 0.4 + 0.6 * ig / (max_ig + 1e-9)
                 colors.append(f"rgba(88,166,255,{alpha:.2f})")
             else:
-                colors.append("rgba(100,100,100,0.25)")   # grey — no pattern mined
+                colors.append("rgba(100,100,100,0.25)")  # grey — no pattern mined
 
         fig = make_subplots(specs=[[{"secondary_y": True}]])
         fig.add_trace(
@@ -306,26 +320,50 @@ class HUGPlotter:
             **_LAYOUT_BASE,
             title=_title(title or f"Marginal Bin Profile · {feature_name}"),
             height=height or self._h,
-            annotations=[dict(
-                text=subtitle, xref="paper", yref="paper",
-                x=0.99, y=0.99, showarrow=False, xanchor="right",
-                font=dict(size=10, color=_T["muted"]),
-            )],
+            annotations=[
+                dict(
+                    text=subtitle,
+                    xref="paper",
+                    yref="paper",
+                    x=0.99,
+                    y=0.99,
+                    showarrow=False,
+                    xanchor="right",
+                    font=dict(size=10, color=_T["muted"]),
+                )
+            ],
         )
-        fig.update_layout(legend=dict(
-            x=0.01, y=0.99, font=dict(color=_T["muted"]),
-            bgcolor="rgba(0,0,0,0)", bordercolor=_T["border"]))
-        fig.update_xaxes(title_text="Bin Range", tickangle=-35,
-                         tickfont=dict(size=9, color=_T["muted"]),
-                         gridcolor=_T["grid"], linecolor=_T["border"])
-        fig.update_yaxes(title_text="Utility", secondary_y=False,
-                         title_font=dict(color=_T["a1"]),
-                         tickfont=dict(color=_T["muted"]),
-                         gridcolor=_T["grid"], linecolor=_T["border"])
-        fig.update_yaxes(title_text="Support %", secondary_y=True,
-                         title_font=dict(color=_T["a5"]),
-                         showgrid=False,
-                         tickfont=dict(color=_T["a5"]))
+        fig.update_layout(
+            legend=dict(
+                x=0.01,
+                y=0.99,
+                font=dict(color=_T["muted"]),
+                bgcolor="rgba(0,0,0,0)",
+                bordercolor=_T["border"],
+            )
+        )
+        fig.update_xaxes(
+            title_text="Bin Range",
+            tickangle=-35,
+            tickfont=dict(size=9, color=_T["muted"]),
+            gridcolor=_T["grid"],
+            linecolor=_T["border"],
+        )
+        fig.update_yaxes(
+            title_text="Utility",
+            secondary_y=False,
+            title_font=dict(color=_T["a1"]),
+            tickfont=dict(color=_T["muted"]),
+            gridcolor=_T["grid"],
+            linecolor=_T["border"],
+        )
+        fig.update_yaxes(
+            title_text="Support %",
+            secondary_y=True,
+            title_font=dict(color=_T["a5"]),
+            showgrid=False,
+            tickfont=dict(color=_T["a5"]),
+        )
         return fig
 
     # ------------------------------------------------------------------
@@ -371,46 +409,64 @@ class HUGPlotter:
             if not any(p.startswith(feature_name + "=") for p in parts):
                 continue
             util = float(pe.utility)
-            sup  = float(clf.x_train_hup_[:, idx].sum()) / n_train * 100
+            sup = float(clf.x_train_hup_[:, idx].sum()) / n_train * 100
             extra = len(pe.items) - 1
             rows.append({"label": label, "util": util, "extra": extra, "sup": sup})
 
         fig = go.Figure()
         if not rows:
-            fig.update_layout(**_LAYOUT_BASE,
+            fig.update_layout(
+                **_LAYOUT_BASE,
                 title=_title(title or f"Feature Combinations · {feature_name}"),
-                height=height or self._h)
-            fig.add_annotation(text=f"No compound patterns for '{feature_name}'",
-                               xref="paper", yref="paper", x=0.5, y=0.5,
-                               showarrow=False, font=dict(color=_T["muted"]))
+                height=height or self._h,
+            )
+            fig.add_annotation(
+                text=f"No compound patterns for '{feature_name}'",
+                xref="paper",
+                yref="paper",
+                x=0.5,
+                y=0.5,
+                showarrow=False,
+                font=dict(color=_T["muted"]),
+            )
             return fig
 
-        df = (pd.DataFrame(rows)
-              .sort_values("util", ascending=False)
-              .head(top_n)[::-1])
+        df = pd.DataFrame(rows).sort_values("util", ascending=False).head(top_n)[::-1]
 
         # Colour by extra-feature count
         color_map = {1: _T["a2"], 2: _T["a5"], 3: _T["a3"]}
         colors = [color_map.get(e, _T["a4"]) for e in df["extra"]]
 
-        fig.add_trace(go.Bar(
-            x=df["util"],
-            y=[f"{r['label'][:45]}…" if len(r["label"]) > 45 else r["label"] for _, r in df.iterrows()],
-            orientation="h",
-            marker=dict(color=colors, line=dict(color=_T["border"], width=0.3)),
-            text=[f"supp={r['sup']:.1f}%" for _, r in df.iterrows()],
-            textfont=dict(color=_T["muted"], size=8),
-            textposition="outside",
-            hovertemplate="<b>%{y}</b><br>Utility: %{x:.4f}<extra></extra>",
-        ))
+        fig.add_trace(
+            go.Bar(
+                x=df["util"],
+                y=[
+                    f"{r['label'][:45]}…" if len(r["label"]) > 45 else r["label"]
+                    for _, r in df.iterrows()
+                ],
+                orientation="h",
+                marker=dict(color=colors, line=dict(color=_T["border"], width=0.3)),
+                text=[f"supp={r['sup']:.1f}%" for _, r in df.iterrows()],
+                textfont=dict(color=_T["muted"], size=8),
+                textposition="outside",
+                hovertemplate="<b>%{y}</b><br>Utility: %{x:.4f}<extra></extra>",
+            )
+        )
 
         # Legend annotation
         fig.add_annotation(
-            text=(f"<span style='color:{_T['a2']}'>■</span> +1  "
-                  f"<span style='color:{_T['a5']}'>■</span> +2  "
-                  f"<span style='color:{_T['a3']}'>■</span> +3 extra features"),
-            x=1.01, xanchor="right", xref="paper", y=1.06, yref="paper",
-            showarrow=False, font=dict(color=_T["muted"], size=9),
+            text=(
+                f"<span style='color:{_T['a2']}'>■</span> +1  "
+                f"<span style='color:{_T['a5']}'>■</span> +2  "
+                f"<span style='color:{_T['a3']}'>■</span> +3 extra features"
+            ),
+            x=1.01,
+            xanchor="right",
+            xref="paper",
+            y=1.06,
+            yref="paper",
+            showarrow=False,
+            font=dict(color=_T["muted"], size=9),
         )
 
         fig.update_layout(
@@ -418,11 +474,18 @@ class HUGPlotter:
             title=_title(title or f"Feature Combinations · {feature_name}"),
             height=max(320, len(df) * 22 + 80) if height is None else height,
         )
-        fig.update_xaxes(title_text="Utility", tickfont=dict(color=_T["muted"]),
-                         gridcolor=_T["grid"], linecolor=_T["border"])
-        fig.update_yaxes(tickfont=dict(size=9, color=_T["muted"]),
-                         autorange="reversed",
-                         gridcolor=_T["grid"], linecolor=_T["border"])
+        fig.update_xaxes(
+            title_text="Utility",
+            tickfont=dict(color=_T["muted"]),
+            gridcolor=_T["grid"],
+            linecolor=_T["border"],
+        )
+        fig.update_yaxes(
+            tickfont=dict(size=9, color=_T["muted"]),
+            autorange="reversed",
+            gridcolor=_T["grid"],
+            linecolor=_T["border"],
+        )
         return fig
 
     # ------------------------------------------------------------------
@@ -465,37 +528,39 @@ class HUGPlotter:
 
         rows = []
         for fname, v in feat_stats.items():
-            rows.append({
-                "feature": fname,
-                "mean_util": float(np.mean(v["utils"])),
-                "mean_ig":   float(np.mean(v["igs"])),
-                "n":         v["n"],
-            })
+            rows.append(
+                {
+                    "feature": fname,
+                    "mean_util": float(np.mean(v["utils"])),
+                    "mean_ig": float(np.mean(v["igs"])),
+                    "n": v["n"],
+                }
+            )
 
-        df = (pd.DataFrame(rows)
-              .sort_values("mean_util", ascending=False)
-              .head(top_n)[::-1])
+        df = pd.DataFrame(rows).sort_values("mean_util", ascending=False).head(top_n)[::-1]
 
-        fig = go.Figure(go.Bar(
-            x=df["mean_util"],
-            y=df["feature"],
-            orientation="h",
-            marker=dict(
-                color=df["mean_ig"],
-                colorscale=[[0,"#30123b"],[0.5,"#1bcfd4"],[1,"#7a0402"]],
-                showscale=True,
-                colorbar=dict(
-                    thickness=11,
-                    tickfont=dict(color=_T["muted"]),
-                    title=dict(font=dict(color=_T["muted"]), text="Mean IG"),
+        fig = go.Figure(
+            go.Bar(
+                x=df["mean_util"],
+                y=df["feature"],
+                orientation="h",
+                marker=dict(
+                    color=df["mean_ig"],
+                    colorscale=[[0, "#30123b"], [0.5, "#1bcfd4"], [1, "#7a0402"]],
+                    showscale=True,
+                    colorbar=dict(
+                        thickness=11,
+                        tickfont=dict(color=_T["muted"]),
+                        title=dict(font=dict(color=_T["muted"]), text="Mean IG"),
+                    ),
+                    line=dict(color=_T["border"], width=0.3),
                 ),
-                line=dict(color=_T["border"], width=0.3),
-            ),
-            text=[f"n={r['n']}" for _, r in df.iterrows()],
-            textfont=dict(color=_T["muted"], size=9),
-            textposition="outside",
-            hovertemplate="<b>%{y}</b><br>Mean U: %{x:.4f}<extra></extra>",
-        ))
+                text=[f"n={r['n']}" for _, r in df.iterrows()],
+                textfont=dict(color=_T["muted"], size=9),
+                textposition="outside",
+                hovertemplate="<b>%{y}</b><br>Mean U: %{x:.4f}<extra></extra>",
+            )
+        )
 
         fig.update_layout(
             **_LAYOUT_BASE,
@@ -503,11 +568,18 @@ class HUGPlotter:
             height=height or max(280, len(df) * 28 + 80),
             margin=dict(l=44, r=20, t=76, b=40),
         )
-        fig.update_xaxes(title_text="Mean Utility", tickfont=dict(color=_T["muted"]),
-                         gridcolor=_T["grid"], linecolor=_T["border"])
-        fig.update_yaxes(autorange="reversed",
-                         tickfont=dict(color=_T["muted"]),
-                         gridcolor=_T["grid"], linecolor=_T["border"])
+        fig.update_xaxes(
+            title_text="Mean Utility",
+            tickfont=dict(color=_T["muted"]),
+            gridcolor=_T["grid"],
+            linecolor=_T["border"],
+        )
+        fig.update_yaxes(
+            autorange="reversed",
+            tickfont=dict(color=_T["muted"]),
+            gridcolor=_T["grid"],
+            linecolor=_T["border"],
+        )
         return fig
 
     # ------------------------------------------------------------------
@@ -549,38 +621,50 @@ class HUGPlotter:
             z_sup.append(float(clf.x_train_hup_[:, idx].sum()) / n_train)
             texts.append(label)
 
-        fig = go.Figure(go.Scatter(
-            x=x_util,
-            y=y_ig,
-            mode="markers",
-            text=texts,
-            hovertemplate="<b>%{text}</b><br>U=%{x:.4f} IG=%{y:.4f}<extra></extra>",
-            marker=dict(
-                color=z_sup,
-                colorscale="Viridis",
-                showscale=True,
-                colorbar=dict(
-                    thickness=11,
-                    tickfont=dict(color=_T["muted"]),
-                    title=dict(font=dict(color=_T["muted"]), text="Support"),
+        fig = go.Figure(
+            go.Scatter(
+                x=x_util,
+                y=y_ig,
+                mode="markers",
+                text=texts,
+                hovertemplate="<b>%{text}</b><br>U=%{x:.4f} IG=%{y:.4f}<extra></extra>",
+                marker=dict(
+                    color=z_sup,
+                    colorscale="Viridis",
+                    showscale=True,
+                    colorbar=dict(
+                        thickness=11,
+                        tickfont=dict(color=_T["muted"]),
+                        title=dict(font=dict(color=_T["muted"]), text="Support"),
+                    ),
+                    line=dict(color=_T["border"], width=0.4),
+                    opacity=0.85,
+                    size=9,
                 ),
-                line=dict(color=_T["border"], width=0.4),
-                opacity=0.85,
-                size=9,
-            ),
-        ))
+            )
+        )
 
         fig.update_layout(
             **_LAYOUT_BASE,
-            title=_title(title or ("Utility vs Info Gain"
-                                   + (f" · {feature_filter}" if feature_filter else ""))),
+            title=_title(
+                title
+                or ("Utility vs Info Gain" + (f" · {feature_filter}" if feature_filter else ""))
+            ),
             height=height or 430,
             margin=dict(l=44, r=20, t=82, b=40),
         )
-        fig.update_xaxes(title_text="Utility", tickfont=dict(color=_T["muted"]),
-                         gridcolor=_T["grid"], linecolor=_T["border"])
-        fig.update_yaxes(title_text="Information Gain", tickfont=dict(color=_T["muted"]),
-                         gridcolor=_T["grid"], linecolor=_T["border"])
+        fig.update_xaxes(
+            title_text="Utility",
+            tickfont=dict(color=_T["muted"]),
+            gridcolor=_T["grid"],
+            linecolor=_T["border"],
+        )
+        fig.update_yaxes(
+            title_text="Information Gain",
+            tickfont=dict(color=_T["muted"]),
+            gridcolor=_T["grid"],
+            linecolor=_T["border"],
+        )
         return fig
 
     # ------------------------------------------------------------------
@@ -614,36 +698,36 @@ class HUGPlotter:
         rows = []
         for idx, (label, pe) in enumerate(zip(all_labels, clf.patterns_)):
             sup = float(clf.x_train_hup_[:, idx].sum()) / n_train
-            rows.append({"label": label, "util": float(pe.utility),
-                          "ig": float(pe.ig), "sup": sup})
+            rows.append({"label": label, "util": float(pe.utility), "ig": float(pe.ig), "sup": sup})
 
-        df = (pd.DataFrame(rows)
-              .sort_values("util", ascending=False)
-              .head(top_n)[::-1])
+        df = pd.DataFrame(rows).sort_values("util", ascending=False).head(top_n)[::-1]
 
-        short = [f"{r['label'][:40]}…" if len(r["label"]) > 40 else r["label"]
-                 for _, r in df.iterrows()]
+        short = [
+            f"{r['label'][:40]}…" if len(r["label"]) > 40 else r["label"] for _, r in df.iterrows()
+        ]
 
-        fig = go.Figure(go.Bar(
-            x=df["util"],
-            y=short,
-            orientation="h",
-            marker=dict(
-                color=df["ig"],
-                colorscale=[[0,"#0d0887"],[0.5,"#bd3786"],[1,"#f0f921"]],
-                showscale=True,
-                colorbar=dict(
-                    thickness=11,
-                    tickfont=dict(color=_T["muted"]),
-                    title=dict(font=dict(color=_T["muted"]), text="IG"),
+        fig = go.Figure(
+            go.Bar(
+                x=df["util"],
+                y=short,
+                orientation="h",
+                marker=dict(
+                    color=df["ig"],
+                    colorscale=[[0, "#0d0887"], [0.5, "#bd3786"], [1, "#f0f921"]],
+                    showscale=True,
+                    colorbar=dict(
+                        thickness=11,
+                        tickfont=dict(color=_T["muted"]),
+                        title=dict(font=dict(color=_T["muted"]), text="IG"),
+                    ),
+                    line=dict(color=_T["border"], width=0.3),
                 ),
-                line=dict(color=_T["border"], width=0.3),
-            ),
-            text=[f"s={r['sup']:.3f}" for _, r in df.iterrows()],
-            textfont=dict(color=_T["muted"], size=9),
-            textposition="outside",
-            hovertemplate="<b>%{y}</b><br>Utility: %{x:.4f}<extra></extra>",
-        ))
+                text=[f"s={r['sup']:.3f}" for _, r in df.iterrows()],
+                textfont=dict(color=_T["muted"], size=9),
+                textposition="outside",
+                hovertemplate="<b>%{y}</b><br>Utility: %{x:.4f}<extra></extra>",
+            )
+        )
 
         fig.update_layout(
             **_LAYOUT_BASE,
@@ -651,11 +735,18 @@ class HUGPlotter:
             height=height or max(280, len(df) * 24 + 80),
             margin=dict(l=44, r=20, t=76, b=40),
         )
-        fig.update_xaxes(title_text="Utility", tickfont=dict(color=_T["muted"]),
-                         gridcolor=_T["grid"], linecolor=_T["border"])
-        fig.update_yaxes(autorange="reversed",
-                         tickfont=dict(color=_T["muted"]),
-                         gridcolor=_T["grid"], linecolor=_T["border"])
+        fig.update_xaxes(
+            title_text="Utility",
+            tickfont=dict(color=_T["muted"]),
+            gridcolor=_T["grid"],
+            linecolor=_T["border"],
+        )
+        fig.update_yaxes(
+            autorange="reversed",
+            tickfont=dict(color=_T["muted"]),
+            gridcolor=_T["grid"],
+            linecolor=_T["border"],
+        )
         return fig
 
     # ------------------------------------------------------------------
@@ -676,23 +767,25 @@ class HUGPlotter:
         all_labels = clf.get_hug_features()
 
         from collections import Counter
+
         feat_counts: Counter = Counter()
         for label in all_labels:
             for part in label.split(", "):
                 if "=" in part:
                     feat_counts[part.split("=")[0]] += 1
 
-        df = (pd.DataFrame(feat_counts.most_common(top_n), columns=["feature", "count"])
-              .iloc[::-1])
+        df = pd.DataFrame(feat_counts.most_common(top_n), columns=["feature", "count"]).iloc[::-1]
 
-        fig = go.Figure(go.Bar(
-            x=df["count"],
-            y=df["feature"],
-            orientation="h",
-            marker=dict(color=_T["a2"], line=dict(color=_T["border"], width=0.3)),
-            text=df["count"].astype(str),
-            textposition="auto",
-        ))
+        fig = go.Figure(
+            go.Bar(
+                x=df["count"],
+                y=df["feature"],
+                orientation="h",
+                marker=dict(color=_T["a2"], line=dict(color=_T["border"], width=0.3)),
+                text=df["count"].astype(str),
+                textposition="auto",
+            )
+        )
 
         fig.update_layout(
             **_LAYOUT_BASE,
@@ -700,11 +793,18 @@ class HUGPlotter:
             height=height or max(280, len(df) * 26 + 80),
             margin=dict(l=44, r=20, t=76, b=40),
         )
-        fig.update_xaxes(title_text="# Patterns", tickfont=dict(color=_T["muted"]),
-                         gridcolor=_T["grid"], linecolor=_T["border"])
-        fig.update_yaxes(autorange="reversed",
-                         tickfont=dict(color=_T["muted"]),
-                         gridcolor=_T["grid"], linecolor=_T["border"])
+        fig.update_xaxes(
+            title_text="# Patterns",
+            tickfont=dict(color=_T["muted"]),
+            gridcolor=_T["grid"],
+            linecolor=_T["border"],
+        )
+        fig.update_yaxes(
+            autorange="reversed",
+            tickfont=dict(color=_T["muted"]),
+            gridcolor=_T["grid"],
+            linecolor=_T["border"],
+        )
         return fig
 
     # ------------------------------------------------------------------
@@ -721,27 +821,38 @@ class HUGPlotter:
         Matches the "Pattern Lengths" card in the governance dashboard.
         """
         from collections import Counter
+
         lengths = Counter(len(pe.items) for pe in self._clf.patterns_)
         xs = sorted(lengths.keys())
         colors = [_T["a1"] if i == 0 else _T["a2"] for i in range(len(xs))]
 
-        fig = go.Figure(go.Bar(
-            x=[f"Length {x}" for x in xs],
-            y=[lengths[x] for x in xs],
-            marker=dict(color=colors[:len(xs)]),
-            text=[str(lengths[x]) for x in xs],
-            textposition="auto",
-        ))
+        fig = go.Figure(
+            go.Bar(
+                x=[f"Length {x}" for x in xs],
+                y=[lengths[x] for x in xs],
+                marker=dict(color=colors[: len(xs)]),
+                text=[str(lengths[x]) for x in xs],
+                textposition="auto",
+            )
+        )
 
         fig.update_layout(
             **_LAYOUT_BASE,
             title=_title(title or "Pattern Lengths"),
             height=height or 280,
         )
-        fig.update_xaxes(title_text="Pattern Length", tickfont=dict(color=_T["muted"]),
-                         gridcolor=_T["grid"], linecolor=_T["border"])
-        fig.update_yaxes(title_text="Count", tickfont=dict(color=_T["muted"]),
-                         gridcolor=_T["grid"], linecolor=_T["border"])
+        fig.update_xaxes(
+            title_text="Pattern Length",
+            tickfont=dict(color=_T["muted"]),
+            gridcolor=_T["grid"],
+            linecolor=_T["border"],
+        )
+        fig.update_yaxes(
+            title_text="Count",
+            tickfont=dict(color=_T["muted"]),
+            gridcolor=_T["grid"],
+            linecolor=_T["border"],
+        )
         return fig
 
     # ------------------------------------------------------------------
@@ -763,21 +874,31 @@ class HUGPlotter:
             for i in range(len(self._clf.patterns_))
         ]
 
-        fig = go.Figure(go.Histogram(
-            x=supports,
-            nbinsx=25,
-            marker=dict(color=_T["a4"], line=dict(color=_T["border"], width=0.3)),
-        ))
+        fig = go.Figure(
+            go.Histogram(
+                x=supports,
+                nbinsx=25,
+                marker=dict(color=_T["a4"], line=dict(color=_T["border"], width=0.3)),
+            )
+        )
 
         fig.update_layout(
             **_LAYOUT_BASE,
             title=_title(title or "Support Distribution"),
             height=height or 280,
         )
-        fig.update_xaxes(title_text="Support", tickfont=dict(color=_T["muted"]),
-                         gridcolor=_T["grid"], linecolor=_T["border"])
-        fig.update_yaxes(title_text="Count", tickfont=dict(color=_T["muted"]),
-                         gridcolor=_T["grid"], linecolor=_T["border"])
+        fig.update_xaxes(
+            title_text="Support",
+            tickfont=dict(color=_T["muted"]),
+            gridcolor=_T["grid"],
+            linecolor=_T["border"],
+        )
+        fig.update_yaxes(
+            title_text="Count",
+            tickfont=dict(color=_T["muted"]),
+            gridcolor=_T["grid"],
+            linecolor=_T["border"],
+        )
         return fig
 
     # ------------------------------------------------------------------
@@ -811,7 +932,7 @@ class HUGPlotter:
         """
         clf = self._clf
         is_df = isinstance(X, pd.DataFrame)
-        row = X.iloc[[sample_idx]] if is_df else X[sample_idx: sample_idx + 1]
+        row = X.iloc[[sample_idx]] if is_df else X[sample_idx : sample_idx + 1]
         hup = clf.transform(row)
         active_cols = hup[0].nonzero()[1].tolist()
 
@@ -833,26 +954,35 @@ class HUGPlotter:
 
         fig = go.Figure()
         if not records:
-            fig.update_layout(**_LAYOUT_BASE,
+            fig.update_layout(
+                **_LAYOUT_BASE,
                 title=_title(f"Active Patterns — sample #{sample_idx}"),
-                height=height or self._h)
-            fig.add_annotation(text="No active patterns for this sample.",
-                               xref="paper", yref="paper", x=0.5, y=0.5,
-                               showarrow=False, font=dict(color=_T["muted"]))
+                height=height or self._h,
+            )
+            fig.add_annotation(
+                text="No active patterns for this sample.",
+                xref="paper",
+                yref="paper",
+                x=0.5,
+                y=0.5,
+                showarrow=False,
+                font=dict(color=_T["muted"]),
+            )
             return fig
 
         coefs = [r["coef"] for r in records]
         colors = [_T["a1"] if c >= 0 else _T["a3"] for c in coefs]
-        labels = [f"{r['label'][:50]}…" if len(r["label"]) > 50 else r["label"]
-                  for r in records]
+        labels = [f"{r['label'][:50]}…" if len(r["label"]) > 50 else r["label"] for r in records]
 
-        fig.add_trace(go.Bar(
-            x=coefs,
-            y=labels,
-            orientation="h",
-            marker=dict(color=colors, line=dict(color=_T["border"], width=0.3)),
-            hovertemplate="<b>%{y}</b><br>Coef: %{x:.4f}<extra></extra>",
-        ))
+        fig.add_trace(
+            go.Bar(
+                x=coefs,
+                y=labels,
+                orientation="h",
+                marker=dict(color=colors, line=dict(color=_T["border"], width=0.3)),
+                hovertemplate="<b>%{y}</b><br>Coef: %{x:.4f}<extra></extra>",
+            )
+        )
 
         n_active = len(active_cols)
         fig.update_layout(
@@ -860,10 +990,15 @@ class HUGPlotter:
             title=_title(title or f"Active Patterns — sample #{sample_idx} ({n_active} active)"),
             height=height or max(280, len(records) * 24 + 80),
         )
-        fig.update_xaxes(title_text="Coefficient", tickfont=dict(color=_T["muted"]),
-                         gridcolor=_T["grid"], linecolor=_T["border"])
-        fig.update_yaxes(tickfont=dict(size=9, color=_T["muted"]),
-                         gridcolor=_T["grid"], linecolor=_T["border"])
+        fig.update_xaxes(
+            title_text="Coefficient",
+            tickfont=dict(color=_T["muted"]),
+            gridcolor=_T["grid"],
+            linecolor=_T["border"],
+        )
+        fig.update_yaxes(
+            tickfont=dict(size=9, color=_T["muted"]), gridcolor=_T["grid"], linecolor=_T["border"]
+        )
         return fig
 
     # ------------------------------------------------------------------
@@ -900,27 +1035,31 @@ class HUGPlotter:
             metrics.get("f1", 0),
         ]
         # Close the polygon
-        cats  = cats + [cats[0]]
-        vals  = vals + [vals[0]]
+        cats = cats + [cats[0]]
+        vals = vals + [vals[0]]
 
-        fig = go.Figure(go.Scatterpolar(
-            r=vals,
-            theta=cats,
-            fill="toself",
-            fillcolor="rgba(88,166,255,.12)",
-            line=dict(color=_T["a1"], width=2),
-        ))
+        fig = go.Figure(
+            go.Scatterpolar(
+                r=vals,
+                theta=cats,
+                fill="toself",
+                fillcolor="rgba(88,166,255,.12)",
+                line=dict(color=_T["a1"], width=2),
+            )
+        )
 
         fig.update_layout(
             **_LAYOUT_BASE,
             title=_title(f"{dataset_name}\nPerformance"),
             height=height or 300,
             polar=dict(
-                radialaxis=dict(visible=True, range=[0, 1],
-                                gridcolor=_T["grid"],
-                                tickfont=dict(color=_T["muted"])),
-                angularaxis=dict(gridcolor=_T["grid"],
-                                 tickfont=dict(color=_T["text"])),
+                radialaxis=dict(
+                    visible=True,
+                    range=[0, 1],
+                    gridcolor=_T["grid"],
+                    tickfont=dict(color=_T["muted"]),
+                ),
+                angularaxis=dict(gridcolor=_T["grid"], tickfont=dict(color=_T["text"])),
                 bgcolor=_T["panel"],
             ),
         )
@@ -955,55 +1094,76 @@ class HUGPlotter:
         def _bin(label: str, feat: str) -> str:
             for p in label.split(", "):
                 if p.startswith(feat + "="):
-                    return p[len(feat) + 1:]
+                    return p[len(feat) + 1 :]
             return "?"
 
-        compound = [(lbl, pe) for lbl, pe in zip(all_labels, clf.patterns_)
-                    if feature_a + "=" in lbl and feature_b + "=" in lbl]
+        compound = [
+            (lbl, pe)
+            for lbl, pe in zip(all_labels, clf.patterns_)
+            if feature_a + "=" in lbl and feature_b + "=" in lbl
+        ]
 
         fig = go.Figure()
         if not compound:
-            fig.update_layout(**_LAYOUT_BASE,
+            fig.update_layout(
+                **_LAYOUT_BASE,
                 title=_title(title or f"2-D HUG Profile · {feature_a} × {feature_b}"),
-                height=height or self._h)
+                height=height or self._h,
+            )
             fig.add_annotation(
                 text=f"No compound patterns for '{feature_a}' × '{feature_b}'.\nTry L≥2 and lower G.",
-                xref="paper", yref="paper", x=0.5, y=0.5,
-                showarrow=False, font=dict(color=_T["muted"]))
+                xref="paper",
+                yref="paper",
+                x=0.5,
+                y=0.5,
+                showarrow=False,
+                font=dict(color=_T["muted"]),
+            )
             return fig
 
         bins_a = sorted(set(_bin(lbl, feature_a) for lbl, _ in compound))
         bins_b = sorted(set(_bin(lbl, feature_b) for lbl, _ in compound))
-        idx_a  = {b: i for i, b in enumerate(bins_a)}
-        idx_b  = {b: i for i, b in enumerate(bins_b)}
-        grid   = np.zeros((len(bins_a), len(bins_b)))
+        idx_a = {b: i for i, b in enumerate(bins_a)}
+        idx_b = {b: i for i, b in enumerate(bins_b)}
+        grid = np.zeros((len(bins_a), len(bins_b)))
         for lbl, pe in compound:
             ia = idx_a.get(_bin(lbl, feature_a))
             ib = idx_b.get(_bin(lbl, feature_b))
             if ia is not None and ib is not None:
                 grid[ia, ib] += float(pe.utility)
 
-        fig.add_trace(go.Heatmap(
-            z=grid,
-            x=bins_b,
-            y=bins_a,
-            colorscale="RdBu_r",
-            zmid=0,
-            colorbar=dict(tickfont=dict(color=_T["muted"]),
-                          title=dict(font=dict(color=_T["muted"]), text="aggregate utility")),
-        ))
+        fig.add_trace(
+            go.Heatmap(
+                z=grid,
+                x=bins_b,
+                y=bins_a,
+                colorscale="RdBu_r",
+                zmid=0,
+                colorbar=dict(
+                    tickfont=dict(color=_T["muted"]),
+                    title=dict(font=dict(color=_T["muted"]), text="aggregate utility"),
+                ),
+            )
+        )
 
         fig.update_layout(
             **_LAYOUT_BASE,
             title=_title(title or f"2-D HUG Profile · {feature_a} × {feature_b}"),
             height=height or self._h,
         )
-        fig.update_xaxes(title_text=feature_b, tickangle=-35,
-                         tickfont=dict(size=9, color=_T["muted"]),
-                         gridcolor=_T["grid"], linecolor=_T["border"])
-        fig.update_yaxes(title_text=feature_a,
-                         tickfont=dict(size=9, color=_T["muted"]),
-                         gridcolor=_T["grid"], linecolor=_T["border"])
+        fig.update_xaxes(
+            title_text=feature_b,
+            tickangle=-35,
+            tickfont=dict(size=9, color=_T["muted"]),
+            gridcolor=_T["grid"],
+            linecolor=_T["border"],
+        )
+        fig.update_yaxes(
+            title_text=feature_a,
+            tickfont=dict(size=9, color=_T["muted"]),
+            gridcolor=_T["grid"],
+            linecolor=_T["border"],
+        )
         return fig
 
     # ------------------------------------------------------------------
@@ -1042,11 +1202,13 @@ class HUGPlotter:
         all_labels = clf.get_hug_features()
 
         # Find features with singleton patterns
-        singleton_feats = sorted({
-            lbl.split(", ")[0].split("=")[0]
-            for lbl, pe in zip(all_labels, clf.patterns_)
-            if len(pe.items) == 1
-        })
+        singleton_feats = sorted(
+            {
+                lbl.split(", ")[0].split("=")[0]
+                for lbl, pe in zip(all_labels, clf.patterns_)
+                if len(pe.items) == 1
+            }
+        )
         if feature_names_for_profile is None:
             feature_names_for_profile = singleton_feats[:12]  # limit for dashboard
 
@@ -1068,6 +1230,7 @@ class HUGPlotter:
         # Assemble HTML — use plotly's own bundled JS so the file is self-contained
         # and works without a network connection (no CDN pin to go stale).
         import plotly.io as pio
+
         html_parts = [
             "<!DOCTYPE html><html><head>",
             "<meta charset='utf-8'>",
@@ -1077,7 +1240,8 @@ class HUGPlotter:
             f"h1{{font-family:{_T['font_t']};color:{_T['a1']};}}",
             ".grid-2{{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-bottom:14px;}}",
             ".card{{background:{panel};border:1px solid {border};border-radius:8px;overflow:hidden;}}".format(
-                panel=_T["panel"], border=_T["border"]),
+                panel=_T["panel"], border=_T["border"]
+            ),
             "</style></head><body>",
             f"<h1>HUG-IML Governance Dashboard — {dataset_name}</h1>",
             "<div class='grid-2'>",

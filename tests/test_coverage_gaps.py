@@ -40,63 +40,74 @@ class TestExceptionHierarchy:
 
     def test_hugiml_error_is_exception(self):
         from hugiml.exceptions import HUGIMLError
+
         err = HUGIMLError("base error")
         assert isinstance(err, Exception)
         assert str(err) == "base error"
 
     def test_fit_error(self):
         from hugiml.exceptions import HUGIMLError, HUGIMLFitError
+
         with pytest.raises(HUGIMLFitError):
             raise HUGIMLFitError("fit failed")
         assert issubclass(HUGIMLFitError, HUGIMLError)
 
     def test_mining_error(self):
         from hugiml.exceptions import HUGIMLFitError, HUGIMLMiningError
+
         with pytest.raises(HUGIMLMiningError):
             raise HUGIMLMiningError("no patterns")
         assert issubclass(HUGIMLMiningError, HUGIMLFitError)
 
     def test_timeout_error(self):
         from hugiml.exceptions import HUGIMLFitError, HUGIMLTimeoutError
+
         with pytest.raises(HUGIMLTimeoutError):
             raise HUGIMLTimeoutError("timed out")
         assert issubclass(HUGIMLTimeoutError, HUGIMLFitError)
 
     def test_validation_error_is_value_error(self):
         from hugiml.exceptions import HUGIMLValidationError
+
         with pytest.raises(ValueError):
             raise HUGIMLValidationError("bad input")
 
     def test_schema_error(self):
         from hugiml.exceptions import HUGIMLSchemaError, HUGIMLValidationError
+
         with pytest.raises(HUGIMLSchemaError):
             raise HUGIMLSchemaError("wrong columns")
         assert issubclass(HUGIMLSchemaError, HUGIMLValidationError)
 
     def test_param_error_is_type_error(self):
         from hugiml.exceptions import HUGIMLParamError
+
         with pytest.raises(TypeError):
             raise HUGIMLParamError("bad param")
 
     def test_serialization_error(self):
         from hugiml.exceptions import HUGIMLError, HUGIMLSerializationError
+
         with pytest.raises(HUGIMLSerializationError):
             raise HUGIMLSerializationError("save failed")
         assert issubclass(HUGIMLSerializationError, HUGIMLError)
 
     def test_version_error(self):
         from hugiml.exceptions import HUGIMLSerializationError, HUGIMLVersionError
+
         with pytest.raises(HUGIMLVersionError):
             raise HUGIMLVersionError("incompatible version")
         assert issubclass(HUGIMLVersionError, HUGIMLSerializationError)
 
     def test_prediction_error_is_runtime_error(self):
         from hugiml.exceptions import HUGIMLPredictionError
+
         with pytest.raises(RuntimeError):
             raise HUGIMLPredictionError("predict failed")
 
     def test_warning_base(self):
         from hugiml.exceptions import HUGIMLWarning
+
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
             warnings.warn("base warn", HUGIMLWarning)
@@ -105,6 +116,7 @@ class TestExceptionHierarchy:
 
     def test_convergence_warning(self):
         from hugiml.exceptions import HUGIMLConvergenceWarning
+
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
             warnings.warn("converged", HUGIMLConvergenceWarning)
@@ -112,6 +124,7 @@ class TestExceptionHierarchy:
 
     def test_dtype_drift_warning(self):
         from hugiml.exceptions import HUGIMLDtypeDriftWarning
+
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
             warnings.warn("dtype drift", HUGIMLDtypeDriftWarning)
@@ -119,6 +132,7 @@ class TestExceptionHierarchy:
 
     def test_range_warning(self):
         from hugiml.exceptions import HUGIMLRangeWarning
+
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
             warnings.warn("out of range", HUGIMLRangeWarning)
@@ -126,6 +140,7 @@ class TestExceptionHierarchy:
 
     def test_degraded_warning(self):
         from hugiml.exceptions import HUGIMLDegradedWarning
+
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
             warnings.warn("degraded", HUGIMLDegradedWarning)
@@ -133,6 +148,7 @@ class TestExceptionHierarchy:
 
     def test_deprecation_warning(self):
         from hugiml.exceptions import HUGIMLDeprecationWarning
+
         with warnings.catch_warnings(record=True) as w:
             warnings.simplefilter("always")
             warnings.warn("deprecated", HUGIMLDeprecationWarning)
@@ -149,6 +165,7 @@ class TestInitLazyImports:
 
     def test_version_and_metadata(self):
         import hugiml
+
         assert isinstance(hugiml.__version__, str)
         assert "Krishnamoorthy" in hugiml.__author__
         assert "Apache" in hugiml.__license__
@@ -156,51 +173,61 @@ class TestInitLazyImports:
 
     def test_lazy_interpretability_metrics(self):
         import hugiml
+
         cls = hugiml.InterpretabilityMetrics
         assert cls.__name__ == "InterpretabilityMetrics"
 
     def test_lazy_compute_all_metrics(self):
         import hugiml
+
         fn = hugiml.compute_all_metrics
         assert callable(fn)
 
     def test_lazy_metrics_dataframe(self):
         import hugiml
+
         fn = hugiml.metrics_dataframe
         assert callable(fn)
 
     def test_lazy_pattern_editor(self):
         import hugiml
+
         cls = hugiml.PatternEditor
         assert cls.__name__ == "PatternEditor"
 
     def test_lazy_hugiml_adaptive(self):
         import hugiml
+
         cls = hugiml.HUGIMLAdaptive
         assert cls.__name__ == "HUGIMLAdaptive"
 
     def test_lazy_multiclass_report(self):
         import hugiml
+
         cls = hugiml.MulticlassHUGReport
         assert cls.__name__ == "MulticlassHUGReport"
 
     def test_lazy_make_imbalanced_pipeline(self):
         import hugiml
+
         fn = hugiml.make_imbalanced_pipeline
         assert callable(fn)
 
     def test_lazy_encode_high_cardinality(self):
         import hugiml
+
         fn = hugiml.encode_high_cardinality
         assert callable(fn)
 
     def test_lazy_apply_encoding(self):
         import hugiml
+
         fn = hugiml.apply_encoding
         assert callable(fn)
 
     def test_unknown_attribute_raises(self):
         import hugiml
+
         with pytest.raises(AttributeError, match="no attribute"):
             _ = hugiml.NonExistentThing
 
@@ -215,6 +242,7 @@ class TestPredictionMonitorStats:
 
     def _filled_monitor(self, n: int = 20) -> object:
         from hugiml.monitoring import PredictionMonitor
+
         mon = PredictionMonitor(window_size=200)
         rng = np.random.default_rng(0)
         for _ in range(n):
@@ -226,9 +254,14 @@ class TestPredictionMonitorStats:
         mon = self._filled_monitor()
         s = mon.stats
         for key in (
-            "n_predictions", "confidence_mean", "confidence_std",
-            "confidence_min", "confidence_max",
-            "latency_p50_ms", "latency_p95_ms", "latency_p99_ms",
+            "n_predictions",
+            "confidence_mean",
+            "confidence_std",
+            "confidence_min",
+            "confidence_max",
+            "latency_p50_ms",
+            "latency_p95_ms",
+            "latency_p99_ms",
             "class_distribution",
         ):
             assert key in s, f"missing key: {key}"
@@ -257,6 +290,7 @@ class TestPredictionMonitorStats:
 
     def test_stats_empty_monitor(self):
         from hugiml.monitoring import PredictionMonitor
+
         mon = PredictionMonitor()
         s = mon.stats
         assert s["n_predictions"] == 0
@@ -269,6 +303,7 @@ class TestDriftDetectorLabelDrift:
 
     def _make_detector(self):
         from hugiml.monitoring import DriftDetector
+
         rng = np.random.default_rng(42)
         X_train = rng.standard_normal((200, 3))
         y_train = rng.integers(0, 2, 200)
@@ -285,16 +320,18 @@ class TestDriftDetectorLabelDrift:
 
     def test_label_drift_none_without_baseline(self):
         from hugiml.monitoring import DriftDetector
+
         det = DriftDetector()
         rng = np.random.default_rng(0)
         X = rng.standard_normal((50, 2))
         cat_mask = np.zeros(2, dtype=bool)
-        det.fit_baseline(X, cat_mask)   # no y → no label baseline
+        det.fit_baseline(X, cat_mask)  # no y → no label baseline
         result = det.compute_label_drift(np.zeros(50, dtype=int))
         assert result is None
 
     def test_detect_with_label_drift(self):
         from hugiml.monitoring import DriftReport
+
         det, X, y = self._make_detector()
         rng = np.random.default_rng(99)
         X_test = rng.standard_normal((80, 3))
@@ -330,6 +367,7 @@ class TestDriftDetectorLabelDrift:
 
     def test_detector_report_no_baseline(self):
         from hugiml.monitoring import DriftDetector
+
         det = DriftDetector()
         X_test = np.random.default_rng(0).standard_normal((20, 2))
         s = det.report(X_test)

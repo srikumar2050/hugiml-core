@@ -70,7 +70,7 @@ inline double safe_log(double x) {
 
 // ── Statistical functions ────────────────────────────────────────────────────
 
-/// Normalised Shannon entropy of integer class labels, in [0, 1].
+/// Java THUIsl-compatible Shannon entropy of integer class labels (natural-log scale).
 double entropy_vec(const std::vector<int>& y, int n_cls);
 
 /// Information gain of a discretised column w.r.t. class labels.

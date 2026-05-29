@@ -22,6 +22,7 @@ Usage
     python -m hugiml.benchmarks.runner --datasets breast_cancer adult
     python -m hugiml.benchmarks.runner --output benchmarks/results/
 """
+
 from __future__ import annotations
 
 import argparse
@@ -59,8 +60,10 @@ __all__ = [
 # Dataset loaders
 # ---------------------------------------------------------------------------
 
+
 def _load_breast_cancer():
     from sklearn.datasets import load_breast_cancer
+
     d = load_breast_cancer(as_frame=True)
     return d.data, d.target.values
 
@@ -68,6 +71,7 @@ def _load_breast_cancer():
 def _load_adult():
     try:
         from sklearn.datasets import fetch_openml
+
         data = fetch_openml("adult", version=2, as_frame=True, parser="auto")
         X = data.data.copy().fillna("MISSING")
         y = (data.target.str.strip().str.rstrip(".") == ">50K").astype(int).values
@@ -79,12 +83,14 @@ def _load_adult():
     except Exception:
         np.random.seed(42)
         n = 3000
-        X = pd.DataFrame({
-            "age": np.random.randint(18, 80, n),
-            "edu_num": np.random.randint(1, 16, n),
-            "capital_gain": np.random.exponential(500, n),
-            "hours_per_week": np.random.randint(10, 80, n),
-        })
+        X = pd.DataFrame(
+            {
+                "age": np.random.randint(18, 80, n),
+                "edu_num": np.random.randint(1, 16, n),
+                "capital_gain": np.random.exponential(500, n),
+                "hours_per_week": np.random.randint(10, 80, n),
+            }
+        )
         y = ((X["age"] > 40) & (X["hours_per_week"] > 40)).astype(int).values
         return X, y
 
@@ -92,25 +98,29 @@ def _load_adult():
 def _load_credit():
     try:
         from sklearn.datasets import fetch_openml
-        data = fetch_openml("default-of-credit-card-clients", version=1,
-                            as_frame=True, parser="auto")
+
+        data = fetch_openml(
+            "default-of-credit-card-clients", version=1, as_frame=True, parser="auto"
+        )
         return data.data.astype(float), data.target.astype(int).values
     except Exception:
         np.random.seed(7)
         n = 3000
-        X = pd.DataFrame({
-            "limit_bal": np.random.exponential(100000, n),
-            "age": np.random.randint(21, 75, n),
-            "bill_amt1": np.random.normal(20000, 15000, n),
-        })
+        X = pd.DataFrame(
+            {
+                "limit_bal": np.random.exponential(100000, n),
+                "age": np.random.randint(21, 75, n),
+                "bill_amt1": np.random.normal(20000, 15000, n),
+            }
+        )
         y = (np.random.random(n) < 0.22).astype(int)
         return X, y
 
 
 DATASET_LOADERS = {
     "breast_cancer": _load_breast_cancer,
-    "adult":         _load_adult,
-    "credit":        _load_credit,
+    "adult": _load_adult,
+    "credit": _load_credit,
 }
 
 
@@ -118,8 +128,10 @@ DATASET_LOADERS = {
 # Model builders
 # ---------------------------------------------------------------------------
 
+
 def _build_hugiml(allCols=None, origColumns=None):
     from hugiml import HUGIMLClassifierNative
+
     kw = {}
     if allCols is not None:
         kw = {"allCols": allCols, "origColumns": origColumns}
@@ -129,6 +141,7 @@ def _build_hugiml(allCols=None, origColumns=None):
 def _build_ebm():
     try:
         from interpret.glassbox import ExplainableBoostingClassifier
+
         return ExplainableBoostingClassifier(random_state=42)
     except ImportError:
         return None
@@ -137,26 +150,33 @@ def _build_ebm():
 def _build_xgb():
     try:
         import xgboost as xgb
-        return xgb.XGBClassifier(n_estimators=100, max_depth=4,
-                                  learning_rate=0.1, random_state=42,
-                                  eval_metric="logloss", verbosity=0)
+
+        return xgb.XGBClassifier(
+            n_estimators=100,
+            max_depth=4,
+            learning_rate=0.1,
+            random_state=42,
+            eval_metric="logloss",
+            verbosity=0,
+        )
     except ImportError:
         return None
 
 
 def _build_rf():
-    return RandomForestClassifier(n_estimators=200, max_depth=8,
-                                  random_state=42, n_jobs=-1)
+    return RandomForestClassifier(n_estimators=200, max_depth=8, random_state=42, n_jobs=-1)
 
 
 def _build_lr():
-    return Pipeline([("sc", StandardScaler()),
-                     ("lr", LogisticRegression(max_iter=500, random_state=42))])
+    return Pipeline(
+        [("sc", StandardScaler()), ("lr", LogisticRegression(max_iter=500, random_state=42))]
+    )
 
 
 def _build_rulefit():
     try:
         from rulefit import RuleFit
+
         return RuleFit(tree_size=4, max_rules=100, rfmode="classify", random_state=42)
     except ImportError:
         return None
@@ -165,25 +185,27 @@ def _build_rulefit():
 def _build_pygam():
     try:
         from pygam import LogisticGAM
+
         return LogisticGAM()
     except ImportError:
         return None
 
 
 BUILDERS = {
-    "HUG-IML":      _build_hugiml,
-    "EBM":          _build_ebm,
-    "XGBoost":      _build_xgb,
+    "HUG-IML": _build_hugiml,
+    "EBM": _build_ebm,
+    "XGBoost": _build_xgb,
     "RandomForest": _build_rf,
-    "LogisticReg":  _build_lr,
-    "RuleFit":      _build_rulefit,
-    "GAM":          _build_pygam,
+    "LogisticReg": _build_lr,
+    "RuleFit": _build_rulefit,
+    "GAM": _build_pygam,
 }
 
 
 # ---------------------------------------------------------------------------
 # Single-fold evaluation
 # ---------------------------------------------------------------------------
+
 
 def _evaluate(clf, X_tr, y_tr, X_te, y_te) -> dict:
     t0 = time.perf_counter()
@@ -206,13 +228,13 @@ def _evaluate(clf, X_tr, y_tr, X_te, y_te) -> dict:
             return float("nan")
 
     return {
-        "accuracy":          _s(accuracy_score, y_te, preds),
+        "accuracy": _s(accuracy_score, y_te, preds),
         "balanced_accuracy": _s(balanced_accuracy_score, y_te, preds),
-        "roc_auc":           _s(roc_auc_score, y_te, proba),
-        "avg_precision":     _s(average_precision_score, y_te, proba),
-        "brier":             _s(brier_score_loss, y_te, proba),
-        "f1":                _s(f1_score, y_te, preds, zero_division=0),
-        "fit_ms":            fit_ms,
+        "roc_auc": _s(roc_auc_score, y_te, proba),
+        "avg_precision": _s(average_precision_score, y_te, proba),
+        "brier": _s(brier_score_loss, y_te, proba),
+        "f1": _s(f1_score, y_te, preds, zero_division=0),
+        "fit_ms": fit_ms,
     }
 
 
@@ -220,10 +242,12 @@ def _evaluate(clf, X_tr, y_tr, X_te, y_te) -> dict:
 # Main benchmark loop
 # ---------------------------------------------------------------------------
 
-def run_benchmark(dataset_name: str, n_splits: int = 5,
-                  output_dir: str | None = None) -> pd.DataFrame:
+
+def run_benchmark(
+    dataset_name: str, n_splits: int = 5, output_dir: str | None = None
+) -> pd.DataFrame:
     """Run CV benchmark for one dataset and return per-fold results."""
-    print(f"\n{'='*60}\nDataset: {dataset_name}\n{'='*60}")
+    print(f"\n{'=' * 60}\nDataset: {dataset_name}\n{'=' * 60}")
 
     X, y = DATASET_LOADERS[dataset_name]()
     print(f"  Shape: {X.shape}  |  class balance: {y.mean():.3f}")
@@ -251,18 +275,15 @@ def run_benchmark(dataset_name: str, n_splits: int = 5,
                 if isinstance(X_tr, pd.DataFrame):
                     cat_cols = X_tr.select_dtypes(include="object").columns.tolist()
                     int_cols = X_tr.select_dtypes(include="int").columns.tolist()
-                    flt_cols = [c for c in X_tr.columns
-                                if c not in cat_cols and c not in int_cols]
-                    clf = _build_hugiml([int_cols, flt_cols, cat_cols],
-                                        X_tr.columns.tolist())
+                    flt_cols = [c for c in X_tr.columns if c not in cat_cols and c not in int_cols]
+                    clf = _build_hugiml([int_cols, flt_cols, cat_cols], X_tr.columns.tolist())
                 else:
                     clf = _build_hugiml()
             else:
                 clf = copy.deepcopy(clf_proto)
 
             m = _evaluate(clf, X_tr, y_tr, X_te, y_te)
-            m.update({"fold": fold_idx, "model": model_name,
-                       "dataset": dataset_name})
+            m.update({"fold": fold_idx, "model": model_name, "dataset": dataset_name})
             records.append(m)
             fold_aucs.append(m.get("roc_auc", float("nan")))
 
@@ -273,9 +294,13 @@ def run_benchmark(dataset_name: str, n_splits: int = 5,
     if output_dir:
         Path(output_dir).mkdir(parents=True, exist_ok=True)
         df.to_csv(f"{output_dir}/{dataset_name}_results.csv", index=False)
-        summary = (df.groupby("model")[
-            ["accuracy","balanced_accuracy","roc_auc","f1","brier","fit_ms"]
-        ].agg(["mean","std"]).round(4))
+        summary = (
+            df.groupby("model")[
+                ["accuracy", "balanced_accuracy", "roc_auc", "f1", "brier", "fit_ms"]
+            ]
+            .agg(["mean", "std"])
+            .round(4)
+        )
         summary.to_json(f"{output_dir}/{dataset_name}_summary.json", indent=2)
         print(f"  → Saved results to {output_dir}/")
     return df
@@ -283,8 +308,7 @@ def run_benchmark(dataset_name: str, n_splits: int = 5,
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--datasets", nargs="+",
-                        default=list(DATASET_LOADERS.keys()))
+    parser.add_argument("--datasets", nargs="+", default=list(DATASET_LOADERS.keys()))
     parser.add_argument("--n-splits", type=int, default=5)
     parser.add_argument("--output", default="benchmarks/results/")
     args = parser.parse_args()
@@ -301,8 +325,7 @@ def main():
         Path(args.output).mkdir(parents=True, exist_ok=True)
         combined.to_csv(f"{args.output}/full_report.csv", index=False)
         print("\n=== FINAL SUMMARY ===")
-        print(combined.groupby("model")["roc_auc"]
-              .agg(["mean","std"]).round(4).to_string())
+        print(combined.groupby("model")["roc_auc"].agg(["mean", "std"]).round(4).to_string())
 
 
 if __name__ == "__main__":

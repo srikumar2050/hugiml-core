@@ -84,6 +84,10 @@ public:
     int    K, L;
     double G, minU = 0.0;
     std::vector<PatternEntry> heap;
+    // item_col[item_id - 1] gives the original feature for each item.
+    // When present, mining enforces the exact mutual-exclusion constraint
+    // that a pattern cannot contain two bins/categories from the same feature.
+    const std::vector<int>* item_col = nullptr;
 
     // Timeout support: set deadline_tp before calling mine().
     // explore() checks this every _timeout_check_interval calls and throws
@@ -98,10 +102,11 @@ public:
     THUIsl(int K, int L, double G) : K(K), L(L), G(G) {}
 
     void save(const std::vector<int>& items, const UL& ul);
-    UL   child_ul(const UL& p_ul, const UL& x_ul);
+    UL   child_ul(const UL* prefix_ul, const UL& px_ul, const UL& py_ul);
     void mine(const TransList& transactions,
               const std::vector<double>& item_twu,
-              const std::vector<int>& ytrain, int n_cls);
+              const std::vector<int>& ytrain, int n_cls,
+              const std::vector<int>* item_col_in = nullptr);
 
 private:
     int _explore_calls = 0;
@@ -109,7 +114,13 @@ private:
     void explore(std::vector<int>  prefix,
                  std::vector<UL*>& uls,
                  const std::vector<int>& y_arr,
-                 int n_cls, int depth, FMap& fmap);
+                 int n_cls, int depth, FMap& fmap,
+                 const UL* prefix_ul);
+
+    bool same_feature(int item_a, int item_b) const;
+    bool candidate_conflicts_with_prefix(const std::vector<int>& prefix,
+                                         int prefix_item,
+                                         int candidate_item) const;
 };
 
 // ── Entry point called from Python bindings ──────────────────────────────────

@@ -96,7 +96,7 @@ elif is_macos:
     _opt_fast = ["-O1", "-Wall", "-Wno-unused-parameter"]
     _opt_bind = ["-O0", "-g0", "-Wall", "-Wno-unused-parameter"]
     _opt_debug = ["-O0", "-g", "-DHUGIML_DEBUG"]
-    
+
 else:
     omp_compile = ["-fopenmp"]
     omp_link = ["-fopenmp"]

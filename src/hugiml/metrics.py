@@ -35,6 +35,7 @@ top_k_cumulative_contribution(k) — cumulative |coef| share of top-k patterns
 active_patterns_per_prediction   — per-sample array
 explanation_sparsity        — fraction of patterns *never* active (dead patterns)
 """
+
 from __future__ import annotations
 
 import dataclasses
@@ -102,7 +103,7 @@ class InterpretabilityMetrics:
             f"  n_patterns              : {self.n_patterns}",
             f"  avg_pattern_length      : {self.avg_pattern_length:.2f}",
             f"  max_pattern_length      : {self.max_pattern_length}",
-            f"  coverage                : {self.coverage:.4f}  ({self.coverage*100:.1f}% of {self.n_samples} samples)",
+            f"  coverage                : {self.coverage:.4f}  ({self.coverage * 100:.1f}% of {self.n_samples} samples)",
             f"  mean_active_patterns    : {self.mean_active_patterns:.2f}",
             f"  std_active_patterns     : {self.std_active_patterns:.2f}",
             f"  overlap_rate (norm.)    : {self.overlap_rate:.4f}",
@@ -110,7 +111,7 @@ class InterpretabilityMetrics:
             "  top-k cumulative |coef|:",
         ]
         for k, v in sorted(self.top_k_cumulative_contribution.items()):
-            lines.append(f"    top-{k:>3} : {v*100:6.1f}%")
+            lines.append(f"    top-{k:>3} : {v * 100:6.1f}%")
         return "\n".join(lines)
 
     def to_dict(self) -> dict:
@@ -328,9 +329,7 @@ def metrics_dataframe(results: dict[str, InterpretabilityMetrics]) -> pd.DataFra
 
 def _require_fitted(clf: Any) -> None:
     if not hasattr(clf, "patterns_"):
-        raise RuntimeError(
-            "Classifier must be fitted before computing interpretability metrics."
-        )
+        raise RuntimeError("Classifier must be fitted before computing interpretability metrics.")
 
 
 def _transform(clf: Any, X: Any):

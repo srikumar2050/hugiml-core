@@ -103,7 +103,6 @@ def run_benchmarks() -> dict[str, float]:
     """Return a dict mapping benchmark keys (as in baseline.json) to seconds."""
     import tempfile
 
-    import numpy as np
     import pandas as pd
     from sklearn.model_selection import train_test_split
 

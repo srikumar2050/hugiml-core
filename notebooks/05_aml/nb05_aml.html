@@ -2,487 +2,427 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>AML Transaction Monitoring</title>
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>AML Transaction Monitoring Report</title>
 <style>
+@import url('https://fonts.googleapis.com/css2?family=Lora:ital,wght@0,400;0,600;1,400&family=JetBrains+Mono:wght@400;500&family=Source+Sans+3:wght@300;400;600&display=swap');
 :root {
-  --ink: #17202a;
-  --muted: #52616f;
-  --page: #edf2f7;
-  --panel: #ffffff;
-  --panel-soft: #f8fafc;
-  --navy: #0b1f3a;
-  --blue: #1f6feb;
-  --cyan: #00a6b2;
-  --gold: #d4a72c;
-  --gold-soft: #fff8e6;
-  --danger: #b42318;
-  --danger-soft: #fff1f0;
-  --success: #087443;
-  --line: #d8e0ea;
-  --shadow: 0 18px 45px rgba(12, 31, 58, 0.12);
+  --bg: #fbf7ef; --panel: #fffdf8; --text: #23312a; --muted: #6b5f4b;
+  --accent: #9a6a2f; --accent2: #2f6b54; --accent3: #7a2f2f;
+  --grid: #e5dccb; --border: #d5ccba; --rule: #ede8de;
 }
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html{font-size:15px}
+body{font-family:'Source Sans 3',sans-serif;background:var(--bg);color:var(--text);line-height:1.65}
 
-* { margin: 0; padding: 0; box-sizing: border-box; }
+/* ─── Header ── */
+header{background:var(--text);padding:3.5rem 4rem 3rem;position:relative;overflow:hidden}
+header::before{content:'';position:absolute;top:-60px;right:-80px;width:280px;height:280px;border:1.5px solid rgba(255,255,255,0.07);border-radius:50%}
+header::after{content:'';position:absolute;bottom:-100px;left:-40px;width:360px;height:360px;border:1px solid rgba(255,255,255,0.04);border-radius:50%}
+.htag{font-family:'JetBrains Mono',monospace;font-size:0.7rem;letter-spacing:0.15em;text-transform:uppercase;color:rgba(255,255,255,0.4);margin-bottom:0.8rem}
+header h1{font-family:'Lora',serif;font-size:2.5rem;font-weight:400;line-height:1.18;color:white;max-width:680px}
+header h1 em{color:rgba(255,255,255,0.65);font-style:italic}
+header p{font-size:0.95rem;color:rgba(255,255,255,0.55);margin-top:0.7rem;max-width:540px;font-weight:300}
+.chips{display:flex;gap:0.55rem;flex-wrap:wrap;margin-top:1.6rem}
+.chip{font-family:'JetBrains Mono',monospace;font-size:0.68rem;padding:0.25rem 0.7rem;border:1px solid rgba(255,255,255,0.18);border-radius:100px;color:rgba(255,255,255,0.65);letter-spacing:0.04em}
 
-body {
-  font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-  line-height: 1.68;
-  color: var(--ink);
-  background:
-    radial-gradient(circle at top left, rgba(31,111,235,0.16), transparent 32rem),
-    linear-gradient(180deg, #f5f8fb 0%, var(--page) 100%);
-  padding: 28px;
-}
+/* ─── Layout ── */
+.container{max-width:1080px;margin:0 auto;padding:0 2.5rem}
+main{padding:2.5rem 0 5rem}
 
-.container {
-  max-width: 1400px;
-  margin: 0 auto;
-  background: var(--panel);
-  padding: 48px;
-  border-radius: 22px;
-  border: 1px solid rgba(216, 224, 234, 0.9);
-  box-shadow: var(--shadow);
-}
+/* ─── Key metrics ── */
+.metrics{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:0;border:1px solid var(--border);border-radius:10px;overflow:hidden;background:var(--panel);margin:2.2rem 0 3.2rem}
+.mc{padding:1.4rem 1.7rem;border-right:1px solid var(--rule)}
+.mc:last-child{border-right:none}
+.ml{font-size:0.7rem;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;color:var(--muted);margin-bottom:0.35rem}
+.mv{font-family:'Lora',serif;font-size:1.9rem;color:var(--text);line-height:1}
+.md{font-size:0.72rem;color:var(--muted);margin-top:0.28rem}
+.md.pos{color:var(--accent2)}.md.neg{color:var(--accent3)}
 
-h1 {
-  color: var(--navy);
-  padding-bottom: 18px;
-  margin-bottom: 34px;
-  font-size: 2.35em;
-  line-height: 1.2;
-  letter-spacing: -0.035em;
-  border-bottom: 1px solid var(--line);
-  position: relative;
-}
+/* ─── Sections ── */
+section{margin-bottom:3.8rem}
+.sh{display:flex;align-items:baseline;gap:0.9rem;border-bottom:1px solid var(--rule);padding-bottom:0.55rem;margin-bottom:1.6rem}
+.sn{font-family:'JetBrains Mono',monospace;font-size:0.72rem;color:var(--muted);font-weight:500}
+.st{font-family:'Lora',serif;font-size:1.4rem;font-weight:400}
+.sb{margin-left:auto;font-family:'JetBrains Mono',monospace;font-size:0.63rem;padding:0.18rem 0.55rem;border-radius:100px;letter-spacing:0.05em;text-transform:uppercase}
+.bsafe{background:#e8f5ee;color:#1a6b3a}.bwarn{background:#faf3e0;color:#7a5c00}.bnew{background:#f5eae9;color:#7a2f2f}
 
-h1::after {
-  content: '';
-  position: absolute;
-  left: 0;
-  bottom: -2px;
-  width: 180px;
-  height: 4px;
-  border-radius: 999px;
-  background: linear-gradient(90deg, var(--blue), var(--cyan), var(--gold));
-}
+/* ─── Notes ── */
+.note{background:var(--panel);border-left:3px solid var(--border);padding:0.9rem 1.1rem;border-radius:0 6px 6px 0;font-size:0.88rem;color:var(--muted);margin-bottom:1.4rem}
+.note.warn{border-left-color:#c0903b;background:#faf3e0;color:#5a3d00}
+.note.ok{border-left-color:var(--accent2);background:#e8f5ee;color:#1a3d22}
+.note strong{color:var(--text)}
 
-h2 {
-  color: var(--navy);
-  margin-top: 44px;
-  margin-bottom: 20px;
-  padding-left: 16px;
-  font-size: 1.75em;
-  line-height: 1.25;
-  letter-spacing: -0.02em;
-  border-left: 6px solid var(--cyan);
-}
+/* ─── Two-col ── */
+.two{display:grid;grid-template-columns:1fr 1fr;gap:1.8rem;margin-bottom:1.8rem}
 
-h3 {
-  color: #24364b;
-  margin-top: 32px;
-  margin-bottom: 14px;
-  font-size: 1.32em;
-  letter-spacing: -0.01em;
-}
+/* ─── Card ── */
+.card{background:var(--panel);border:1px solid var(--border);border-radius:10px;padding:1.4rem}
+.card h3{font-size:0.72rem;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;color:var(--muted);margin-bottom:0.9rem}
 
-h4 {
-  color: #2d3f55;
-  margin-top: 22px;
-  margin-bottom: 10px;
-  font-size: 1.12em;
-}
+/* ─── Pattern table ── */
+.pt{width:100%;border-collapse:collapse;font-size:0.86rem}
+.pt thead tr{background:var(--rule)}
+.pt th{font-weight:600;font-size:0.7rem;letter-spacing:0.07em;text-transform:uppercase;color:var(--muted);padding:0.6rem 0.85rem;text-align:left;border-bottom:1px solid var(--border)}
+.pt td{padding:0.5rem 0.85rem;border-bottom:1px solid var(--rule);vertical-align:middle}
+.pt tr:last-child td{border-bottom:none}
+.mono{font-family:'JetBrains Mono',monospace;font-size:0.8rem}
+.pos{color:var(--accent2);font-weight:600}.neg{color:var(--accent3);font-weight:600}
+.typo{font-size:0.72rem;color:var(--muted)}
+.bup{font-family:'JetBrains Mono',monospace;font-size:0.63rem;padding:0.13rem 0.45rem;border-radius:3px;background:#e8f5ee;color:#1a6b3a;font-weight:500}
+.bdn{font-family:'JetBrains Mono',monospace;font-size:0.63rem;padding:0.13rem 0.45rem;border-radius:3px;background:#f5e8e8;color:#7a2f2f;font-weight:500}
 
-p { color: var(--muted); margin: 8px 0; }
-strong { color: #1e2c3d; }
+/* ─── Threshold gauge ── */
+.tg-wrap{margin:1.2rem 0}
+.tg-row{display:flex;align-items:center;gap:1rem;padding:0.6rem 0;border-bottom:1px solid var(--rule)}
+.tg-row:last-child{border-bottom:none}
+.tg-label{font-family:'JetBrains Mono',monospace;font-size:0.78rem;width:90px;color:var(--muted)}
+.tg-bar{flex:1;height:8px;background:var(--rule);border-radius:4px;overflow:hidden}
+.tg-fill{height:100%;border-radius:4px}
+.tg-val{font-family:'JetBrains Mono',monospace;font-size:0.8rem;width:70px;text-align:right}
+.tg-note{font-size:0.7rem;color:var(--muted);width:130px;text-align:right}
 
-.executive-summary {
-  background:
-    linear-gradient(135deg, rgba(11,31,58,0.98) 0%, rgba(23,69,117,0.96) 52%, rgba(0,166,178,0.92) 100%);
-  color: white;
-  padding: 34px;
-  border-radius: 20px;
-  margin-bottom: 42px;
-  box-shadow: 0 18px 40px rgba(11,31,58,0.24);
-  border: 1px solid rgba(255,255,255,0.16);
-}
+/* ─── Decile bars ── */
+.db-wrap{display:flex;align-items:flex-end;gap:3px;height:120px;margin:0.8rem 0}
+.db-bar{flex:1;background:var(--accent2);border-radius:3px 3px 0 0;transition:opacity .2s}
+.db-bar:hover{opacity:.8}
+.db-labels{display:flex;gap:3px;margin-top:0.3rem}
+.db-lbl{flex:1;font-family:'JetBrains Mono',monospace;font-size:0.65rem;text-align:center;color:var(--muted)}
 
-.executive-summary h2 {
-  color: white;
-  border-left-color: var(--gold);
-  margin-top: 0;
-}
+/* ─── PSI bars ── */
+.psi-row{display:flex;align-items:center;gap:1rem;padding:0.55rem 0;border-bottom:1px solid var(--rule)}
+.psi-row:last-child{border-bottom:none}
+.psi-feat{font-family:'JetBrains Mono',monospace;font-size:0.8rem;width:200px}
+.psi-bar-wrap{flex:1;height:8px;background:var(--rule);border-radius:4px;overflow:hidden}
+.psi-stable{background:var(--accent2)}.psi-warn{background:#c0903b}.psi-shift{background:var(--accent3)}
+.psi-val{font-family:'JetBrains Mono',monospace;font-size:0.78rem;width:60px;text-align:right}
+.psi-st{font-size:0.7rem;width:90px;text-align:right;font-weight:500}
+.st-stable{color:var(--accent2)}.st-warn{color:#7a5c00}.st-shift{color:var(--accent3)}
 
-.executive-summary p { color: rgba(255,255,255,0.88); }
+/* ─── Audit terminal ── */
+.audit{background:var(--text);border-radius:8px;padding:1.5rem 1.8rem;font-family:'JetBrains Mono',monospace;font-size:0.79rem;color:rgba(255,255,255,0.72);line-height:1.75}
+.ak{color:rgba(255,255,255,0.42)}.av{color:#7ecbff}.avs{color:#97d879}.avn{color:#ffd580}.arm{color:#ff9090}
 
-.metrics-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
-  gap: 18px;
-  margin-top: 24px;
-}
+/* ─── Summary ── */
+.summary{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:0.9rem;margin-top:1.4rem}
+.si{display:flex;align-items:center;gap:0.7rem;background:var(--panel);border:1px solid var(--border);border-radius:8px;padding:0.9rem 1.1rem;font-size:0.87rem}
+.sico{font-size:1.1rem}
 
-.metric-card {
-  background: rgba(255,255,255,0.13);
-  padding: 22px;
-  border-radius: 16px;
-  border: 1px solid rgba(255,255,255,0.22);
-  border-top: 4px solid var(--gold);
-  backdrop-filter: blur(8px);
-}
+/* ─── CMP table ── */
+.cmp{width:100%;border-collapse:collapse;font-size:0.87rem;border:1px solid var(--border);border-radius:8px;overflow:hidden;background:var(--panel)}
+.cmp th{font-weight:600;font-size:0.7rem;letter-spacing:0.07em;text-transform:uppercase;color:var(--muted);padding:0.6rem 0.85rem;border-bottom:1px solid var(--border);text-align:left;background:var(--rule)}
+.cmp td{padding:0.55rem 0.85rem;border-bottom:1px solid var(--rule)}
+.cmp tr:last-child td{border-bottom:none}
+.hl{background:rgba(42,107,84,0.05)}
 
-.metric-card h3 {
-  color: white;
-  font-size: 2.45em;
-  line-height: 1;
-  margin: 10px 0;
-  letter-spacing: -0.04em;
-}
-
-.metric-card p {
-  color: rgba(255,255,255,0.84);
-  font-size: 0.95em;
-}
-
-.regulatory-context {
-  background: linear-gradient(180deg, var(--gold-soft), #ffffff 100%);
-  border: 1px solid #f0db9f;
-  border-left: 6px solid var(--gold);
-  padding: 22px 24px;
-  margin: 22px 0;
-  border-radius: 14px;
-  box-shadow: 0 8px 22px rgba(68, 52, 11, 0.06);
-}
-
-.regulatory-context h4 {
-  color: #6d4f00;
-  margin-top: 0;
-}
-
-/* Inline panels from the original HTML */
-div[style*='background:#f8f9fa'],
-div[style*='background:#e7f3ff'] {
-  background: var(--panel-soft) !important;
-  border: 1px solid var(--line) !important;
-  border-left: 6px solid var(--blue) !important;
-  border-radius: 14px !important;
-  box-shadow: 0 8px 22px rgba(12, 31, 58, 0.06) !important;
-}
-
-div[style*='font-family:monospace'] {
-  background: #111827 !important;
-  color: #e5edf7 !important;
-  border-left: 6px solid var(--gold) !important;
-  border-radius: 14px !important;
-  box-shadow: 0 16px 32px rgba(17, 24, 39, 0.18) !important;
-}
-
-div[style*='font-family:monospace'] strong { color: #ffffff; }
-
-table {
-  width: 100%;
-  border-collapse: separate;
-  border-spacing: 0;
-  margin: 22px 0 28px;
-  font-size: 0.94em;
-  overflow: hidden;
-  border: 1px solid var(--line);
-  border-radius: 14px;
-  box-shadow: 0 8px 24px rgba(12, 31, 58, 0.06);
-}
-
-th, td {
-  padding: 13px 14px;
-  text-align: left;
-  border-bottom: 1px solid var(--line);
-  vertical-align: top;
-}
-
-th {
-  background: linear-gradient(180deg, var(--navy), #14365f);
-  color: white;
-  font-weight: 650;
-  letter-spacing: 0.01em;
-}
-
-tr:nth-child(even) td { background: #fafcff; }
-tr:hover td { background: #eef7ff; }
-tr:last-child td { border-bottom: none; }
-
-code {
-  background: #eef4fb;
-  color: #12365f;
-  padding: 3px 7px;
-  border-radius: 6px;
-  font-family: 'Courier New', monospace;
-  font-size: 0.9em;
-  border: 1px solid #d8e6f7;
-}
-
-.visualization { margin: 30px 0; text-align: center; }
-.visualization img {
-  max-width: 100%;
-  height: auto;
-  max-height: 500px;
-  border: 1px solid var(--line);
-  border-radius: 14px;
-  box-shadow: 0 12px 28px rgba(12,31,58,0.1);
-}
-.visualization-caption { font-size: 0.9em; color: var(--muted); margin-top: 10px; font-style: italic; }
-
-ul, ol { margin: 15px 0; padding-left: 30px; }
-li { margin: 8px 0; color: var(--muted); }
-li::marker { color: var(--cyan); }
-
-.references {
-  margin-top: 44px;
-  padding-top: 24px;
-  border-top: 1px solid var(--line);
-}
-.references ol { padding-left: 22px; }
-.references li { margin: 10px 0; text-align: left; }
-
-/* Preserve semantic red/green inline status indicators but harmonize them */
-td[style*='color:#dc3545'] { color: var(--danger) !important; }
-td[style*='color:green'] { color: var(--success) !important; }
-
-@media (max-width: 760px) {
-  body { padding: 12px; }
-  .container { padding: 24px; border-radius: 16px; }
-  h1 { font-size: 1.8em; }
-  h2 { font-size: 1.42em; }
-  table { font-size: 0.86em; display: block; overflow-x: auto; white-space: nowrap; }
-  th, td { padding: 10px; }
-}
+/* ─── Footer ── */
+footer{border-top:1px solid var(--rule);padding:1.4rem 2.5rem;display:flex;justify-content:space-between;align-items:center;font-size:0.72rem;color:var(--muted);font-family:'JetBrains Mono',monospace}
 </style>
 </head>
 <body>
+
+<header>
+  <div class="container">
+    <div class="htag">BSA / FinCEN / FATF</div>
+    <h1>AML Transaction Monitoring<br><em>Suspicious Activity Review Report</em></h1>
+    <p>Pattern-level transparency for SAR filing queues — typology mapping,
+       threshold optimisation, subgroup audit, drift detection, and BSA compliance workflow.</p>
+    <div class="chips">
+      <span class="chip">10,000 transactions</span>
+      <span class="chip">5% suspicious rate</span>
+      <span class="chip">FinCEN typologies</span>
+      <span class="chip">BSA §5318</span>
+      <span class="chip">FATF Rec. 10/12</span>
+      <span class="chip">Isotonic recalibration</span>
+    </div>
+  </div>
+</header>
+
+<main>
 <div class="container">
 
-<h1>AML Transaction Monitoring</h1>
+  <!-- ── Key Metrics ── -->
+  <div class="metrics">
+    <div class="mc"><div class="ml">AUC-ROC (pruned)</div><div class="mv">0.9982</div><div class="md pos">near-perfect separation</div></div>
+    <div class="mc"><div class="ml">Avg Precision (pruned)</div><div class="mv">0.9481</div><div class="md">vs 0.9773 baseline</div></div>
+    <div class="mc"><div class="ml">ECE (post-cal)</div><div class="mv">0.0028</div><div class="md pos">excellent calibration</div></div>
+    <div class="mc"><div class="ml">Patterns mined</div><div class="mv">73</div><div class="md">71 after BSA review</div></div>
+    <div class="mc"><div class="ml">Flags @ 80% recall</div><div class="mv">102</div><div class="md">93.1% precision</div></div>
+    <div class="mc"><div class="ml">Investigator workload</div><div class="mv">51 h</div><div class="md">per review run</div></div>
+  </div>
 
-<div class="executive-summary">
-<h2>Executive Summary</h2>
-<p>Anti-Money Laundering transaction monitoring system using pattern-based machine learning. Demonstrates structuring detection, high-risk jurisdiction screening, and velocity-based suspicious activity indicators aligned with FATF AML standards and FinCEN SAR reporting requirements.</p>
-<div class="metrics-grid">
-<div class="metric-card"><p>AUC-ROC</p><h3>0.9990</h3><p>Near-perfect discrimination</p></div>
-<div class="metric-card"><p>Precision</p><h3>0.9539</h3><p>95% alert accuracy</p></div>
-<div class="metric-card"><p>Recall</p><h3>0.9667</h3><p>97% detection rate</p></div>
-<div class="metric-card"><p>Patterns</p><h3>72</h3><p>Transparent rules</p></div>
+  <!-- ── Section 1: feature_mode ── -->
+  <section>
+    <div class="sh">
+      <span class="sn">01</span>
+      <span class="st">feature_mode Comparison</span>
+      <span class="sb bnew"></span>
+    </div>
+    <div class="note">
+      For AML investigator review, <strong>patterns_only</strong> gives the cleanest pattern-level
+      explanation per transaction. <code style="font-family:'JetBrains Mono';font-size:0.82rem">original_plus_patterns</code>
+      lifts AUC marginally but complicates the regulatory narrative for SAR filings.
+    </div>
+    <table class="cmp">
+      <thead><tr><th>feature_mode</th><th>AUC-ROC</th><th>Avg Precision</th><th>Patterns</th><th>Best for</th></tr></thead>
+      <tbody>
+        <tr class="hl"><td class="mono">patterns_only</td><td class="mono">0.9987</td><td class="mono">0.9773</td><td class="mono">73</td><td style="font-size:0.85rem">✅ SAR narrative / audit trail</td></tr>
+        <tr><td class="mono">original_plus_patterns</td><td class="mono">0.9990</td><td class="mono">0.9810</td><td class="mono">73+orig</td><td style="font-size:0.85rem">When marginal AUC matters more</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <!-- ── Section 2: Top Patterns ── -->
+  <section>
+    <div class="sh">
+      <span class="sn">02</span>
+      <span class="st">Top 12 Patterns — FinCEN Typology Labels</span>
+      <span class="sb bsafe">73 patterns total</span>
+    </div>
+    <div class="note ok">
+      Patterns are mapped to FinCEN / FATF money-laundering typologies, linking model evidence
+      directly to the regulatory narrative required in SAR filings and examiner presentations.
+    </div>
+    <table class="pt" style="border:1px solid var(--border);border-radius:8px;overflow:hidden;background:var(--panel)">
+      <thead><tr><th>#</th><th>Pattern</th><th>Coef</th><th>Dir</th><th>Support</th><th>Typology</th></tr></thead>
+      <tbody>
+        <tr><td>1</td><td class="mono">num_previous_transactions=[2,15)</td><td class="mono pos">+4.086</td><td><span class="bup">▲ RISK UP</span></td><td>9.3%</td><td class="typo">Layering / Sparse History</td></tr>
+        <tr><td>2</td><td class="mono">country=CA</td><td class="mono neg">−2.127</td><td><span class="bdn">▼ RISK DN</span></td><td>9.4%</td><td class="typo">Geographic Risk</td></tr>
+        <tr><td>3</td><td class="mono">country=VG</td><td class="mono pos">+1.961</td><td><span class="bup">▲ RISK UP</span></td><td>1.4%</td><td class="typo">Offshore Routing (Virgin Islands)</td></tr>
+        <tr><td>4</td><td class="mono">country=US</td><td class="mono neg">−1.907</td><td><span class="bdn">▼ RISK DN</span></td><td>63.4%</td><td class="typo">Geographic Risk</td></tr>
+        <tr><td>5</td><td class="mono">hour_of_day=[0,8)</td><td class="mono pos">+1.873</td><td><span class="bup">▲ RISK UP</span></td><td>1.5%</td><td class="typo">Off-Hours Activity</td></tr>
+        <tr><td>6</td><td class="mono">structuring_score=[0.498,0.982)</td><td class="mono pos">+1.652</td><td><span class="bup">▲ RISK UP</span></td><td>10.0%</td><td class="typo">Structuring / CTR Evasion</td></tr>
+        <tr><td>7</td><td class="mono">country=UK</td><td class="mono neg">−1.575</td><td><span class="bdn">▼ RISK DN</span></td><td>19.4%</td><td class="typo">Geographic Risk</td></tr>
+        <tr><td>8</td><td class="mono">country=KY</td><td class="mono pos">+1.487</td><td><span class="bup">▲ RISK UP</span></td><td>1.0%</td><td class="typo">Offshore Routing (Cayman)</td></tr>
+        <tr><td>9</td><td class="mono">transaction_type=ach</td><td class="mono neg">−1.381</td><td><span class="bdn">▼ RISK DN</span></td><td>43.8%</td><td class="typo">Transaction-Type Risk</td></tr>
+        <tr><td>10</td><td class="mono">structuring_score=[0.102,0.137)</td><td class="mono neg">−1.349</td><td><span class="bdn">▼ RISK DN</span></td><td>10.0%</td><td class="typo">Structuring / CTR Evasion</td></tr>
+        <tr><td>11</td><td class="mono">country=DE</td><td class="mono neg">−1.298</td><td><span class="bdn">▼ RISK DN</span></td><td>4.8%</td><td class="typo">Geographic Risk</td></tr>
+        <tr><td>12</td><td class="mono">country=PA</td><td class="mono pos">+1.275</td><td><span class="bup">▲ RISK UP</span></td><td>0.6%</td><td class="typo">Offshore Routing (Panama)</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <!-- ── Section 3: BSA Pruning ── -->
+  <section>
+    <div class="sh">
+      <span class="sn">03</span>
+      <span class="st">BSA Demographic Review &amp; Pattern Pruning</span>
+      <span class="sb bnew">PatternEditor</span>
+    </div>
+    <div class="two">
+      <div>
+        <div class="note warn">
+          <strong>Geographic patterns retained.</strong> Patterns referencing
+          <code style="font-family:'JetBrains Mono';font-size:0.82rem">country</code> and
+          <code style="font-family:'JetBrains Mono';font-size:0.82rem">high_risk_country</code>
+          map directly to FinCEN high-risk jurisdiction flags (FATF Recommendations 10/12)
+          and are required considerations — they are <strong>not removed</strong>.
+        </div>
+        <div class="note">
+          <strong>Low-signal age patterns removed.</strong> BSA / FinCEN guidance discourages
+          demographic profiling as a primary suspicious-activity indicator.
+          Two <code style="font-family:'JetBrains Mono';font-size:0.82rem">customer_age</code>
+          patterns with weak signal (|coef| &lt; 0.20, support &lt; 11%) were removed
+          to reduce disparate-impact exposure.
+        </div>
+      </div>
+      <div class="card">
+        <h3>Before / After Comparison</h3>
+        <table style="width:100%;font-size:0.87rem;border-collapse:collapse;">
+          <tr style="color:var(--muted);font-size:0.7rem;font-weight:600;letter-spacing:0.07em;text-transform:uppercase;border-bottom:1px solid var(--border);">
+            <td style="padding:.45rem 0">Metric</td><td style="padding:.45rem 0">Baseline</td><td style="padding:.45rem 0">Pruned+Cal</td>
+          </tr>
+          <tr style="border-bottom:1px solid var(--rule);"><td style="padding:.45rem 0">AUC-ROC</td><td class="mono">0.9987</td><td class="mono">0.9982</td></tr>
+          <tr style="border-bottom:1px solid var(--rule);background:rgba(42,107,84,0.05)"><td style="padding:.45rem 0">Avg Precision</td><td class="mono">0.9773</td><td class="mono">0.9481</td></tr>
+          <tr style="border-bottom:1px solid var(--rule);"><td style="padding:.45rem 0">ECE</td><td class="mono">0.0067</td><td class="mono">0.0028</td></tr>
+          <tr style="border-bottom:1px solid var(--rule);background:rgba(42,107,84,0.05)"><td style="padding:.45rem 0">Brier</td><td class="mono">0.0051</td><td class="mono">0.0055</td></tr>
+          <tr><td style="padding:.45rem 0">Patterns</td><td class="mono">73</td><td class="mono" style="color:var(--accent2)">71 (−2)</td></tr>
+        </table>
+        <p style="font-size:0.75rem;color:var(--muted);margin-top:0.9rem">
+          2 patterns removed + isotonic recalibration on 2,000-sample holdout
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Section 4: SAR Threshold ── -->
+  <section>
+    <div class="sh">
+      <span class="sn">04</span>
+      <span class="st">SAR Filing Threshold Analysis</span>
+    </div>
+    <div class="note">
+      Each flagged transaction requires ~30 min investigator review time.
+      We analyse the <strong>FP burden</strong> and <strong>investigator workload</strong>
+      across the full threshold range. The 80% recall operating point is common
+      in high-risk AML programmes.
+    </div>
+    <div class="two">
+      <div class="card">
+        <h3>Operating Points</h3>
+        <div class="tg-wrap">
+          <div class="tg-row">
+            <div class="tg-label">Youden</div>
+            <div class="tg-bar"><div class="tg-fill" style="width:9%;background:var(--accent2)"></div></div>
+            <div class="tg-val" style="color:var(--accent2)">0.087</div>
+            <div class="tg-note">Optimal recall/precision</div>
+          </div>
+          <div class="tg-row">
+            <div class="tg-label">80% recall</div>
+            <div class="tg-bar"><div class="tg-fill" style="width:68%;background:var(--accent)"></div></div>
+            <div class="tg-val" style="color:var(--accent)">0.675</div>
+            <div class="tg-note">Regulatory minimum</div>
+          </div>
+        </div>
+        <table style="width:100%;font-size:0.85rem;border-collapse:collapse;margin-top:1rem;">
+          <tr style="color:var(--muted);font-size:0.7rem;font-weight:600;letter-spacing:0.06em;text-transform:uppercase;border-bottom:1px solid var(--border);">
+            <td style="padding:.4rem 0">Metric</td><td style="padding:.4rem 0">@ Youden (0.087)</td><td style="padding:.4rem 0">@ 80% recall (0.675)</td>
+          </tr>
+          <tr style="border-bottom:1px solid var(--rule);"><td style="padding:.4rem 0">Flags / run</td><td class="mono">—</td><td class="mono">102</td></tr>
+          <tr style="border-bottom:1px solid var(--rule);background:rgba(42,107,84,0.05)"><td style="padding:.4rem 0">Precision</td><td class="mono">—</td><td class="mono">93.1%</td></tr>
+          <tr style="border-bottom:1px solid var(--rule);"><td style="padding:.4rem 0">Recall</td><td class="mono">—</td><td class="mono">95.0%</td></tr>
+          <tr style="border-bottom:1px solid var(--rule);background:rgba(42,107,84,0.05)"><td style="padding:.4rem 0">FP per TP</td><td class="mono">—</td><td class="mono" style="color:var(--accent2)">0.07</td></tr>
+          <tr><td style="padding:.4rem 0">Workload (h)</td><td class="mono">—</td><td class="mono">51.0</td></tr>
+        </table>
+      </div>
+      <div class="card">
+        <h3>Score Decile Lift (10 = highest risk)</h3>
+        <div class="db-wrap">
+          <!-- decile bars normalised to max event_rate 1.0 -->
+          <div class="db-bar" style="height:100%;opacity:1;" title="Decile 10: 100%"></div>
+          <div class="db-bar" style="height:100%;" title="Decile 9: 100%"></div>
+          <div class="db-bar" style="height:0%;"   title="Decile 8: 0%"></div>
+          <div class="db-bar" style="height:0%;"   title="Decile 7: 0%"></div>
+          <div class="db-bar" style="height:0%;"   title="Decile 6: 0%"></div>
+          <div class="db-bar" style="height:0%;"   title="Decile 5: 0%"></div>
+          <div class="db-bar" style="height:0%;"   title="Decile 4: 0%"></div>
+          <div class="db-bar" style="height:0%;"   title="Decile 3: 0%"></div>
+          <div class="db-bar" style="height:0%;"   title="Decile 2: 0%"></div>
+          <div class="db-bar" style="height:0%;"   title="Decile 1: 0%"></div>
+        </div>
+        <div class="db-labels">
+          <span class="db-lbl">10</span><span class="db-lbl">9</span><span class="db-lbl">8</span>
+          <span class="db-lbl">7</span><span class="db-lbl">6</span><span class="db-lbl">5</span>
+          <span class="db-lbl">4</span><span class="db-lbl">3</span><span class="db-lbl">2</span>
+          <span class="db-lbl">1</span>
+        </div>
+        <p style="font-size:0.75rem;color:var(--muted);margin-top:0.6rem">
+          Top 2 deciles capture all suspicious activity — 20× base rate lift.
+          A queue-priority strategy reviewing only the top 2 deciles catches 100% of SARs.
+        </p>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Section 5: Subgroup Audit ── -->
+  <section>
+    <div class="sh">
+      <span class="sn">05</span>
+      <span class="st">Subgroup Flag-Rate Audit</span>
+      <span class="sb bsafe">Quarterly required</span>
+    </div>
+    <div class="note ok">
+      <strong>High-risk country flag rate reflects genuine risk concentration,</strong>
+      not disparate treatment. Jurisdictions flagged as high-risk (VG, KY, PA)
+      have 100% suspicious rates in the test set by construction,
+      consistent with FinCEN guidance.
+    </div>
+    <table class="pt" style="border:1px solid var(--border);border-radius:8px;overflow:hidden;background:var(--panel)">
+      <thead><tr><th>Feature</th><th>Segment</th><th>N</th><th>Base Rate</th><th>Flag Rate</th><th>AUC</th><th>Precision</th><th>Recall</th></tr></thead>
+      <tbody>
+        <tr><td>country</td><td class="mono">VG</td><td>26</td><td class="mono">100.0%</td><td class="mono">100.0%</td><td class="mono">—</td><td class="mono">100%</td><td class="mono">100%</td></tr>
+        <tr style="background:rgba(42,107,84,0.03)"><td>high_risk_country</td><td class="mono">1</td><td>56</td><td class="mono">100.0%</td><td class="mono">100.0%</td><td class="mono">—</td><td class="mono">100%</td><td class="mono">100%</td></tr>
+        <tr><td>transaction_type</td><td class="mono">cash</td><td>119</td><td class="mono">9.2%</td><td class="mono">11.8%</td><td class="mono">0.995</td><td class="mono">91%</td><td class="mono">100%</td></tr>
+        <tr style="background:rgba(42,107,84,0.03)"><td>transaction_type</td><td class="mono">wire</td><td>655</td><td class="mono">7.6%</td><td class="mono">8.2%</td><td class="mono">0.998</td><td class="mono">94%</td><td class="mono">100%</td></tr>
+        <tr><td>customer_type</td><td class="mono">business</td><td>572</td><td class="mono">5.2%</td><td class="mono">6.3%</td><td class="mono">0.997</td><td class="mono">91%</td><td class="mono">100%</td></tr>
+        <tr style="background:rgba(42,107,84,0.03)"><td>customer_type</td><td class="mono">retail</td><td>1428</td><td class="mono">4.9%</td><td class="mono">5.3%</td><td class="mono">0.999</td><td class="mono">93%</td><td class="mono">100%</td></tr>
+        <tr><td>country</td><td class="mono">US</td><td>1289</td><td class="mono">2.6%</td><td class="mono">3.2%</td><td class="mono">0.998</td><td class="mono">88%</td><td class="mono">100%</td></tr>
+      </tbody>
+    </table>
+  </section>
+
+  <!-- ── Section 6: Drift ── -->
+  <section>
+    <div class="sh">
+      <span class="sn">06</span>
+      <span class="st">Covariate Drift PSI</span>
+      <span class="sb bwarn">Monthly monitoring</span>
+    </div>
+    <div class="note warn">
+      <strong>All features show significant drift</strong> under the simulated
+      high-velocity / structuring-heavy deployment window.
+      AML typologies evolve rapidly — PSI monitoring is mandatory monthly
+      with mandatory re-validation triggers at PSI &gt; 0.25.
+    </div>
+    <div class="card" style="max-width:520px">
+      <h3>PSI — Simulated High-Velocity / Structuring Window</h3>
+      <div style="margin-top:0.6rem">
+        <div class="psi-row"><div class="psi-feat">hour_of_day</div><div class="psi-bar-wrap"><div class="psi-shift" style="height:100%;border-radius:4px;width:100%"></div></div><div class="psi-val">15.88</div><div class="psi-st st-shift">SHIFT</div></div>
+        <div class="psi-row"><div class="psi-feat">velocity_24h</div><div class="psi-bar-wrap"><div class="psi-shift" style="height:100%;border-radius:4px;width:80%"></div></div><div class="psi-val">12.72</div><div class="psi-st st-shift">SHIFT</div></div>
+        <div class="psi-row"><div class="psi-feat">num_prev_txns</div><div class="psi-bar-wrap"><div class="psi-shift" style="height:100%;border-radius:4px;width:80%"></div></div><div class="psi-val">12.65</div><div class="psi-st st-shift">SHIFT</div></div>
+        <div class="psi-row"><div class="psi-feat">structuring_score</div><div class="psi-bar-wrap"><div class="psi-shift" style="height:100%;border-radius:4px;width:78%"></div></div><div class="psi-val">12.43</div><div class="psi-st st-shift">SHIFT</div></div>
+        <div class="psi-row"><div class="psi-feat">amount</div><div class="psi-bar-wrap"><div class="psi-shift" style="height:100%;border-radius:4px;width:67%"></div></div><div class="psi-val">10.63</div><div class="psi-st st-shift">SHIFT</div></div>
+        <div class="psi-row"><div class="psi-feat">account_age_days</div><div class="psi-bar-wrap"><div class="psi-shift" style="height:100%;border-radius:4px;width:66%"></div></div><div class="psi-val">10.54</div><div class="psi-st st-shift">SHIFT</div></div>
+        <div class="psi-row"><div class="psi-feat">customer_age</div><div class="psi-bar-wrap"><div class="psi-shift" style="height:100%;border-radius:4px;width:58%"></div></div><div class="psi-val">9.24</div><div class="psi-st st-shift">SHIFT</div></div>
+        <div class="psi-row"><div class="psi-feat">avg_monthly_balance</div><div class="psi-bar-wrap"><div class="psi-warn" style="height:100%;border-radius:4px;width:3%"></div></div><div class="psi-val">0.547</div><div class="psi-st st-shift">SHIFT</div></div>
+      </div>
+      <div style="display:flex;gap:1rem;margin-top:0.9rem;font-size:0.7rem;font-family:'JetBrains Mono',monospace">
+        <span><span style="display:inline-block;width:9px;height:9px;background:var(--accent2);border-radius:2px;margin-right:3px"></span>STABLE &lt;0.10</span>
+        <span><span style="display:inline-block;width:9px;height:9px;background:#c0903b;border-radius:2px;margin-right:3px"></span>WARN 0.10–0.25</span>
+        <span><span style="display:inline-block;width:9px;height:9px;background:var(--accent3);border-radius:2px;margin-right:3px"></span>SHIFT &gt;0.25</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- ── Section 7: Audit Trail ── -->
+  <section>
+    <div class="sh">
+      <span class="sn">07</span>
+      <span class="st">JSON Audit Trail (excerpt)</span>
+    </div>
+    <div class="audit">
+<pre>{
+  <span class="ak">"operator"</span>: <span class="avs">"aml-compliance-team"</span>,
+  <span class="ak">"generated_at"</span>: <span class="avs">"2026-05-28T14:xx:xxZ"</span>,
+  <span class="ak">"diff"</span>: {
+    <span class="ak">"n_original"</span>: <span class="avn">73</span>,
+    <span class="ak">"n_current"</span>:  <span class="avn">71</span>,
+    <span class="ak">"n_removed"</span>:  <span class="avn">2</span>,
+    <span class="ak">"removed_patterns"</span>: [
+      <span class="arm">"customer_age=[25,32)"</span>,
+      <span class="arm">"customer_age=[52,57)"</span>
+    ]
+  },
+  <span class="ak">"calibration"</span>: { <span class="ak">"applied"</span>: <span class="av">true</span>, <span class="ak">"method"</span>: <span class="avs">"isotonic"</span> },
+  <span class="ak">"removals"</span>: [
+    {
+      <span class="ak">"pattern_labels"</span>: [<span class="arm">"customer_age=[52,57)"</span>, <span class="arm">"customer_age=[25,32)"</span>],
+      <span class="ak">"reason"</span>: <span class="avs">"Low-signal demographic age patterns — weak evidence and low support;
+               removed to reduce BSA disparate-impact exposure"</span>,
+      <span class="ak">"removed_by"</span>: <span class="avs">"aml-compliance-team"</span>
+    }
+  ]
+}</pre>
+    </div>
+  </section>
+
+  <!-- ── Summary ── -->
+  <section>
+    <div class="sh"><span class="sn">08</span><span class="st">Regulatory Workflow Summary</span></div>
+    <div class="summary">
+      <div class="si"><span class="sico">🏦</span>BSA / FinCEN typology labels on all patterns</div>
+      <div class="si"><span class="sico">✂️</span>Weak age patterns removed (disparate-impact)</div>
+      <div class="si"><span class="sico">🗺️</span>Geographic risk patterns retained (FinCEN guidance)</div>
+      <div class="si"><span class="sico">📐</span>Isotonic recalibration on calibration holdout</div>
+      <div class="si"><span class="sico">📋</span>SAR threshold + FP burden analysis</div>
+      <div class="si"><span class="sico">👥</span>Subgroup flag-rate audit by segment</div>
+      <div class="si"><span class="sico">🔁</span>Monthly PSI drift monitoring plan</div>
+      <div class="si"><span class="sico">🏛️</span>BSA §5318 model card generated</div>
+    </div>
+  </section>
+
 </div>
-</div>
+</main>
 
-<h2>Regulatory Context</h2>
-
-<div class="regulatory-context">
-<h4>FATF 40 Recommendations & FinCEN SAR Requirements</h4>
-<p><strong>Key Regulatory Requirements:</strong></p>
-<ul>
-<li><strong>FATF Recommendation 10:</strong> Customer Due Diligence and record-keeping for transactions exceeding designated threshold</li>
-<li><strong>FATF Recommendation 16:</strong> Wire transfer screening and monitoring for suspicious patterns</li>
-<li><strong>FinCEN SAR Filing:</strong> Suspicious Activity Report required within 30 days for transactions $5,000+ showing potential structuring</li>
-<li><strong>Bank Secrecy Act (BSA):</strong> Monitoring for cash transactions $10,000+ and patterns designed to evade reporting</li>
-<li><strong>USA PATRIOT Act Section 314(a):</strong> Information sharing for terrorist financing and money laundering detection</li>
-</ul>
-</div>
-
-<h3>Dataset Characteristics</h3>
-<p><strong>Synthetic AML Transaction Dataset</strong></p>
-<ul>
-<li><strong>Size:</strong> 10,000 transactions (9,500 legitimate, 500 suspicious)</li>
-<li><strong>Fraud Rate:</strong> 5% (realistic for production AML systems)</li>
-<li><strong>Transaction Types:</strong> Wire transfers, ACH, checks, cash transactions</li>
-<li><strong>Key Features:</strong> Transaction amounts, velocity (24h activity), account age, structuring score, customer type, country risk</li>
-<li><strong>Structuring Pattern:</strong> Transactions clustered at $9,000-$9,950 range (just below $10K reporting threshold)</li>
-<li><strong>High-Risk Indicators:</strong> Offshore jurisdictions (VG, KY, PA), unusual transaction timing, new accounts with high activity</li>
-</ul>
-
-<h2>Model Development & Performance</h2>
-
-<h3>Model Configuration</h3>
-<div style="background:#f8f9fa;padding:15px;border-left:4px solid#e74c3c;margin:15px 0;">
-<code style="font-size:1.1em;">
-HUGIMLClassifierNative(B=10, L=1, G=5e-4, topK=100)<br>
-• B=10: Discretization bins per feature<br>
-• L=1: Single-feature patterns (interpretable)<br>
-• G=5e-4: Regularization strength<br>
-• Optimal Threshold: 0.4950 (F1-optimized)
-</code>
-</div>
-
-<h3>Top 15 AML Detection Patterns</h3>
-<table>
-<thead>
-<tr><th>#</th><th>Pattern</th><th>Coefficient</th><th>Support</th><th>Indication</th></tr>
-</thead>
-<tbody>
-<tr><td>1</td><td><code>structuring_score=[0.7273,1)</code></td><td style="color:#dc3545;font-weight:bold;">+7.2033</td><td>1.0%</td><td><strong>SUSPICIOUS</strong></td></tr>
-<tr><td>2</td><td><code>amount=[9000,9433)</code></td><td style="color:#dc3545;font-weight:bold;">+6.3469</td><td>3.5%</td><td><strong>STRUCTURING</strong></td></tr>
-<tr><td>3</td><td><code>high_risk_country=1</code></td><td style="color:#dc3545;font-weight:bold;">+5.8722</td><td>12.8%</td><td><strong>SUSPICIOUS</strong></td></tr>
-<tr><td>4</td><td><code>velocity_24h=[9,16]</code></td><td style="color:#dc3545;font-weight:bold;">+5.6891</td><td>5.2%</td><td><strong>SUSPICIOUS</strong></td></tr>
-<tr><td>5</td><td><code>account_age_days=[0.007382,19.95)</code></td><td style="color:#dc3545;font-weight:bold;">+5.1144</td><td>9.7%</td><td><strong>SUSPICIOUS</strong></td></tr>
-<tr><td>6</td><td><code>amount=[9433,9649)</code></td><td style="color:#dc3545;font-weight:bold;">+4.9823</td><td>3.3%</td><td><strong>STRUCTURING</strong></td></tr>
-<tr><td>7</td><td><code>structuring_score=[0.5455,0.7273)</code></td><td style="color:#dc3545;font-weight:bold;">+4.7612</td><td>1.8%</td><td><strong>SUSPICIOUS</strong></td></tr>
-<tr><td>8</td><td><code>num_previous_transactions=[0,2)</code></td><td style="color:#dc3545;font-weight:bold;">+4.5289</td><td>8.9%</td><td><strong>SUSPICIOUS</strong></td></tr>
-<tr><td>9</td><td><code>hour_of_day=[0,3]</code></td><td style="color:#dc3545;font-weight:bold;">+4.3127</td><td>6.2%</td><td><strong>SUSPICIOUS</strong></td></tr>
-<tr><td>10</td><td><code>amount=[9649,9813)</code></td><td style="color:#dc3545;font-weight:bold;">+4.0956</td><td>3.1%</td><td><strong>STRUCTURING</strong></td></tr>
-<tr><td>11</td><td><code>customer_age=[18,26.64)</code></td><td style="color:#dc3545;font-weight:bold;">+3.8784</td><td>11.4%</td><td><strong>SUSPICIOUS</strong></td></tr>
-<tr><td>12</td><td><code>velocity_24h=[7,9)</code></td><td style="color:#dc3545;font-weight:bold;">+3.6613</td><td>6.8%</td><td><strong>SUSPICIOUS</strong></td></tr>
-<tr><td>13</td><td><code>hour_of_day=[22,24]</code></td><td style="color:#dc3545;font-weight:bold;">+3.4441</td><td>5.5%</td><td><strong>SUSPICIOUS</strong></td></tr>
-<tr><td>14</td><td><code>structuring_score=[0.3636,0.5455)</code></td><td style="color:#dc3545;font-weight:bold;">+3.2270</td><td>2.6%</td><td><strong>SUSPICIOUS</strong></td></tr>
-<tr><td>15</td><td><code>account_age_days=[19.95,73.87)</code></td><td style="color:#dc3545;font-weight:bold;">+3.0098</td><td>12.1%</td><td><strong>SUSPICIOUS</strong></td></tr>
-</tbody>
-</table>
-
-<div style="margin:20px 0;">
-<h4>Performance Analysis</h4>
-<ul>
-<li><strong>AUC-ROC: 0.9990</strong> - Near-perfect discrimination between legitimate and suspicious transactions</li>
-<li><strong>Precision: 0.9539</strong> - 95.4% of flagged transactions are genuine suspicious activity (minimal false positives)</li>
-<li><strong>Recall: 0.9667</strong> - System captures 96.7% of all suspicious transactions (only 5 cases missed)</li>
-<li><strong>F1-Score: 0.9603</strong> - Excellent balance between precision and recall</li>
-<li><strong>ECE: 0.0043</strong> - Well-calibrated probability estimates for risk scoring</li>
-<li><strong>Patterns: 72</strong> - Complete regulatory transparency with interpretable rules</li>
-</ul>
-</div>
-
-<h2>AML Risk Pattern Analysis</h2>
-
-<h3>Structuring Detection (Primary Indicator)</h3>
-<ul>
-<li><strong>Amount Range $9,000-$9,950:</strong> Three distinct patterns (#2, #6, #10) capture transactions just below $10K CTR threshold</li>
-<li><strong>Structuring Score 0.73-1.0:</strong> Highest coefficient (+7.20) - composite metric combining amount clustering and velocity</li>
-<li><strong>BSA Compliance:</strong> Pattern directly addresses 31 CFR 1010.314 anti-structuring provisions</li>
-</ul>
-
-<h3>High-Risk Jurisdiction Indicators</h3>
-<ul>
-<li><strong>Offshore Countries:</strong> Transactions involving Virgin Islands (VG), Cayman Islands (KY), Panama (PA)</li>
-<li><strong>FATF Grey/Black List:</strong> Pattern #3 flags jurisdictions with weak AML controls</li>
-<li><strong>Enhanced Due Diligence:</strong> Triggers additional review per FATF Recommendation 19</li>
-</ul>
-
-<h3>Velocity & Timing Patterns</h3>
-<ul>
-<li><strong>High Transaction Velocity:</strong> 9-16 transactions in 24 hours indicates potential layering (money laundering stage 2)</li>
-<li><strong>Off-Hours Activity:</strong> Transactions at 12am-3am and 10pm-midnight correlate with suspicious behavior</li>
-<li><strong>New Account Red Flag:</strong> Accounts <20 days old with high activity show elevated risk</li>
-</ul>
-
-<h2>SAR Reporting Framework</h2>
-
-<div class="regulatory-context">
-<h4>FinCEN Suspicious Activity Report (SAR) Filing</h4>
-<p><strong>Automatic SAR Triggers:</strong></p>
-<ul>
-<li>Any transaction matching patterns #1-3 (structuring score >0.73, amounts $9K-$9.95K, high-risk country)</li>
-<li>Combinations of 3+ secondary indicators (velocity, timing, new account)</li>
-<li>Risk score >0.95 based on model probability output</li>
-</ul>
-<p><strong>SAR Timeline:</strong> File within 30 calendar days of initial detection per 31 CFR 1020.320</p>
-</div>
-
-<h3>Pattern-Based SAR Narrative Template</h3>
-<div style="background:#f8f9fa;padding:20px;border-left:4px solid#dc3545;margin:20px 0;font-family:monospace;font-size:0.9em;">
-<strong>SUSPICIOUS ACTIVITY REPORT - STRUCTURING DETECTED</strong><br><br>
-<strong>Subject:</strong> [Customer Name], Account [XXX-XXXX]<br>
-<strong>Detection Date:</strong> [Date]<br>
-<strong>Risk Score:</strong> 0.96 (Threshold: 0.495)<br><br>
-
-<strong>Detected Patterns:</strong><br>
-• <strong>structuring_score=[0.73,1.0)</strong> (+7.20) - High structuring indicator<br>
-• <strong>amount=[9000,9433)</strong> (+6.35) - Transaction amount $9,125 (below $10K CTR)<br>
-• <strong>velocity_24h=[9,16]</strong> (+5.69) - 12 transactions in 24 hours<br>
-• <strong>account_age_days=[0,19.95)</strong> (+5.11) - Account opened 8 days ago<br><br>
-
-<strong>Suspicious Activity Summary:</strong><br>
-Customer initiated series of wire transfers totaling $109,500 over 12 transactions in 24-hour period. Individual transactions ranged $9,000-$9,950, appearing designed to evade Currency Transaction Report (CTR) filing requirement. Account recently opened with minimal prior transaction history. Pattern consistent with structuring under 31 USC 5324.<br><br>
-
-<strong>Recommended Action:</strong> File FinCEN SAR Form 111, freeze pending transactions, conduct enhanced due diligence<br>
-<strong>BSA Officer Review:</strong> [Required within 24 hours]
-</div>
-
-<h2>Model Governance & Monitoring</h2>
-
-<h3>Model Card: AML Transaction Monitor v1.0</h3>
-<div style="background:#e7f3ff;padding:20px;border-radius:5px;">
-<p><strong>Model ID:</strong> aml-structuring-v1.0.0</p>
-<p><strong>Model Type:</strong> HUG-IML Pattern-Based Classifier</p>
-<p><strong>Model Complexity:</strong> 72 single-feature patterns</p>
-<p><strong>Intended Use:</strong> Real-time AML transaction monitoring and SAR identification</p>
-<p><strong>Training Data:</strong> Synthetic transaction dataset (10,000 samples, 5% suspicious rate)</p>
-<p><strong>Performance:</strong> AUC 0.9990, Precision 0.95, Recall 0.97</p>
-<p><strong>Hyperparameters:</strong> B=10 bins, L=1 (single features), G=5e-4 regularization</p>
-<p><strong>Regulatory Alignment:</strong> FATF 40 Recommendations, FinCEN SAR requirements, BSA compliance</p>
-<p><strong>Limitations:</strong> (1) Trained on synthetic data - production requires validation on institution-specific transactions, 
-(2) Structuring patterns may evolve - quarterly retraining recommended, (3) Cannot detect sophisticated trade-based money laundering without additional trade finance features</p>
-<p><strong>Ethical Considerations:</strong> High precision (0.95) minimizes false positives affecting legitimate customers. All 72 patterns 
-fully explainable for customer inquiries and regulatory audits. Model does not use protected characteristics (race, religion, national origin) per ECOA requirements.</p>
-<p><strong>Monitoring Protocol:</strong> Daily pattern drift detection, weekly false positive rate tracking, monthly SAR filing statistics review, 
-quarterly model retraining with new confirmed suspicious cases.</p>
-</div>
-
-<h2>Compliance Checklist</h2>
-
-<table>
-<thead>
-<tr><th>Requirement</th><th>Implementation</th><th>Status</th></tr>
-</thead>
-<tbody>
-<tr>
-<td>FATF Recommendation 10 (CDD)</td>
-<td>Pattern-based monitoring for enhanced due diligence triggers</td>
-<td style="color:green;font-weight:bold;">✓ COMPLIANT</td>
-</tr>
-<tr>
-<td>FinCEN SAR Filing (31 CFR 1020.320)</td>
-<td>Automated SAR identification with 30-day filing workflow</td>
-<td style="color:green;font-weight:bold;">✓ COMPLIANT</td>
-</tr>
-<tr>
-<td>BSA Anti-Structuring (31 USC 5324)</td>
-<td>Multiple patterns detect $9-10K transaction clustering</td>
-<td style="color:green;font-weight:bold;">✓ COMPLIANT</td>
-</tr>
-<tr>
-<td>Model Explainability</td>
-<td>All 72 patterns transparent, auditable, customer-explainable</td>
-<td style="color:green;font-weight:bold;">✓ COMPLIANT</td>
-</tr>
-<tr>
-<td>ECOA Fair Lending (12 CFR 1002)</td>
-<td>No protected characteristics used in model features</td>
-<td style="color:green;font-weight:bold;">✓ COMPLIANT</td>
-</tr>
-<tr>
-<td>Model Risk Management (SR 11-7)</td>
-<td>Model card, limitations documented, monitoring protocol</td>
-<td style="color:green;font-weight:bold;">✓ COMPLIANT</td>
-</tr>
-</tbody>
-</table>
-
-<div class="references">
-<h3>References</h3>
-<ol>
-<li>Board of Governors of the Federal Reserve System. (2011). Supervisory Guidance on Model Risk Management. SR Letter 11-7, April 4, 2011.</li>
-<li>Financial Action Task Force. (2025). International Standards on Combating Money Laundering and the Financing of Terrorism & Proliferation: The FATF Recommendations. FATF, Paris.</li>
-<li>Reports by banks of suspicious transactions, 31 C.F.R. § 1020.320.</li>
-<li>USA PATRIOT Act, Pub. L. No. 107-56, § 314(a), 115 Stat. 272 (2001); 31 C.F.R. § 1010.520.</li>
-</li>
-</ol>
-</div>
-
-
-
-
-
-
-
-
-
-
-
-</div>
 </body>
 </html>

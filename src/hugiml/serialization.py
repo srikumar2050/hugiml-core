@@ -469,7 +469,9 @@ def save_model(clf: Any, path: str | os.PathLike) -> None:
         "original_numeric_cols": getattr(clf, "_original_numeric_cols_", []),
         "original_cat_cols": getattr(clf, "_original_cat_cols_", []),
         "original_dummy_columns": getattr(clf, "_original_dummy_columns_", []),
-        "original_feature_names_downstream": getattr(clf, "_original_feature_names_downstream_", []),
+        "original_feature_names_downstream": getattr(
+            clf, "_original_feature_names_downstream_", []
+        ),
     }
     if hasattr(clf, "fit_metadata_") and clf.fit_metadata_ is not None:
         import dataclasses
@@ -480,8 +482,7 @@ def save_model(clf: Any, path: str | os.PathLike) -> None:
     # in training data.  Serialised as float lists for JSON compatibility.
     if getattr(clf, "_missing_col_edges_", None):
         fit_state["missing_col_edges"] = {
-            name: edges.tolist()
-            for name, edges in clf._missing_col_edges_.items()
+            name: edges.tolist() for name, edges in clf._missing_col_edges_.items()
         }
     # ─────────────────────────────────────────────────────────────────────
     # ── v1.1.0 adaptive binning state ────────────────────────────────────
@@ -491,10 +492,7 @@ def save_model(clf: Any, path: str | os.PathLike) -> None:
     # converted back to int in load_model.
     if getattr(clf, "adaptive_binning", False) and getattr(clf, "_bin_edges_", None):
         fit_state["adaptive_binning_state"] = {
-            "bin_edges": {
-                name: edges.tolist()
-                for name, edges in clf._bin_edges_.items()
-            },
+            "bin_edges": {name: edges.tolist() for name, edges in clf._bin_edges_.items()},
             "per_feature_b": dict(clf.per_feature_b_),
             "ig_scores": {
                 name: {str(b): float(v) for b, v in sc.items()}
@@ -522,7 +520,9 @@ def save_model(clf: Any, path: str | os.PathLike) -> None:
     if hasattr(clf, "_pattern_orders_"):
         clf_arrays["pattern_orders_"] = np.asarray(clf._pattern_orders_, dtype=np.int64)
     if hasattr(clf, "_interaction_pattern_mask_"):
-        clf_arrays["interaction_pattern_mask_"] = np.asarray(clf._interaction_pattern_mask_, dtype=np.bool_)
+        clf_arrays["interaction_pattern_mask_"] = np.asarray(
+            clf._interaction_pattern_mask_, dtype=np.bool_
+        )
     if hasattr(clf, "_original_scaler_"):
         scaler = clf._original_scaler_
         if hasattr(scaler, "mean_"):
@@ -532,9 +532,13 @@ def save_model(clf: Any, path: str | os.PathLike) -> None:
         if hasattr(scaler, "var_"):
             clf_arrays["original_scaler_var_"] = np.asarray(scaler.var_, dtype=np.float64)
         if hasattr(scaler, "n_features_in_"):
-            clf_arrays["original_scaler_n_features_in_"] = np.asarray([scaler.n_features_in_], dtype=np.int64)
+            clf_arrays["original_scaler_n_features_in_"] = np.asarray(
+                [scaler.n_features_in_], dtype=np.int64
+            )
     if hasattr(clf, "_original_numeric_medians_"):
-        clf_arrays["original_numeric_medians_"] = np.asarray(clf._original_numeric_medians_, dtype=np.float64)
+        clf_arrays["original_numeric_medians_"] = np.asarray(
+            clf._original_numeric_medians_, dtype=np.float64
+        )
     members["arrays.npz"] = _npz_bytes(**clf_arrays)
 
     # TransactionDataWrapper
@@ -745,8 +749,10 @@ def _load_v3(path: str | os.PathLike) -> Any:
         scaler = StandardScaler()
         scaler.mean_ = clf_arrays["original_scaler_mean_"]
         scaler.scale_ = clf_arrays.get("original_scaler_scale_", np.ones_like(scaler.mean_))
-        scaler.var_ = clf_arrays.get("original_scaler_var_", scaler.scale_ ** 2)
-        scaler.n_features_in_ = int(clf_arrays.get("original_scaler_n_features_in_", np.array([len(scaler.mean_)]))[0])
+        scaler.var_ = clf_arrays.get("original_scaler_var_", scaler.scale_**2)
+        scaler.n_features_in_ = int(
+            clf_arrays.get("original_scaler_n_features_in_", np.array([len(scaler.mean_)]))[0]
+        )
         clf._original_scaler_ = scaler
 
     # Patterns
@@ -777,8 +783,7 @@ def _load_v3(path: str | os.PathLike) -> Any:
     missing_edges = clf_fit.get("missing_col_edges")
     if missing_edges:
         clf._missing_col_edges_ = {
-            name: np.array(edges, dtype=np.float64)
-            for name, edges in missing_edges.items()
+            name: np.array(edges, dtype=np.float64) for name, edges in missing_edges.items()
         }
     else:
         clf._missing_col_edges_ = {}
@@ -787,14 +792,18 @@ def _load_v3(path: str | os.PathLike) -> Any:
     adap = clf_fit.get("adaptive_binning_state")
     if adap:
         clf._bin_edges_ = {
-            name: np.array(edges, dtype=np.float64)
-            for name, edges in adap["bin_edges"].items()
+            name: np.array(edges, dtype=np.float64) for name, edges in adap["bin_edges"].items()
         }
         clf.per_feature_b_ = dict(adap["per_feature_b"])
         clf.ig_scores_ = {
             name: {int(b): float(v) for b, v in sc.items()}
             for name, sc in adap["ig_scores"].items()
         }
+        # Rebuild the integer-code → original-label map that is derived from
+        # _bin_edges_ but not stored separately in the .hugiml format.
+        clf._rebuild_adaptive_code_label_map()
+    else:
+        clf._adaptive_code_label_map_ = {}
     # ────────────────────────────────────────────────────────────────────
 
     # TransactionDataWrapper

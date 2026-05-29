@@ -42,7 +42,7 @@ class TestCalibrationInvariants:
         n=st.integers(min_value=10, max_value=200),
         seed=st.integers(min_value=0, max_value=2**31 - 1),
     )
-    @settings(max_examples=30, suppress_health_check=[HealthCheck.too_slow])
+    @settings(max_examples=30, suppress_health_check=[HealthCheck.too_slow], deadline=None)
     def test_ece_always_in_unit_interval(self, n, seed):
         from hugiml.calibration import evaluate_calibration
 

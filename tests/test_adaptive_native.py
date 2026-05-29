@@ -7,6 +7,7 @@ Test suite for the adaptive_binning integration in HUGIMLClassifierNative.
 Run with:
     pytest tests/test_adaptive_native.py -v
 """
+
 import warnings
 
 import numpy as np
@@ -25,6 +26,7 @@ warnings.filterwarnings("ignore")
 # Fixtures
 # ---------------------------------------------------------------------------
 
+
 @pytest.fixture(scope="module")
 def bc_split():
     bc = load_breast_cancer(as_frame=True)
@@ -38,7 +40,10 @@ def bc_split():
 def fitted_adaptive(bc_split):
     Xtr, Xte, ytr, yte = bc_split
     clf = HUGIMLClassifierNative(
-        B=8, L=2, G=1e-4, topK=-1,
+        B=8,
+        L=2,
+        G=1e-4,
+        topK=-1,
         adaptive_binning=True,
         b_candidates=[2, 3, 5, 7, 10, 15],
         min_marginal_gain_ratio=0.02,
@@ -58,6 +63,7 @@ def fitted_non_adaptive(bc_split):
 # ---------------------------------------------------------------------------
 # Parameter handling
 # ---------------------------------------------------------------------------
+
 
 class TestAdaptiveParams:
     def test_defaults_off(self):
@@ -89,6 +95,7 @@ class TestAdaptiveParams:
         clf = HUGIMLClassifierNative(adaptive_binning=True, b_candidates=[1, 5])
         with pytest.raises(Exception):
             from sklearn.datasets import load_breast_cancer
+
             bc = load_breast_cancer(as_frame=True)
             Xtr = bc.data.iloc[:400]
             ytr = bc.target.values[:400]
@@ -104,6 +111,7 @@ class TestAdaptiveParams:
 # ---------------------------------------------------------------------------
 # Fitted attributes
 # ---------------------------------------------------------------------------
+
 
 class TestFittedAttributes:
     def test_per_feature_b_set(self, fitted_adaptive, bc_split):
@@ -140,6 +148,7 @@ class TestFittedAttributes:
 # Inference
 # ---------------------------------------------------------------------------
 
+
 class TestInference:
     def test_predict_proba_shape(self, fitted_adaptive, bc_split):
         clf, Xtr, Xte, ytr, yte = fitted_adaptive
@@ -174,6 +183,7 @@ class TestInference:
 # Serialisation
 # ---------------------------------------------------------------------------
 
+
 class TestSerialisation:
     def test_save_load_roundtrip(self, fitted_adaptive, bc_split, tmp_path):
         clf, Xtr, Xte, ytr, yte = fitted_adaptive
@@ -207,10 +217,12 @@ class TestSerialisation:
 # Backward compatibility
 # ---------------------------------------------------------------------------
 
+
 class TestBackwardCompat:
     def test_setstate_without_adaptive_keys(self, fitted_adaptive):
         """Old model state missing adaptive keys defaults gracefully."""
         import copy
+
         clf, *_ = fitted_adaptive
         state = copy.deepcopy(clf.__getstate__())
         for key in ("adaptive_binning", "b_candidates", "min_marginal_gain_ratio"):
@@ -236,6 +248,7 @@ class TestBackwardCompat:
 # Model summary
 # ---------------------------------------------------------------------------
 
+
 class TestModelSummary:
     def test_summary_has_adaptive_section(self, fitted_adaptive):
         clf, *_ = fitted_adaptive
@@ -252,23 +265,25 @@ class TestModelSummary:
 # Multiclass
 # ---------------------------------------------------------------------------
 
+
 class TestMulticlassAdaptive:
     def test_wine_multiclass(self):
         wn = load_wine(as_frame=True)
         X, y = wn.data, wn.target.values
         clf_tmp = HUGIMLClassifierNative()
         X_enc, y_enc = clf_tmp.prepareXy(X, y)
-        Xtr, Xte, ytr, yte = train_test_split(X_enc, y_enc, test_size=0.25,
-                                               stratify=y_enc, random_state=0)
-        clf = HUGIMLClassifierNative(
-            B=8, L=2, G=1e-4, topK=-1, adaptive_binning=True
+        Xtr, Xte, ytr, yte = train_test_split(
+            X_enc, y_enc, test_size=0.25, stratify=y_enc, random_state=0
         )
+        clf = HUGIMLClassifierNative(B=8, L=2, G=1e-4, topK=-1, adaptive_binning=True)
         clf.fit(Xtr, ytr)
         proba = clf.predict_proba(Xte)
         assert proba.shape == (len(yte), 3)
         auc = roc_auc_score(
             label_binarize(yte, classes=[0, 1, 2]),
-            proba, multi_class="ovr", average="macro",
+            proba,
+            multi_class="ovr",
+            average="macro",
         )
         assert auc > 0.95, f"Wine multiclass AUC={auc:.4f}"
 
@@ -277,9 +292,11 @@ class TestMulticlassAdaptive:
 # Integration with extension modules
 # ---------------------------------------------------------------------------
 
+
 class TestExtensionIntegration:
     def test_metrics_on_adaptive(self, fitted_adaptive, bc_split):
         from hugiml.metrics import compute_all_metrics
+
         clf, Xtr, Xte, ytr, yte = fitted_adaptive
         m = compute_all_metrics(clf, Xte)
         assert m.n_patterns == len(clf.patterns_)
@@ -287,6 +304,7 @@ class TestExtensionIntegration:
 
     def test_pruning_on_adaptive(self, fitted_adaptive, bc_split):
         from hugiml.pruning import PatternEditor
+
         clf, Xtr, Xte, ytr, yte = fitted_adaptive
         editor = PatternEditor(clf, operator_name="test")
         orig_n = len(clf.patterns_)
@@ -301,6 +319,7 @@ class TestExtensionIntegration:
     def test_plots_bin_profile_adaptive(self, fitted_adaptive, bc_split):
         pytest.importorskip("plotly")
         from hugiml.plots import HUGPlotter
+
         clf, Xtr, Xte, ytr, yte = fitted_adaptive
         plotter = HUGPlotter(clf)
         feat = list(clf.per_feature_b_.keys())[0]

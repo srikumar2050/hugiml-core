@@ -158,6 +158,7 @@ except ImportError:
         except ImportError:
             return 0
 
+
 __all__ = [
     "HUGIMLClassifierNative",
     "FitMetadata",
@@ -334,6 +335,9 @@ class _TransactionDataWrapper:
         self._cpp_nb_col = list(td_native.nb_col)
         self._cpp_is_cat = list(td_native.is_cat_v)
         self._cpp_is_int = list(td_native.is_int_v)
+        # Store is_precoded_v so the Python fallback uses direct code→bi mapping
+        # rather than MinMax-scaling the integer codes through the float path.
+        self._cpp_is_precoded = list(td_native.is_precoded_v) if td_native.is_precoded_v else []
         self._cpp_cat_categories = [list(c) for c in td_native.cat_categories]
 
         self.bn2id = self._build_compat_bn2id()
@@ -597,8 +601,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
     def __getstate__(self) -> dict:
         state = self.__dict__.copy()
         state.pop("_fit_lock", None)
-        # Strip instance-level method patches set by instrument_classifier():
-        # these are closures and are not picklable.
+        # Strip instance-level method patches set by instrument_classifier():\n        # these are closures and are not picklable.
         state.pop("predict_proba", None)
         state.pop("predict", None)
         state["_schema_version_"] = MODEL_SCHEMA_VERSION
@@ -608,6 +611,20 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                 for pe in state["patterns_"]
             ]
             state["_patterns_pickled_"] = True
+        # serialize raw_patterns_ (also holds PatternEntry objects) ──
+        # __getstate__ previously converted patterns_ but left raw_patterns_ as
+        # native PatternEntry objects, which are not picklable/deepcopyable.
+        # Mirror the same dict-serialisation used for patterns_.
+        if "raw_patterns_" in state and state["raw_patterns_"]:
+            try:
+                state["raw_patterns_"] = [
+                    {"utility": pe.utility, "items": list(pe.items), "ig": pe.ig}
+                    for pe in state["raw_patterns_"]
+                ]
+                state["_raw_patterns_pickled_"] = True
+            except (AttributeError, TypeError):
+                # Already serialized (dicts) or empty — leave as-is
+                pass
         return state
 
     def __setstate__(self, state: dict) -> None:
@@ -630,6 +647,20 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
 
             state["patterns_"] = [_PE(d) for d in state["patterns_"]]
 
+        # restore raw_patterns_ from its serialized dict form ──────
+        if state.pop("_raw_patterns_pickled_", False):
+
+            class _PE2:
+                __slots__ = ("utility", "items", "ig")
+
+                def __init__(self, d: dict) -> None:
+                    self.utility = d["utility"]
+                    self.items = d["items"]
+                    self.ig = d["ig"]
+
+            if "raw_patterns_" in state and state["raw_patterns_"]:
+                state["raw_patterns_"] = [_PE2(d) for d in state["raw_patterns_"]]
+
         self.__dict__.update(state)
         self._fit_lock = threading.RLock()
 
@@ -644,6 +675,18 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         # v1.1.0 missing value handling — absent in models saved before this version
         if not hasattr(self, "_missing_col_edges_"):
             self._missing_col_edges_ = {}
+        # v1.1.x integer-code adaptive path — absent in pre-v1.1.x models
+        if not hasattr(self, "_adaptive_code_label_map_"):
+            self._adaptive_code_label_map_ = {}
+        # Rebuild the code→label map from stored bin edges whenever it's absent
+        # or empty but adaptive bin edges are present.  This handles save/load via
+        # both pickle and the custom .hugiml format (serialization.py).
+        if (
+            self.adaptive_binning
+            and not self._adaptive_code_label_map_
+            and getattr(self, "_bin_edges_", None)
+        ):
+            self._rebuild_adaptive_code_label_map()
         # ──────────────────────────────────────────────────────────────────
 
         if hasattr(self, "td_") and self.td_ is not None:
@@ -764,6 +807,27 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
     # ── Internal helpers ──────────────────────────────────────────────────────
 
     @staticmethod
+    def _safe_cast_y(y: Any) -> np.ndarray:
+        """Cast label array to int64, raising a clear error if y is non-finite.
+
+        ``np.asarray(y, dtype=np.int64)`` silently produces undefined values
+        (typically INT64_MIN = -9223372036854775808) when y contains NaN or
+        infinity; the C++ mining kernel then processes garbage class codes.
+        This helper converts via float first and raises ``HUGIMLValidationError``
+        if any non-finite values are present, which is the correct contract
+        for a classifier that requires integer class labels.
+        """
+        y_arr = np.asarray(y)
+        if np.issubdtype(y_arr.dtype, np.floating) or y_arr.dtype == object:
+            y_float = y_arr.astype(float, copy=False)
+            if not np.all(np.isfinite(y_float)):
+                raise HUGIMLValidationError(
+                    "y contains NaN or infinite values. HUG-IML requires integer class labels."
+                )
+            return y_float.astype(np.int64)
+        return y_arr.astype(np.int64)
+
+    @staticmethod
     def _to_float_array(arr: Any, cat_mask: np.ndarray | None = None) -> tuple:
         """Split input into a float64 numeric array and raw categorical arrays.
 
@@ -811,17 +875,91 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
 
         return X_num, X_cat_raw
 
-    def _effective_topK(self) -> int:
+    def _effective_topK(self, n_items: int | None = None) -> int:
         if self.topK != -1:
             return self.topK
-        nitems = 100
-        lsize: dict[int, int] = {i: math.comb(nitems, i) for i in range(1, 7)}
-        if self.L in (-1, 1):
-            return lsize[1]
-        elif isinstance(self.L, int) and 2 <= self.L <= 6:
-            return lsize[self.L]
-        else:
-            return lsize[2]
+        # Auto topK should be based on the actual mined item universe once
+        # transaction preparation has run.  Before then, use the historical
+        # memory-estimation fallback only for rough sizing.
+        nitems = int(n_items) if n_items is not None else 100
+        nitems = max(nitems, 1)
+        # Avoid accidental combinatorial explosions for L=-1/all.  The miner
+        # still uses this as a budget, not as a post-hoc filter.
+        cap = 20000
+        if self.L == 1:
+            return min(nitems, cap)
+        if isinstance(self.L, int) and self.L >= 2:
+            return min(math.comb(nitems, min(self.L, nitems)), cap)
+        return min(sum(math.comb(nitems, r) for r in range(1, min(nitems, 6) + 1)), cap)
+
+    def _deduplicate_patterns_by_coverage(
+        self, patterns: list, n_rows: int
+    ) -> tuple[list, tuple | None]:
+        """Remove duplicate HUG patterns with identical training-row coverage.
+
+        This is intentionally a post-mining HUGIML optimization.  Raw top-k
+        mining output remains non-deduplicated and can be compared directly
+        with THUI/HMiner/brute-force utility oracles.
+
+        Among patterns that cover exactly the same set of training rows, the
+        one with the highest information gain (and highest utility on ties) is
+        retained; all lower-ranked duplicates are discarded.  Scanning forward
+        through the descending-IG-sorted list achieves this: the first time a
+        coverage key is encountered it belongs to the best representative, so
+        every subsequent occurrence of that key is marked for removal.
+        fsK is intentionally not applied.
+
+        COO cache: the matrix built here for coverage-key computation
+        is a superset of the Stage-4 matrix (all raw patterns vs. survivors).
+        We filter the COO in Python to keep only survivor columns and return
+        the result alongside the pattern list, so Stage 4 can skip the second
+        C++ build_train_matrix call entirely.
+
+        Returns
+        -------
+        survivors : list of PatternEntry
+        cached_coo : (rows_array, cols_array) filtered to survivors, or None
+        """
+        if not patterns:
+            return [], None
+        ordered = sorted(patterns, key=lambda pe: (-pe.ig, -pe.utility))
+        rows_raw, cols_raw = _core.build_train_matrix(self.td_, ordered)
+        rows_np = np.asarray(rows_raw, dtype=np.int64)
+        cols_np = np.asarray(cols_raw, dtype=np.int64)
+
+        # build coverage keys without Python-level int() conversions.
+        # Sort COO by column index, then use searchsorted to split rows into
+        # per-pattern arrays.  Hash each array via .tobytes() rather than
+        # materializing a Python tuple, which avoids O(n) object allocation
+        # per pattern.
+        n_ordered = len(ordered)
+        seen: set[bytes] = set()
+        remove: set[int] = set()
+        if len(rows_np) > 0:
+            order = np.argsort(cols_np, kind="stable")
+            rows_sorted = rows_np[order].astype(np.int64)
+            cols_sorted = cols_np[order]
+            # split_points[i] = start index of column i in sorted arrays
+            split_points = np.searchsorted(cols_sorted, np.arange(n_ordered))
+            split_points_end = np.append(split_points[1:], len(rows_sorted))
+            for i in range(n_ordered):
+                seg = rows_sorted[split_points[i] : split_points_end[i]]
+                # Sort within segment for a canonical key regardless of COO order
+                key = np.sort(seg).tobytes()
+                if key in seen:
+                    remove.add(i)
+                else:
+                    seen.add(key)
+        survivors = [pe for i, pe in enumerate(ordered) if i not in remove]
+
+        # Build the column-index remap: old ordered-index → new survivor index.
+        # Then filter the raw COO to keep only survivor entries, remapping cols.
+        survivor_old_indices = [i for i in range(len(ordered)) if i not in remove]
+        old_to_new = {old: new for new, old in enumerate(survivor_old_indices)}
+        keep_mask = np.isin(cols_np, survivor_old_indices)
+        rows_filtered = rows_np[keep_mask].astype(np.int32)
+        cols_filtered = np.array([old_to_new[int(c)] for c in cols_np[keep_mask]], dtype=np.int32)
+        return survivors, (rows_filtered, cols_filtered)
 
     def _make_estimator(self, n_cls: int) -> Any:
         if self.base_estimator is not None:
@@ -854,15 +992,12 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                 or len(self.b_candidates) == 0
                 or not all(isinstance(b, int) and b >= 2 for b in self.b_candidates)
             ):
-                raise HUGIMLParamError(
-                    "b_candidates must be a non-empty list of int >= 2."
-                )
+                raise HUGIMLParamError("b_candidates must be a non-empty list of int >= 2.")
         if not isinstance(self.min_marginal_gain_ratio, (float, int)):
             raise HUGIMLParamError("min_marginal_gain_ratio must be numeric.")
         if not 0 < float(self.min_marginal_gain_ratio) < 1:
             raise HUGIMLParamError(
-                f"min_marginal_gain_ratio must be in (0, 1), "
-                f"got {self.min_marginal_gain_ratio}."
+                f"min_marginal_gain_ratio must be in (0, 1), got {self.min_marginal_gain_ratio}."
             )
         allowed_feature_modes = {
             "patterns_only",
@@ -937,9 +1072,39 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
 
     # ── v1.1.0  Adaptive binning methods ─────────────────────────────────────
 
-    def _apply_adaptive_binning(
-        self, X_train: Any, y_arr: np.ndarray
-    ) -> Any:
+    def _rebuild_adaptive_code_label_map(self) -> None:
+        """Reconstruct ``_adaptive_code_label_map_`` from stored ``_bin_edges_``.
+
+        Called automatically by ``__setstate__`` after deserialization (both
+        pickle and the custom .hugiml format) when the map is absent or empty.
+        The map is not stored explicitly in the .hugiml format; it is always
+        derived from ``_bin_edges_``, which IS persisted.
+
+        The reconstruction exactly mirrors the map built in
+        ``_apply_adaptive_binning``: for each column whose edges are stored, and
+        for each bin k, the key is the C++ item-map label
+        ``"name=[k.000,(k+1).000]"`` and the value is the original-scale label
+        ``"name=[edges[k]:.4g, edges[k+1]:.4g)"``.
+        """
+        bin_edges = getattr(self, "_bin_edges_", {})
+        if not bin_edges:
+            return
+        # We only build entries for columns that were encoded as is_precoded
+        # (i.e., had no NaN at training time).  After deserialization we cannot
+        # distinguish which columns were NaN-fallback vs is_precoded.  Safe
+        # approach: rebuild for all columns in _bin_edges_.  The entry is only
+        # consulted when the C++ item_map actually contains the key, so spurious
+        # entries for NaN-fallback columns are harmless.
+        new_map: dict[str, str] = {}
+        for name, edges in bin_edges.items():
+            n_bins = len(edges) - 1
+            for k in range(n_bins):
+                cpp_label = f"{name}=[{float(k):.3f},{float(k + 1):.3f}]"
+                orig_label = f"{name}=[{edges[k]:.4g},{edges[k + 1]:.4g})"
+                new_map[cpp_label] = orig_label
+        self._adaptive_code_label_map_ = new_map
+
+    def _apply_adaptive_binning(self, X_train: Any, y_arr: np.ndarray) -> Any:
         """Pre-discretise numerical features using per-feature IG-selected B_j.
 
         Called by _fit_impl when adaptive_binning=True.  The method:
@@ -967,50 +1132,110 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         self.ig_scores_: dict = {}
         pre_binned: set = set()
 
-        for j, name in enumerate(col_names):
-            if j < len(cat_mask) and cat_mask[j]:
-                continue  # leave existing categorical columns untouched
+        # Identify which columns need adaptive B-selection.
+        num_cols = [
+            (j, name) for j, name in enumerate(col_names) if not (j < len(cat_mask) and cat_mask[j])
+        ]
+
+        # parallel B-selection:
+        def _select_one(j: int, name: str) -> tuple:
             col = pd.to_numeric(X_df.iloc[:, j], errors="coerce").values
-            finite = np.isfinite(col)
-            if finite.sum() < 10:
+            finite_mask = np.isfinite(col)
+            if finite_mask.sum() < 10:
                 chosen = candidates[len(candidates) // 2]
-                self.ig_scores_[name] = {b: 0.0 for b in candidates}
+                scores = {b: 0.0 for b in candidates}
             else:
                 chosen, scores = _adap_select_b(
-                    col[finite], y_arr[finite], candidates, ratio
+                    col[finite_mask], y_arr[finite_mask], candidates, ratio
                 )
-                self.ig_scores_[name] = scores
             edges = _adap_quantile_edges(col, chosen)
+            return name, chosen, scores, edges
+
+        try:
+            from joblib import Parallel
+            from joblib import delayed as _delayed
+
+            _n_jobs = self.n_jobs if hasattr(self, "n_jobs") else 1
+            _results = Parallel(n_jobs=_n_jobs, prefer="threads")(
+                _delayed(_select_one)(j, name) for j, name in num_cols
+            )
+        except Exception:
+            _results = [_select_one(j, name) for j, name in num_cols]
+
+        for name, chosen, scores, edges in _results:
+            self.ig_scores_[name] = scores
             self.per_feature_b_[name] = len(edges) - 1
             self._bin_edges_[name] = edges
             pre_binned.add(name)
 
-        # Update masks so Stage 1 treats pre-binned features as categorical
+        # ── Integer-code path ─────────────────────────────────────
+        # Encode pre-binned columns as integer codes (0..B_j-1) and route them
+        # through the C++ is_int path, which is 8–20x faster than the old
+        # string-categorical std::string path.
+        #
+        # NaN handling (hybrid):
+        #   Columns WITHOUT any NaN/Inf → is_int=True (fast integer path).
+        #   Columns WITH NaN/Inf        → cat=True  (existing string path,
+        #       correct because C++ categorical skips np.nan cells).
+        # In practice most adaptive-mode datasets have no NaN; the string
+        # fallback only fires when needed.
+        #
+        # Label translation: the C++ integer path stores item labels as
+        # "feat=[k,k+1]" (integer-range format).  get_hug_features() remaps
+        # these to original-scale "[lo,hi)" labels via _adaptive_code_label_map_.
+        self._adaptive_code_label_map_: dict[str, str] = {}
+
         new_cat = cat_mask.copy()
-        new_int = getattr(
-            self, "is_int_mask_", np.zeros(len(col_names), dtype=bool)
-        ).copy()
-        for j, name in enumerate(col_names):
-            if name in pre_binned:
-                new_cat[j] = True
-                new_int[j] = False
-        self.cat_cols_mask_ = new_cat
-        self.is_int_mask_ = new_int
+        new_int = getattr(self, "is_int_mask_", np.zeros(len(col_names), dtype=bool)).copy()
 
         X_pre = X_df.copy()
         for name, edges in self._bin_edges_.items():
-            if name in X_df.columns:
-                col = pd.to_numeric(X_df[name], errors="coerce").values
-                X_pre[name] = _adap_apply_edges(col, edges)
+            if name not in X_df.columns:
+                continue
+            col = pd.to_numeric(X_df[name], errors="coerce").values
+            n_bins = len(edges) - 1
+            has_nan = not np.isfinite(col).all()
+
+            j = col_names.index(name) if name in col_names else -1
+
+            # Integer-code path for all adaptive columns, with or without NaN.
+            # NaN/Inf cells are encoded as np.nan (float64), which the C++
+            # is_precoded handler reads as non-finite and maps to -1 (skipped
+            # — no item generated for that row/feature pair).
+            # This keeps the column numeric rather than converting the whole
+            # column to object/string dtype for a small number of NaNs, which
+            # would force the slower C++ categorical path.
+            codes = np.clip(np.digitize(col, edges[1:-1]), 0, n_bins - 1).astype(np.float64)
+            if has_nan:
+                codes[~np.isfinite(col)] = np.nan  # sentinel: C++ skips
+            X_pre[name] = codes
+            if j >= 0:
+                new_cat[j] = False
+                new_int[j] = True
+            # Build C++ label -> original-scale label translation.
+            # Key format matches the C++ is_precoded label exactly:
+            # std::fixed << std::setprecision(3) -> "name=[0.000,1.000]"
+            for k in range(n_bins):
+                cpp_label = f"{name}=[{float(k):.3f},{float(k + 1):.3f}]"
+                orig_label = f"{name}=[{edges[k]:.4g},{edges[k + 1]:.4g})"
+                self._adaptive_code_label_map_[cpp_label] = orig_label
+
+        self.cat_cols_mask_ = new_cat
+        self.is_int_mask_ = new_int
         return X_pre if is_df else X_pre
 
     def _prebin_for_predict(self, X: Any) -> Any:
         """Apply stored bin edges to X before the C++ inference path.
 
         Called at the top of predict_proba / predict / transform when
-        adaptive_binning=True.  Accepts raw (un-binned) input in any form
-        that _build_test_hup accepts, and returns a DataFrame with string
-        bin labels for the features that were pre-binned during fit().
+        adaptive_binning=True.  Accepts raw (un-binned) input and returns a
+        DataFrame where all adaptive columns are converted to float64 integer
+        codes 0..B_j-1, with np.nan for non-finite (missing) cells.
+
+        All adaptive columns now use the integer-code path regardless of
+        whether they contained NaN during training.  The old string-cat
+        fallback for NaN-containing columns has been removed; the C++
+        is_precoded handler maps non-finite values to -1 (no item).
         """
         bin_edges = getattr(self, "_bin_edges_", {})
         if not bin_edges:
@@ -1024,9 +1249,26 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             cols = feat_names or [f"col{j}" for j in range(arr.shape[1])]
             X_df = pd.DataFrame(arr, columns=cols)
         X_out = X_df.copy()
+        # Columns in _adaptive_code_label_map_ were encoded as is_int=True at fit.
+        # All other binned columns used the string-cat (NaN-fallback) path.
+        code_label_map = getattr(self, "_adaptive_code_label_map_", {})
         for name, edges in bin_edges.items():
-            if name in X_df.columns:
-                col = pd.to_numeric(X_df[name], errors="coerce").values
+            if name not in X_df.columns:
+                continue
+            col = pd.to_numeric(X_df[name], errors="coerce").values
+            n_bins = len(edges) - 1
+            # A column's key format: "name=[0.000,1.000]" (3 decimal places)
+            # Match by checking if any key starts with "name=["
+            any_code_for_col = any(k.startswith(f"{name}=[") for k in code_label_map)
+            if any_code_for_col:
+                # is_int path: float64 codes, NaN cells preserved as NaN
+                codes = np.clip(np.digitize(col, edges[1:-1]), 0, n_bins - 1).astype(np.float64)
+                nan_mask = ~np.isfinite(col)
+                if nan_mask.any():
+                    codes[nan_mask] = np.nan
+                X_out[name] = codes
+            else:
+                # String-cat fallback (NaN-containing columns from training)
                 X_out[name] = _adap_apply_edges(col, edges)
         return X_out if is_df else X_out
 
@@ -1076,9 +1318,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
 
         self._missing_col_edges_: dict = {}
         new_cat = cat_mask.copy()
-        new_int = getattr(
-            self, "is_int_mask_", np.zeros(n_cols, dtype=bool)
-        ).copy()
+        new_int = getattr(self, "is_int_mask_", np.zeros(n_cols, dtype=bool)).copy()
         modified = False
 
         for j, name in enumerate(col_names):
@@ -1087,7 +1327,9 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
 
             col = pd.to_numeric(X_df.iloc[:, j], errors="coerce").values
             finite = col[np.isfinite(col)]
-            edges = _adap_quantile_edges(finite, self.B) if finite.size > 0                 else np.array([0.0, 1.0])
+            edges = (
+                _adap_quantile_edges(finite, self.B) if finite.size > 0 else np.array([0.0, 1.0])
+            )
             self._missing_col_edges_[name] = edges
             new_cat[j] = True
             new_int[j] = False
@@ -1209,6 +1451,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             "feature_names_in_",
             "_bin_edges_",
             "_missing_col_edges_",
+            "_adaptive_code_label_map_",
             "per_feature_b_",
             "ig_scores_",
             "patterns_",
@@ -1248,8 +1491,8 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         # cat_cols_mask_ (pre-binned features → categorical) is already in
         # place when Stage 1 short-circuits on the existing mask.
         if self.adaptive_binning:
-            self._resolve_col_meta(X_train)   # prime cat_cols_mask_ first
-            _y_for_ig = np.asarray(y_train, dtype=np.int64)
+            self._resolve_col_meta(X_train)  # prime cat_cols_mask_ first
+            _y_for_ig = self._safe_cast_y(y_train)
             X_train = self._apply_adaptive_binning(X_train, _y_for_ig)
             if self.verbose:
                 logger.info(
@@ -1266,7 +1509,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         # Non-adaptive path: pre-bin NaN-containing columns here so the C++
         # receives them as categorical with np.nan → no item generated.
         if not self.adaptive_binning:
-            self._resolve_col_meta(X_train)   # ensure cat_cols_mask_ exists
+            self._resolve_col_meta(X_train)  # ensure cat_cols_mask_ exists
             X_train = self._prebin_nan_cols(X_train)
         # ─────────────────────────────────────────────────────────────────
 
@@ -1283,8 +1526,17 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             int_mask = getattr(self, "is_int_mask_", None)
 
             X_num, X_cat_raw = self._to_float_array(X_train, cat_mask)
-            y_train = np.asarray(y_train, dtype=np.int64)
-            X_num, y_train = check_X_y(X_num, y_train, dtype=None)
+            y_train = self._safe_cast_y(y_train)
+            if getattr(self, "adaptive_binning", False):
+                # NaN in X_num is the missing-value sentinel for the C++
+                # is_precoded path (non-finite -> -1 -> no item generated).
+                # Let it through sklearn's finite check.
+                try:
+                    X_num, y_train = check_X_y(X_num, y_train, dtype=None, ensure_all_finite=False)
+                except TypeError:
+                    X_num, y_train = check_X_y(X_num, y_train, dtype=None, force_all_finite=False)
+            else:
+                X_num, y_train = check_X_y(X_num, y_train, dtype=None)
 
             self.n_features_in_ = X_num.shape[1]
             self.classes_ = np.unique(y_train)
@@ -1328,24 +1580,41 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                 int_mask if int_mask is not None else np.zeros(X_num.shape[1], dtype=bool)
             ).astype(np.uint8)
 
+            # Build is_precoded mask: True for columns that _apply_adaptive_binning
+            # encoded as integer codes (no NaN at training time).  These columns
+            # have entries in _adaptive_code_label_map_ and must skip C++ re-binning.
+            is_precoded_np: np.ndarray | None = None
+            if self.adaptive_binning:
+                code_label_map = getattr(self, "_adaptive_code_label_map_", {})
+                p_cols = X_num.shape[1]
+                feat_names_list = (
+                    col_names if col_names is not None else [f"col{j}" for j in range(p_cols)]
+                )
+                is_precoded_np = np.zeros(p_cols, dtype=np.uint8)
+                for j, name in enumerate(feat_names_list):
+                    if any(k.startswith(f"{name}=[") for k in code_label_map):
+                        is_precoded_np[j] = 1
+
             self.td_ = _core.prepare_transactions(
                 X_num,
                 y_train,
-                # v1.1.0: when adaptive_binning=True all numerical features
-                # are already pre-binned as categorical; B=2 is the sentinel
-                # value that satisfies the C++ >=2 constraint while having
-                # no effect on already-categorical columns.
+                # When adaptive_binning=True with integer-code path (is_precoded),
+                # pass B=2 (sentinel); the pre-coded branch ignores B entirely.
+                # For the string-cat NaN-fallback columns, B=2 is also correct
+                # since those columns are categorical (no binning needed).
+                # For non-adaptive fits, use self.B as normal.
                 2 if self.adaptive_binning else self.B,
                 col_names,
                 is_cat_np,
                 is_int_np,
                 X_cat_raw if any(v is not None for v in X_cat_raw) else None,
+                is_precoded_np,
             )
             stage_times["prepare_transactions"] = t.ms
             cpp_mem_bytes = self.td_.memory_usage_bytes()
 
-            K = self._effective_topK()
             n_items = len(self.td_.item_twu)
+            K = self._effective_topK(n_items)
 
             if self.verbose:
                 logger.info("  items=%d, K=%d, td_mem=%.1fMB", n_items, K, cpp_mem_bytes / 1e6)
@@ -1356,7 +1625,12 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                 time.perf_counter() + self.max_fit_seconds if self.max_fit_seconds else None
             )
             raw_patterns = self._mine_with_fallback(y_train, n_cls, K, fit_deadline)
-            self.patterns_ = sorted(raw_patterns, key=lambda pe: (pe.utility, pe.items))
+            self.raw_patterns_ = sorted(raw_patterns, key=lambda pe: (-pe.utility, tuple(pe.items)))
+            # dedup returns (survivors, cached_coo) so Stage 4 skips
+            # the second build_train_matrix call on the same pattern list.
+            self.patterns_, _cached_coo = self._deduplicate_patterns_by_coverage(
+                self.raw_patterns_, len(y_train)
+            )
             stage_times["mine_patterns"] = t.ms
 
             if len(self.patterns_) == 0:
@@ -1375,11 +1649,17 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                     stage_times["mine_patterns"],
                 )
 
-            # Stage 4: build binary pattern matrix (C++)
+            # Stage 4: build binary pattern matrix (C++).
+            # reuse the COO that dedup already computed; only call
+            # build_train_matrix when the cache is absent (should not happen
+            # in normal fit(), but the fallback keeps the code robust).
             t = self._timer()
             n_train = len(y_train)
             n_pats = len(self.patterns_)
-            rows, cols = _core.build_train_matrix(self.td_, self.patterns_)
+            if _cached_coo is not None:
+                rows, cols = _cached_coo
+            else:
+                rows, cols = _core.build_train_matrix(self.td_, self.patterns_)
             data = np.ones(len(rows), dtype=np.float32)
             self.x_train_hup_ = csr_matrix(
                 (data, (rows, cols)), shape=(n_train, n_pats), dtype=np.float32
@@ -1430,7 +1710,10 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             total_fit_ms=t_total.ms,
             matrix_density=density,
             config=dict(
-                B=self.B, L=self.L, G=self.G, topK=self.topK,
+                B=self.B,
+                L=self.L,
+                G=self.G,
+                topK=self.topK,
                 adaptive_binning=self.adaptive_binning,
                 feature_mode=self.feature_mode,
             ),
@@ -1537,7 +1820,15 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         np.ndarray, shape (n_samples, n_classes)
         """
         check_is_fitted(self)
-        X_test_original_for_downstream = self._copy_input_for_downstream(X_test)
+        # skip the full DataFrame.copy() when feature_mode="patterns_only"
+        # (the default).  _make_downstream_features returns Z_patterns immediately
+        # in that mode without reading X_original, so the copy is wasted.
+        # Non-patterns_only modes still copy to preserve original values across
+        # adaptive pre-binning and chunked slicing.
+        _needs_original = getattr(self, "feature_mode", "patterns_only") != "patterns_only"
+        X_test_original_for_downstream = (
+            self._copy_input_for_downstream(X_test) if _needs_original else X_test
+        )
         # ── v1.1.0 adaptive pre-binning ───────────────────────────────────
         if getattr(self, "adaptive_binning", False) and getattr(self, "_bin_edges_", None):
             X_test = self._prebin_for_predict(X_test)
@@ -1602,7 +1893,11 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         np.ndarray, shape (n_samples,)
         """
         check_is_fitted(self)
-        X_test_original_for_downstream = self._copy_input_for_downstream(X_test)
+        # skip copy for patterns_only mode (see predict_proba for rationale).
+        _needs_original = getattr(self, "feature_mode", "patterns_only") != "patterns_only"
+        X_test_original_for_downstream = (
+            self._copy_input_for_downstream(X_test) if _needs_original else X_test
+        )
         # ── v1.1.0 adaptive pre-binning ───────────────────────────────────
         if getattr(self, "adaptive_binning", False) and getattr(self, "_bin_edges_", None):
             X_test = self._prebin_for_predict(X_test)
@@ -1679,8 +1974,16 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             self._original_numeric_medians_ = X_num.median(numeric_only=True).fillna(0.0)
             X_num_filled = X_num.fillna(self._original_numeric_medians_)
             self._original_scaler_ = StandardScaler()
-            X_num_arr = self._original_scaler_.fit_transform(X_num_filled) if len(self._original_numeric_cols_) else np.empty((len(X_df), 0))
-            X_cat_dum = pd.get_dummies(X_cat.astype("string"), dummy_na=True) if len(self._original_cat_cols_) else pd.DataFrame(index=X_df.index)
+            X_num_arr = (
+                self._original_scaler_.fit_transform(X_num_filled)
+                if len(self._original_numeric_cols_)
+                else np.empty((len(X_df), 0))
+            )
+            X_cat_dum = (
+                pd.get_dummies(X_cat.astype("string"), dummy_na=True)
+                if len(self._original_cat_cols_)
+                else pd.DataFrame(index=X_df.index)
+            )
             self._original_dummy_columns_ = list(X_cat_dum.columns)
         else:
             num_cols = getattr(self, "_original_numeric_cols_", [])
@@ -1693,14 +1996,24 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                 X_num_arr = np.empty((len(X_df), 0))
             cat_cols = getattr(self, "_original_cat_cols_", [])
             X_cat = X_df.reindex(columns=cat_cols)
-            X_cat_dum = pd.get_dummies(X_cat.astype("string"), dummy_na=True) if len(cat_cols) else pd.DataFrame(index=X_df.index)
+            X_cat_dum = (
+                pd.get_dummies(X_cat.astype("string"), dummy_na=True)
+                if len(cat_cols)
+                else pd.DataFrame(index=X_df.index)
+            )
             dummy_cols = getattr(self, "_original_dummy_columns_", [])
             X_cat_dum = X_cat_dum.reindex(columns=dummy_cols, fill_value=0)
 
-        X_cat_arr = X_cat_dum.to_numpy(dtype=np.float64, copy=False) if X_cat_dum.shape[1] else np.empty((len(X_df), 0))
+        X_cat_arr = (
+            X_cat_dum.to_numpy(dtype=np.float64, copy=False)
+            if X_cat_dum.shape[1]
+            else np.empty((len(X_df), 0))
+        )
         X_base = np.hstack([X_num_arr, X_cat_arr]) if X_cat_arr.shape[1] else X_num_arr
         if fit:
-            self._original_feature_names_downstream_ = list(getattr(self, "_original_numeric_cols_", [])) + list(getattr(self, "_original_dummy_columns_", []))
+            self._original_feature_names_downstream_ = list(
+                getattr(self, "_original_numeric_cols_", [])
+            ) + list(getattr(self, "_original_dummy_columns_", []))
         return csr_matrix(X_base.astype(np.float32, copy=False))
 
     def _make_downstream_features(self, X_original: Any, Z_patterns: csr_matrix, fit: bool = False):
@@ -1730,11 +2043,15 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         pattern_names = list(self.get_hug_features())
         if mode == "patterns_only":
             return pattern_names
-        original_names = [f"orig:{name}" for name in getattr(self, "_original_feature_names_downstream_", [])]
+        original_names = [
+            f"orig:{name}" for name in getattr(self, "_original_feature_names_downstream_", [])
+        ]
         if mode == "original_plus_patterns":
             return original_names + [f"pattern:{name}" for name in pattern_names]
         if mode == "original_plus_interactions":
-            mask = getattr(self, "_interaction_pattern_mask_", np.ones(len(pattern_names), dtype=bool))
+            mask = getattr(
+                self, "_interaction_pattern_mask_", np.ones(len(pattern_names), dtype=bool)
+            )
             selected = [name for name, keep in zip(pattern_names, mask) if keep]
             return original_names + [f"pattern:{name}" for name in selected]
         return pattern_names
@@ -1775,7 +2092,14 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         # ─────────────────────────────────────────────────────────────────
         self._validate_test_input(X_test)
         X_num, X_cat_raw = self._to_float_array(X_test, _cat_mask)
-        X_num = check_array(X_num, dtype=None)
+        # NaN in X_num is the missing-value sentinel on the adaptive path.
+        if getattr(self, "adaptive_binning", False):
+            try:
+                X_num = check_array(X_num, dtype=None, ensure_all_finite=False)
+            except TypeError:
+                X_num = check_array(X_num, dtype=None, force_all_finite=False)
+        else:
+            X_num = check_array(X_num, dtype=None)
 
         n = X_num.shape[0]
         n_pats = len(self.patterns_)
@@ -1817,6 +2141,17 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         cpp_col_range = td._cpp_col_range
         cpp_is_cat = td._cpp_is_cat
         cpp_is_int = td._cpp_is_int
+        cpp_is_precoded = getattr(td, "_cpp_is_precoded", [])
+        # If the wrapper was deserialized without _cpp_is_precoded (models saved
+        # before this fix, or via .hugiml format), reconstruct it from the
+        # classifier's _adaptive_code_label_map_ and feature_names_in_.
+        if not cpp_is_precoded:
+            code_label_map = getattr(self, "_adaptive_code_label_map_", {})
+            if code_label_map:
+                feat_names = getattr(self, "feature_names_in_", None) or []
+                cpp_is_precoded = [
+                    any(k.startswith(f"{name}=[") for k in code_label_map) for name in feat_names
+                ]
         cpp_cat_cats = td._cpp_cat_categories
 
         label2code: list[dict[object, int] | None] = [None] * p
@@ -1846,15 +2181,28 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                     if code is None:
                         continue
                     bi = code + 1
+                elif j < len(cpp_is_precoded) and cpp_is_precoded[j]:
+                    # Pre-coded column: X_num[r, j] IS the 0-indexed bin code.
+                    # bi = code + 1 directly — no scaling, no upper_bound.
+                    code_val = X_num[r, j]
+                    if not math.isfinite(code_val):
+                        continue
+                    nb = cpp_nb_col[j] if j < len(cpp_nb_col) else 0
+                    bi = max(1, min(int(code_val) + 1, nb))
                 else:
                     edges = cpp_all_edges[j]
                     if edges is None or len(edges) < 2:
                         continue
                     nb = cpp_nb_col[j]
+                    raw = X_num[r, j]
+                    # Non-finite values must generate no item — same contract
+                    # as every other column type and the C++ build_test_matrix.
+                    if not math.isfinite(raw):
+                        continue
                     if j < len(cpp_is_int) and cpp_is_int[j]:
-                        val = X_num[r, j]
+                        val = raw
                     else:
-                        val = (X_num[r, j] - cpp_col_min[j]) / cpp_col_range[j]
+                        val = (raw - cpp_col_min[j]) / cpp_col_range[j]
                     inner = edges[1:-1] if isinstance(edges, np.ndarray) else np.array(edges[1:-1])
                     bi = int(np.searchsorted(inner, val, side="right")) + 1
                     bi = max(1, min(bi, nb))
@@ -2065,37 +2413,59 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             "fold_metadata": [],
         }
 
-        for train_idx, test_idx in cv.split(X, y):
+        # parallelise CV folds.
+        # Each fold is fully independent (separate clone, separate fit).
+        # prefer="threads" avoids pickling the classifier and its C++ state;
+        # the GIL is released during C++ mining so threads still scale.
+        # Falls back to serial when n_jobs=1 (the default).
+        base_params = {
+            k: v for k, v in self.get_params().items() if k not in ("allCols", "origColumns")
+        }
+        clf_cls = self.__class__
+
+        def _fit_fold(train_idx, test_idx):
             if isinstance(X, pd.DataFrame):
                 X_tr, X_te = X.iloc[train_idx], X.iloc[test_idx]
             else:
                 X_tr, X_te = X[train_idx], X[test_idx]
             y_tr, y_te = y[train_idx], y[test_idx]
 
-            fold_clf = self.__class__(
-                **{
-                    k: v
-                    for k, v in self.get_params().items()
-                    if k not in ("allCols", "origColumns")
-                }
-            )
+            fold_clf = clf_cls(**base_params)
             t0 = time.perf_counter()
             fold_clf.fit(X_tr, y_tr)
-            results["fit_times_ms"].append((time.perf_counter() - t0) * 1000)
-            results["test_scores"].append(scorer(fold_clf, X_te, y_te))
-            results["fold_metadata"].append(fold_clf.fit_metadata_)
+            fit_ms = (time.perf_counter() - t0) * 1000
+            score = scorer(fold_clf, X_te, y_te)
 
             fold_clf.enable_monitoring()
             fold_clf.predict_proba(X_te)
             fold_mon = fold_clf.monitor
-            results["fold_monitors"].append(fold_mon.stats if fold_mon is not None else {})
+            mon_stats = fold_mon.stats if fold_mon is not None else {}
 
-            if fold_clf._drift_det is not None:
+            psi: dict = {}
+            if getattr(fold_clf, "_drift_det", None) is not None:
                 cat_mask = getattr(fold_clf, "cat_cols_mask_", np.zeros(0, dtype=bool))
                 X_te_num, _ = fold_clf._to_float_array(X_te, cat_mask)
-                results["fold_drift"].append(fold_clf._drift_det.compute_psi(X_te_num))
-            else:
-                results["fold_drift"].append({})
+                psi = fold_clf._drift_det.compute_psi(X_te_num)
+
+            return score, fit_ms, fold_clf.fit_metadata_, mon_stats, psi
+
+        try:
+            from joblib import Parallel
+            from joblib import delayed as _delayed
+
+            _n_jobs = self.n_jobs if hasattr(self, "n_jobs") else 1
+            fold_outputs = Parallel(n_jobs=_n_jobs, prefer="threads")(
+                _delayed(_fit_fold)(tr, te) for tr, te in cv.split(X, y)
+            )
+        except Exception:
+            fold_outputs = [_fit_fold(tr, te) for tr, te in cv.split(X, y)]
+
+        for score, fit_ms, metadata, mon_stats, psi in fold_outputs:
+            results["test_scores"].append(score)
+            results["fit_times_ms"].append(fit_ms)
+            results["fold_metadata"].append(metadata)
+            results["fold_monitors"].append(mon_stats)
+            results["fold_drift"].append(psi)
 
         return results
 
@@ -2104,10 +2474,16 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
     def get_hug_features(self) -> list[str]:
         """Return a human-readable label for each mined HUG pattern.
 
-        Singleton patterns use the format ``feature=[lo,hi]`` for numerical
-        columns (e.g. ``age=[35,50]``) and ``feature=value`` for categorical
-        columns (e.g. ``gender=F``).  Compound patterns (L > 1) are
-        comma-separated, e.g. ``age=[35,50], gender=F``.
+        Singleton patterns use the format ``feature=[lo,hi)`` for adaptive
+        numerical columns (e.g. ``age=[35,50)``) and ``feature=value`` for
+        categorical columns (e.g. ``gender=F``).  Compound patterns (L > 1)
+        are comma-separated, e.g. ``age=[35,50), gender=F``.
+
+        When ``adaptive_binning=True`` and the integer-code path was used,
+        C++ stores bin labels as ``feature=[k,k+1]`` (integer range).  These
+        are transparently remapped to the original-scale ``[lo,hi)`` labels
+        via ``_adaptive_code_label_map_`` so that the output is identical in
+        appearance to the string-path output.
 
         Returns
         -------
@@ -2115,7 +2491,15 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         """
         check_is_fitted(self)
         item_map = self.td_.item_map
-        return [", ".join(item_map.get(it, str(it)) for it in pe.items) for pe in self.patterns_]
+        # _adaptive_code_label_map_ is set by _apply_adaptive_binning when the
+        # integer-code path is used.  Empty dict (default) → no remapping needed.
+        label_remap = getattr(self, "_adaptive_code_label_map_", {})
+
+        def _resolve_item(item_id: int) -> str:
+            raw_label = item_map.get(item_id, str(item_id))
+            return label_remap.get(raw_label, raw_label)
+
+        return [", ".join(_resolve_item(it) for it in pe.items) for pe in self.patterns_]
 
     def get_transformed_shape(self) -> tuple[int, int]:
         """Return (n_samples, n_patterns) of the training pattern matrix."""
@@ -2173,7 +2557,11 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         features = self._get_downstream_feature_names()
         n_train = self.x_train_hup_.shape[0]
         mode = getattr(self, "feature_mode", "patterns_only")
-        original_count = len(getattr(self, "_original_feature_names_downstream_", [])) if mode != "patterns_only" else 0
+        original_count = (
+            len(getattr(self, "_original_feature_names_downstream_", []))
+            if mode != "patterns_only"
+            else 0
+        )
 
         rows: list[dict[str, object]] = []
         for i, (feat, c) in enumerate(zip(features, coef)):
@@ -2183,8 +2571,14 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             else:
                 pat_idx = i - original_count
                 if mode == "original_plus_interactions":
-                    interaction_indices = np.where(getattr(self, "_interaction_pattern_mask_", []))[0]
-                    pat_idx = int(interaction_indices[pat_idx]) if pat_idx < len(interaction_indices) else pat_idx
+                    interaction_indices = np.where(getattr(self, "_interaction_pattern_mask_", []))[
+                        0
+                    ]
+                    pat_idx = (
+                        int(interaction_indices[pat_idx])
+                        if pat_idx < len(interaction_indices)
+                        else pat_idx
+                    )
                 support = (
                     float(self.x_train_hup_[:, pat_idx].sum()) / n_train
                     if 0 <= pat_idx < self.x_train_hup_.shape[1]
@@ -2236,8 +2630,10 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         lo, hi = min(cands), max(cands)
 
         colors = [
-            "#2166ac" if b <= lo + (hi - lo) / 3
-            else "#1a9641" if b <= lo + 2 * (hi - lo) / 3
+            "#2166ac"
+            if b <= lo + (hi - lo) / 3
+            else "#1a9641"
+            if b <= lo + 2 * (hi - lo) / 3
             else "#d7191c"
             for b in bvals
         ]
@@ -2298,10 +2694,16 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             chosen = self.per_feature_b_.get(f)
             if chosen and chosen in bs:
                 j = bs.index(chosen)
-                ax.add_patch(plt.Rectangle(
-                    (j - 0.5, i - 0.5), 1, 1,
-                    fill=False, edgecolor="black", linewidth=2,
-                ))
+                ax.add_patch(
+                    plt.Rectangle(
+                        (j - 0.5, i - 0.5),
+                        1,
+                        1,
+                        fill=False,
+                        edgecolor="black",
+                        linewidth=2,
+                    )
+                )
         plt.colorbar(im, ax=ax, label="Information gain")
         fig.tight_layout()
         return fig, ax
@@ -2316,9 +2718,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                 f"or use HUGIMLAdaptive."
             )
         if not getattr(self, "per_feature_b_", None):
-            raise RuntimeError(
-                f"{method_name}() requires per_feature_b_ — call fit() first."
-            )
+            raise RuntimeError(f"{method_name}() requires per_feature_b_ — call fit() first.")
 
     @staticmethod
     def _require_mpl() -> None:
@@ -2378,14 +2778,9 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             ]
         if self.adaptive_binning and getattr(self, "per_feature_b_", None):
             lines += ["", "Adaptive binning — chosen B per feature:"]
-            for feat, b in sorted(
-                self.per_feature_b_.items(), key=lambda kv: -kv[1]
-            ):
+            for feat, b in sorted(self.per_feature_b_.items(), key=lambda kv: -kv[1]):
                 edges = self._bin_edges_.get(feat, [])
-                rng = (
-                    f"  [{float(edges[0]):.4g}…{float(edges[-1]):.4g}]"
-                    if len(edges) >= 2 else ""
-                )
+                rng = f"  [{float(edges[0]):.4g}…{float(edges[-1]):.4g}]" if len(edges) >= 2 else ""
                 lines.append(f"  {feat:<35} B={b:<3}{rng}")
         # ─────────────────────────────────────────────────────────────────
 

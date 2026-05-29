@@ -66,6 +66,7 @@ Diagnostic plots (``plot_bin_profiles``, ``ig_heatmap``) and fitted
 attributes (``per_feature_b_``, ``ig_scores_``, ``_bin_edges_``) are
 defined on ``HUGIMLClassifierNative`` and inherited here.
 """
+
 from __future__ import annotations
 
 from typing import Any

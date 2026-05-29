@@ -81,7 +81,7 @@ Benchmark runner (CLI)::
 
 from __future__ import annotations
 
-__version__ = "1.1.2"
+__version__ = "1.1.3"
 __author__ = "Srikumar Krishnamoorthy"
 __license__ = "Apache-2.0"
 __paper__ = (
@@ -114,37 +114,56 @@ from hugiml.monitoring import DriftDetector, DriftReport, PredictionMonitor
 def __getattr__(name: str):
     """Lazy import gate for optional-dependency sub-modules."""
     _lazy = {
-        "HUGPlotter":              ("hugiml.plots",     "HUGPlotter"),
-        "InterpretabilityMetrics": ("hugiml.metrics",   "InterpretabilityMetrics"),
-        "compute_all_metrics":     ("hugiml.metrics",   "compute_all_metrics"),
-        "metrics_dataframe":       ("hugiml.metrics",   "metrics_dataframe"),
-        "PatternEditor":           ("hugiml.pruning",   "PatternEditor"),
-        "HUGIMLAdaptive":          ("hugiml.adaptive",  "HUGIMLAdaptive"),
-        "MulticlassHUGReport":     ("hugiml.multiclass","MulticlassHUGReport"),
-        "make_imbalanced_pipeline":("hugiml.multiclass","make_imbalanced_pipeline"),
-        "encode_high_cardinality": ("hugiml.multiclass","encode_high_cardinality"),
-        "apply_encoding":          ("hugiml.multiclass","apply_encoding"),
+        "HUGPlotter": ("hugiml.plots", "HUGPlotter"),
+        "InterpretabilityMetrics": ("hugiml.metrics", "InterpretabilityMetrics"),
+        "compute_all_metrics": ("hugiml.metrics", "compute_all_metrics"),
+        "metrics_dataframe": ("hugiml.metrics", "metrics_dataframe"),
+        "PatternEditor": ("hugiml.pruning", "PatternEditor"),
+        "HUGIMLAdaptive": ("hugiml.adaptive", "HUGIMLAdaptive"),
+        "MulticlassHUGReport": ("hugiml.multiclass", "MulticlassHUGReport"),
+        "make_imbalanced_pipeline": ("hugiml.multiclass", "make_imbalanced_pipeline"),
+        "encode_high_cardinality": ("hugiml.multiclass", "encode_high_cardinality"),
+        "apply_encoding": ("hugiml.multiclass", "apply_encoding"),
     }
     if name in _lazy:
         import importlib
+
         mod = importlib.import_module(_lazy[name][0])
         return getattr(mod, _lazy[name][1])
     raise AttributeError(f"module 'hugiml' has no attribute {name!r}")
 
 
 __all__ = [
-    "HUGIMLClassifierNative", "FitMetadata",
-    "PredictionMonitor", "DriftDetector", "DriftReport",
-    "HUGIMLError", "HUGIMLFitError", "HUGIMLMiningError",
-    "HUGIMLTimeoutError", "HUGIMLValidationError", "HUGIMLSchemaError",
-    "HUGIMLParamError", "HUGIMLSerializationError", "HUGIMLVersionError",
-    "HUGIMLPredictionError", "HUGIMLWarning", "HUGIMLConvergenceWarning",
-    "HUGIMLDtypeDriftWarning", "HUGIMLRangeWarning", "HUGIMLDegradedWarning",
+    "HUGIMLClassifierNative",
+    "FitMetadata",
+    "PredictionMonitor",
+    "DriftDetector",
+    "DriftReport",
+    "HUGIMLError",
+    "HUGIMLFitError",
+    "HUGIMLMiningError",
+    "HUGIMLTimeoutError",
+    "HUGIMLValidationError",
+    "HUGIMLSchemaError",
+    "HUGIMLParamError",
+    "HUGIMLSerializationError",
+    "HUGIMLVersionError",
+    "HUGIMLPredictionError",
+    "HUGIMLWarning",
+    "HUGIMLConvergenceWarning",
+    "HUGIMLDtypeDriftWarning",
+    "HUGIMLRangeWarning",
+    "HUGIMLDegradedWarning",
     "HUGPlotter",
-    "InterpretabilityMetrics", "compute_all_metrics", "metrics_dataframe",
+    "InterpretabilityMetrics",
+    "compute_all_metrics",
+    "metrics_dataframe",
     "PatternEditor",
     "HUGIMLAdaptive",
-    "MulticlassHUGReport", "make_imbalanced_pipeline",
-    "encode_high_cardinality", "apply_encoding",
-    "__version__", "__paper__",
+    "MulticlassHUGReport",
+    "make_imbalanced_pipeline",
+    "encode_high_cardinality",
+    "apply_encoding",
+    "__version__",
+    "__paper__",
 ]

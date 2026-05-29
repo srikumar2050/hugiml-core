@@ -17,7 +17,32 @@ void bind_mine_patterns(py::module_& m)
         "One mined HUG pattern: utility, item IDs, and information gain.")
         .def_readonly("utility", &PatternEntry::utility)
         .def_readonly("items",   &PatternEntry::items)
-        .def_readonly("ig",      &PatternEntry::ig);
+        .def_readonly("ig",      &PatternEntry::ig)
+        // ── Pickle / deepcopy support ──────────────────────────────────────
+        // pybind11 objects are not picklable by default; without __reduce__
+        // both pickle.dumps and copy.deepcopy fail with
+        // "cannot pickle '_hugiml_core.PatternEntry' object".
+        // We expose the three fields as a plain tuple and reconstruct via a
+        // module-level factory so that pickle, deepcopy, joblib, and any
+        // other serialisation that goes through the C-pickle protocol works.
+        .def(py::pickle(
+            // __getstate__: return a (utility, items, ig) tuple
+            [](const PatternEntry& pe) {
+                return py::make_tuple(pe.utility, pe.items, pe.ig);
+            },
+            // __setstate__: reconstruct from the same tuple
+            [](py::tuple t) {
+                if (t.size() != 3)
+                    throw std::runtime_error(
+                        "PatternEntry.__setstate__: expected 3-tuple, "
+                        "got " + std::to_string(t.size()));
+                PatternEntry pe;
+                pe.utility = t[0].cast<double>();
+                pe.items   = t[1].cast<std::vector<int>>();
+                pe.ig      = t[2].cast<double>();
+                return pe;
+            }
+        ));
 
     m.def("mine_patterns",
         [](const TransactionDataCpp& td,
