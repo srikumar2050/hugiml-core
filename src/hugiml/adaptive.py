@@ -170,6 +170,11 @@ class HUGIMLAdaptive(HUGIMLClassifierNative):
             max_fit_seconds=max_fit_seconds,
         )
 
+    @classmethod
+    def default_param_grid(cls) -> dict[str, list]:
+        """Return the default compact tuning grid inherited from the native classifier."""
+        return HUGIMLClassifierNative.default_param_grid()
+
     # ── sklearn protocol ──────────────────────────────────────────────────────
 
     def get_params(self, deep: bool = True) -> dict:
@@ -188,6 +193,7 @@ class HUGIMLAdaptive(HUGIMLClassifierNative):
             n_jobs=self.n_jobs,
             verbose=self.verbose,
             max_fit_seconds=self.max_fit_seconds,
+            use_hotpath=self.use_hotpath,
         )
 
     # ── fit ───────────────────────────────────────────────────────────────────

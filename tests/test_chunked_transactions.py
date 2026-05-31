@@ -68,6 +68,10 @@ GERMAN_COLS = [
 
 
 def _clf(**params) -> HUGIMLClassifierNative:
+    # use_hotpath=False: the L1 hotpath intentionally discards .transactions
+    # for memory efficiency.  These tests inspect transaction internals directly,
+    # so they must run on the slow path where .transactions is populated.
+    params.setdefault("use_hotpath", False)
     return HUGIMLClassifierNative(**params)
 
 
@@ -143,8 +147,11 @@ def assert_td_equal(td_a, td_b, label: str = ""):
 
 @pytest.fixture(scope="module")
 def german():
+    p = TESTS_DIR / "german.data"
+    if not p.exists():
+        pytest.skip("german.data not found in tests/ directory")
     df = pd.read_csv(
-        TESTS_DIR / "german.data", sep=" ", header=None, names=GERMAN_COLS + ["target"]
+        p, sep=" ", header=None, names=GERMAN_COLS + ["target"]
     )
     df["target"] = (df["target"] == 2).astype(int)
     return df.drop(columns=["target"]), df["target"]
@@ -152,7 +159,10 @@ def german():
 
 @pytest.fixture(scope="module")
 def heloc():
-    df = pd.read_csv(TESTS_DIR / "heloc.csv")
+    p = TESTS_DIR / "heloc.csv"
+    if not p.exists():
+        pytest.skip("heloc.csv not found in tests/ directory")
+    df = pd.read_csv(p)
     df["target"] = (df["RiskPerformance"] == "Bad").astype(int)
     df = df.drop(columns=["RiskPerformance"])
     return df.drop(columns=["target"]), df["target"]

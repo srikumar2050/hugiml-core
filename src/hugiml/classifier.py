@@ -457,14 +457,23 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
     monitor: PredictionMonitor | None  # set by enable_monitoring() / disable_monitoring()
     feature_names_in_: list[str] | None  # set by prepareXy / _resolve_col_meta after fit
 
+    DEFAULT_PARAM_GRID: dict[str, list] = {
+        "B": [-1],
+        "adaptive_binning": [True],
+        "L": [1, 2],
+        "feature_mode": ["patterns_only", "original_plus_patterns"],
+        "topK": [30, 60, 90, 120, 150],
+        "G": [1e-3],
+    }
+
     def __init__(
         self,
         allCols: list | None = None,
         origColumns: list | None = None,
         B: int = 8,
-        L: int = 2,
-        G: float = 1e-4,
-        topK: int = 200,
+        L: int = 1,
+        G: float = 1e-3,
+        topK: int = 30,
         base_estimator: Any = None,
         n_jobs: int = 1,
         max_predict_ms: float | None = None,
@@ -481,6 +490,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         b_candidates: list | None = None,
         min_marginal_gain_ratio: float = 0.02,
         feature_mode: str = "patterns_only",
+        use_hotpath: bool = True,
     ) -> None:
         self.allCols = allCols
         self.origColumns = origColumns
@@ -497,6 +507,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         self.b_candidates = b_candidates
         self.min_marginal_gain_ratio = min_marginal_gain_ratio
         self.feature_mode = feature_mode
+        self.use_hotpath = use_hotpath
         self._fit_lock = threading.RLock()
 
     # ── Class methods ─────────────────────────────────────────────────────────
@@ -520,6 +531,17 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             raise HUGIMLParamError(f"Unknown preset '{name}'.  Available: {list(_PRESETS)}")
         params = {**_PRESETS[name], **overrides}
         return cls(**params)
+
+    @classmethod
+    def default_param_grid(cls) -> dict[str, list]:
+        """Return the default validation grid for compact HUGIML tuning.
+
+        The grid uses adaptive binning (``B=-1``), searches ``L`` in
+        ``{1, 2}``, searches ``feature_mode`` in ``{'patterns_only',
+        'original_plus_patterns'}``, keeps ``G`` fixed at 1e-3, and mines
+        exactly the requested ``topK`` in a single pass.
+        """
+        return {k: list(v) for k, v in cls.DEFAULT_PARAM_GRID.items()}
 
     # ── Representation ────────────────────────────────────────────────────────
 
@@ -550,6 +572,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             b_candidates=self.b_candidates,
             min_marginal_gain_ratio=self.min_marginal_gain_ratio,
             feature_mode=self.feature_mode,
+            use_hotpath=self.use_hotpath,
         )
 
     def set_params(self, **params: Any) -> HUGIMLClassifierNative:
@@ -662,6 +685,10 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                 state["raw_patterns_"] = [_PE2(d) for d in state["raw_patterns_"]]
 
         self.__dict__.update(state)
+        # Drop experimental multi-round attributes from earlier development builds.
+        for _attr in ("n_rounds", "g_decay_factor", "pattern_selection", "transaction_weighting",
+                      "_boosting_round_tds_", "_boosting_round_pats_"):
+            self.__dict__.pop(_attr, None)
         self._fit_lock = threading.RLock()
 
         # ── v1.1.0 backward compatibility ─────────────────────────────────
@@ -672,6 +699,8 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             self.adaptive_binning = False
             self.b_candidates = None
             self.min_marginal_gain_ratio = 0.02
+        if not hasattr(self, "use_hotpath"):
+            self.use_hotpath = True
         # v1.1.0 missing value handling — absent in models saved before this version
         if not hasattr(self, "_missing_col_edges_"):
             self._missing_col_edges_ = {}
@@ -875,22 +904,35 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
 
         return X_num, X_cat_raw
 
-    def _effective_topK(self, n_items: int | None = None) -> int:
+    def _effective_topK_total(self, n_items: int | None = None) -> int:
+        """Return the user-facing total topK pattern budget."""
         if self.topK != -1:
-            return self.topK
-        # Auto topK should be based on the actual mined item universe once
-        # transaction preparation has run.  Before then, use the historical
-        # memory-estimation fallback only for rough sizing.
+            return int(self.topK)
         nitems = int(n_items) if n_items is not None else 100
         nitems = max(nitems, 1)
-        # Avoid accidental combinatorial explosions for L=-1/all.  The miner
-        # still uses this as a budget, not as a post-hoc filter.
         cap = 20000
         if self.L == 1:
             return min(nitems, cap)
         if isinstance(self.L, int) and self.L >= 2:
             return min(math.comb(nitems, min(self.L, nitems)), cap)
         return min(sum(math.comb(nitems, r) for r in range(1, min(nitems, 6) + 1)), cap)
+
+    def _effective_topK(self, n_items: int | None = None) -> int:
+        """Return the effective topK budget used by the single-pass miner."""
+        return max(1, int(self._effective_topK_total(n_items)))
+
+    def _effective_mining_topK(self, n_items: int | None = None) -> int:
+        """Return the topK passed to the native miner.
+
+        Mining uses exactly the requested topK budget. No expanded
+        information-gain candidate pool and no round-wise budget splitting are
+        used.
+        """
+        return self._effective_topK(n_items)
+
+    def _select_patterns_for_budget(self, patterns: list, n_items: int | None = None) -> list:
+        """Return mined patterns without post-mining IG oversampling/filtering."""
+        return list(patterns)
 
     def _deduplicate_patterns_by_coverage(
         self, patterns: list, n_rows: int
@@ -1103,6 +1145,125 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                 orig_label = f"{name}=[{edges[k]:.4g},{edges[k + 1]:.4g})"
                 new_map[cpp_label] = orig_label
         self._adaptive_code_label_map_ = new_map
+
+    def _apply_adaptive_binning_cpp(self, X_train: Any, y_arr: np.ndarray) -> Any:
+        """C++ replacement for _apply_adaptive_binning.
+
+        Calls _core.select_adaptive_bins (C++ elbow_stop_nb_cpp) instead of
+        the Python _adap_select_b loop.  Produces identical _bin_edges_,
+        per_feature_b_, ig_scores_, _adaptive_code_label_map_, cat_cols_mask_,
+        and X_pre outputs.  Falls back to the Python path on any error.
+        """
+        try:
+            return self._apply_adaptive_binning_cpp_impl(X_train, y_arr)
+        except Exception as exc:
+            logger.warning(
+                "C++ adaptive binning failed (%s); falling back to Python path.", exc
+            )
+            return self._apply_adaptive_binning(X_train, y_arr)
+
+    def _apply_adaptive_binning_cpp_impl(self, X_train: Any, y_arr: np.ndarray) -> Any:
+        """Implementation of the C++ adaptive B-selection path.
+
+        Works for numeric-only and mixed (numeric + string categorical) DataFrames.
+        Extracts only the numeric columns into a float64 array before calling
+        select_adaptive_bins, avoiding the ValueError that X_df.to_numpy(float64)
+        raises when string-categorical columns are present.
+        """
+        is_df = isinstance(X_train, pd.DataFrame)
+        X_df = X_train if is_df else pd.DataFrame(X_train)
+        candidates = sorted(set(self.b_candidates or [2, 3, 5, 7, 10, 15]))
+        ratio = self.min_marginal_gain_ratio
+        cat_mask = self.cat_cols_mask_
+        col_names = list(X_df.columns)
+        n_cls = len(np.unique(y_arr))
+
+        self._bin_edges_: dict = {}
+        self.per_feature_b_: dict = {}
+        self.ig_scores_: dict = {}
+
+        # ── Extract only the numeric (non-cat) columns ────────────────────────
+        # Passing the full mixed DataFrame to to_numpy(float64) raises ValueError
+        # when string-categorical columns are present.  select_adaptive_bins
+        # already skips is_cat columns, so we can pass only the numeric subset
+        # and map indices back afterwards via num_col_map.
+        num_col_map = [j for j, v in enumerate(cat_mask) if not v]
+        col_names_num = [col_names[j] for j in num_col_map]
+        # C++ binding expects std::string column names.  ndarray inputs create
+        # integer DataFrame column names, so pass string labels to C++ while
+        # retaining the original names for pandas indexing below.
+        col_names_num_cpp = [str(name) for name in col_names_num]
+
+        if not num_col_map:
+            # All columns are categorical — nothing to adapt
+            self._adaptive_code_label_map_: dict[str, str] = {}
+            return X_train
+
+        # Build X_num: shape (n, len(num_col_map)), float64
+        X_num = X_df.iloc[:, num_col_map].to_numpy(dtype=np.float64, na_value=np.nan)
+        y_int = y_arr.astype(np.int64)
+        # Pass all-zeros is_cat so C++ processes every column in X_num
+        is_cat_zeros = np.zeros(len(num_col_map), dtype=np.uint8)
+
+        adap_result = _core.select_adaptive_bins(
+            X_num, y_int, n_cls,
+            col_names_num_cpp, is_cat_zeros,
+            candidates, ratio,
+        )
+
+        # Pack C++ results into Python model attributes.
+        # adap_result.num_col_indices[ci] is the index within X_num (= within
+        # col_names_num).  Map back to the original X_df column index via num_col_map.
+        for ci, col_res in enumerate(adap_result.cols):
+            j_num = adap_result.num_col_indices[ci]
+            name  = col_names_num[j_num]
+            edges = np.array(col_res.edges)
+            self._bin_edges_[name]     = edges
+            # Match the Python adaptive path, which records the effective number
+            # of stored bins after duplicate quantile edges have collapsed.
+            self.per_feature_b_[name]  = len(edges) - 1
+            # Pad missing candidates (early elbow-stop) with 0.0 for diagnostics
+            scores: dict[int, float] = {}
+            for k, b in enumerate(candidates):
+                scores[b] = col_res.ig_scores[k] if k < len(col_res.ig_scores) else 0.0
+            self.ig_scores_[name] = scores
+
+        # Build _adaptive_code_label_map_ and update column-type masks
+        self._adaptive_code_label_map_: dict[str, str] = {}
+        new_cat = cat_mask.copy()
+        new_int = getattr(self, "is_int_mask_", np.zeros(len(col_names), dtype=bool)).copy()
+
+        for name, edges in self._bin_edges_.items():
+            if name not in X_df.columns:
+                continue
+            j = col_names.index(name) if name in col_names else -1
+            if j >= 0:
+                new_cat[j] = False
+                new_int[j] = True
+            n_bins = len(edges) - 1
+            for k in range(n_bins):
+                cpp_label  = f"{name}=[{float(k):.3f},{float(k + 1):.3f}]"
+                orig_label = f"{name}=[{edges[k]:.4g},{edges[k + 1]:.4g})"
+                self._adaptive_code_label_map_[cpp_label] = orig_label
+
+        self.cat_cols_mask_ = new_cat
+        self.is_int_mask_   = new_int
+
+        # Apply integer codes to the pre-binned numeric columns in X_pre
+        X_codes_np = adap_result.get_X_codes()   # (n × n_num_cols) float64
+        X_pre = X_df.copy()
+        for ci in range(adap_result.n_num_cols):
+            j_num    = adap_result.num_col_indices[ci]
+            name     = col_names_num[j_num]
+            col_raw  = pd.to_numeric(X_df[name], errors="coerce").values
+            codes    = X_codes_np[:, ci].copy()
+            # Re-apply NaN sentinel for non-finite cells (C++ may have assigned
+            # a valid code to the filtered-out index; replace with np.nan so
+            # the is_precoded C++ handler generates no item for that row/feature).
+            codes[~np.isfinite(col_raw)] = np.nan
+            X_pre[name] = codes
+
+        return X_pre if is_df else X_pre
 
     def _apply_adaptive_binning(self, X_train: Any, y_arr: np.ndarray) -> Any:
         """Pre-discretise numerical features using per-feature IG-selected B_j.
@@ -1486,14 +1647,21 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         self._validate_params()
         X_train_original_for_downstream = self._copy_input_for_downstream(X_train)
 
-        # ── v1.1.0 adaptive pre-binning ───────────────────────────────────
-        # Must run before Stage 1 (_resolve_col_meta) so that the updated
-        # cat_cols_mask_ (pre-binned features → categorical) is already in
-        # place when Stage 1 short-circuits on the existing mask.
+        # ── v1.2.0 adaptive pre-binning (C++ hot path or Python fallback) ─────
+        # ── v1.2.0 adaptive B-selection always uses C++ ──────────────────
+        # _apply_adaptive_binning_cpp calls _core.select_adaptive_bins
+        # (elbow_stop_nb_cpp) whenever the C++ extension is available.
+        # use_hotpath does NOT gate this: C++ adaptive selection is always
+        # preferred because it produces identical outputs with no conflicts.
+        # Python _apply_adaptive_binning is kept as a fallback for
+        # environments where the C++ extension is absent.
         if self.adaptive_binning:
             self._resolve_col_meta(X_train)  # prime cat_cols_mask_ first
             _y_for_ig = self._safe_cast_y(y_train)
-            X_train = self._apply_adaptive_binning(X_train, _y_for_ig)
+            if _CORE_AVAILABLE and hasattr(_core, 'select_adaptive_bins'):
+                X_train = self._apply_adaptive_binning_cpp(X_train, _y_for_ig)
+            else:
+                X_train = self._apply_adaptive_binning(X_train, _y_for_ig)
             if self.verbose:
                 logger.info(
                     "  adaptive binning: %d features pre-binned, B_j in [%d, %d]",
@@ -1571,7 +1739,13 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                     n_cls,
                 )
 
-            # Stage 2: prepare transactions (C++)
+            # Stage 2+3+4: prepare / mine / build matrix
+            # ── v1.2.0 fused L=1 hot path ──────────────────────────────────
+            # When use_hotpath=True and L=1: a single C++ call replaces
+            # prepare_transactions + mine_patterns + build_train_matrix.
+            # No TransList, no hash-map lookups, direct COO from TID index.
+            # Falls back to the original three-step path for L>1, adaptive
+            # binning with Python fallback, or when explicitly disabled.
             t = self._timer()
             rss_before = _get_peak_rss_kb()
             col_names = getattr(self, "feature_names_in_", None)
@@ -1580,9 +1754,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                 int_mask if int_mask is not None else np.zeros(X_num.shape[1], dtype=bool)
             ).astype(np.uint8)
 
-            # Build is_precoded mask: True for columns that _apply_adaptive_binning
-            # encoded as integer codes (no NaN at training time).  These columns
-            # have entries in _adaptive_code_label_map_ and must skip C++ re-binning.
+            # Build is_precoded mask (same logic as before)
             is_precoded_np: np.ndarray | None = None
             if self.adaptive_binning:
                 code_label_map = getattr(self, "_adaptive_code_label_map_", {})
@@ -1595,76 +1767,163 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                     if any(k.startswith(f"{name}=[") for k in code_label_map):
                         is_precoded_np[j] = 1
 
-            self.td_ = _core.prepare_transactions(
-                X_num,
-                y_train,
-                # When adaptive_binning=True with integer-code path (is_precoded),
-                # pass B=2 (sentinel); the pre-coded branch ignores B entirely.
-                # For the string-cat NaN-fallback columns, B=2 is also correct
-                # since those columns are categorical (no binning needed).
-                # For non-adaptive fits, use self.B as normal.
-                2 if self.adaptive_binning else self.B,
-                col_names,
-                is_cat_np,
-                is_int_np,
-                X_cat_raw if any(v is not None for v in X_cat_raw) else None,
-                is_precoded_np,
+            _use_fused = (
+                self.use_hotpath
+                and _CORE_AVAILABLE
+                and self.L == 1
+                and hasattr(_core, "prepare_and_mine_l1")
             )
-            stage_times["prepare_transactions"] = t.ms
-            cpp_mem_bytes = self.td_.memory_usage_bytes()
 
-            n_items = len(self.td_.item_twu)
-            K = self._effective_topK(n_items)
-
-            if self.verbose:
-                logger.info("  items=%d, K=%d, td_mem=%.1fMB", n_items, K, cpp_mem_bytes / 1e6)
-
-            # Stage 3: mine patterns (C++) with graceful degradation
-            t = self._timer()
-            fit_deadline = (
-                time.perf_counter() + self.max_fit_seconds if self.max_fit_seconds else None
-            )
-            raw_patterns = self._mine_with_fallback(y_train, n_cls, K, fit_deadline)
-            self.raw_patterns_ = sorted(raw_patterns, key=lambda pe: (-pe.utility, tuple(pe.items)))
-            # dedup returns (survivors, cached_coo) so Stage 4 skips
-            # the second build_train_matrix call on the same pattern list.
-            self.patterns_, _cached_coo = self._deduplicate_patterns_by_coverage(
-                self.raw_patterns_, len(y_train)
-            )
-            stage_times["mine_patterns"] = t.ms
-
-            if len(self.patterns_) == 0:
-                raise HUGIMLMiningError(
-                    "No HUG patterns found.  Try reducing G, increasing topK, or adjusting B / L."
+            if _use_fused:
+                # ── Fused path ────────────────────────────────────────────────
+                fit_deadline = (
+                    time.perf_counter() + self.max_fit_seconds if self.max_fit_seconds else None
                 )
-
-            degraded = hasattr(self, "_degraded_reason")
-            if degraded and self.verbose:
-                logger.warning("  DEGRADED: %s", self._degraded_reason)
-
-            if self.verbose:
-                logger.info(
-                    "  %d patterns in %.0f ms",
-                    len(self.patterns_),
-                    stage_times["mine_patterns"],
+                remaining_s = (
+                    max(fit_deadline - time.perf_counter(), 0.0) if fit_deadline else 0.0
                 )
+                K_eff = self._effective_mining_topK()  # rough pre-estimate (no n_items yet)
 
-            # Stage 4: build binary pattern matrix (C++).
-            # reuse the COO that dedup already computed; only call
-            # build_train_matrix when the cache is absent (should not happen
-            # in normal fit(), but the fallback keeps the code robust).
-            t = self._timer()
-            n_train = len(y_train)
-            n_pats = len(self.patterns_)
-            if _cached_coo is not None:
-                rows, cols = _cached_coo
+                _l1_result = _core.prepare_and_mine_l1(
+                    X_num,
+                    y_train,
+                    2 if self.adaptive_binning else self.B,
+                    col_names,
+                    is_cat_np,
+                    is_int_np,
+                    X_cat_raw if any(v is not None for v in X_cat_raw) else None,
+                    is_precoded_np,
+                    K_eff,
+                    self.G,
+                    remaining_s,
+                )
+                self.td_ = _l1_result.td
+                cpp_mem_bytes = self.td_.memory_usage_bytes()
+                n_items = len(self.td_.item_twu)
+                K = self._effective_topK(n_items)
+                stage_times["prepare_transactions"] = t.ms
+
+                if self.verbose:
+                    logger.info("  items=%d, K=%d [fused L=1 path]", n_items, K)
+
+                t = self._timer()
+                raw_patterns_list = list(_l1_result.patterns)
+                self.raw_patterns_ = sorted(
+                    raw_patterns_list, key=lambda pe: (-pe.utility, tuple(pe.items))
+                )
+                # L=1 singletons are unique by definition (each pattern is one
+                # distinct item), so deduplication by coverage is a no-op.
+                # Skip calling _deduplicate_patterns_by_coverage (which would
+                # call build_train_matrix on the empty td.transactions) and use
+                # the COO returned directly by the fused path.
+                self.patterns_ = self.raw_patterns_
+                stage_times["mine_patterns"] = t.ms
+
+                if len(self.patterns_) == 0:
+                    if self.feature_mode == "patterns_only":
+                        raise HUGIMLMiningError(
+                            "No HUG patterns found.  Try reducing G, increasing topK, or adjusting B / L."
+                        )
+                    # In original_plus_patterns mode, zero mined HUG patterns is
+                    # not fatal: downstream fitting should fall back to the
+                    # original feature block with an empty pattern matrix.
+                    n_train = len(y_train)
+                    self.x_train_hup_ = csr_matrix((n_train, 0), dtype=np.float32)
+                    stage_times["build_matrix"] = 0.0
+
+                if self.verbose:
+                    logger.info(
+                        "  %d patterns in %.0f ms [fused]",
+                        len(self.patterns_),
+                        stage_times["mine_patterns"],
+                    )
+
+                t = self._timer()
+                n_train = len(y_train)
+                n_pats = len(self.patterns_)
+                # Build train matrix from fused COO (no bitmap scan needed)
+                rows, cols = _l1_result.get_coo()
+                # The fused COO is ordered by pattern index matching raw_patterns_
+                # (both sorted by descending utility).  If patterns_ was reordered
+                # by dedup we would need to remap cols — but dedup is skipped here
+                # so the order is identical.
+                data = np.ones(len(rows), dtype=np.float32)
+                self.x_train_hup_ = csr_matrix(
+                    (data, (rows, cols)), shape=(n_train, n_pats), dtype=np.float32
+                )
+                stage_times["build_matrix"] = t.ms
+
             else:
-                rows, cols = _core.build_train_matrix(self.td_, self.patterns_)
-            data = np.ones(len(rows), dtype=np.float32)
-            self.x_train_hup_ = csr_matrix(
-                (data, (rows, cols)), shape=(n_train, n_pats), dtype=np.float32
-            )
-            stage_times["build_matrix"] = t.ms
+                # ── Original three-step path (L>1, or hotpath disabled) ───────
+                self.td_ = _core.prepare_transactions(
+                    X_num,
+                    y_train,
+                    2 if self.adaptive_binning else self.B,
+                    col_names,
+                    is_cat_np,
+                    is_int_np,
+                    X_cat_raw if any(v is not None for v in X_cat_raw) else None,
+                    is_precoded_np,
+                )
+                stage_times["prepare_transactions"] = t.ms
+                cpp_mem_bytes = self.td_.memory_usage_bytes()
+
+                n_items = len(self.td_.item_twu)
+                K = self._effective_topK(n_items)
+                K_mine = self._effective_mining_topK(n_items)
+
+                if self.verbose:
+                    logger.info("  items=%d, K=%d, K_mine=%d, td_mem=%.1fMB", n_items, K, K_mine, cpp_mem_bytes / 1e6)
+
+                t = self._timer()
+                fit_deadline = (
+                    time.perf_counter() + self.max_fit_seconds if self.max_fit_seconds else None
+                )
+                raw_patterns = self._mine_with_fallback(y_train, n_cls, K_mine, fit_deadline)
+                self.raw_patterns_ = sorted(
+                    raw_patterns, key=lambda pe: (-pe.utility, tuple(pe.items))
+                )
+                selected_patterns = self._select_patterns_for_budget(self.raw_patterns_, n_items)
+                self.patterns_, _cached_coo = self._deduplicate_patterns_by_coverage(
+                    selected_patterns, len(y_train)
+                )
+                stage_times["mine_patterns"] = t.ms
+
+                if len(self.patterns_) == 0:
+                    if self.feature_mode == "patterns_only":
+                        raise HUGIMLMiningError(
+                            "No HUG patterns found.  Try reducing G, increasing topK, or adjusting B / L."
+                        )
+                    # In original_plus_patterns mode, zero mined HUG patterns is
+                    # not fatal: downstream fitting should fall back to the
+                    # original feature block with an empty pattern matrix.
+                    n_train = len(y_train)
+                    self.x_train_hup_ = csr_matrix((n_train, 0), dtype=np.float32)
+                    stage_times["build_matrix"] = 0.0
+
+                degraded = hasattr(self, "_degraded_reason")
+                if degraded and self.verbose:
+                    logger.warning("  DEGRADED: %s", self._degraded_reason)
+
+                if self.verbose:
+                    logger.info(
+                        "  %d patterns in %.0f ms",
+                        len(self.patterns_),
+                        stage_times["mine_patterns"],
+                    )
+
+                t = self._timer()
+                n_train = len(y_train)
+                n_pats = len(self.patterns_)
+                if _cached_coo is not None:
+                    rows, cols = _cached_coo
+                else:
+                    rows, cols = _core.build_train_matrix(self.td_, self.patterns_)
+                data = np.ones(len(rows), dtype=np.float32)
+                self.x_train_hup_ = csr_matrix(
+                    (data, (rows, cols)), shape=(n_train, n_pats), dtype=np.float32
+                )
+                stage_times["build_matrix"] = t.ms
 
             # Stage 5: fit downstream classifier
             t = self._timer()
@@ -1693,19 +1952,19 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             )
 
         rss_delta_mb = (_get_peak_rss_kb() - rss_before) / 1024
-
         n_compound = sum(1 for pe in self.patterns_ if len(pe.items) > 1)
+        n_pats_final = len(self.patterns_)
+        n_train_final = self.x_train_hup_.shape[0]
         nnz = self.x_train_hup_.nnz
-        density = nnz / (n_train * n_pats) if (n_train * n_pats) > 0 else 0.0
-
+        density = nnz / (n_train_final * n_pats_final) if (n_train_final * n_pats_final) > 0 else 0.0
         self.fit_metadata_ = FitMetadata(
-            n_samples=n_train,
+            n_samples=n_train_final,
             n_features=X_num.shape[1],
             n_classes=n_cls,
-            n_items=n_items,
-            n_patterns=n_pats,
+            n_items=len(getattr(self.td_, 'item_twu', [])),
+            n_patterns=n_pats_final,
             n_compound=n_compound,
-            topK_used=K,
+            topK_used=self._effective_topK(len(getattr(self.td_, 'item_twu', [])) or None),
             stage_times_ms=stage_times,
             total_fit_ms=t_total.ms,
             matrix_density=density,
@@ -1721,7 +1980,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             memory_rss_mb=round(rss_delta_mb, 1),
             memory_cpp_mb=round(cpp_mem_bytes / 1e6, 2),
             openmp_threads=actual_threads,
-            degraded=degraded,
+            degraded=hasattr(self, '_degraded_reason'),
         )
 
         if self.verbose:
@@ -2078,13 +2337,17 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         return self._build_test_hup(X)
 
     def _build_test_hup(self, X_test: Any) -> csr_matrix:
-        """Build the sparse binary pattern matrix for test data."""
+        """Build the sparse binary pattern matrix for test data.
+
+        This follows the original v1.1.x single-pass path.
+        """
         self._check_health()
+        # In original_plus_patterns mode, a fitted model may legitimately have
+        # zero mined patterns.  Return an empty pattern matrix and let
+        # _make_downstream_features use the original feature block.
+        if len(getattr(self, "patterns_", [])) == 0 and getattr(self, "feature_mode", "patterns_only") != "patterns_only":
+            return csr_matrix((len(X_test), 0), dtype=np.float32)
         # ── v1.1.0 non-finite handling ────────────────────────────────────
-        # Adaptive: X_test already pre-binned by _prebin_for_predict
-        #           (called in predict_proba/predict/transform before here).
-        # Non-adaptive: apply stored or reconstructed edges; non-finite
-        #               cells become np.nan → C++ generates no item.
         if not getattr(self, "adaptive_binning", False):
             X_test, _cat_mask = self._handle_test_nan(X_test)
         else:
@@ -2092,7 +2355,6 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         # ─────────────────────────────────────────────────────────────────
         self._validate_test_input(X_test)
         X_num, X_cat_raw = self._to_float_array(X_test, _cat_mask)
-        # NaN in X_num is the missing-value sentinel on the adaptive path.
         if getattr(self, "adaptive_binning", False):
             try:
                 X_num = check_array(X_num, dtype=None, ensure_all_finite=False)
@@ -2102,14 +2364,16 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             X_num = check_array(X_num, dtype=None)
 
         n = X_num.shape[0]
-        n_pats = len(self.patterns_)
+        X_cat_arg = X_cat_raw if any(v is not None for v in X_cat_raw) else None
 
+        # Single-pass path
+        n_pats = len(self.patterns_)
         if getattr(self, "_native_available_", True):
             try:
                 rows, cols = _core.build_test_matrix(
                     X_num,
                     self.td_,
-                    X_cat_raw if any(v is not None for v in X_cat_raw) else None,
+                    X_cat_arg,
                     self.patterns_,
                 )
                 data = np.ones(len(rows), dtype=np.float32)
@@ -2226,7 +2490,9 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
 
     def _check_health(self) -> None:
         check_is_fitted(self)
-        if not hasattr(self, "patterns_") or len(self.patterns_) == 0:
+        if not hasattr(self, "patterns_"):
+            raise HUGIMLPredictionError("Pattern state missing — fit() may have failed.")
+        if len(self.patterns_) == 0 and getattr(self, "feature_mode", "patterns_only") == "patterns_only":
             raise HUGIMLPredictionError("Model has no patterns — fit() may have failed.")
         if not hasattr(self, "model_"):
             raise HUGIMLPredictionError("Downstream model missing — fit() incomplete.")
@@ -2563,6 +2829,11 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             else 0
         )
 
+        pattern_support = np.asarray(self.x_train_hup_.sum(axis=0)).ravel() / max(n_train, 1)
+        interaction_indices = None
+        if mode == "original_plus_interactions":
+            interaction_indices = np.where(getattr(self, "_interaction_pattern_mask_", []))[0]
+
         rows: list[dict[str, object]] = []
         for i, (feat, c) in enumerate(zip(features, coef)):
             if i < original_count:
@@ -2570,18 +2841,15 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                 ftype = "original"
             else:
                 pat_idx = i - original_count
-                if mode == "original_plus_interactions":
-                    interaction_indices = np.where(getattr(self, "_interaction_pattern_mask_", []))[
-                        0
-                    ]
+                if interaction_indices is not None:
                     pat_idx = (
                         int(interaction_indices[pat_idx])
                         if pat_idx < len(interaction_indices)
                         else pat_idx
                     )
                 support = (
-                    float(self.x_train_hup_[:, pat_idx].sum()) / n_train
-                    if 0 <= pat_idx < self.x_train_hup_.shape[1]
+                    float(pattern_support[pat_idx])
+                    if 0 <= pat_idx < len(pattern_support)
                     else 1.0
                 )
                 ftype = "pattern"

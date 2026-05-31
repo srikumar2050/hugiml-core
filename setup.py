@@ -140,7 +140,9 @@ _ALGO_SOURCES = [
     "native/discretization.cpp",
     "native/transaction.cpp",
     "native/mining.cpp",
+    "native/mining_l1.cpp",
     "native/matrix.cpp",
+    "native/prepare_mine_l1.cpp",
 ]
 
 _BIND_SOURCES = [
@@ -148,6 +150,7 @@ _BIND_SOURCES = [
     "native/bind_pattern.cpp",
     "native/bind_prepare_tx.cpp",
     "native/bind_mine_patterns.cpp",
+    "native/bind_prepare_mine_l1.cpp",
     "native/bind_build_matrix.cpp",
     "native/bind_openmp.cpp",
     "native/bindings.cpp",

@@ -77,6 +77,11 @@ GERMAN_COLS = [
 @pytest.fixture(scope="session")
 def german_raw() -> pd.DataFrame:
     """Full German Credit DataFrame with a binary target column (0/1)."""
+    if not GERMAN_PATH.exists():
+        pytest.skip(
+            f"German Credit dataset not found at {GERMAN_PATH}. "
+            "Download german.data from the UCI ML Repository and place it in the tests/ directory."
+        )
     df = pd.read_csv(GERMAN_PATH, sep=" ", header=None, names=GERMAN_COLS)
     # Original coding: 1 = Good, 2 = Bad → recode to 0/1
     df["target"] = (df["target"] == 2).astype(int)
@@ -108,6 +113,11 @@ def german_split(german_Xy):
 @pytest.fixture(scope="session")
 def heloc_raw() -> pd.DataFrame:
     """Full HELOC DataFrame with a binary target column (0/1)."""
+    if not HELOC_PATH.exists():
+        pytest.skip(
+            f"HELOC dataset not found at {HELOC_PATH}. "
+            "Download heloc.csv and place it in the tests/ directory."
+        )
     df = pd.read_csv(HELOC_PATH)
     df["target"] = (df["RiskPerformance"] == "Bad").astype(int)
     df = df.drop(columns=["RiskPerformance"])

@@ -703,7 +703,7 @@ class TestPlots:
 
         X, y = bc_data
         Xtr, Xte, ytr, yte = train_test_split(X, y, test_size=0.25, stratify=y, random_state=42)
-        clf = HUGIMLClassifierNative(B=8, L=2, G=1e-4, topK=-1, adaptive_binning=True)
+        clf = HUGIMLClassifierNative(B=8, L=2, G=1e-4, topK=80, adaptive_binning=True)
         clf.fit(Xtr, ytr)
         feat = list(clf._bin_edges_.keys())[0]
         fig = HUGPlotter(clf).plot_marginal_bin_profile(feat)
@@ -1013,7 +1013,7 @@ class TestMissingValues:
         from hugiml import HUGIMLClassifierNative
 
         Xtr, Xte, ytr, yte = nan_split
-        clf = HUGIMLClassifierNative(B=8, L=2, G=1e-4, topK=-1, adaptive_binning=True)
+        clf = HUGIMLClassifierNative(B=8, L=2, G=1e-4, topK=80, adaptive_binning=True)
         clf.fit(Xtr, ytr)
         assert not any("=nan" in feat.lower() for feat in clf.get_hug_features())
         assert roc_auc_score(yte, clf.predict_proba(Xte)[:, 1]) > 0.90
@@ -1025,7 +1025,7 @@ class TestMissingValues:
         rng = np.random.default_rng(0)
         X_nan = X.copy()
         X_nan[rng.random(X_nan.shape) < 0.05] = np.nan
-        clf = HUGIMLAdaptive(b_candidates=[3, 5, 7], L=2, G=1e-4)
+        clf = HUGIMLAdaptive(b_candidates=[3, 5, 7], L=2, G=1e-4, topK=80)
         X_enc, y_enc = clf.prepareXy(X_nan, y)
         Xtr, Xte, ytr, yte = train_test_split(
             X_enc, y_enc, test_size=0.25, stratify=y_enc, random_state=42

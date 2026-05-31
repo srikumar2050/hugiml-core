@@ -135,7 +135,7 @@ def _build_hugiml(allCols=None, origColumns=None):
     kw = {}
     if allCols is not None:
         kw = {"allCols": allCols, "origColumns": origColumns}
-    return HUGIMLClassifierNative(B=7, L=2, G=5e-3, **kw)
+    return HUGIMLClassifierNative(B=7, L=2, G=5e-3, topK=100, **kw)
 
 
 def _build_ebm():

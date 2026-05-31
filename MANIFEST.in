@@ -2,6 +2,7 @@ include LICENSE
 include NOTICE
 include README.md
 include CONTRIBUTING.md
+include CHANGELOG.md
 include pyproject.toml
 include setup.py
 
@@ -9,7 +10,7 @@ recursive-include native *.cpp *.hpp
 recursive-include src/hugiml *.py py.typed
 recursive-include tests *.py
 recursive-include benchmarks *.py *.json
-recursive-include docs *.md
+recursive-include docs *.md *.rst *.py
 recursive-include docker Dockerfile*
 recursive-include kubernetes *.yaml
 recursive-include scripts *.py *.sh

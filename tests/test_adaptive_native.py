@@ -43,7 +43,7 @@ def fitted_adaptive(bc_split):
         B=8,
         L=2,
         G=1e-4,
-        topK=-1,
+        topK=1000,
         adaptive_binning=True,
         b_candidates=[2, 3, 5, 7, 10, 15],
         min_marginal_gain_ratio=0.02,
@@ -55,7 +55,7 @@ def fitted_adaptive(bc_split):
 @pytest.fixture(scope="module")
 def fitted_non_adaptive(bc_split):
     Xtr, Xte, ytr, yte = bc_split
-    clf = HUGIMLClassifierNative(B=5, L=2, G=1e-4, topK=-1)
+    clf = HUGIMLClassifierNative(B=5, L=2, G=1e-4, topK=1000)
     clf.fit(Xtr, ytr)
     return clf, Xtr, Xte, ytr, yte
 
@@ -237,7 +237,7 @@ class TestBackwardCompat:
         """Existing non-adaptive flow is bit-for-bit identical."""
         clf, Xtr, Xte, ytr, yte = fitted_non_adaptive
         # fit a second time with same seed
-        clf2 = HUGIMLClassifierNative(B=5, L=2, G=1e-4, topK=-1)
+        clf2 = HUGIMLClassifierNative(B=5, L=2, G=1e-4, topK=1000)
         clf2.fit(Xtr, ytr)
         auc1 = roc_auc_score(yte, clf.predict_proba(Xte)[:, 1])
         auc2 = roc_auc_score(yte, clf2.predict_proba(Xte)[:, 1])
@@ -275,7 +275,7 @@ class TestMulticlassAdaptive:
         Xtr, Xte, ytr, yte = train_test_split(
             X_enc, y_enc, test_size=0.25, stratify=y_enc, random_state=0
         )
-        clf = HUGIMLClassifierNative(B=8, L=2, G=1e-4, topK=-1, adaptive_binning=True)
+        clf = HUGIMLClassifierNative(B=8, L=2, G=1e-4, topK=1000, adaptive_binning=True)
         clf.fit(Xtr, ytr)
         proba = clf.predict_proba(Xte)
         assert proba.shape == (len(yte), 3)

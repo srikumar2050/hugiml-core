@@ -25,9 +25,12 @@ void bind_prepare_transactions(py::module_& m);
 void bind_mine_patterns(py::module_& m);
 void bind_build_matrix(py::module_& m);
 
+void bind_prepare_mine_l1(py::module_& m);
+
 void bind_pattern(py::module_& m)
 {
     bind_prepare_transactions(m);
     bind_mine_patterns(m);
     bind_build_matrix(m);
+    bind_prepare_mine_l1(m);
 }

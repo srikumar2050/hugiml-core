@@ -256,11 +256,18 @@ class PatternEditor:
 
         from sklearn.pipeline import Pipeline
 
-        # Build pattern matrix for training data
-        hup_tr = clf.transform(X_tr)
-
+        # Build pattern matrix for training data.  After remove(), the working
+        # classifier already carries the original training HUP matrix with the
+        # same columns pruned.  Reuse it when the caller passes the same-row
+        # training split; rebuilding it by scanning every pattern can dominate
+        # refit time for large adaptive models.
         y_arr = np.asarray(y_tr, dtype=np.int64)
-        clf.x_train_hup_ = csr_matrix(hup_tr, dtype=np.float32)
+        cached_hup = getattr(clf, "x_train_hup_", None)
+        if cached_hup is not None and cached_hup.shape[0] == len(y_arr):
+            clf.x_train_hup_ = csr_matrix(cached_hup, dtype=np.float32)
+        else:
+            hup_tr = clf.transform(X_tr)
+            clf.x_train_hup_ = csr_matrix(hup_tr, dtype=np.float32)
 
         if estimator is not None:
             new_est = _copy.deepcopy(estimator)

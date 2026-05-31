@@ -58,7 +58,11 @@ def _make_dataset(n: int, p: int, n_cls: int = 2, seed: int = 0) -> tuple:
 def _quick_clf(**kw):
     from hugiml import HUGIMLClassifierNative
 
-    defaults = dict(B=4, L=1, G=0.0, topK=30)
+    # use_hotpath=False: the L1 hotpath discards .transactions for memory
+    # efficiency.  TestBitmapAtScale.test_build_train_matrix_large calls
+    # build_train_matrix on clf.td_ which requires patterns to be produced
+    # via the slow path so that row indices are non-empty.
+    defaults = dict(B=4, L=1, G=0.0, topK=30, use_hotpath=False)
     defaults.update(kw)
     return HUGIMLClassifierNative(**defaults)
 
