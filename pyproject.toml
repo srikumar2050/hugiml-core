@@ -7,8 +7,7 @@ name = "hugiml-core"
 version = "1.1.4"
 description = "High-performance interpretable rule-based ML — HUG-IML classifier, adaptive binning, EBM-style plots, pattern pruning, and benchmark runner (IEEE Access 2024)."
 readme = "README.md"
-license = "Apache-2.0"
-license-files = ["LICENSE", "NOTICE"]
+license = {text = "Apache-2.0"}
 authors = [{ name = "Srikumar Krishnamoorthy" }]
 requires-python = ">=3.9"
 keywords = [
@@ -28,6 +27,7 @@ classifiers = [
 	"Intended Audience :: Legal Industry",                 
 	"Intended Audience :: Science/Research",
     "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.9",
     "Programming Language :: Python :: 3.10",
