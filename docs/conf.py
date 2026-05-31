@@ -18,13 +18,14 @@ extensions = [
     "sphinx.ext.autodoc",
     "sphinx.ext.autosummary",
     "sphinx.ext.napoleon",
+    "myst_parser",
 ]
 
 autosummary_generate = True
 autodoc_typehints = "description"
 templates_path = ["_templates"]
 exclude_patterns = ["_build", "Thumbs.db", ".DS_Store"]
-html_theme = "alabaster"
-html_title = "hugiml-core 1.1.4"
+html_theme = "sphinx_rtd_theme"
+html_title = "hugiml-core documentation"
 
 suppress_warnings = ["ref.term", "ref.ref"]
