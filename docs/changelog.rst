@@ -1,8 +1,43 @@
 Changelog
 =========
 
-v1.1.4
-------
+The canonical release notes live in ``CHANGELOG.md`` at the repository root. Keep that file synchronized with the package version, PyPI release, GitHub tag, and Read the Docs build.
 
-* Added the native L1 hot path for ``L=1`` fits. The C++ path fuses transaction preparation, single-item pattern mining, information-gain filtering, top-K retention, and sparse matrix construction to reduce Python/C++ overhead for the common L1 workflow.
-* Moved adaptive binning selection into the C++ backend. Per-feature bin counts are now selected using supervised information-gain scoring and elbow-style stopping, while keeping Python metadata such as ``per_feature_b_``, ``_bin_edges_``, and ``ig_scores_`` available for inspection and serialization.
+Recent releases
+---------------
+
+1.1.4 — 2026-05-31
+~~~~~~~~~~~~~~~~~~
+
+* Added the native L1 hot path for ``L=1`` fits, fusing transaction preparation, single-item pattern mining, information-gain filtering, top-K retention, and sparse matrix construction in the C++ path.
+* Moved adaptive binning selection into the C++ backend with supervised information-gain scoring and elbow-style stopping.
+* Preserved Python-side adaptive-binning metadata including ``per_feature_b_``, ``_bin_edges_``, and ``ig_scores_`` for inspection and serialization.
+
+1.1.3 — 2026-05-29
+~~~~~~~~~~~~~~~~~~
+
+* Optimized the native mining path by pushing the effective ``topK`` budget into mining, closer to the original Java implementation.
+* Added performance and memory improvements, including row-stripe chunked transaction construction.
+* Enforced structured mining constraints exactly and kept EUCS pruning disabled by default for predictable compound-pattern behavior.
+* Revised domain-specific notebook examples.
+
+1.1.2 — 2026-05-27
+~~~~~~~~~~~~~~~~~~
+
+* Added ``feature_mode`` to ``HUGIMLClassifierNative``.
+* Supported ``patterns_only``, ``original_plus_patterns``, and ``original_plus_interactions`` downstream representations.
+* Preserved pattern-space behavior for ``transform()``, ``fit_transform()``, ``get_hug_features()``, and ``get_pattern_info()``.
+* Updated serialization, summaries, feature importances, and tests for hybrid feature modes.
+
+1.1.1 — 2026-05-26
+~~~~~~~~~~~~~~~~~~
+
+* Fixed compound-pattern information-gain handling so L2+ patterns survive positive ``G`` after item-list release.
+* Added notebooks and examples.
+
+1.1.0 — 2026-05-23
+~~~~~~~~~~~~~~~~~~
+
+* Added adaptive binning and supervised per-feature ``B`` selection.
+* Added native missing-value handling for numerical ``NaN`` and infinite values.
+* Added plotting, pruning, interpretability metrics, multiclass/imbalance helpers, benchmarks, and expanded documentation assets.

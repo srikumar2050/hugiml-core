@@ -1,31 +1,89 @@
-# Configuration file for the Sphinx documentation builder.
+"""Sphinx configuration for the hugiml-core documentation."""
 
 from __future__ import annotations
 
+import os
 import sys
-from pathlib import Path
+from datetime import datetime
 
-ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(ROOT / "src"))
-sys.path.insert(0, str(ROOT))
+sys.path.insert(0, os.path.abspath("../src"))
 
 project = "hugiml-core"
 author = "Srikumar Krishnamoorthy"
-release = "1.1.4"
-version = "1.1.4"
+copyright = f"{datetime.now().year}, {author}"
+
+try:
+    import hugiml
+
+    release = hugiml.__version__
+except Exception:  # pragma: no cover - defensive fallback for RTD builds
+    release = ""
 
 extensions = [
     "sphinx.ext.autodoc",
     "sphinx.ext.autosummary",
     "sphinx.ext.napoleon",
+    "sphinx.ext.viewcode",
+    "sphinx.ext.todo",
     "myst_parser",
 ]
 
 autosummary_generate = True
+autodoc_member_order = "bysource"
 autodoc_typehints = "description"
+autodoc_default_options = {
+    "members": True,
+    "member-order": "bysource",
+    # Avoid documenting sklearn metadata-routing helper methods inherited
+    # by BaseEstimator. They create noisy external cross-reference warnings
+    # and distract from the public HUGIML API.
+    "exclude-members": "set_fit_request,set_score_request,set_predict_request,set_transform_request,set_partial_fit_request",
+}
+autodoc_mock_imports = [
+    "_hugiml_core",
+    "plotly",
+    "shap",
+    "mlflow",
+    "opentelemetry",
+    "prometheus_client",
+    "imblearn",
+    "xgboost",
+    "interpret",
+    "pygam",
+    "rulefit",
+]
+
+napoleon_google_docstring = True
+napoleon_numpy_docstring = True
+napoleon_include_init_with_doc = True
+napoleon_use_param = True
+napoleon_use_rtype = True
+
+source_suffix = {
+    ".rst": "restructuredtext",
+    ".md": "markdown",
+}
+
 templates_path = ["_templates"]
 exclude_patterns = ["_build", "Thumbs.db", ".DS_Store"]
-html_theme = "sphinx_rtd_theme"
-html_title = "hugiml-core documentation"
 
-suppress_warnings = ["ref.term", "ref.ref"]
+html_theme = "sphinx_rtd_theme"
+html_static_path = ["_static"]
+html_css_files = ["custom.css"]
+html_logo = "images/header-hugiml.png"
+html_favicon = None
+html_theme_options = {
+    "collapse_navigation": False,
+    "navigation_depth": 3,
+    "style_external_links": True,
+}
+
+# Intersphinx is intentionally disabled for deterministic RTD/local builds.
+# Re-enable it only if external inventory availability is required.
+
+todo_include_todos = False
+
+# Third-party docstrings imported through autodoc may contain unresolved
+# intersphinx references on offline or restricted builders. The project pages
+# still surface HUGIML API warnings normally.
+suppress_warnings = ["ref.python", "ref.term", "ref.ref", "toc.not_included", "intersphinx"]
