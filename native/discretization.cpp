@@ -20,8 +20,39 @@
 #include "math.hpp"
 
 #include <algorithm>
+#include <cmath>
+#include <unordered_map>
 
 namespace hugiml {
+
+static double adaptive_entropy_log2(const std::vector<int>& y) {
+    if (y.empty()) return 0.0;
+    std::unordered_map<int, int> counts;
+    counts.reserve(y.size());
+    for (int v : y) counts[v]++;
+    const double n = static_cast<double>(y.size());
+    double h = 0.0;
+    for (const auto& kv : counts) {
+        double p = static_cast<double>(kv.second) / n;
+        if (p > 0.0) h -= p * std::log2(p + 1e-12);
+    }
+    return h;
+}
+
+static double adaptive_ig_log2(const std::vector<int>& x_disc,
+                               const std::vector<int>& y) {
+    if (x_disc.empty() || y.empty()) return 0.0;
+    const double total = static_cast<double>(y.size());
+    const double base = adaptive_entropy_log2(y);
+    std::unordered_map<int, std::vector<int>> groups;
+    groups.reserve(32);
+    for (size_t i = 0; i < x_disc.size(); ++i) groups[x_disc[i]].push_back(y[i]);
+    double weighted = 0.0;
+    for (const auto& kv : groups) {
+        weighted += static_cast<double>(kv.second.size()) / total * adaptive_entropy_log2(kv.second);
+    }
+    return std::max(0.0, base - weighted);
+}
 
 std::pair<std::vector<int>, std::vector<double>>
 kbins_cpp(const std::vector<double>& col, int nb) {
@@ -84,40 +115,106 @@ int choose_nb_cpp(const std::vector<double>& col,
 
 namespace hugiml {
 
-// Helper: kbins on pre-sorted column (avoids repeated sort).
-// sc must already be sorted ascending.
-//
-// Uses the same boundary formula as Python _information_gain_from_sorted:
-//   idx = round(linspace(0, n-1, nb+1))
-// (integer index, no interpolation).  This matches np.round behaviour exactly
-// so that elbow_stop_nb_cpp produces identical bin assignments to Python _select_b.
-static std::pair<std::vector<int>, std::vector<double>>
-kbins_presorted(const std::vector<double>& sc,
-                const std::vector<double>& col_orig,
-                int nb) {
-    size_t n = sc.size();
+// Helper: final quantile edges from an already-sorted finite column.
+// This mirrors kbins_cpp edge generation (linear interpolation percentiles),
+// but avoids a second column copy/sort during adaptive B selection.
+static std::vector<double>
+kbins_edges_from_sorted_linear(const std::vector<double>& sc, int nb) {
+    const size_t n = sc.size();
+    if (n == 0) return {0.0, 1.0};
+    double step = 100.0 / nb;
     std::vector<double> edges;
     edges.reserve(nb + 1);
     for (int i = 0; i <= nb; i++) {
-        // linspace(0, n-1, nb+1)[i] then round to nearest integer — matches
-        // np.round(np.linspace(0, n-1, nb+1)).astype(int) in Python.
-        double fidx = static_cast<double>(i) / static_cast<double>(nb) * (n - 1);
-        size_t idx  = static_cast<size_t>(std::round(fidx));
+        double q    = step * static_cast<double>(i);
+        double fidx = q / 100.0 * static_cast<double>(n - 1);
+        size_t lo   = static_cast<size_t>(fidx);
+        size_t hi   = std::min(lo + 1, n - 1);
+        double frac = fidx - static_cast<double>(lo);
+        edges.push_back(sc[lo] + frac * (sc[hi] - sc[lo]));
+    }
+    std::sort(edges.begin(), edges.end());
+    edges.erase(std::unique(edges.begin(), edges.end()), edges.end());
+    if (edges.size() < 2) edges = {sc.front(), sc.front() + 1e-9};
+    return edges;
+}
+
+// Helper: rounded-index edges from an already-sorted finite column.
+// This matches the scoring edge construction used by the previous
+// kbins_presorted() implementation, but returns only the unique edge vector.
+static std::vector<double>
+kbins_score_edges_from_sorted(const std::vector<double>& sc, int nb) {
+    const size_t n = sc.size();
+    std::vector<double> edges;
+    edges.reserve(nb + 1);
+    for (int i = 0; i <= nb; i++) {
+        double fidx = static_cast<double>(i) / static_cast<double>(nb) * static_cast<double>(n - 1);
+        size_t idx  = static_cast<size_t>(std::nearbyint(fidx));
         idx = std::min(idx, n - 1);
         edges.push_back(sc[idx]);
     }
     std::sort(edges.begin(), edges.end());
     edges.erase(std::unique(edges.begin(), edges.end()), edges.end());
-    if (edges.size() < 2) {
-        edges = {sc.front(), sc.front() + 1e-9};
+    if (edges.size() < 2) edges = {sc.front(), sc.front() + 1e-9};
+    return edges;
+}
+
+static double entropy_log2_from_counts(const std::vector<int>& counts, int total) {
+    if (total <= 0) return 0.0;
+    const double inv = 1.0 / static_cast<double>(total);
+    double h = 0.0;
+    for (int c : counts) {
+        if (c > 0) {
+            double p = static_cast<double>(c) * inv;
+            h -= p * std::log2(p + 1e-12);
+        }
     }
-    std::vector<double> inner(edges.begin() + 1, edges.end() - 1);
-    std::vector<int> binned(col_orig.size());
-    for (size_t i = 0; i < col_orig.size(); i++) {
-        auto it   = std::upper_bound(inner.begin(), inner.end(), col_orig[i]);
-        binned[i] = static_cast<int>(it - inner.begin());
+    return std::max(0.0, h);
+}
+
+// Allocation-light IG for a candidate B.  The older implementation materialised
+// a length-n binned vector and then built unordered_map<int, vector<int>> groups
+// for every candidate.  This version scans the sorted (x, y) column once and
+// accumulates dense class histograms by bin, preserving the same upper_bound
+// binning semantics for duplicate edges and boundary values.
+static double adaptive_ig_sorted_hist_log2(const std::vector<double>& x_sorted,
+                                           const std::vector<int>& y_sorted,
+                                           int n_cls,
+                                           const std::vector<int>& global_counts,
+                                           double base_entropy,
+                                           int total,
+                                           int nb) {
+    if (total <= 0 || nb <= 0) return 0.0;
+    std::vector<double> edges = kbins_score_edges_from_sorted(x_sorted, nb);
+    const int n_bins = static_cast<int>(edges.size()) - 1;
+    if (n_bins <= 0) return 0.0;
+
+    std::vector<int> bin_counts(static_cast<size_t>(n_bins) * static_cast<size_t>(n_cls), 0);
+    std::vector<int> bin_totals(n_bins, 0);
+    int b = 0;
+    const int n_inner = static_cast<int>(edges.size()) - 2;
+    for (int i = 0; i < total; i++) {
+        const double x = x_sorted[i];
+        while (b < n_inner && x >= edges[static_cast<size_t>(b) + 1]) ++b;
+        int yy = y_sorted[i];
+        if (0 <= yy && yy < n_cls) {
+            bin_counts[static_cast<size_t>(b) * static_cast<size_t>(n_cls) + static_cast<size_t>(yy)]++;
+            bin_totals[b]++;
+        }
     }
-    return {binned, edges};
+
+    double weighted = 0.0;
+    std::vector<int> tmp_counts(n_cls);
+    for (int bi = 0; bi < n_bins; bi++) {
+        int bt = bin_totals[bi];
+        if (bt <= 0) continue;
+        for (int c = 0; c < n_cls; c++) {
+            tmp_counts[c] = bin_counts[static_cast<size_t>(bi) * static_cast<size_t>(n_cls) + static_cast<size_t>(c)];
+        }
+        weighted += static_cast<double>(bt) / static_cast<double>(total) * entropy_log2_from_counts(tmp_counts, bt);
+    }
+    (void)global_counts;  // retained in signature for clarity and future reuse.
+    return std::max(0.0, base_entropy - weighted);
 }
 
 int elbow_stop_nb_cpp(const std::vector<double>& col_raw,
@@ -127,65 +224,61 @@ int elbow_stop_nb_cpp(const std::vector<double>& col_raw,
                       double                     ratio,
                       std::vector<double>&       out_edges,
                       std::vector<double>&       out_ig_scores) {
-    // ── 1. Filter non-finite values ──────────────────────────────────────────
-    std::vector<double> col_f;
-    std::vector<int>    y_f;
-    col_f.reserve(col_raw.size());
-    y_f.reserve(col_raw.size());
+    // ── 1. Filter non-finite values while preserving labels ─────────────────
+    std::vector<std::pair<double, int>> xy;
+    xy.reserve(col_raw.size());
     for (size_t i = 0; i < col_raw.size(); i++) {
-        if (std::isfinite(col_raw[i])) {
-            col_f.push_back(col_raw[i]);
-            y_f.push_back(y[i]);
-        }
+        if (std::isfinite(col_raw[i])) xy.emplace_back(col_raw[i], y[i]);
     }
 
-    if (static_cast<int>(col_f.size()) < 10 || candidates.empty()) {
+    if (static_cast<int>(xy.size()) < 10 || candidates.empty()) {
         int chosen = candidates.empty() ? 2 : candidates[candidates.size() / 2];
         out_ig_scores.assign(candidates.size(), 0.0);
-        // Preserve Python _quantile_edges semantics for the final stored edges:
-        // finite-only np.percentile(..., linspace(0, 100, chosen+1)), unique,
-        // then [min, max + 1e-9] fallback for collapsed edges.
-        if (col_f.empty()) {
+        if (xy.empty()) {
             out_edges = {0.0, 1.0};
         } else {
-            auto [dummy_binned, edges] = kbins_cpp(col_f, chosen);
-            out_edges = edges;
+            std::sort(xy.begin(), xy.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+            std::vector<double> sc;
+            sc.reserve(xy.size());
+            for (const auto& v : xy) sc.push_back(v.first);
+            out_edges = kbins_edges_from_sorted_linear(sc, chosen);
         }
         return chosen;
     }
 
-    // ── 2. Sort ONCE — reuse across all candidate evaluations ────────────────
-    // Mirrors Python _select_b which sorts once and calls
-    // _information_gain_from_sorted(x_sorted, y_sorted, b) per candidate.
-    std::vector<double> sc = col_f;
-    std::sort(sc.begin(), sc.end());
+    // ── 2. Sort once and split into dense arrays ─────────────────────────────
+    std::sort(xy.begin(), xy.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
+    const int total = static_cast<int>(xy.size());
+    std::vector<double> x_sorted;
+    std::vector<int> y_sorted;
+    x_sorted.reserve(xy.size());
+    y_sorted.reserve(xy.size());
+    std::vector<int> global_counts(std::max(n_cls, 1), 0);
+    for (const auto& v : xy) {
+        x_sorted.push_back(v.first);
+        y_sorted.push_back(v.second);
+        if (0 <= v.second && v.second < n_cls) global_counts[v.second]++;
+    }
+    double base_entropy = entropy_log2_from_counts(global_counts, total);
 
-    // ── 3. Elbow-stop over candidates using pre-sorted column ─────────────────
+    // ── 3. Elbow-stop over candidates with histogram-only scoring ────────────
     double prev_ig = 0.0;
-    int    chosen  = candidates[0];
+    int chosen = candidates[0];
     out_ig_scores.clear();
     out_ig_scores.reserve(candidates.size());
     for (int b : candidates) {
-        // Match Python _select_b exactly: candidate b is passed directly to
-        // _information_gain_from_sorted.  That function may collapse duplicate
-        // edges internally; it does not cap b by distinct-1 before scoring.
-        auto [binned, score_edges] = kbins_presorted(sc, col_f, b);
-        double ig = ig_col_cpp(binned, y_f, n_cls);
+        double ig = adaptive_ig_sorted_hist_log2(
+            x_sorted, y_sorted, n_cls, global_counts, base_entropy, total, b);
         out_ig_scores.push_back(ig);
-
-        if (prev_ig > 0.0 &&
-            (ig - prev_ig) / (prev_ig + 1e-9) < ratio) {
+        if (prev_ig > 0.0 && (ig - prev_ig) / (prev_ig + 1e-9) < ratio) {
             break;
         }
-        chosen  = b;
+        chosen = b;
         prev_ig = ig;
     }
 
-    // Preserve Python _apply_adaptive_binning semantics: after _select_b chooses
-    // B, final stored edges come from _quantile_edges(col, chosen), not from
-    // the rounded-index edges used only for fast IG scoring.
-    auto [dummy_binned, final_edges] = kbins_cpp(col_f, chosen);
-    out_edges = final_edges;
+    // ── 4. Final stored edges use the original percentile/interpolation path ─
+    out_edges = kbins_edges_from_sorted_linear(x_sorted, chosen);
     return chosen;
 }
 

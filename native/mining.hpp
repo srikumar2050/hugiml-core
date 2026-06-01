@@ -88,6 +88,8 @@ public:
     // When present, mining enforces the exact mutual-exclusion constraint
     // that a pattern cannot contain two bins/categories from the same feature.
     const std::vector<int>* item_col = nullptr;
+    const std::vector<double>* item_iu = nullptr;
+    const std::vector<std::vector<double>>* transaction_utils = nullptr;
 
     // Timeout support: set deadline_tp before calling mine().
     // explore() checks this every _timeout_check_interval calls and throws
@@ -106,7 +108,9 @@ public:
     void mine(const TransList& transactions,
               const std::vector<double>& item_twu,
               const std::vector<int>& ytrain, int n_cls,
-              const std::vector<int>* item_col_in = nullptr);
+              const std::vector<int>* item_col_in = nullptr,
+              const std::vector<double>* item_iu_in = nullptr,
+              const std::vector<std::vector<double>>* transaction_utils_in = nullptr);
 
 private:
     int _explore_calls = 0;

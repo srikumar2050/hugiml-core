@@ -65,19 +65,21 @@ namespace hugiml {
 
 // ── Result types ──────────────────────────────────────────────────────────────
 
+/// Per-column output of C++ adaptive B selection.
+struct ColAdaptResult {
+    int                  chosen_b;     ///< Elbow-stop selected B_j
+    std::vector<double>  edges;        ///< Quantile edges [0..B_j] for this column
+    std::vector<double>  ig_scores;    ///< IG score per candidate evaluated
+};
+
 /// Output of the fused L=1 hot path.
 struct L1FitResult {
     TransactionDataCpp           td;         ///< Phase-1 artefacts; td.transactions is EMPTY
     std::vector<PatternEntry>    patterns;   ///< Mined top-K singletons
     std::vector<int32_t>         coo_rows;   ///< COO row indices for x_train_hup
     std::vector<int32_t>         coo_cols;   ///< COO column indices for x_train_hup
-};
-
-/// Per-column output of C++ adaptive B selection.
-struct ColAdaptResult {
-    int                  chosen_b;     ///< Elbow-stop selected B_j
-    std::vector<double>  edges;        ///< Quantile edges [0..B_j] for this column
-    std::vector<double>  ig_scores;    ///< IG score per candidate evaluated
+    std::vector<ColAdaptResult>  adaptive_cols; ///< Metadata for fused adaptive path
+    std::vector<int>             adaptive_num_col_indices; ///< Original numeric col indices
 };
 
 /// Output of select_adaptive_bins_cpp.
@@ -118,5 +120,30 @@ AdaptiveBinResult select_adaptive_bins_cpp(
     const pybind11::array_t<uint8_t, pybind11::array::forcecast>& is_cat_arr,
     const std::vector<int>&                candidates,
     double                                 ratio);
+
+/// Fast fixed-B dense numeric L=1 hot path.  It keeps numeric columns numeric,
+/// skips non-finite cells, parallelises fixed-bin column preparation and the
+/// first row scan, and avoids materialising transactions.
+L1FitResult prepare_and_mine_l1_fixed_numeric_cpp(
+    const pybind11::array_t<double,  pybind11::array::c_style | pybind11::array::forcecast>& X_num_arr,
+    const pybind11::array_t<int64_t, pybind11::array::c_style | pybind11::array::forcecast>& y_arr,
+    int B,
+    std::vector<std::string> col_names,
+    const pybind11::array_t<uint8_t, pybind11::array::forcecast>& is_int_arr,
+    int K, double G, double timeout_s);
+
+/// Fused adaptive-B + L1 hot path.  This combines adaptive edge selection and
+/// the L1 scan without materialising X_codes_flat or a Python binned DataFrame.
+L1FitResult prepare_and_mine_l1_adaptive_cpp(
+    const pybind11::array_t<double,  pybind11::array::c_style | pybind11::array::forcecast>& X_num_arr,
+    const pybind11::array_t<int64_t, pybind11::array::c_style | pybind11::array::forcecast>& y_arr,
+    std::vector<std::string>               col_names,
+    const pybind11::array_t<uint8_t, pybind11::array::forcecast>& is_cat_arr,
+    const pybind11::array_t<uint8_t, pybind11::array::forcecast>& is_int_arr,
+    std::vector<std::vector<std::string>>  cat_raw_strs,
+    std::vector<std::vector<bool>>         cat_raw_valid,
+    const std::vector<int>&                candidates,
+    double                                 ratio,
+    int K, double G, double timeout_s);
 
 }  // namespace hugiml

@@ -19,7 +19,8 @@ Taxonomy::
     HUGIMLError (base)
     ├── HUGIMLFitError          — any failure during fit()
     │   ├── HUGIMLMiningError   — pattern mining specifically
-    │   └── HUGIMLTimeoutError  — max_fit_seconds exceeded
+    │   ├── HUGIMLTimeoutError  — max_fit_seconds exceeded
+    │   └── HUGIMLMemoryError   — native/Python memory budget exceeded
     ├── HUGIMLValidationError   — input data / param validation
     │   ├── HUGIMLSchemaError   — column mismatch at predict time
     │   └── HUGIMLParamError    — bad hyperparameter values / types
@@ -43,6 +44,7 @@ __all__ = [
     "HUGIMLFitError",
     "HUGIMLMiningError",
     "HUGIMLTimeoutError",
+    "HUGIMLMemoryError",
     "HUGIMLValidationError",
     "HUGIMLSchemaError",
     "HUGIMLParamError",
@@ -78,6 +80,10 @@ class HUGIMLMiningError(HUGIMLFitError):
 
 class HUGIMLTimeoutError(HUGIMLFitError):
     """Raised when fit exceeds max_fit_seconds."""
+
+
+class HUGIMLMemoryError(HUGIMLFitError, MemoryError):
+    """Raised when fit cannot safely allocate required memory."""
 
 
 class HUGIMLValidationError(HUGIMLError, ValueError):

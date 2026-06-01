@@ -21,6 +21,7 @@
  */
 
 #include "matrix.hpp"
+#include "resource_guard.hpp"
 #include <unordered_set>
 #include <numeric>
 
@@ -61,16 +62,22 @@ COO build_matrix_cpp(const TransList& transactions,
         for (int it : pe.items)
             if (it > max_item) max_item = it;
     for (int i = 0; i < n && i < static_cast<int>(transactions.size()); i++)
-        for (auto& [it, _u] : transactions[i])
+        for (int it : transactions[i])
             if (it > 0 && it > max_item) max_item = it;
 
     int nw = n_words(max_item + 1);
+
+    ensure_native_memory_available(
+        static_cast<uint64_t>(n) * static_cast<uint64_t>(nw) * sizeof(Word) +
+        static_cast<uint64_t>(n_pats) * static_cast<uint64_t>(nw) * sizeof(Word) +
+        static_cast<uint64_t>(n) * static_cast<uint64_t>(std::max(n_pats, 1)) / 4ULL * sizeof(int32_t) * 2ULL,
+        "build_matrix bitmap/COO buffers");
 
     // Flat row-major bitmap arrays: txn_bm[i * nw + w], pat_bm[pi * nw + w]
     std::vector<Word> txn_bm(static_cast<size_t>(n) * nw, 0);
     for (int i = 0; i < n && i < static_cast<int>(transactions.size()); i++) {
         Word* row = txn_bm.data() + static_cast<size_t>(i) * nw;
-        for (auto& [it, _u] : transactions[i])
+        for (int it : transactions[i])
             if (it > 0) bit_set(row, it);
     }
 
@@ -179,6 +186,10 @@ COO build_test_matrix_cpp(
     bool have_cat_valid = (!cat_valid.empty() &&
                            static_cast<int>(cat_valid.size()) == p);
 
+    ensure_native_memory_available(
+        static_cast<uint64_t>(n) * (sizeof(Trans) + 8ULL) +
+        static_cast<uint64_t>(n) * static_cast<uint64_t>(std::max(p, 1)) * sizeof(TItem),
+        "build_test_matrix temporary transactions");
     TransList test_trans(n);
     for (int r = 0; r < n; r++) {
         Trans row;
@@ -222,9 +233,9 @@ COO build_test_matrix_cpp(
             }
             int bname = td.bkey(bi, j);
             auto it   = td.bn2id.find(bname);
-            if (it != td.bn2id.end()) row.push_back({it->second, 1.0});
+            if (it != td.bn2id.end()) row.push_back(it->second);
         }
-        test_trans[r] = row.empty() ? Trans{{-1, 0.0}} : row;
+        test_trans[r] = row.empty() ? Trans{-1} : row;
     }
 
     return build_matrix_cpp(test_trans, patterns, n);

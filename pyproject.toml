@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hugiml-core"
-version = "1.1.4"
+version = "1.1.5"
 description = "High-performance interpretable rule-based ML — HUG-IML classifier, adaptive binning, EBM-style plots, pattern pruning, and benchmark runner (IEEE Access 2024)."
 readme = "README.md"
 license = {text = "Apache-2.0"}

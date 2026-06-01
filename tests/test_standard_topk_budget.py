@@ -71,4 +71,3 @@ def test_default_param_grid_keys():
     grid = HUGIMLClassifierNative.default_param_grid()
     for key in ("B", "L", "topK", "G", "adaptive_binning", "feature_mode"):
         assert key in grid, f"missing key: {key}"
-

@@ -84,10 +84,13 @@ if is_windows:
     _opt_debug = ["/Od", "/Zi", "/DHUGIML_DEBUG"]
 elif is_macos:
     import subprocess
+
     try:
-        libomp_prefix = subprocess.check_output(
-            ["brew", "--prefix", "libomp"], stderr=subprocess.DEVNULL
-        ).decode().strip()
+        libomp_prefix = (
+            subprocess.check_output(["brew", "--prefix", "libomp"], stderr=subprocess.DEVNULL)
+            .decode()
+            .strip()
+        )
     except Exception:
         libomp_prefix = "/opt/homebrew/opt/libomp"
     omp_compile = [f"-I{libomp_prefix}/include", "-Xpreprocessor", "-fopenmp"]

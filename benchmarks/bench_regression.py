@@ -58,17 +58,33 @@ TESTS_DIR = ROOT / "tests"
 sys.path.insert(0, str(ROOT / "src"))
 
 GERMAN_COLS = [
-    "checking_acct", "duration", "credit_history", "purpose",
-    "credit_amount", "savings", "employment", "installment_rate",
-    "personal_status", "other_debtors", "residence_since", "property",
-    "age", "other_plans", "housing", "existing_credits", "job",
-    "num_dependents", "telephone", "foreign_worker",
+    "checking_acct",
+    "duration",
+    "credit_history",
+    "purpose",
+    "credit_amount",
+    "savings",
+    "employment",
+    "installment_rate",
+    "personal_status",
+    "other_debtors",
+    "residence_since",
+    "property",
+    "age",
+    "other_plans",
+    "housing",
+    "existing_credits",
+    "job",
+    "num_dependents",
+    "telephone",
+    "foreign_worker",
 ]
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _timed(fn, *args, **kwargs):
     t0 = time.perf_counter()
@@ -78,9 +94,11 @@ def _timed(fn, *args, **kwargs):
 
 def _load_german():
     import pandas as pd
+
     df = pd.read_csv(
         TESTS_DIR / "german.data",
-        sep=" ", header=None,
+        sep=" ",
+        header=None,
         names=GERMAN_COLS + ["target"],
     )
     df["target"] = (df["target"] == 2).astype(int)
@@ -89,6 +107,7 @@ def _load_german():
 
 def _load_heloc():
     import pandas as pd
+
     df = pd.read_csv(TESTS_DIR / "heloc.csv")
     df["target"] = (df["RiskPerformance"] == "Bad").astype(int)
     df = df.drop(columns=["RiskPerformance"])
@@ -98,6 +117,7 @@ def _load_heloc():
 # ---------------------------------------------------------------------------
 # Benchmark cases aligned to baseline.json keys
 # ---------------------------------------------------------------------------
+
 
 def run_benchmarks() -> dict[str, float]:
     """Return a dict mapping benchmark keys (as in baseline.json) to seconds."""
@@ -125,17 +145,18 @@ def run_benchmarks() -> dict[str, float]:
 
     clf_fit = HUGIMLClassifierNative(B=7, L=1, G=5e-3)
     Xgp2, ygp2 = clf_fit.prepareXy(X_g.copy(), y_g.copy())
-    Xgtr2, _, ygtr2, _ = train_test_split(
-        Xgp2, ygp2, test_size=0.2, random_state=42, stratify=ygp2
-    )
+    Xgtr2, _, ygtr2, _ = train_test_split(Xgp2, ygp2, test_size=0.2, random_state=42, stratify=ygp2)
     _, t = _timed(clf_fit.fit, Xgtr2, ygtr2)
     results["fit_german_credit"] = t
     clf_g.fit(X_gtr, y_gtr)
 
     n = 1000
     reps = (n // len(X_gte)) + 1
-    X_g1k = pd.concat([X_gte] * reps, ignore_index=True).iloc[:n] \
-        if isinstance(X_gte, pd.DataFrame) else X_gte
+    X_g1k = (
+        pd.concat([X_gte] * reps, ignore_index=True).iloc[:n]
+        if isinstance(X_gte, pd.DataFrame)
+        else X_gte
+    )
     _, t = _timed(clf_g.predict_proba, X_g1k)
     results["predict_proba_german_1k"] = t
 
@@ -162,8 +183,11 @@ def run_benchmarks() -> dict[str, float]:
 
     n_l2 = min(500, len(Xgte_l2))
     reps_l2 = (n_l2 // len(Xgte_l2)) + 1
-    X_g_l2_pred = pd.concat([Xgte_l2] * reps_l2, ignore_index=True).iloc[:n_l2] \
-        if isinstance(Xgte_l2, pd.DataFrame) else Xgte_l2
+    X_g_l2_pred = (
+        pd.concat([Xgte_l2] * reps_l2, ignore_index=True).iloc[:n_l2]
+        if isinstance(Xgte_l2, pd.DataFrame)
+        else Xgte_l2
+    )
     _, t = _timed(clf_g_l2.predict_proba, X_g_l2_pred)
     results["predict_proba_german_l2_500"] = t
 
@@ -177,17 +201,18 @@ def run_benchmarks() -> dict[str, float]:
 
     clf_hfit = HUGIMLClassifierNative(B=7, L=1, G=5e-3)
     Xhp2, yhp2 = clf_hfit.prepareXy(X_h.copy(), y_h.copy())
-    Xhtr2, _, yhtr2, _ = train_test_split(
-        Xhp2, yhp2, test_size=0.2, random_state=42, stratify=yhp2
-    )
+    Xhtr2, _, yhtr2, _ = train_test_split(Xhp2, yhp2, test_size=0.2, random_state=42, stratify=yhp2)
     _, t = _timed(clf_hfit.fit, Xhtr2, yhtr2)
     results["fit_heloc_full"] = t
     clf_h.fit(X_htr, y_htr)
 
     n = 10_000
     reps = (n // len(X_hte)) + 1
-    X_h10k = pd.concat([X_hte] * reps, ignore_index=True).iloc[:n] \
-        if isinstance(X_hte, pd.DataFrame) else X_hte
+    X_h10k = (
+        pd.concat([X_hte] * reps, ignore_index=True).iloc[:n]
+        if isinstance(X_hte, pd.DataFrame)
+        else X_hte
+    )
     _, t = _timed(clf_h.predict_proba, X_h10k)
     results["predict_proba_heloc_10k"] = t
 
@@ -197,6 +222,7 @@ def run_benchmarks() -> dict[str, float]:
 # ---------------------------------------------------------------------------
 # Regression check
 # ---------------------------------------------------------------------------
+
 
 def check_regression(
     measured: dict[str, float],
@@ -221,9 +247,7 @@ def check_regression(
         actual = measured[key]
         # Report per-benchmark factor as informational guidance
         per_bench_factor = spec.get("regression_factor", threshold)
-        guidance = (
-            f"(per-bench factor={per_bench_factor}×, CLI threshold={threshold}×)"
-        )
+        guidance = f"(per-bench factor={per_bench_factor}×, CLI threshold={threshold}×)"
         if actual > limit:
             failures.append(
                 f"REGRESSION  {key}: {actual:.3f}s > limit {limit:.3f}s "
@@ -238,16 +262,22 @@ def check_regression(
 # Main
 # ---------------------------------------------------------------------------
 
+
 def main():
     parser = argparse.ArgumentParser(description="HUG-IML performance regression gate")
-    parser.add_argument("--check", action="store_true",
-                        help="Exit non-zero if a regression is detected")
-    parser.add_argument("--threshold", type=float, default=1.5,
-                        help="Global regression factor applied to all benchmarks (default 1.5×)")
-    parser.add_argument("--output", type=Path, default=None,
-                        help="Directory to write result JSON")
-    parser.add_argument("--baseline", type=Path, default=BASELINE_PATH,
-                        help="Path to baseline.json")
+    parser.add_argument(
+        "--check", action="store_true", help="Exit non-zero if a regression is detected"
+    )
+    parser.add_argument(
+        "--threshold",
+        type=float,
+        default=1.5,
+        help="Global regression factor applied to all benchmarks (default 1.5×)",
+    )
+    parser.add_argument("--output", type=Path, default=None, help="Directory to write result JSON")
+    parser.add_argument(
+        "--baseline", type=Path, default=BASELINE_PATH, help="Path to baseline.json"
+    )
     args = parser.parse_args()
 
     print("Running benchmarks …")
@@ -263,15 +293,21 @@ def main():
 
     if args.output:
         import datetime
+
         args.output.mkdir(parents=True, exist_ok=True)
         ts = datetime.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
         out = args.output / f"regression_{ts}.json"
-        out.write_text(json.dumps({
-            "timestamp": ts,
-            "threshold": args.threshold,
-            "measured": measured,
-            "failures": failures,
-        }, indent=2))
+        out.write_text(
+            json.dumps(
+                {
+                    "timestamp": ts,
+                    "threshold": args.threshold,
+                    "measured": measured,
+                    "failures": failures,
+                },
+                indent=2,
+            )
+        )
         print(f"\nResult written to {out}")
 
     if failures:

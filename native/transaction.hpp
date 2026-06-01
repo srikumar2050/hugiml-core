@@ -30,7 +30,7 @@ namespace py = pybind11;
 
 namespace hugiml {
 
-using TItem     = std::pair<int, double>;
+using TItem     = int;
 using Trans     = std::vector<TItem>;
 using TransList = std::vector<Trans>;
 
@@ -39,6 +39,14 @@ struct TransactionDataCpp {
     std::vector<double>                              item_twu;
     std::unordered_map<int, std::string>             item_map;
     std::vector<double>                              RIU;
+    // item_iu[item_id - 1] = normalized instantaneous utility for the item/bin.
+    // Utilities are item-level constants in v1.1.4 (class weights are not exposed/applied),
+    // so transactions store item IDs only and recover utilities through this lookup.
+    std::vector<double>                              item_iu;
+    // Optional row-position utilities. Empty for compact prepared data; populated
+    // only by the direct Python TransactionDataCpp constructor when callers pass
+    // arbitrary row-specific utilities for the same item.
+    std::vector<std::vector<double>>                 transaction_utils;
     // item_col[item_id - 1] = original source feature/column index.
     // Used by mining to enforce the exact structural constraint that a
     // pattern cannot contain two mutually-exclusive bins from the same feature.
@@ -52,7 +60,7 @@ struct TransactionDataCpp {
     int disc_n = 0, disc_p = 0;
 
     // bn2id: bname -> item ID.  Presence of a key means eiu > 0 for that bin.
-    // colnew_set has been removed (Fix 4a); bn2id alone is sufficient for
+    // colnew_set has been removed; bn2id alone is sufficient for
     // Pass 3 filtering via a single find() instead of a set-find + map-at pair.
     std::unordered_map<int, int>                     bn2id;
 
@@ -88,6 +96,10 @@ struct TransactionDataCpp {
         // vectors
         total += item_twu.capacity() * sizeof(double);
         total += RIU.capacity() * sizeof(double);
+        total += item_iu.capacity() * sizeof(double);
+        for (auto& urow : transaction_utils)
+            total += sizeof(std::vector<double>) + urow.capacity() * sizeof(double);
+        total += transaction_utils.capacity() * sizeof(std::vector<double>);
         total += item_col.capacity() * sizeof(int);
         total += col_min.capacity() * sizeof(double);
         total += col_range.capacity() * sizeof(double);
@@ -110,6 +122,28 @@ struct TransactionDataCpp {
     }
 
     // Python-facing accessor
+    double utility_at(size_t tid, size_t pos, int iid) const {
+        if (tid < transaction_utils.size() && pos < transaction_utils[tid].size())
+            return transaction_utils[tid][pos];
+        if (iid > 0 && static_cast<size_t>(iid - 1) < item_iu.size())
+            return item_iu[static_cast<size_t>(iid - 1)];
+        return 0.0;
+    }
+
+    py::list get_transactions_py() const {
+        py::list rows;
+        for (size_t tid = 0; tid < transactions.size(); ++tid) {
+            const auto& t = transactions[tid];
+            py::list row;
+            for (size_t pos = 0; pos < t.size(); ++pos) {
+                int iid = t[pos];
+                row.append(py::make_tuple(iid, utility_at(tid, pos, iid)));
+            }
+            rows.append(row);
+        }
+        return rows;
+    }
+
     py::dict get_item_map_py() const {
         py::dict d;
         for (auto& kv : item_map)

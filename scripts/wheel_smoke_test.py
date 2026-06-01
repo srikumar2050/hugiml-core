@@ -158,6 +158,91 @@ def main() -> None:
         # Non-fatal: sklearn version may not support parametrize_with_checks
         print(f"[SKIP] sklearn parametrize_with_checks not available: {exc}")
 
+    # ── 11. HUGIMLMemoryError ───────────────────────────────────────
+    try:
+        from hugiml.exceptions import HUGIMLFitError, HUGIMLMemoryError
+
+        err = HUGIMLMemoryError("OOM: reduce B")
+        assert isinstance(err, HUGIMLFitError), "HUGIMLMemoryError must subclass HUGIMLFitError"
+        assert isinstance(err, MemoryError), "HUGIMLMemoryError must subclass MemoryError"
+        assert "HUGIMLMemoryError" in __import__("hugiml").__all__
+        print("[OK] HUGIMLMemoryError importable and hierarchy correct")
+    except Exception as exc:
+        _fail("HUGIMLMemoryError check failed", exc)
+
+    # ── 12. TransactionDataCpp item_iu + get_transactions_py ─────────
+    try:
+        import _hugiml_core as _core
+
+        # Use a fresh all-numeric array — X_tr contains a categorical column
+        # and prepare_transactions expects a float64 numeric array.
+        rng12 = np.random.default_rng(12)
+        n12 = len(y_tr)
+        X_num12 = rng12.standard_normal((n12, 3)).astype(np.float64)
+        y_num12 = np.asarray(y_tr, dtype=np.int64)
+        p12 = X_num12.shape[1]
+        td_smoke = _core.prepare_transactions(
+            X_num12,
+            y_num12,
+            4,
+            None,
+            np.zeros(p12, dtype=np.uint8),
+            np.zeros(p12, dtype=np.uint8),
+            None,
+            [False] * p12,
+        )
+        n_items = len(td_smoke.item_twu)
+        iu_vec = list(td_smoke.item_iu)
+        assert len(iu_vec) == n_items, f"item_iu length {len(iu_vec)} != n_items {n_items}"
+        assert all(0.0 <= v <= 1.0 + 1e-9 for v in iu_vec), "item_iu out of [0,1] range"
+        txs = td_smoke.transactions
+        for iid, u in txs[0]:
+            if iid != -1:
+                assert abs(u - iu_vec[iid - 1]) < 1e-9, "get_transactions_py utility mismatch"
+        print(f"[OK] item_iu vector ({n_items} items) and get_transactions_py consistent")
+    except Exception as exc:
+        _fail("item_iu / get_transactions_py smoke test failed", exc)
+
+    # ── 13. Fused adaptive+L1 hotpath  ────────────────────────────────
+    try:
+        clf_adap = HUGIMLClassifierNative(
+            B=5,
+            L=1,
+            G=0.0,
+            topK=20,
+            adaptive_binning=True,
+            use_hotpath=True,
+        )
+        clf_adap.fit(X_tr, y_tr)
+        assert len(clf_adap.patterns_) > 0, "fused adaptive L1 fit returned 0 patterns"
+        assert hasattr(clf_adap, "_bin_edges_") and len(clf_adap._bin_edges_) > 0, (
+            "_bin_edges_ not populated after fused adaptive fit"
+        )
+        preds_adap = clf_adap.predict(X_te)
+        assert preds_adap.shape == (len(X_te),)
+        print(
+            f"[OK] fused adaptive+L1 hotpath: {len(clf_adap.patterns_)} patterns, "
+            f"{len(clf_adap._bin_edges_)} adaptive cols"
+        )
+    except Exception as exc:
+        _fail("fused adaptive+L1 hotpath smoke test failed", exc)
+
+    # ── 14. Fixed-B numeric L1 hotpath ──────────────────
+    try:
+        import os
+
+        os.environ["HUGIML_ENABLE_FIXED_NUMERIC_L1_FASTPATH"] = "1"
+        clf_fixed = HUGIMLClassifierNative(B=5, L=1, G=0.0, topK=20, adaptive_binning=False)
+        clf_fixed.fit(X_tr, y_tr)
+        assert len(clf_fixed.patterns_) > 0, "fixed-numeric L1 fit returned 0 patterns"
+        preds_fixed = clf_fixed.predict(X_te)
+        assert preds_fixed.shape == (len(X_te),)
+        print(f"[OK] fixed-numeric L1 hotpath: {len(clf_fixed.patterns_)} patterns")
+    except Exception as exc:
+        _fail("fixed-numeric L1 hotpath smoke test failed", exc)
+    finally:
+        os.environ.pop("HUGIML_ENABLE_FIXED_NUMERIC_L1_FASTPATH", None)
+
     print("\n=== All smoke tests PASSED ===")
 
 

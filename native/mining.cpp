@@ -224,9 +224,15 @@ void THUIsl::mine(const TransList& transactions,
                    const std::vector<double>& item_twu,
                    const std::vector<int>& ytrain,
                    int n_cls,
-                   const std::vector<int>* item_col_in) {
+                   const std::vector<int>* item_col_in,
+                   const std::vector<double>* item_iu_in,
+                   const std::vector<std::vector<double>>* transaction_utils_in) {
     item_col = (item_col_in && item_col_in->size() >= item_twu.size())
         ? item_col_in : nullptr;
+    item_iu = (item_iu_in && item_iu_in->size() >= item_twu.size())
+        ? item_iu_in : nullptr;
+    transaction_utils = (transaction_utils_in && !transaction_utils_in->empty())
+        ? transaction_utils_in : nullptr;
 
     // minU is seeded by mine_patterns_cpp (td.riu_thresh(K)) before this call.
     // Do NOT reset it here — only clear the heap and the recursion counter.
@@ -297,12 +303,22 @@ void THUIsl::mine(const TransList& transactions,
             }
         }
         const Trans& trans = transactions[tid];
-        if (trans.size() == 1 && trans[0].first == -1) continue;
+        if (trans.size() == 1 && trans[0] == -1) continue;
 
         std::vector<std::pair<int, double>> active;
         active.reserve(trans.size());
-        for (auto& [it, u] : trans)
+        for (size_t pos = 0; pos < trans.size(); ++pos) {
+            int it = trans[pos];
+            double u = 0.0;
+            if (transaction_utils &&
+                static_cast<size_t>(tid) < transaction_utils->size() &&
+                pos < (*transaction_utils)[static_cast<size_t>(tid)].size()) {
+                u = (*transaction_utils)[static_cast<size_t>(tid)][pos];
+            } else if (item_iu && it > 0 && static_cast<size_t>(it - 1) < item_iu->size()) {
+                u = (*item_iu)[static_cast<size_t>(it - 1)];
+            }
             if (ul_map.count(it)) active.push_back({it, u});
+        }
         if (active.empty()) continue;
 
         double new_twu = 0.0;
@@ -593,7 +609,7 @@ std::vector<PatternEntry> mine_patterns_cpp(
     }
 
     try {
-        miner.mine(td.transactions, td.item_twu, ytrain, n_cls, &td.item_col);
+        miner.mine(td.transactions, td.item_twu, ytrain, n_cls, &td.item_col, &td.item_iu, &td.transaction_utils);
     } catch (const std::runtime_error& e) {
         if (std::string(e.what()) == "mining_timeout") {
             // Return whatever was collected before the timeout.

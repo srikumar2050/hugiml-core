@@ -7,6 +7,7 @@
 
 #include "bind_helpers.hpp"
 #include "transaction.hpp"
+#include "resource_guard.hpp"
 
 namespace py = pybind11;
 using namespace hugiml;
@@ -61,15 +62,26 @@ void bind_prepare_transactions(py::module_& m)
                     ipc_vec[j] = static_cast<bool>(ipcb(j));
             }
 
-            // Release GIL before the heavy C++ computation
-            py::gil_scoped_release release;
-            return prepare_transactions_cpp(
-                X_num, y, B,
-                std::move(col_names_cpp),
-                is_cat, is_int,
-                std::move(ipc_vec),
-                std::move(cat_strs),
-                std::move(cat_valid));
+            // Release GIL before the heavy C++ computation.  Convert native
+            // memory failures into Python MemoryError so severe stress exits
+            // gracefully instead of surfacing as std::bad_alloc text.
+            try {
+                py::gil_scoped_release release;
+                return prepare_transactions_cpp(
+                    X_num, y, B,
+                    std::move(col_names_cpp),
+                    is_cat, is_int,
+                    std::move(ipc_vec),
+                    std::move(cat_strs),
+                    std::move(cat_valid));
+            } catch (const NativeMemoryError& e) {
+                PyErr_SetString(PyExc_MemoryError, e.what());
+                throw py::error_already_set();
+            } catch (const std::bad_alloc&) {
+                PyErr_SetString(PyExc_MemoryError,
+                    "HUGIML native OOM while preparing transactions");
+                throw py::error_already_set();
+            }
         },
         py::arg("X_num"), py::arg("y"), py::arg("B"),
         py::arg("col_names"), py::arg("is_cat"), py::arg("is_int"),

@@ -4,6 +4,16 @@ All notable changes to hugiml-core are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
+## [1.1.5] - 2026-06-01
+
+### Changed
+
+- Reduced memory usage for materialized native transactions by storing item ids with shared item-level utility lookup instead of repeating utility values in every transaction entry.
+- Integrated adaptive binning directly into the native L1 hot path, avoiding intermediate binned-matrix materialization for `L=1` adaptive workflows.
+- Parallelized native adaptive bin selection and bin-code application, with `n_jobs` applied before adaptive preprocessing.
+- Improved large-data stability with cleaner native memory/timeout error handling and safer fallback behavior under memory pressure.
+
+---
 ## [1.1.4] - 2026-05-31
 
 - Added the native L1 hot path for `L=1` fits. The C++ path fuses transaction preparation, single-item pattern mining, information-gain filtering, top-K retention, and sparse matrix construction to reduce Python/C++ overhead for the common L1 workflow.

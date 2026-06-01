@@ -19,20 +19,25 @@ using namespace hugiml;
 #include <algorithm>
 
 
+using PyTItem     = std::pair<int, double>;
+using PyTrans     = std::vector<PyTItem>;
+using PyTransList = std::vector<PyTrans>;
+
 static TransactionDataCpp make_transaction_data_from_transactions(
-    const TransList& transactions,
+    const PyTransList& transactions_in,
     int n_items,
     std::vector<int> item_col_in = {})
 {
     int max_item = n_items;
-    for (const auto& t : transactions)
+    for (const auto& t : transactions_in)
         for (const auto& iu : t)
             if (iu.first > max_item) max_item = iu.first;
 
     TransactionDataCpp td;
-    td.transactions = transactions;
+    td.transactions.reserve(transactions_in.size());
     td.item_twu.assign(static_cast<size_t>(std::max(max_item, 0)), 0.0);
     td.RIU.assign(static_cast<size_t>(std::max(max_item, 0)), 0.0);
+    td.item_iu.assign(static_cast<size_t>(std::max(max_item, 0)), 0.0);
     if (!item_col_in.empty()) {
         if (static_cast<int>(item_col_in.size()) < max_item)
             throw std::invalid_argument("item_col length must be >= number of items");
@@ -42,19 +47,37 @@ static TransactionDataCpp make_transaction_data_from_transactions(
         for (int iid = 1; iid <= max_item; ++iid)
             td.item_col[static_cast<size_t>(iid - 1)] = iid - 1;
     }
-    td.disc_n = static_cast<int>(transactions.size());
+    td.disc_n = static_cast<int>(transactions_in.size());
     td.disc_p = max_item;
 
-    for (const auto& t : td.transactions) {
-        if (t.size() == 1 && t[0].first == -1) continue;
+    td.transaction_utils.reserve(transactions_in.size());
+    for (const auto& t_in : transactions_in) {
+        Trans t;
+        std::vector<double> urow;
+        t.reserve(t_in.size());
+        urow.reserve(t_in.size());
+        if (t_in.size() == 1 && t_in[0].first == -1) {
+            td.transactions.push_back(Trans{-1});
+            td.transaction_utils.push_back(std::vector<double>{0.0});
+            continue;
+        }
         double tu = 0.0;
-        for (const auto& [iid, u] : t) tu += u;
-        for (const auto& [iid, u] : t) {
+        for (const auto& [iid, u] : t_in) {
+            if (iid <= 0 || iid > max_item) continue;
+            t.push_back(iid);
+            urow.push_back(u);
+            if (td.item_iu[static_cast<size_t>(iid - 1)] == 0.0)
+                td.item_iu[static_cast<size_t>(iid - 1)] = u;
+            tu += u;
+        }
+        for (const auto& [iid, u] : t_in) {
             if (iid <= 0 || iid > max_item) continue;
             td.item_twu[static_cast<size_t>(iid - 1)] += tu;
             td.RIU[static_cast<size_t>(iid - 1)] += u;
             td.item_map.emplace(iid, std::to_string(iid));
         }
+        td.transactions.push_back(std::move(t));
+        td.transaction_utils.push_back(std::move(urow));
     }
     return td;
 }
@@ -69,10 +92,12 @@ void bind_transaction(py::module_& m)
              py::arg("transactions"), py::arg("n_items") = 0,
              py::arg("item_col") = std::vector<int>{},
              "Build TransactionDataCpp directly from [[(item, utility), ...], ...].")
-        .def_readonly("transactions", &TransactionDataCpp::transactions,
-             "Raw transaction list as [(item_id, utility), ...] per row.")
+        .def_property_readonly("transactions", &TransactionDataCpp::get_transactions_py,
+             "Raw transaction list as [(item_id, utility), ...] per row; utilities are reconstructed from item_iu.")
         .def_readonly("RIU", &TransactionDataCpp::RIU,
              "Real item utilities per item (0-indexed).")
+        .def_readonly("item_iu", &TransactionDataCpp::item_iu,
+             "Normalized instantaneous utility per item/bin (0-indexed).")
         .def_property_readonly("item_map", &TransactionDataCpp::get_item_map_py,
              "dict {item_id (int) -> label (str)}")
         .def_readonly("item_twu", &TransactionDataCpp::item_twu,

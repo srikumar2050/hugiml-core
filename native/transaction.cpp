@@ -40,6 +40,7 @@
 #include "transaction.hpp"
 #include "math.hpp"
 #include "discretization.hpp"
+#include "resource_guard.hpp"
 
 #include <algorithm>
 #include <iomanip>
@@ -88,13 +89,20 @@ TransactionDataCpp prepare_transactions_cpp(
         throw std::invalid_argument(
             "B must be -1 (auto) or in range [2, 100], got " + std::to_string(B));
 
-    // ── Memory guard (informational warning only) ─────────────────────────────
+    // ── Native memory guard ─────────────────────────────────────────────────
+    // Fail early with a Python MemoryError (via the binding layer) instead of
+    // letting the OS kill the process during severe stress.  This is only a
+    // conservative guard for native temporary/output buffers; it does not count
+    // the already-owned NumPy input matrix.
     {
-        uint64_t total_bytes = static_cast<uint64_t>(n) * p * sizeof(int32_t);
-        if (total_bytes > 4ULL * 1024 * 1024 * 1024)
-            std::cerr << "[hugiml] WARNING: large dataset n=" << n
-                      << " p=" << p << " — estimated peak memory ~"
-                      << (total_bytes >> 20) << " MiB\n";
+        const uint64_t dense_cells = static_cast<uint64_t>(n) * static_cast<uint64_t>(p);
+        const uint64_t rough_native_bytes =
+            dense_cells * sizeof(int32_t) +                         // stripe / code-like buffers
+            static_cast<uint64_t>(n) * (sizeof(Trans) + 8ULL) +     // row vectors + allocator slack
+            dense_cells * sizeof(TItem);                            // compact item IDs
+        ensure_native_memory_available(rough_native_bytes,
+                                       "prepare_transactions_cpp(n=" + std::to_string(n) +
+                                       ", p=" + std::to_string(p) + ")");
     }
 
     // ── Bin-key stride ───────────────────────────────────────────────────────
@@ -527,6 +535,25 @@ TransactionDataCpp prepare_transactions_cpp(
         kv.second = (tu_y[yi] > 0.0) ? kv.second / tu_y[yi] : 0.0;
     }
 
+    // Materialize one normalized utility per item/bin.  In v1.1.4 the class
+    // dimension in tu[bname, yi] is redundant because class weights are not
+    // exposed/applied; the same normalized value is stored for every yi.
+    std::vector<double> item_iu(static_cast<size_t>(ic), 0.0);
+    for (const auto& kv_bn : bn2id) {
+        const int bname = kv_bn.first;
+        const int iid   = kv_bn.second;
+        if (iid <= 0 || iid > ic) continue;
+        for (int yi_probe = 0; yi_probe < key_stride; ++yi_probe) {
+            int64_t k = static_cast<int64_t>(bname) * key_stride + yi_probe;
+            auto it = tu.find(k);
+            if (it != tu.end()) {
+                item_iu[static_cast<size_t>(iid - 1)] =
+                    std::round(it->second * 1e6) / 1e6;
+                break;
+            }
+        }
+    }
+
     // ── Phase 2 : Striped transaction construction ────────────────────────────
     //
     // Rows are processed in stripes of STRIPE_ROWS.  For each stripe:
@@ -564,6 +591,10 @@ TransactionDataCpp prepare_transactions_cpp(
     TransList           transactions;
     std::vector<double> item_twu(ic, 0.0);
     std::vector<double> RIU(ic, 0.0);
+    ensure_native_memory_available(
+        static_cast<uint64_t>(n) * (sizeof(Trans) + 8ULL) +
+        static_cast<uint64_t>(n) * static_cast<uint64_t>(std::max(n_active, 0)) * sizeof(TItem),
+        "compact transaction output");
     transactions.reserve(n);
 
     // Flat stripe buffer: stripe_codes[s_row * n_active + a_col]
@@ -576,7 +607,12 @@ TransactionDataCpp prepare_transactions_cpp(
 
         // Resize the stripe buffer for the current stripe width (usually
         // constant except for the final stripe which may be shorter).
-        stripe_codes.assign(static_cast<size_t>(stripe_n) * n_active, -1);
+        const size_t stripe_cells = checked_mul_size_t(
+            static_cast<uint64_t>(stripe_n), static_cast<uint64_t>(std::max(n_active, 0)),
+            "prepare_transactions stripe_codes");
+        ensure_native_memory_available(static_cast<uint64_t>(stripe_cells) * sizeof(int32_t),
+                                       "prepare_transactions stripe buffer");
+        stripe_codes.assign(stripe_cells, -1);
 
         // ── Fill stripe_codes from X_num_arr ──────────────────────────────
         for (int a = 0; a < n_active; a++) {
@@ -669,24 +705,26 @@ TransactionDataCpp prepare_transactions_cpp(
                 if (bname < 0) continue;                        // zero-IU bin
 
                 int64_t txk = static_cast<int64_t>(bname) * key_stride + yi;
-                auto tit = tu.find(txk);
-                if (tit == tu.end()) continue;
+                if (tu.find(txk) == tu.end()) continue;
 
-                double iu = std::round(tit->second * 1e6) / 1e6;
                 auto bn_it = bn2id.find(bname);
                 if (bn_it == bn2id.end()) continue;
-                trans.push_back({bn_it->second, iu});
+                int iid = bn_it->second;
+                if (iid <= 0 || static_cast<size_t>(iid - 1) >= item_iu.size()) continue;
+                double iu = item_iu[static_cast<size_t>(iid - 1)];
+                trans.push_back(iid);
                 tutils += iu;
             }
 
             if (tutils > 0.0) {
-                for (auto& [iid, iu] : trans) {
+                for (int iid : trans) {
+                    double iu = item_iu[static_cast<size_t>(iid - 1)];
                     item_twu[iid - 1] += tutils;
                     RIU[iid - 1]      += iu;
                 }
                 transactions.push_back(std::move(trans));
             } else {
-                transactions.push_back({{-1, 0.0}});
+                transactions.push_back({-1});
             }
         }
         // stripe_codes is reused next iteration (assign() at top of loop).
@@ -698,6 +736,7 @@ TransactionDataCpp prepare_transactions_cpp(
     td.item_twu        = std::move(item_twu);
     td.item_map        = std::move(item_map);
     td.RIU             = std::move(RIU);
+    td.item_iu         = std::move(item_iu);
     td.item_col        = std::move(item_col);
     td.disc_n          = n;
     td.disc_p          = p;

@@ -150,9 +150,7 @@ def german():
     p = TESTS_DIR / "german.data"
     if not p.exists():
         pytest.skip("german.data not found in tests/ directory")
-    df = pd.read_csv(
-        p, sep=" ", header=None, names=GERMAN_COLS + ["target"]
-    )
+    df = pd.read_csv(p, sep=" ", header=None, names=GERMAN_COLS + ["target"])
     df["target"] = (df["target"] == 2).astype(int)
     return df.drop(columns=["target"]), df["target"]
 
@@ -570,7 +568,85 @@ class TestTransactionOrdering:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 7. Zero-correlation column pruning
+# 7b.  item_iu vector invariants (TItem=int storage)
+# ═══════════════════════════════════════════════════════════════════════════
+
+
+class TestItemIuStorage:
+    """
+
+    In previous versions utilities were stored inline as TItem = (int, double).
+    Now TItem = int and TransactionDataCpp carries item_iu[iid-1] as a
+    level constant.  get_transactions_py() reconstructs the old (iid, u) view.
+    """
+
+    def _check_item_iu(self, td, label: str):
+        n_items = len(td.item_twu)
+        iu_vec = list(td.item_iu)
+
+        # Length must match item registry
+        assert len(iu_vec) == n_items, f"{label}: item_iu length {len(iu_vec)} != n_items {n_items}"
+
+        # All utilities non-negative and bounded
+        assert all(v >= 0.0 for v in iu_vec), f"{label}: item_iu has negative entries"
+        assert all(v <= 1.0 + 1e-9 for v in iu_vec), f"{label}: item_iu has entries > 1"
+
+        # get_transactions_py must reconstruct utilities that match item_iu
+        txs = td.transactions
+        for r, row in enumerate(txs):
+            for iid, u in row:
+                if iid == -1:
+                    continue
+                idx = iid - 1
+                assert 0 <= idx < len(iu_vec), f"{label}: row {r} iid {iid} out of range"
+                assert abs(u - iu_vec[idx]) < 1e-9, (
+                    f"{label}: row {r} iid {iid}: get_transactions_py u={u:.8f} "
+                    f"!= item_iu[{idx}]={iu_vec[idx]:.8f}"
+                )
+
+    def test_float(self, synth_float):
+        X, y = synth_float
+        td = _td(X, y, {"B": 5, "L": 1, "G": 0.0})
+        self._check_item_iu(td, "float")
+
+    def test_integer(self, synth_mixed):
+        X, y = synth_mixed
+        td = _td(X, y, {"B": 5, "L": 1, "G": 0.0})
+        self._check_item_iu(td, "mixed")
+
+    def test_categorical(self, synth_cat):
+        X, y = synth_cat
+        td = _td(X, y, {"B": 3, "L": 1, "G": 0.0})
+        self._check_item_iu(td, "categorical")
+
+    def test_adaptive(self, synth_float):
+        X, y = synth_float
+        td = _td(X, y, {"B": 5, "L": 1, "G": 0.0, "adaptive_binning": True})
+        self._check_item_iu(td, "adaptive")
+
+    def test_nan(self, synth_nan):
+        X, y = synth_nan
+        td = _td(X, y, {"B": 5, "L": 1, "G": 0.0})
+        self._check_item_iu(td, "nan")
+
+    def test_item_iu_nonzero_for_active_items(self, synth_float):
+        """Every item that appears in at least one transaction should have iu > 0."""
+        X, y = synth_float
+        td = _td(X, y, {"B": 5, "L": 1, "G": 0.0})
+        iu_vec = list(td.item_iu)
+        seen_iids = set()
+        for row in td.transactions:
+            for iid, _ in row:
+                if iid != -1:
+                    seen_iids.add(iid)
+        for iid in seen_iids:
+            assert iu_vec[iid - 1] > 0.0, (
+                f"item {iid} appears in transactions but item_iu[{iid - 1}] == 0"
+            )
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# 8. Zero-correlation column pruning
 # ═══════════════════════════════════════════════════════════════════════════
 
 
@@ -614,7 +690,7 @@ class TestZeroCorrelation:
 
 
 # ═══════════════════════════════════════════════════════════════════════════
-# 8. Serialization round-trip
+# 9. Serialization round-trip
 # ═══════════════════════════════════════════════════════════════════════════
 
 

@@ -7,6 +7,7 @@
 
 #include "bind_helpers.hpp"
 #include "mining.hpp"
+#include "resource_guard.hpp"
 
 namespace py = pybind11;
 using namespace hugiml;
@@ -61,8 +62,17 @@ void bind_mine_patterns(py::module_& m)
             for (py::ssize_t i = 0; i < yb.shape(0); i++)
                 ytrain[i] = static_cast<int>(yb(i));
 
-            py::gil_scoped_release release;
-            return mine_patterns_cpp(td, ytrain, n_cls, K, L, G, timeout_s);
+            try {
+                py::gil_scoped_release release;
+                return mine_patterns_cpp(td, ytrain, n_cls, K, L, G, timeout_s);
+            } catch (const NativeMemoryError& e) {
+                PyErr_SetString(PyExc_MemoryError, e.what());
+                throw py::error_already_set();
+            } catch (const std::bad_alloc&) {
+                PyErr_SetString(PyExc_MemoryError,
+                    "HUGIML native OOM during pattern mining");
+                throw py::error_already_set();
+            }
         },
         py::arg("td"), py::arg("ytrain"), py::arg("n_cls"),
         py::arg("K"), py::arg("L"), py::arg("G"),

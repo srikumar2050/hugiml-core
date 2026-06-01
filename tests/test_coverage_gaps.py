@@ -66,6 +66,17 @@ class TestExceptionHierarchy:
             raise HUGIMLTimeoutError("timed out")
         assert issubclass(HUGIMLTimeoutError, HUGIMLFitError)
 
+    def test_memory_error(self):
+        from hugiml.exceptions import HUGIMLFitError, HUGIMLMemoryError
+
+        with pytest.raises(HUGIMLMemoryError):
+            raise HUGIMLMemoryError("OOM: reduce B or n")
+        assert issubclass(HUGIMLMemoryError, HUGIMLFitError)
+        assert issubclass(HUGIMLMemoryError, MemoryError)
+        # Also catchable as plain MemoryError
+        with pytest.raises(MemoryError):
+            raise HUGIMLMemoryError("also a MemoryError")
+
     def test_validation_error_is_value_error(self):
         from hugiml.exceptions import HUGIMLValidationError
 

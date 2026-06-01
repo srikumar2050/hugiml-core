@@ -9,6 +9,7 @@
 #include "bind_helpers.hpp"
 #include "matrix.hpp"
 #include "mining.hpp"
+#include "resource_guard.hpp"
 
 namespace py = pybind11;
 using namespace hugiml;
@@ -23,9 +24,16 @@ void bind_build_matrix(py::module_& m)
                 throw std::invalid_argument(
                     "patterns list is empty — nothing to build");
             COO coo;
-            {
+            try {
                 py::gil_scoped_release release;
                 coo = build_train_matrix_cpp(td, patterns);
+            } catch (const NativeMemoryError& e) {
+                PyErr_SetString(PyExc_MemoryError, e.what());
+                throw py::error_already_set();
+            } catch (const std::bad_alloc&) {
+                PyErr_SetString(PyExc_MemoryError,
+                    "HUGIML native OOM while building the training pattern matrix");
+                throw py::error_already_set();
             }
             return coo_to_tuple(std::move(coo));
         },
@@ -78,12 +86,19 @@ void bind_build_matrix(py::module_& m)
             }
 
             COO coo;
-            {
+            try {
                 py::gil_scoped_release release;
                 coo = build_test_matrix_cpp(X_raw, td,
                                              std::move(cat_strs),
                                              std::move(cat_valid),
                                              patterns);
+            } catch (const NativeMemoryError& e) {
+                PyErr_SetString(PyExc_MemoryError, e.what());
+                throw py::error_already_set();
+            } catch (const std::bad_alloc&) {
+                PyErr_SetString(PyExc_MemoryError,
+                    "HUGIML native OOM while building the test pattern matrix");
+                throw py::error_already_set();
             }
             return coo_to_tuple(std::move(coo));
         },

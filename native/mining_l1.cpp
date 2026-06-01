@@ -223,12 +223,12 @@ std::vector<PatternEntry> mine_patterns_l1_cpp(
 
         // Skip placeholder rows ({-1, 0.0} sentinel emitted by prepare_transactions_cpp
         // for zero-utility rows).
-        if (tx.size() == 1 && tx[0].first == -1) continue;
+        if (tx.size() == 1 && tx[0] == -1) continue;
 
         const int lbl = ytrain[tid];
         const bool lbl_valid = (lbl >= 0 && lbl < n_cls);
 
-        for (const auto& [iid, iu] : tx) {
+        for (int iid : tx) {
             if (iid <= 0 || iid > n_items) continue;
             const int ci = iid_to_idx[static_cast<size_t>(iid)];
             if (ci < 0) continue;  // item didn't pass TWU threshold
