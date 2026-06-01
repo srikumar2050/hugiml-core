@@ -99,7 +99,7 @@ After fitting, inspect both predictive behavior and explanation complexity:
 Performance-oriented starting point
 -----------------------------------
 
-For the current 1.1.3 implementation, start with a bounded pattern budget and increase complexity only when validation results justify it:
+For the current 1.1.5 implementation, start with the native ``L=1`` hot path, a bounded pattern budget, and adaptive binning only when per-feature bin selection is useful. Increase complexity only when validation results justify it:
 
 .. code-block:: python
 
@@ -109,11 +109,13 @@ For the current 1.1.3 implementation, start with a bounded pattern budget and in
        G=5e-3,
        topK=100,
        n_jobs=-1,
+       use_hotpath=True,
    )
 
    clf.fit(X_train, y_train)
    print(clf.fit_metadata_.summary())
+   print(clf.fit_metadata_)
 
-Use ``L=2`` when interaction patterns are important, and compensate by tightening ``G`` or keeping ``topK`` bounded. Use ``topK=-1`` only for smaller datasets or controlled benchmark runs, because it allows the automatic budget to grow with the item universe.
+Use ``adaptive_binning=True`` with ``L=1`` when you want supervised per-feature bin resolution without paying the cost of a fully materialized adaptive pre-binned matrix. Use ``L=2`` when interaction patterns are important, and compensate by tightening ``G`` or keeping ``topK`` bounded. Use ``topK=-1`` only for smaller datasets or controlled benchmark runs, because it allows the automatic budget to grow with the item universe.
 
 If your logs show ``HUGIMLConvergenceWarning`` for a constant column, the model is telling you that the column has zero utility. Drop the column upstream if it is expected; otherwise, treat it as a data-quality signal.

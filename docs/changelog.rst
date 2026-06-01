@@ -6,6 +6,14 @@ The canonical release notes live in ``CHANGELOG.md`` at the repository root. Kee
 Recent releases
 ---------------
 
+1.1.5 — 2026-06-01
+~~~~~~~~~~~~~~~~~~
+
+* Reduced native transaction memory use by storing compact item ids with shared item-level utility lookup instead of repeating utility values in every materialized transaction entry.
+* Integrated adaptive binning into the fused native ``L=1`` execution path, avoiding an intermediate binned-matrix materialization for common adaptive workflows.
+* Parallelized native adaptive bin selection and bin-code application; ``n_jobs`` is now applied before adaptive preprocessing when native support is available.
+* Improved large-data stability with clearer native memory and timeout errors, plus safer fallback behavior under memory pressure.
+
 1.1.4 — 2026-05-31
 ~~~~~~~~~~~~~~~~~~
 

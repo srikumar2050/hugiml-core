@@ -67,7 +67,7 @@ Key hyperparameters
      - Minimum information gain threshold.
      - ``1e-3`` to ``1e-5``
    * - ``topK``
-     - Maximum number of retained patterns. In 1.1.3 this budget is applied inside native mining, so it is both an interpretability cap and a performance control. ``-1`` computes an automatic budget from the mined item universe.
+     - Maximum number of retained patterns. In the native 1.1.x path this budget is applied inside mining, so it is both an interpretability cap and a performance control. ``-1`` computes an automatic budget from the mined item universe.
      - ``50`` to ``300`` for compact audits; use ``-1`` only when the candidate space is known to be manageable
    * - ``adaptive_binning``
      - Selects per-feature bin resolution with supervised information gain.
@@ -113,11 +113,20 @@ Adaptive binning selects a bin count per numerical feature by evaluating candida
 Performance and mining behavior
 --------------------------------
 
-Version 1.1.3 keeps the modeling interface stable but changes where work is bounded internally. The effective ``topK`` value is passed into the native mining stage before candidate retention, rather than being treated only as a post-processing cap. This is closer to the original HUGIML Java implementation and is important for larger datasets because fewer non-final candidates need to be materialized.
+The 1.1.x native path keeps the modeling interface stable but changes where work is bounded internally. The effective ``topK`` value is passed into the native mining stage before candidate retention, rather than being treated only as a post-processing cap. This is closer to the original HUGIML Java implementation and is important for larger datasets because fewer non-final candidates need to be materialized.
 
-Transaction construction is performed in row-stripe chunks. The resulting model is the same as the non-chunked construction path, but memory use is less bursty because the full transaction list is not assembled as one large Python-side object. This is most useful for wide data, large batches, and cross-validation loops.
+For ``L=1`` fits, the native hot path fuses transaction preparation, singleton pattern mining, information-gain filtering, top-K retention, and sparse matrix construction. In 1.1.5 this hot path also supports adaptive binning without first materializing a separate binned matrix, which is the recommended route for large adaptive singleton workflows. Set ``use_hotpath=False`` only when comparing against the older three-stage path for debugging or benchmarking.
 
-For interaction mining, structured constraints are applied exactly. EUCS pruning is disabled by default in 1.1.3 because aggressive pair-level pruning can remove valid higher-order patterns in edge cases. Prefer controlling complexity with ``L``, ``G``, and ``topK`` first.
+Transaction construction is performed in row-stripe chunks on the non-fused path, and materialized native transactions now store compact item ids with shared item-level utility lookup. The resulting model is intended to match the previous transaction semantics while reducing repeated utility storage and making memory use less bursty. This is most useful for wide data, large batches, and cross-validation loops.
+
+For interaction mining, structured constraints are applied exactly. EUCS pruning is disabled by default because aggressive pair-level pruning can remove valid higher-order patterns in edge cases. Prefer controlling complexity with ``L``, ``G``, and ``topK`` first.
+
+Operational stability controls
+------------------------------
+
+Use ``n_jobs=-1`` to allow the native backend to use all available OpenMP threads. In 1.1.5 the adaptive bin-selection and bin-code application stages can use this parallelism before the main mining step, so it benefits adaptive workflows as well as the fused ``L=1`` path.
+
+``max_fit_seconds`` is a wall-clock budget for the native mining stage. If the budget or memory pressure prevents the full configuration from completing, HUGIML attempts safer fallback configurations, records the degraded outcome in ``fit_metadata_.degraded``, and raises a clear ``HUGIMLTimeoutError`` or ``HUGIMLMemoryError`` only when it cannot recover. Inspect ``fit_metadata_`` after fitting to review pattern counts, stage timings, memory estimates, OpenMP thread count, and whether a fallback was used.
 
 Constant and zero-utility columns
 ---------------------------------
