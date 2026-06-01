@@ -61,7 +61,7 @@ jobs:
 
       # ── All platforms: pybind11 must be present before the C++ build ───────
       - name: Install build prerequisites
-        run: pip install --upgrade pip pybind11
+        run: python -m pip install --upgrade pip pybind11
 
       # Install with dev + plots so plot tests run (not just skip)
       - name: Install package and dependencies
