@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
-import os
+import re
 import sys
 from datetime import datetime
+from pathlib import Path
 
-sys.path.insert(0, os.path.abspath("../src"))
+ROOT = Path(__file__).resolve().parents[1]
+SRC = ROOT / "src"
+sys.path.insert(0, str(SRC))
 
 project = "hugiml-core"
 author = "Srikumar Krishnamoorthy"
@@ -16,8 +19,10 @@ try:
     import hugiml
 
     release = hugiml.__version__
-except Exception:  # pragma: no cover - defensive fallback for RTD builds
-    release = ""
+except Exception:  # pragma: no cover - defensive fallback for documentation builds
+    init_text = (SRC / "hugiml" / "__init__.py").read_text(encoding="utf-8")
+    release_match = re.search(r'__version__\s*=\s*["\']([^"\']+)["\']', init_text)
+    release = release_match.group(1) if release_match else ""
 
 extensions = [
     "sphinx.ext.autodoc",
