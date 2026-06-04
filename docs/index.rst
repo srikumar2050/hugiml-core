@@ -14,7 +14,7 @@ Why HUGIML?
 
 * **Intrinsic interpretability:** learned HUG patterns are the model representation, not an after-the-fact explanation.
 * **Regulated-domain fit:** model cards, audit artifacts, pruning trails, calibration, drift monitoring, and deployment helpers are included.
-* **Native performance:** computationally intensive mining, transaction construction, and matrix-building stages are C++ accelerated with optional OpenMP support. Version 1.1.6 adds native augmented-pair features for ``L > 1`` adaptive-binning models while retaining the 1.1.5 native L1 and adaptive-binning scalability improvements.
+* **Native performance:** computationally intensive mining, transaction construction, and matrix-building stages are C++ accelerated with optional OpenMP support. Version 1.1.6 adds native augmented-pair features for ``L > 1`` adaptive-binning models while retaining the native L1 and adaptive-binning scalability improvements from the 1.1.x series.
 * **Python ergonomics:** the estimator follows the scikit-learn API and works with pandas DataFrames or NumPy arrays.
 
 
@@ -26,7 +26,7 @@ The 1.1.6 release expands the downstream feature space for interaction-oriented 
 * ``L > 1`` adaptive-binning models can add native product and absolute-difference augmented-pair features to the downstream estimator.
 * ``topk_budget_strict=True`` applies a single global ``topK`` budget across original features, HUG patterns, and augmented-pair features.
 * Interpretability outputs distinguish original, pattern, and augmented-pair features and expose raw-scale augmented-pair effect metadata.
-* Earlier 1.1.x capabilities remain available, including the 1.1.5 native transaction-memory and fused adaptive ``L=1`` improvements.
+* Earlier 1.1.x capabilities remain available, including compact native transaction memory and fused adaptive ``L=1`` execution.
 
 Installation
 ------------
@@ -69,6 +69,7 @@ The implementation is based on:
 
 .. toctree::
    :maxdepth: 1
+   :titlesonly:
    :caption: Project
 
    contributing

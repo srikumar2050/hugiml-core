@@ -42,7 +42,7 @@ Missing-value robustness
 Interpretation guidance
 -----------------------
 
-The benchmark suite should be read as a trade-off analysis, not as a universal ranking. Boosted tree models often deliver the highest raw predictive score, while HUGIML emphasizes compact pattern-level explanations, governance artifacts, and auditable behavior. For larger datasets, start with ``L=1`` and a bounded ``topK`` to keep mining and audit complexity manageable. In 1.1.5 and later, the fused native ``L=1`` path is also the preferred benchmark setting for large adaptive-binning runs because it avoids intermediate adaptive binned-matrix materialization.
+The benchmark suite should be read as a trade-off analysis, not as a universal ranking. Boosted tree models often deliver the highest raw predictive score, while HUGIML emphasizes compact pattern-level explanations, governance artifacts, and auditable behavior. For larger datasets, start with ``L=1`` and a bounded ``topK`` to keep mining and audit complexity manageable. The fused native ``L=1`` path is the preferred benchmark setting for large adaptive-binning runs because it avoids intermediate adaptive binned-matrix materialization.
 
 Reproducibility notes
 ---------------------
