@@ -4,6 +4,19 @@ All notable changes to hugiml-core are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
+## [1.1.6] - 2026-06-04
+
+### Added
+
+- Added native augmented-pair features for `L > 1` adaptive-binning models, including product and absolute-difference transforms selected from informative numeric features.
+- Added strict global `topK` budgeting across original features, HUG patterns, and augmented-pair features.
+- Added public augmented-pair interpretation APIs with raw-scale effects, feature coverage, missing-pair policy, and downstream feature composition metadata.
+
+### Changed
+
+- Improved model summaries, explainability reports, feature lineage, serialization, and pattern-pruning workflows so hybrid downstream models clearly distinguish original features, HUG patterns, and augmented-pair features.
+
+---
 ## [1.1.5] - 2026-06-01
 
 ### Changed

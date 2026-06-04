@@ -140,6 +140,382 @@ except ImportError:
     _core = None
     _CORE_AVAILABLE = False
 
+
+DEFAULT_AUGMENTED_PAIR_MAX_FEATURES = 10
+DEFAULT_AUGMENTED_PAIR_UNBOUNDED_CAP = 100
+AUGMENTED_PAIR_OPS = ("product", "absolute_difference")
+
+
+def _best_ig_score(score_obj: Any) -> float:
+    """Return the best finite IG score from native adaptive-binning metadata."""
+    if isinstance(score_obj, dict):
+        vals: list[float] = []
+        for value in score_obj.values():
+            try:
+                fval = float(value)
+            except Exception:
+                continue
+            if np.isfinite(fval):
+                vals.append(fval)
+        return max(vals) if vals else 0.0
+    try:
+        fval = float(score_obj)
+    except Exception:
+        return 0.0
+    return fval if np.isfinite(fval) else 0.0
+
+
+def _dense_full_csr(Z: np.ndarray) -> csr_matrix:
+    """Convert a dense, mostly non-zero float block to CSR without scanning."""
+    n_rows, n_cols = Z.shape
+    if n_cols == 0:
+        return csr_matrix((n_rows, 0), dtype=np.float32)
+    data = np.ascontiguousarray(Z, dtype=np.float32).ravel()
+    indices = np.tile(np.arange(n_cols, dtype=np.int32), n_rows)
+    indptr = np.arange(0, (n_rows + 1) * n_cols, n_cols, dtype=np.int32)
+    return csr_matrix((data, indices, indptr), shape=(n_rows, n_cols), dtype=np.float32)
+
+
+def _entropy_from_counts(counts: np.ndarray) -> float:
+    total = float(np.sum(counts))
+    if total <= 0.0:
+        return 0.0
+    probs = counts.astype(np.float64, copy=False) / total
+    probs = probs[probs > 0.0]
+    return float(-np.sum(probs * np.log2(probs)))
+
+
+def _information_gain_from_codes(
+    feature_codes: np.ndarray, y_codes: np.ndarray, n_classes: int
+) -> float:
+    """Return IG(y; feature) for integer-coded feature values."""
+    y_codes = np.asarray(y_codes, dtype=np.int64)
+    feature_codes = np.asarray(feature_codes, dtype=np.int64)
+    valid = (feature_codes >= 0) & (y_codes >= 0)
+    if not np.any(valid):
+        return 0.0
+    f = feature_codes[valid]
+    yv = y_codes[valid]
+    base = _entropy_from_counts(np.bincount(yv, minlength=n_classes))
+    if base <= 0.0:
+        return 0.0
+    _, inv = np.unique(f, return_inverse=True)
+    cond = 0.0
+    n = float(len(yv))
+    for code in range(int(inv.max()) + 1):
+        mask = inv == code
+        if not np.any(mask):
+            continue
+        weight = float(np.sum(mask)) / n
+        cond += weight * _entropy_from_counts(np.bincount(yv[mask], minlength=n_classes))
+    return max(0.0, float(base - cond))
+
+
+def _continuous_to_quantile_codes(values: np.ndarray, max_bins: int = 16) -> np.ndarray:
+    """Quantile-code a continuous column for strict topK IG ranking."""
+    arr = np.asarray(values, dtype=np.float64)
+    codes = np.full(arr.shape[0], -1, dtype=np.int64)
+    finite = np.isfinite(arr)
+    if not np.any(finite):
+        return codes
+    vals = arr[finite]
+    uniq = np.unique(vals)
+    if uniq.size <= max_bins:
+        _, inv = np.unique(vals, return_inverse=True)
+        codes[finite] = inv.astype(np.int64, copy=False)
+        return codes
+    qs = np.linspace(0.0, 1.0, max_bins + 1)[1:-1]
+    edges = np.unique(np.quantile(vals, qs))
+    if edges.size == 0:
+        codes[finite] = 0
+    else:
+        codes[finite] = np.searchsorted(edges, vals, side="right").astype(np.int64, copy=False)
+    return codes
+
+
+class NativeAugmentedPairTransformBlock:
+    """Native-backed L>1 pair augmentation state and transform wrapper.
+
+    Candidate scoring and feature generation are fully delegated to the native
+    ``_hugiml_core`` extension.  Python only selects source columns from already
+    fitted adaptive-binning IG metadata, stores audit metadata, and prepares the
+    compact numeric arrays needed by the native routines.
+    """
+
+    def __init__(
+        self,
+        max_features: int = DEFAULT_AUGMENTED_PAIR_MAX_FEATURES,
+        budget_topK: int | None = None,
+        min_source_ig: float | None = None,
+        unbounded_cap: int = DEFAULT_AUGMENTED_PAIR_UNBOUNDED_CAP,
+    ) -> None:
+        self.max_features = int(max_features)
+        self.top_ig = self.max_features
+        self.budget_topK = None if budget_topK is None else int(budget_topK)
+        self.min_source_ig = None if min_source_ig is None else float(min_source_ig)
+        self.unbounded_cap = int(unbounded_cap)
+
+    @staticmethod
+    def _as_frame(X: Any, cols: list[str]) -> pd.DataFrame:
+        if isinstance(X, pd.DataFrame):
+            X_df = X
+        else:
+            arr = np.asarray(X)
+            if arr.ndim == 1:
+                arr = arr.reshape(1, -1)
+            names = cols if len(cols) == arr.shape[1] else [f"col{j}" for j in range(arr.shape[1])]
+            X_df = pd.DataFrame(arr, columns=names)
+        missing = [col for col in cols if col not in X_df.columns]
+        if missing:
+            X_df = X_df.copy()
+            for col in missing:
+                X_df[col] = np.nan
+        return X_df
+
+    def _selected_numeric_matrix(self, X: Any, cols: list[str] | None = None) -> np.ndarray:
+        selected = list(cols or getattr(self, "selected_ig_features_", []))
+        n_rows = len(X) if hasattr(X, "__len__") else 0
+        if not selected:
+            return np.zeros((n_rows, 0), dtype=np.float64)
+        X_df = self._as_frame(X, selected)
+        try:
+            mat = X_df.reindex(columns=selected).to_numpy(dtype=np.float64, copy=True)
+        except Exception:
+            mat = np.column_stack(
+                [
+                    pd.to_numeric(X_df[col], errors="coerce").to_numpy(dtype=np.float64)
+                    for col in selected
+                ]
+            )
+        return np.ascontiguousarray(mat, dtype=np.float64)
+
+    def _pair_index_arrays(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        pos = {col: idx for idx, col in enumerate(getattr(self, "selected_ig_features_", []))}
+        left: list[int] = []
+        right: list[int] = []
+        ops: list[int] = []
+        for spec in getattr(self, "kept_specs_", []):
+            a, b = spec["inputs"]
+            left.append(pos[a])
+            right.append(pos[b])
+            ops.append(0 if spec["operation"] == "product" else 1)
+        return (
+            np.asarray(left, dtype=np.int64),
+            np.asarray(right, dtype=np.int64),
+            np.asarray(ops, dtype=np.int8),
+        )
+
+    def fit(
+        self,
+        X: Any,
+        y: Any,
+        ig_scores: dict[str, Any],
+        bin_edges: dict[str, Any],
+        numeric_cols: list[str],
+        budget_topK: int | None = None,
+        min_source_ig: float | None = None,
+    ) -> NativeAugmentedPairTransformBlock:
+        if not (
+            _CORE_AVAILABLE
+            and hasattr(_core, "score_pair_candidates")
+            and hasattr(_core, "transform_pair_features")
+        ):
+            raise HUGIMLParamError(
+                "Native augmented pair transforms require _hugiml_core.score_pair_candidates "
+                "and _hugiml_core.transform_pair_features. Rebuild the native extension."
+            )
+        if budget_topK is not None:
+            self.budget_topK = int(budget_topK)
+        if min_source_ig is not None:
+            self.min_source_ig = float(min_source_ig)
+        # ``None`` means no augmented-pair pre-budget. This is used by
+        # topk_budget_strict=True so the single global topK filter ranks
+        # original + HUG pattern + augmented-pair features together exactly once.
+        # Negative values retain a safety cap for explicitly
+        # unbounded non-strict augmented-pair selection.
+        if self.budget_topK is not None and self.budget_topK < 0:
+            self.budget_topK = max(0, self.unbounded_cap)
+
+        min_ig = max(1e-12, float(self.min_source_ig or 0.0))
+        self.min_source_ig_ = min_ig
+        scored: list[tuple[float, str]] = []
+        for col in numeric_cols:
+            score = _best_ig_score((ig_scores or {}).get(col, {}))
+            if score >= min_ig:
+                scored.append((score, col))
+        scored.sort(key=lambda item: (-item[0], item[1]))
+        self.selected_ig_features_ = [col for _, col in scored[: min(self.top_ig, len(scored))]]
+        self.selected_ig_scores_ = {col: float(score) for score, col in scored}
+        self.input_bin_edges_ = {
+            col: (
+                np.asarray(bin_edges[col], dtype=float).tolist()
+                if col in (bin_edges or {})
+                else None
+            )
+            for col in self.selected_ig_features_
+        }
+
+        X_selected = self._selected_numeric_matrix(X, self.selected_ig_features_)
+        if X_selected.shape[1] == 0:
+            self.source_observed_medians_ = {}
+            self.source_observed_medians_array_ = np.zeros(0, dtype=np.float64)
+            self.numeric_medians_ = {}
+            self.numeric_medians_array_ = np.zeros(0, dtype=np.float64)
+            self.kept_specs_ = []
+            self.candidate_count_ = 0
+            self.feature_names_ = []
+            self.augmented_pair_transforms_ = []
+            self.augmented_pair_native_used_ = True
+            self.scaler_mean_ = np.zeros(0, dtype=np.float64)
+            self.scaler_scale_ = np.zeros(0, dtype=np.float64)
+            self.pair_reference_values_ = np.zeros(0, dtype=np.float64)
+            return self
+
+        observed_medians = np.nanmedian(
+            np.where(np.isfinite(X_selected), X_selected, np.nan), axis=0
+        )
+        observed_medians = np.where(np.isfinite(observed_medians), observed_medians, 0.0).astype(
+            np.float64, copy=False
+        )
+        self.source_observed_medians_array_ = observed_medians
+        self.source_observed_medians_ = {
+            col: float(observed_medians[j]) for j, col in enumerate(self.selected_ig_features_)
+        }
+        # Backward-compatible internal aliases for older saved state readers.
+        # Augmented-pair feature construction does not median-fill source columns.
+        self.numeric_medians_array_ = observed_medians
+        self.numeric_medians_ = dict(self.source_observed_medians_)
+
+        y_codes, _ = pd.factorize(np.asarray(y), sort=True)
+        native_specs = _core.score_pair_candidates(
+            X_selected,
+            np.asarray(y_codes, dtype=np.int64),
+            list(self.selected_ig_features_),
+        )
+        self.augmented_pair_native_used_ = True
+        candidates = list(native_specs)
+        candidates.sort(key=lambda item: (-float(item["transform_ig"]), str(item["name"])))
+        self.candidate_count_ = len(candidates)
+        keep_n = (
+            len(candidates)
+            if self.budget_topK is None
+            else min(int(self.budget_topK), len(candidates))
+        )
+        self.kept_specs_ = candidates[:keep_n]
+        self.feature_names_ = [str(spec["name"]) for spec in self.kept_specs_]
+
+        if self.kept_specs_:
+            left, right, ops = self._pair_index_arrays()
+            pair_refs = np.asarray(
+                [float(spec.get("reference_raw_value", 0.0)) for spec in self.kept_specs_],
+                dtype=np.float64,
+            )
+            self.pair_reference_values_ = pair_refs
+            raw = _core.transform_pair_features(
+                X_selected,
+                left,
+                right,
+                ops,
+                pair_refs,
+                np.zeros(len(self.kept_specs_), dtype=np.float64),
+                np.ones(len(self.kept_specs_), dtype=np.float64),
+            ).astype(np.float64, copy=False)
+            self.scaler_mean_ = pair_refs.copy()
+            centered = raw - pair_refs.reshape(1, -1)
+            scale = np.sqrt(np.mean(centered * centered, axis=0))
+            self.scaler_scale_ = np.where(np.isfinite(scale) & (scale > 0), scale, 1.0).astype(
+                np.float64, copy=False
+            )
+            self.left_indices_ = left
+            self.right_indices_ = right
+            self.op_codes_ = ops
+        else:
+            self.scaler_mean_ = np.zeros(0, dtype=np.float64)
+            self.scaler_scale_ = np.zeros(0, dtype=np.float64)
+            self.left_indices_ = np.zeros(0, dtype=np.int64)
+            self.right_indices_ = np.zeros(0, dtype=np.int64)
+            self.op_codes_ = np.zeros(0, dtype=np.int8)
+            self.pair_reference_values_ = np.zeros(0, dtype=np.float64)
+        self.augmented_pair_transforms_ = self._build_catalog()
+        return self
+
+    def transform(self, X: Any) -> csr_matrix:
+        n_rows = len(X) if hasattr(X, "__len__") else 0
+        if not getattr(self, "kept_specs_", []):
+            return csr_matrix((n_rows, 0), dtype=np.float32)
+        X_selected = self._selected_numeric_matrix(
+            X, list(getattr(self, "selected_ig_features_", []))
+        )
+        Z = _core.transform_pair_features(
+            X_selected,
+            np.asarray(getattr(self, "left_indices_", np.zeros(0)), dtype=np.int64),
+            np.asarray(getattr(self, "right_indices_", np.zeros(0)), dtype=np.int64),
+            np.asarray(getattr(self, "op_codes_", np.zeros(0)), dtype=np.int8),
+            np.asarray(
+                getattr(
+                    self, "pair_reference_values_", np.zeros(len(getattr(self, "kept_specs_", [])))
+                ),
+                dtype=np.float64,
+            ),
+            np.asarray(getattr(self, "scaler_mean_", np.zeros(0)), dtype=np.float64),
+            np.asarray(getattr(self, "scaler_scale_", np.ones(0)), dtype=np.float64),
+        )
+        return _dense_full_csr(np.asarray(Z, dtype=np.float32))
+
+    def _build_catalog(self) -> list[dict[str, Any]]:
+        out: list[dict[str, Any]] = []
+        candidate_count = int(getattr(self, "candidate_count_", 0))
+        means = np.asarray(getattr(self, "scaler_mean_", np.zeros(0)), dtype=np.float64)
+        scales = np.asarray(getattr(self, "scaler_scale_", np.ones(0)), dtype=np.float64)
+        for rank, spec in enumerate(getattr(self, "kept_specs_", []), start=1):
+            left, right = list(spec["inputs"])
+            mean = float(means[rank - 1]) if rank - 1 < means.size else 0.0
+            scale = float(scales[rank - 1]) if rank - 1 < scales.size else 1.0
+            raw_formula = str(spec["formula"])
+            out.append(
+                {
+                    "name": str(spec["name"]),
+                    "kind": "augmented_pair_transform",
+                    "operation": str(spec["operation"]),
+                    "inputs": [left, right],
+                    "formula": raw_formula,
+                    "raw_formula": raw_formula,
+                    "standardized_formula": f"({raw_formula} - {mean:.12g}) / {scale:.12g}",
+                    "standardization": {"mean": mean, "scale": scale},
+                    "standardization_mean": mean,
+                    "standardization_scale": scale,
+                    "source_observed_medians": {
+                        left: float(getattr(self, "source_observed_medians_", {}).get(left, 0.0)),
+                        right: float(getattr(self, "source_observed_medians_", {}).get(right, 0.0)),
+                    },
+                    "pair_missing_policy": "reference_value_for_unavailable_pair",
+                    "reference_raw_value": float(spec.get("reference_raw_value", mean)),
+                    "eligible_count": int(spec.get("eligible_count", 0)),
+                    "eligible_rate": float(spec.get("eligible_rate", np.nan)),
+                    "missing_pair_rate": float(spec.get("missing_pair_rate", np.nan)),
+                    "selected_by": f"native_hugiml_adaptive_binning_ig_top_{self.max_features}_observed_pair_transform_ig",
+                    "source_ig": {
+                        left: float(self.selected_ig_scores_.get(left, 0.0)),
+                        right: float(self.selected_ig_scores_.get(right, 0.0)),
+                    },
+                    "source_bin_edges": {
+                        left: self.input_bin_edges_.get(left),
+                        right: self.input_bin_edges_.get(right),
+                    },
+                    "transform_ig": float(spec["transform_ig"]),
+                    "transform_bin_edges": spec.get("transform_bin_edges"),
+                    "rank": rank,
+                    "budget_topK": None if self.budget_topK is None else int(self.budget_topK),
+                    "candidate_count": candidate_count,
+                    "augmented_pair_max_features": int(self.max_features),
+                    "used_in_hugiml_mining": False,
+                    "eligible_for_L2": False,
+                    "integration_point": "before_downstream_lr",
+                }
+            )
+        return out
+
+
 # ---------------------------------------------------------------------------
 # Helpers: RSS memory (Unix) with Windows fallback
 # ---------------------------------------------------------------------------
@@ -200,6 +576,14 @@ class FitMetadata:
         Number of HUG patterns mined and retained.
     n_compound : int
         Compound patterns (length > 1).
+    n_augmented_pairs : int
+        Number of augmented pair features retained for the downstream estimator.
+    n_downstream_features : int
+        Number of columns used by the downstream estimator after feature-mode
+        construction and optional strict TopK filtering.
+    downstream_feature_counts : dict
+        Counts by downstream feature family, for example original, pattern, and
+        augmented_pair.
     topK_used : int
         Effective topK budget used during mining.
     stage_times_ms : dict[str, float]
@@ -233,6 +617,9 @@ class FitMetadata:
     total_fit_ms: float
     matrix_density: float
     config: dict
+    n_augmented_pairs: int = 0
+    n_downstream_features: int = 0
+    downstream_feature_counts: dict = dataclasses.field(default_factory=dict)
     memory_peak_mb: float = 0.0
     memory_rss_mb: float = 0.0
     memory_cpp_mb: float = 0.0
@@ -241,9 +628,15 @@ class FitMetadata:
 
     def summary(self) -> str:
         """Return a single-line human-readable summary of the fit outcome."""
+        downstream_text = (
+            f", {self.n_augmented_pairs} augmented pairs, "
+            f"{self.n_downstream_features} downstream features"
+            if self.n_downstream_features
+            else f", {self.n_augmented_pairs} augmented pairs"
+        )
         return (
             f"{self.n_patterns} patterns "
-            f"({self.n_compound} compound) from "
+            f"({self.n_compound} compound){downstream_text} from "
             f"{self.n_samples}×{self.n_features} in "
             f"{self.total_fit_ms:.0f} ms  "
             f"[density={self.matrix_density:.4f}]"
@@ -463,7 +856,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         "adaptive_binning": [True],
         "L": [1, 2],
         "feature_mode": ["patterns_only", "original_plus_patterns"],
-        "topK": [30, 60, 90, 120, 150],
+        "topK": [30, 50, 100],
         "G": [1e-3],
     }
 
@@ -492,6 +885,9 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         min_marginal_gain_ratio: float = 0.02,
         feature_mode: str = "patterns_only",
         use_hotpath: bool = True,
+        augmented_pair_transforms: bool = True,
+        augmented_pair_max_features: int = 10,
+        topk_budget_strict: bool = False,
     ) -> None:
         self.allCols = allCols
         self.origColumns = origColumns
@@ -509,6 +905,9 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         self.min_marginal_gain_ratio = min_marginal_gain_ratio
         self.feature_mode = feature_mode
         self.use_hotpath = use_hotpath
+        self.augmented_pair_transforms = augmented_pair_transforms
+        self.augmented_pair_max_features = augmented_pair_max_features
+        self.topk_budget_strict = topk_budget_strict
         self._fit_lock = threading.RLock()
 
     # ── Class methods ─────────────────────────────────────────────────────────
@@ -539,8 +938,11 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
 
         The grid uses adaptive binning (``B=-1``), searches ``L`` in
         ``{1, 2}``, searches ``feature_mode`` in ``{'patterns_only',
-        'original_plus_patterns'}``, keeps ``G`` fixed at 1e-3, and mines
-        exactly the requested ``topK`` in a single pass.
+        'original_plus_patterns'}``, keeps ``G`` fixed at 1e-3, and searches ``topK`` in
+        ``{30, 50, 100}``. For ``L > 1`` and
+        ``augmented_pair_transforms=True``, native augmented-pair transforms
+        are created internally from the top-10 native-IG numeric features
+        and capped to the same ``topK`` budget by transform IG.
         """
         return {k: list(v) for k, v in cls.DEFAULT_PARAM_GRID.items()}
 
@@ -551,7 +953,10 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         status = f", {len(self.patterns_)} patterns" if fitted else ", not fitted"
         adap = ", adaptive" if self.adaptive_binning else ""
         mode = f", feature_mode={self.feature_mode}"
-        return f"HUGIMLClassifierNative(B={self.B}, L={self.L}, G={self.G}{adap}{mode}{status})"
+        aug = f", augmented_pair_transforms={self.augmented_pair_transforms}"
+        return (
+            f"HUGIMLClassifierNative(B={self.B}, L={self.L}, G={self.G}{adap}{mode}{aug}{status})"
+        )
 
     # ── sklearn protocol ──────────────────────────────────────────────────────
 
@@ -574,6 +979,9 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             min_marginal_gain_ratio=self.min_marginal_gain_ratio,
             feature_mode=self.feature_mode,
             use_hotpath=self.use_hotpath,
+            augmented_pair_transforms=self.augmented_pair_transforms,
+            augmented_pair_max_features=self.augmented_pair_max_features,
+            topk_budget_strict=self.topk_budget_strict,
         )
 
     def set_params(self, **params: Any) -> HUGIMLClassifierNative:
@@ -625,7 +1033,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
     def __getstate__(self) -> dict:
         state = self.__dict__.copy()
         state.pop("_fit_lock", None)
-        # Strip instance-level method patches set by instrument_classifier():\n        # these are closures and are not picklable.
+        # Remove instance-level methods set by instrument_classifier():\n        # these closures are not picklable.
         state.pop("predict_proba", None)
         state.pop("predict", None)
         state["_schema_version_"] = MODEL_SCHEMA_VERSION
@@ -636,7 +1044,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             ]
             state["_patterns_pickled_"] = True
         # serialize raw_patterns_ (also holds PatternEntry objects) ──
-        # __getstate__ previously converted patterns_ but left raw_patterns_ as
+        # __getstate__ must convert patterns_ and raw_patterns_ consistently as
         # native PatternEntry objects, which are not picklable/deepcopyable.
         # Mirror the same dict-serialisation used for patterns_.
         if "raw_patterns_" in state and state["raw_patterns_"]:
@@ -686,7 +1094,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                 state["raw_patterns_"] = [_PE2(d) for d in state["raw_patterns_"]]
 
         self.__dict__.update(state)
-        # Drop experimental multi-round attributes from earlier development builds.
+        # Drop unsupported multi-round attributes when loading serialized estimators.
         for _attr in (
             "n_rounds",
             "g_decay_factor",
@@ -708,6 +1116,16 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             self.min_marginal_gain_ratio = 0.02
         if not hasattr(self, "use_hotpath"):
             self.use_hotpath = True
+        if not hasattr(self, "augmented_pair_transforms"):
+            self.augmented_pair_transforms = True
+        if not hasattr(self, "topk_budget_strict"):
+            self.topk_budget_strict = False
+        if not hasattr(self, "augmented_pair_max_features"):
+            self.augmented_pair_max_features = 10
+        if not hasattr(self, "augmented_pair_transforms_"):
+            self.augmented_pair_transforms_ = []
+        if not hasattr(self, "augmented_pair_selected_features_"):
+            self.augmented_pair_selected_features_ = []
         # v1.1.0 missing value handling — absent in models saved before this version
         if not hasattr(self, "_missing_col_edges_"):
             self._missing_col_edges_ = {}
@@ -886,6 +1304,18 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         if cat_mask is None:
             cat_mask = np.zeros(p, dtype=bool)
 
+        # Hot predict path: all-numeric inputs do not need per-column pandas
+        # Series extraction.  Keep behaviour identical by still returning a
+        # writable float64 copy and an all-None categorical list.
+        if not np.any(cat_mask):
+            try:
+                if is_df:
+                    return arr.to_numpy(dtype=np.float64, copy=True), [None] * p
+                assert arr_np is not None
+                return np.array(arr_np, dtype=np.float64, copy=True), [None] * p
+            except Exception:
+                pass
+
         X_num = np.zeros((n, p), dtype=np.float64)
         X_cat_raw = [None] * p
 
@@ -1057,6 +1487,23 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             raise HUGIMLParamError(
                 f"feature_mode must be one of {sorted(allowed_feature_modes)}, "
                 f"got {self.feature_mode!r}."
+            )
+        if not isinstance(self.augmented_pair_transforms, bool):
+            raise HUGIMLParamError(
+                "augmented_pair_transforms must be bool, "
+                f"got {type(self.augmented_pair_transforms).__name__}."
+            )
+        if not isinstance(self.topk_budget_strict, bool):
+            raise HUGIMLParamError(
+                f"topk_budget_strict must be bool, got {type(self.topk_budget_strict).__name__}."
+            )
+        if not isinstance(self.augmented_pair_max_features, int):
+            raise HUGIMLParamError(
+                f"augmented_pair_max_features must be int, got {type(self.augmented_pair_max_features).__name__}."
+            )
+        if self.augmented_pair_max_features < 2:
+            raise HUGIMLParamError(
+                f"augmented_pair_max_features must be >= 2, got {self.augmented_pair_max_features}."
             )
 
     def _resolve_col_meta(self, X_train: Any) -> np.ndarray:
@@ -1471,6 +1918,29 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                 arr = arr.reshape(1, -1)
             cols = feat_names or [f"col{j}" for j in range(arr.shape[1])]
             X_df = pd.DataFrame(arr, columns=cols)
+
+        # Fast labelled path for the common adaptive case: all stored adaptive
+        # columns are numeric pre-coded features.  Convert once to NumPy, edit
+        # columns in-place, and rebuild one DataFrame instead of assigning one
+        # pandas Series per feature.
+        if is_df and all(name in X_df.columns and name in precoded_features for name in bin_edges):
+            try:
+                cols = list(X_df.columns)
+                name_to_idx = {str(c): j for j, c in enumerate(cols)}
+                X_mat = X_df.to_numpy(dtype=np.float64, copy=True)
+                for name, edges in bin_edges.items():
+                    j = name_to_idx[name]
+                    n_bins = len(edges) - 1
+                    col = X_mat[:, j]
+                    codes = np.clip(np.digitize(col, edges[1:-1]), 0, n_bins - 1).astype(np.float64)
+                    nan_mask = ~np.isfinite(col)
+                    if nan_mask.any():
+                        codes[nan_mask] = np.nan
+                    X_mat[:, j] = codes
+                return pd.DataFrame(X_mat, columns=X_df.columns, index=X_df.index)
+            except Exception:
+                pass
+
         X_out = X_df.copy()
         for name, edges in bin_edges.items():
             if name not in X_df.columns:
@@ -1692,6 +2162,9 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             "_pattern_orders_",
             "_interaction_pattern_mask_",
             "x_train_downstream_",
+            "_augmented_pair_block_",
+            "augmented_pair_transforms_",
+            "augmented_pair_selected_features_",
         ):
             self.__dict__.pop(_attr, None)
 
@@ -1721,12 +2194,14 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             _core.openmp_set_num_threads(n_threads)
         actual_threads = _core.openmp_get_max_threads()
 
-        # Preserve raw input only for downstream modes that actually need the
-        # original feature block.  patterns_only can avoid a large dense copy.
+        # Preserve raw input if the downstream mode needs original features,
+        # or if L>1 will create internal augmented_pair_transforms. This remains
+        # an internal operation; no public hyperparameter is added.
+        _needs_augmented_pairs = bool(self.L > 1 and bool(self.augmented_pair_transforms))
         X_train_original_for_downstream = (
-            None
-            if self.feature_mode == "patterns_only"
-            else self._copy_input_for_downstream(X_train)
+            self._copy_input_for_downstream(X_train)
+            if (self.feature_mode != "patterns_only" or _needs_augmented_pairs)
+            else None
         )
 
         # Fused adaptive+L1 hot path can consume raw X directly and must not
@@ -2103,9 +2578,16 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             # Stage 5: fit downstream classifier
             t = self._timer()
             self._setup_feature_mode_metadata()
+            self._setup_augmented_pair_transforms(
+                X_train_original_for_downstream, y_train, fit=True
+            )
             self.x_train_downstream_ = self._make_downstream_features(
                 X_train_original_for_downstream, self.x_train_hup_, fit=True
             )
+            self.x_train_downstream_ = self._apply_strict_topk_budget_fit(
+                self.x_train_downstream_, y_train
+            )
+            self._cache_downstream_feature_metadata()
             self.model_ = Pipeline([("clf", self._make_estimator(n_cls))])
             self.model_.fit(self.x_train_downstream_, y_train)
             stage_times["fit_downstream"] = t.ms
@@ -2134,6 +2616,24 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         density = (
             nnz / (n_train_final * n_pats_final) if (n_train_final * n_pats_final) > 0 else 0.0
         )
+        downstream_names_for_metadata = list(
+            getattr(self, "_downstream_feature_names_", []) or self._get_downstream_feature_names()
+        )
+        downstream_feature_counts = {
+            "original": sum(
+                1 for name in downstream_names_for_metadata if str(name).startswith("orig:")
+            ),
+            "pattern": sum(
+                1 for name in downstream_names_for_metadata if str(name).startswith("pattern:")
+            ),
+            "augmented_pair": sum(
+                1
+                for name in downstream_names_for_metadata
+                if str(name).startswith("augmented_pair:")
+            ),
+        }
+        downstream_feature_counts["total"] = len(downstream_names_for_metadata)
+
         self.fit_metadata_ = FitMetadata(
             n_samples=n_train_final,
             n_features=X_num.shape[1],
@@ -2142,6 +2642,9 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             n_patterns=n_pats_final,
             n_compound=n_compound,
             topK_used=self._effective_topK(len(getattr(self.td_, "item_twu", [])) or None),
+            n_augmented_pairs=downstream_feature_counts.get("augmented_pair", 0),
+            n_downstream_features=downstream_feature_counts.get("total", 0),
+            downstream_feature_counts=downstream_feature_counts,
             stage_times_ms=stage_times,
             total_fit_ms=t_total.ms,
             matrix_density=density,
@@ -2261,7 +2764,9 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         # in that mode without reading X_original, so the copy is wasted.
         # Non-patterns_only modes still copy to preserve original values across
         # adaptive pre-binning and chunked slicing.
-        _needs_original = getattr(self, "feature_mode", "patterns_only") != "patterns_only"
+        _needs_original = getattr(self, "feature_mode", "patterns_only") != "patterns_only" or bool(
+            getattr(self, "augmented_pair_transforms_", [])
+        )
         X_test_original_for_downstream = (
             self._copy_input_for_downstream(X_test) if _needs_original else X_test
         )
@@ -2277,6 +2782,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             X_downstream = self._make_downstream_features(
                 X_test_original_for_downstream, Z_test, fit=False
             )
+            X_downstream = self._apply_strict_topk_budget_transform(X_downstream)
             proba = np.asarray(self.model_.predict_proba(X_downstream))
             _mon = getattr(self, "monitor", None)
             if _mon is not None:
@@ -2309,6 +2815,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             )
             Z_chunk = self._build_test_hup(chunk)
             X_downstream_chunk = self._make_downstream_features(orig_chunk, Z_chunk, fit=False)
+            X_downstream_chunk = self._apply_strict_topk_budget_transform(X_downstream_chunk)
             result[start:end] = self.model_.predict_proba(X_downstream_chunk)
             completed = end
 
@@ -2329,8 +2836,10 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         np.ndarray, shape (n_samples,)
         """
         check_is_fitted(self)
-        # skip copy for patterns_only mode (see predict_proba for rationale).
-        _needs_original = getattr(self, "feature_mode", "patterns_only") != "patterns_only"
+        # skip copy only when neither feature_mode nor augmented_pair_transforms need raw input.
+        _needs_original = getattr(self, "feature_mode", "patterns_only") != "patterns_only" or bool(
+            getattr(self, "augmented_pair_transforms_", [])
+        )
         X_test_original_for_downstream = (
             self._copy_input_for_downstream(X_test) if _needs_original else X_test
         )
@@ -2342,6 +2851,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         X_downstream = self._make_downstream_features(
             X_test_original_for_downstream, Z_test, fit=False
         )
+        X_downstream = self._apply_strict_topk_budget_transform(X_downstream)
         return np.asarray(self.model_.predict(X_downstream))
 
     # ── Downstream feature modes ─────────────────────────────────────────────
@@ -2398,6 +2908,30 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                     X_df[col] = np.nan
             X_df = X_df[list(train_names)]
 
+        # Hot predict path: fitted all-numeric original_plus_* models can avoid
+        # pandas apply/fillna/reindex/get_dummies.  This preserves the fitted
+        # StandardScaler and median-imputation contract exactly.
+        if not fit:
+            num_cols = list(getattr(self, "_original_numeric_cols_", []))
+            cat_cols = list(getattr(self, "_original_cat_cols_", []))
+            dummy_cols = list(getattr(self, "_original_dummy_columns_", []))
+            if num_cols and not cat_cols and not dummy_cols and list(X_df.columns) == num_cols:
+                try:
+                    X_num_arr_raw = X_df.to_numpy(dtype=np.float64, copy=True)
+                    med_arr = getattr(self, "_original_numeric_medians_array_", None)
+                    if med_arr is None or len(med_arr) != X_num_arr_raw.shape[1]:
+                        med = getattr(self, "_original_numeric_medians_", pd.Series(dtype=float))
+                        med_arr = (
+                            med.reindex(num_cols).fillna(0.0).to_numpy(dtype=np.float64, copy=True)
+                        )
+                    bad = ~np.isfinite(X_num_arr_raw)
+                    if bad.any():
+                        X_num_arr_raw[bad] = np.take(med_arr, np.nonzero(bad)[1])
+                    X_num_arr = self._original_scaler_.transform(X_num_arr_raw)
+                    return csr_matrix(X_num_arr.astype(np.float32, copy=False))
+                except Exception:
+                    pass
+
         # Numeric columns are scaled; non-numeric columns are one-hot encoded.
         numeric = X_df.apply(pd.to_numeric, errors="coerce")
         numeric_cols = [c for c in X_df.columns if not numeric[c].isna().all()]
@@ -2408,10 +2942,15 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             self._original_numeric_cols_ = list(X_num.columns)
             self._original_cat_cols_ = list(X_cat.columns)
             self._original_numeric_medians_ = X_num.median(numeric_only=True).fillna(0.0)
+            self._original_numeric_medians_array_ = self._original_numeric_medians_.reindex(
+                self._original_numeric_cols_
+            ).to_numpy(dtype=np.float64, copy=True)
             X_num_filled = X_num.fillna(self._original_numeric_medians_)
             self._original_scaler_ = StandardScaler()
             X_num_arr = (
-                self._original_scaler_.fit_transform(X_num_filled)
+                self._original_scaler_.fit_transform(
+                    X_num_filled.to_numpy(dtype=np.float64, copy=False)
+                )
                 if len(self._original_numeric_cols_)
                 else np.empty((len(X_df), 0))
             )
@@ -2455,42 +2994,557 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
     def _make_downstream_features(self, X_original: Any, Z_patterns: csr_matrix, fit: bool = False):
         """Build the estimator input matrix for the configured feature_mode."""
         mode = getattr(self, "feature_mode", "patterns_only")
+        Z = Z_patterns if issparse(Z_patterns) else csr_matrix(Z_patterns)
+        Z_aug = self._make_augmented_pair_features(X_original, fit=fit)
         if mode == "patterns_only":
-            return Z_patterns
+            return hstack([Z, Z_aug], format="csr") if Z_aug.shape[1] else Z
 
         X_base = self._prepare_original_features_for_downstream(X_original, fit=fit)
-        Z = Z_patterns if issparse(Z_patterns) else csr_matrix(Z_patterns)
 
         if mode == "original_plus_patterns":
-            return hstack([X_base, Z], format="csr")
+            blocks = [X_base, Z]
+            if Z_aug.shape[1]:
+                blocks.append(Z_aug)
+            return hstack(blocks, format="csr")
 
         if mode == "original_plus_interactions":
             mask = getattr(self, "_interaction_pattern_mask_", None)
             if mask is None:
                 self._setup_feature_mode_metadata()
                 mask = self._interaction_pattern_mask_
-            return hstack([X_base, Z[:, mask]], format="csr")
+            blocks = [X_base, Z[:, mask]]
+            if Z_aug.shape[1]:
+                blocks.append(Z_aug)
+            return hstack(blocks, format="csr")
 
         raise HUGIMLParamError(f"Unknown feature_mode={mode!r}.")
 
-    def _get_downstream_feature_names(self) -> list[str]:
-        """Names aligned with coefficients of the downstream estimator."""
+    def _get_downstream_feature_names_full(self) -> list[str]:
+        """Names for the unfiltered downstream feature matrix."""
         mode = getattr(self, "feature_mode", "patterns_only")
         pattern_names = list(self.get_hug_features())
+        aug_names = [
+            f"augmented_pair:{t['name']}" for t in getattr(self, "augmented_pair_transforms_", [])
+        ]
         if mode == "patterns_only":
-            return pattern_names
+            return [f"pattern:{name}" for name in pattern_names] + aug_names
         original_names = [
             f"orig:{name}" for name in getattr(self, "_original_feature_names_downstream_", [])
         ]
         if mode == "original_plus_patterns":
-            return original_names + [f"pattern:{name}" for name in pattern_names]
+            return original_names + [f"pattern:{name}" for name in pattern_names] + aug_names
         if mode == "original_plus_interactions":
             mask = getattr(
                 self, "_interaction_pattern_mask_", np.ones(len(pattern_names), dtype=bool)
             )
             selected = [name for name, keep in zip(pattern_names, mask) if keep]
-            return original_names + [f"pattern:{name}" for name in selected]
-        return pattern_names
+            return original_names + [f"pattern:{name}" for name in selected] + aug_names
+        return [f"pattern:{name}" for name in pattern_names]
+
+    def _get_downstream_feature_names(self) -> list[str]:
+        """Names aligned with coefficients of the downstream estimator."""
+        names = self._get_downstream_feature_names_full()
+        mask = getattr(self, "_strict_topk_feature_mask_", None)
+        if mask is None:
+            return names
+        return [name for name, keep in zip(names, np.asarray(mask, dtype=bool)) if keep]
+
+    def _is_discrete_downstream_feature(self, name: str) -> bool:
+        return name.startswith("pattern:") or (
+            name.startswith("orig:") and name in getattr(self, "_strict_topk_dummy_names_", set())
+        )
+
+    def _strict_topk_discrete_mask(self, names: list[str]) -> np.ndarray:
+        """Boolean mask of downstream columns that should be IG-scored as discrete."""
+        dummy_names = {f"orig:{c}" for c in getattr(self, "_original_dummy_columns_", [])}
+        self._strict_topk_dummy_names_ = dummy_names
+        return np.asarray(
+            [name.startswith("pattern:") or name in dummy_names for name in names],
+            dtype=np.uint8,
+        )
+
+    def _strict_topk_column_scores(self, X: csr_matrix, y: Any, names: list[str]) -> np.ndarray:
+        """Compute comparable IG scores for strict global topK filtering.
+
+        The native path scores CSC columns directly. The Python fallback is kept
+        only for source-tree development before the extension has been rebuilt.
+        """
+        y_codes, _ = pd.factorize(np.asarray(y), sort=True)
+        n_classes = int(np.max(y_codes)) + 1 if y_codes.size else 0
+        if n_classes <= 1:
+            return np.zeros(X.shape[1], dtype=np.float64)
+        X_csc = X.tocsc() if issparse(X) else csr_matrix(X).tocsc()
+        discrete_mask = self._strict_topk_discrete_mask(names)
+        max_bins = max(
+            8,
+            int(
+                getattr(self, "B", 8) if getattr(self, "B", 8) and getattr(self, "B", 8) > 0 else 16
+            ),
+        )
+        if _CORE_AVAILABLE and hasattr(_core, "strict_topk_filter_csc"):
+            scores, _ = _core.strict_topk_filter_csc(
+                np.asarray(X_csc.data, dtype=np.float32),
+                np.asarray(X_csc.indices, dtype=np.int32),
+                np.asarray(X_csc.indptr, dtype=np.int32),
+                int(X_csc.shape[0]),
+                int(X_csc.shape[1]),
+                np.asarray(y_codes, dtype=np.int64),
+                discrete_mask,
+                -1,
+                int(max_bins),
+            )
+            return np.asarray(scores, dtype=np.float64)
+        scores = np.zeros(X.shape[1], dtype=np.float64)
+        for j in range(X.shape[1]):
+            col = np.asarray(X_csc[:, j].toarray()).ravel()
+            if bool(discrete_mask[j]):
+                vals = np.where(col > 0.5, 1, 0).astype(np.int64, copy=False)
+            else:
+                vals = _continuous_to_quantile_codes(col, max_bins=max_bins)
+            scores[j] = _information_gain_from_codes(vals, y_codes, n_classes)
+        return scores
+
+    def _apply_strict_topk_budget_fit(self, X: csr_matrix, y: Any) -> csr_matrix:
+        """Optionally apply a single native global IG topK budget over all downstream features."""
+        n_cols = int(X.shape[1])
+        names = self._get_downstream_feature_names_full()
+        self._downstream_feature_names_full_ = list(names)
+        self._strict_topk_feature_scores_ = np.zeros(n_cols, dtype=np.float64)
+        self._strict_topk_feature_mask_ = np.ones(n_cols, dtype=bool)
+        self._strict_topk_selected_feature_names_ = list(names)
+        if (
+            not bool(getattr(self, "topk_budget_strict", False))
+            or self.topK is None
+            or int(self.topK) < 0
+        ):
+            return X
+        if n_cols == 0:
+            return X
+        budget = min(max(1, int(self.topK)), n_cols)
+        y_codes, _ = pd.factorize(np.asarray(y), sort=True)
+        X_csc = X.tocsc() if issparse(X) else csr_matrix(X).tocsc()
+        discrete_mask = self._strict_topk_discrete_mask(names)
+        max_bins = max(
+            8,
+            int(
+                getattr(self, "B", 8) if getattr(self, "B", 8) and getattr(self, "B", 8) > 0 else 16
+            ),
+        )
+        if _CORE_AVAILABLE and hasattr(_core, "strict_topk_filter_csc"):
+            scores, mask_native = _core.strict_topk_filter_csc(
+                np.asarray(X_csc.data, dtype=np.float32),
+                np.asarray(X_csc.indices, dtype=np.int32),
+                np.asarray(X_csc.indptr, dtype=np.int32),
+                int(X_csc.shape[0]),
+                int(X_csc.shape[1]),
+                np.asarray(y_codes, dtype=np.int64),
+                discrete_mask,
+                int(budget),
+                int(max_bins),
+            )
+            scores = np.asarray(scores, dtype=np.float64)
+            mask = np.asarray(mask_native, dtype=bool)
+        else:
+            scores = self._strict_topk_column_scores(X, y, names)
+            order = np.lexsort((np.arange(n_cols), -scores))
+            keep_idx = np.sort(order[:budget])
+            mask = np.zeros(n_cols, dtype=bool)
+            mask[keep_idx] = True
+        self._strict_topk_feature_scores_ = scores
+        self._strict_topk_feature_mask_ = mask
+        self._strict_topk_selected_feature_names_ = [
+            name for name, keep in zip(names, mask) if keep
+        ]
+        return X[:, mask]
+
+    def _apply_strict_topk_budget_transform(self, X: csr_matrix) -> csr_matrix:
+        mask = getattr(self, "_strict_topk_feature_mask_", None)
+        if mask is None:
+            return X
+        mask_arr = np.asarray(mask, dtype=bool)
+        if mask_arr.size != X.shape[1] or bool(np.all(mask_arr)):
+            return X
+        return X[:, mask_arr]
+
+    def _numeric_feature_names_for_augmented_pairs(self) -> list[str]:
+        names = list(getattr(self, "feature_names_in_", []) or [])
+        cat_mask = getattr(self, "cat_cols_mask_", np.zeros(len(names), dtype=bool))
+        return [name for name, is_cat in zip(names, cat_mask) if not bool(is_cat)]
+
+    def _setup_augmented_pair_transforms(
+        self, X_original: Any, y: Any | None = None, fit: bool = False
+    ) -> None:
+        """Create internal augmented_pair_transforms when L>1.
+
+        This reuses native adaptive-binning IG metadata and does not expose a
+        public hyperparameter. Augmented pair transforms are not fed into HUGIML
+        mining; they are appended only before the downstream estimator.
+        """
+        enabled = bool(self.augmented_pair_transforms)
+        if not fit or self.L <= 1 or not enabled or X_original is None:
+            self._augmented_pair_block_ = None
+            self.augmented_pair_transforms_ = []
+            self.augmented_pair_selected_features_ = []
+            self.augmented_pair_transforms_enabled_ = False
+            return
+        if not getattr(self, "adaptive_binning", False):
+            warnings.warn(
+                "augmented_pair_transforms require adaptive_binning=True because they are selected from adaptive-binning IG metadata; no augmented pair features will be added.",
+                HUGIMLWarning,
+                stacklevel=2,
+            )
+            self._augmented_pair_block_ = None
+            self.augmented_pair_transforms_ = []
+            self.augmented_pair_selected_features_ = []
+            self.augmented_pair_transforms_enabled_ = False
+            self.augmented_pair_config_ = {
+                "enabled": False,
+                "reason": "adaptive_binning_required",
+                "max_features": int(self.augmented_pair_max_features),
+                "budget": int(self.topK) if self.topK is not None and self.topK >= 0 else None,
+                "num_candidates": 0,
+                "num_retained": 0,
+            }
+            return
+        if not getattr(self, "ig_scores_", None):
+            warnings.warn(
+                "augmented_pair_transforms were requested but no adaptive-binning IG scores are available; no augmented pair features will be added.",
+                HUGIMLWarning,
+                stacklevel=2,
+            )
+            self._augmented_pair_block_ = None
+            self.augmented_pair_transforms_ = []
+            self.augmented_pair_selected_features_ = []
+            self.augmented_pair_transforms_enabled_ = False
+            self.augmented_pair_config_ = {
+                "enabled": False,
+                "reason": "missing_ig_scores",
+                "max_features": int(self.augmented_pair_max_features),
+                "budget": int(self.topK) if self.topK is not None and self.topK >= 0 else None,
+                "num_candidates": 0,
+                "num_retained": 0,
+            }
+            return
+        pair_budget = None if bool(getattr(self, "topk_budget_strict", False)) else self.topK
+        block = NativeAugmentedPairTransformBlock(
+            max_features=self.augmented_pair_max_features,
+            budget_topK=pair_budget,
+            min_source_ig=self.G,
+        )
+        block.fit(
+            X_original,
+            y,
+            getattr(self, "ig_scores_", {}) or {},
+            getattr(self, "_bin_edges_", {}) or {},
+            self._numeric_feature_names_for_augmented_pairs(),
+            budget_topK=pair_budget,
+            min_source_ig=self.G,
+        )
+        self._augmented_pair_block_ = block
+        self.augmented_pair_transforms_ = list(block.augmented_pair_transforms_)
+        self.augmented_pair_selected_features_ = list(block.selected_ig_features_)
+        self.augmented_pair_transforms_enabled_ = bool(self.augmented_pair_transforms_)
+        self.augmented_pair_config_ = {
+            "enabled": self.augmented_pair_transforms_enabled_,
+            "max_features": int(self.augmented_pair_max_features),
+            "budget": int(self.topK) if self.topK is not None and self.topK >= 0 else None,
+            "budget_source": "global_strict_topK"
+            if bool(getattr(self, "topk_budget_strict", False))
+            else "topK",
+            "ops": ["product", "absolute_difference"],
+            "score": "adaptive_binned_ig",
+            "min_source_ig": float(
+                getattr(block, "min_source_ig_", max(1e-12, float(self.G or 0.0)))
+            ),
+            "num_candidates": int(getattr(block, "candidate_count_", 0)),
+            "num_retained": len(self.augmented_pair_transforms_),
+        }
+
+    def _make_augmented_pair_features(self, X_original: Any, fit: bool = False):
+        if self.L <= 1 or not bool(self.augmented_pair_transforms) or X_original is None:
+            n_rows = 0 if X_original is None else len(X_original)
+            return csr_matrix((n_rows, 0), dtype=np.float32)
+        block = getattr(self, "_augmented_pair_block_", None)
+        if block is None:
+            return csr_matrix((len(X_original), 0), dtype=np.float32)
+        return block.transform(X_original)
+
+    def get_augmented_pair_transforms(self) -> list[dict[str, Any]]:
+        """Return augmented pair transforms used by the downstream estimator.
+
+        Each catalog entry includes the raw pair formula, source-feature IG
+        provenance, candidate coverage, unavailable-pair policy, and the
+        standardization parameters used before the downstream estimator sees
+        the feature.  Candidate IG is scored on rows where both source values
+        are observed.  For selected features, rows where the pair value cannot
+        be computed receive the pair feature's training reference value before
+        standardization, yielding a neutral standardized value.
+        """
+        return [dict(item) for item in getattr(self, "augmented_pair_transforms_", [])]
+
+    def get_augmented_pair_standardization(self) -> pd.DataFrame:
+        """Return standardization metadata for augmented pair features.
+
+        The returned columns are aligned to ``get_augmented_pair_transforms()``
+        and make the raw-to-estimator transformation explicit.
+        """
+        rows: list[dict[str, Any]] = []
+        for item in self.get_augmented_pair_transforms():
+            rows.append(
+                {
+                    "name": item.get("name"),
+                    "operation": item.get("operation"),
+                    "inputs": item.get("inputs"),
+                    "raw_formula": item.get("raw_formula", item.get("formula")),
+                    "standardization_mean": item.get("standardization_mean"),
+                    "standardization_scale": item.get("standardization_scale"),
+                    "standardized_formula": item.get("standardized_formula"),
+                    "reference_raw_value": item.get("reference_raw_value"),
+                    "pair_missing_policy": item.get("pair_missing_policy"),
+                    "eligible_count": item.get("eligible_count"),
+                    "eligible_rate": item.get("eligible_rate"),
+                    "missing_pair_rate": item.get("missing_pair_rate"),
+                    "source_observed_medians": item.get("source_observed_medians"),
+                    "transform_ig": item.get("transform_ig"),
+                }
+            )
+        return pd.DataFrame(rows)
+
+    @staticmethod
+    def _format_source_observed_medians(source_observed_medians: Any) -> str:
+        if not isinstance(source_observed_medians, dict) or not source_observed_medians:
+            return "not available"
+        parts: list[str] = []
+        for key, value in source_observed_medians.items():
+            try:
+                parts.append(f"{key}={float(value):.6g}")
+            except (TypeError, ValueError):
+                parts.append(f"{key}={value}")
+        return ", ".join(parts)
+
+    @staticmethod
+    def _augmented_pair_effect_text(
+        *,
+        raw_formula: str,
+        operation: str,
+        coefficient_raw_scale: float,
+        standardization_mean: float,
+        standardization_scale: float,
+        source_observed_medians: Any,
+        pair_missing_policy: str,
+        eligible_rate: float,
+        missing_pair_rate: float,
+    ) -> dict[str, Any]:
+        eligible_text = (
+            f"Candidate scoring used rows where both source values were observed"
+            f" (eligible_rate={eligible_rate:.3g})."
+            if np.isfinite(eligible_rate)
+            else "Candidate scoring used rows where both source values were observed."
+        )
+        missing_text = (
+            f"training rows where the pair was unavailable: {missing_pair_rate:.3g}."
+            if np.isfinite(missing_pair_rate)
+            else "the unavailable-pair rate is not available."
+        )
+        reference_note = (
+            f"The reference raw value {standardization_mean:.6g} is the training-cohort mean "
+            f"of the observed {raw_formula} pair term after applying the selected pair operation. "
+            "It is not a domain-specific baseline."
+        )
+        source_median_text = HUGIMLClassifierNative._format_source_observed_medians(
+            source_observed_medians
+        )
+        missing_policy_note = (
+            "If a selected pair cannot be computed for a row because one or both source values are missing, "
+            "the augmented-pair feature is set to its training reference raw value before standardization. "
+            "That gives the pair term a neutral standardized value of 0 for that row. "
+            "This policy applies only to continuous augmented-pair features; HUGIML pattern features keep "
+            "their native missing-value handling. "
+            f"For diagnostics, source feature medians observed in training were: {source_median_text}."
+        )
+
+        if not np.isfinite(coefficient_raw_scale):
+            return {
+                "decision_direction": "effect_not_available",
+                "risk_increases_when": "not_available",
+                "unit_effect_interpretation": "Raw-scale log-odds effect is not available for this downstream estimator.",
+                "reference_raw_value_description": "training_cohort_mean_of_observed_raw_pair_value",
+                "source_observed_medians_description": "per-source-feature observed medians for diagnostics only; not used to construct pair values",
+                "pair_missing_policy_description": "unavailable pair values are set to the pair reference raw value before standardization",
+                "raw_scale_note": f"{reference_note} {eligible_text}",
+                "raw_interpretation": (
+                    f"The downstream estimator uses ({raw_formula} - {standardization_mean:.6g}) "
+                    f"/ {standardization_scale:.6g}. {reference_note} {eligible_text} "
+                    f"For selected-feature construction, {missing_policy_note}"
+                ),
+            }
+
+        if coefficient_raw_scale > 0:
+            direction = "higher_raw_value_increases_score"
+            direction_text = f"Higher {raw_formula} increases the model score."
+        elif coefficient_raw_scale < 0:
+            direction = "higher_raw_value_decreases_score"
+            direction_text = f"Higher {raw_formula} decreases the model score."
+        else:
+            direction = "raw_value_has_zero_linear_effect"
+            direction_text = f"Higher {raw_formula} does not change the linear model score."
+
+        if operation == "absolute_difference":
+            risk_when = (
+                "absolute_difference_increases"
+                if coefficient_raw_scale > 0
+                else "absolute_difference_decreases"
+                if coefficient_raw_scale < 0
+                else "not_applicable"
+            )
+            unit_text = (
+                f"Each +1 increase in the absolute difference term changes the log-odds by "
+                f"{coefficient_raw_scale:.6g}."
+            )
+            raw_scale_note = (
+                "The raw-unit effect is expressed on the absolute-difference scale. "
+                + reference_note
+            )
+        elif operation == "product":
+            risk_when = (
+                "product_value_increases"
+                if coefficient_raw_scale > 0
+                else "product_value_decreases"
+                if coefficient_raw_scale < 0
+                else "not_applicable"
+            )
+            unit_text = (
+                f"A +1 change in the product term changes the log-odds by "
+                f"{coefficient_raw_scale:.6g}. For a product feature, changing one source "
+                "variable does not have a fixed marginal effect; it depends on the current "
+                "value of the other source variable."
+            )
+            raw_scale_note = (
+                "The raw-unit effect is expressed on the product-term scale, not as a fixed "
+                "one-unit effect of either individual source feature. " + reference_note
+            )
+        else:
+            risk_when = (
+                "raw_value_increases"
+                if coefficient_raw_scale > 0
+                else "raw_value_decreases"
+                if coefficient_raw_scale < 0
+                else "not_applicable"
+            )
+            unit_text = (
+                f"Each +1 raw-unit increase changes the log-odds by {coefficient_raw_scale:.6g}."
+            )
+            raw_scale_note = reference_note
+
+        return {
+            "decision_direction": direction,
+            "risk_increases_when": risk_when,
+            "unit_effect_interpretation": unit_text,
+            "reference_raw_value_description": "training_cohort_mean_of_observed_raw_pair_value",
+            "source_observed_medians_description": "per-source-feature observed medians for diagnostics only; not used to construct pair values",
+            "pair_missing_policy_description": "unavailable pair values are set to the pair reference raw value before standardization",
+            "raw_scale_note": f"{raw_scale_note} {eligible_text}",
+            "raw_interpretation": (
+                f"{direction_text} {unit_text} The downstream estimator uses "
+                f"({raw_formula} - {standardization_mean:.6g}) / {standardization_scale:.6g}. "
+                f"{reference_note} {eligible_text} For selected-feature construction, {missing_policy_note} "
+                f"Among training rows, {missing_text}"
+            ),
+        }
+
+    def _augmented_pair_effect_rows(self) -> list[dict[str, Any]]:
+        """Return augmented-pair effect rows in raw and standardized units."""
+        check_is_fitted(self)
+        try:
+            imp = self.feature_importances()
+            coef_lookup = dict(zip(imp["feature"], imp["coefficient"]))
+        except AttributeError:
+            coef_lookup = {}
+
+        rows: list[dict[str, Any]] = []
+        for item in self.get_augmented_pair_transforms():
+            name = str(item.get("name"))
+            feature = f"augmented_pair:{name}"
+            coef_std = float(coef_lookup.get(feature, np.nan))
+            mean = float(item.get("standardization_mean", np.nan))
+            scale = float(item.get("standardization_scale", np.nan))
+            scale_safe = scale if np.isfinite(scale) and scale != 0.0 else np.nan
+            coef_raw = (
+                coef_std / scale_safe
+                if np.isfinite(coef_std) and np.isfinite(scale_safe)
+                else np.nan
+            )
+            operation = str(item.get("operation", ""))
+            raw_formula = str(item.get("raw_formula", item.get("formula", name)))
+
+            text = self._augmented_pair_effect_text(
+                raw_formula=raw_formula,
+                operation=operation,
+                coefficient_raw_scale=coef_raw,
+                standardization_mean=mean,
+                standardization_scale=scale,
+                source_observed_medians=item.get("source_observed_medians"),
+                pair_missing_policy=str(
+                    item.get("pair_missing_policy", "reference_value_for_unavailable_pair")
+                ),
+                eligible_rate=float(item.get("eligible_rate", np.nan)),
+                missing_pair_rate=float(item.get("missing_pair_rate", np.nan)),
+            )
+
+            rows.append(
+                {
+                    "feature": feature,
+                    "name": name,
+                    "operation": operation,
+                    "inputs": item.get("inputs"),
+                    "raw_formula": raw_formula,
+                    "standardized_formula": item.get("standardized_formula"),
+                    "standardization_mean": mean,
+                    "standardization_scale": scale,
+                    "reference_raw_value": mean,
+                    "reference_raw_value_description": text["reference_raw_value_description"],
+                    "coefficient_standardized": coef_std,
+                    "one_std_effect_on_log_odds": coef_std,
+                    "coefficient_raw_scale": coef_raw,
+                    "one_raw_unit_effect_on_log_odds": coef_raw,
+                    "decision_direction": text["decision_direction"],
+                    "risk_increases_when": text["risk_increases_when"],
+                    "unit_effect_interpretation": text["unit_effect_interpretation"],
+                    "raw_scale_note": text["raw_scale_note"],
+                    "raw_interpretation": text["raw_interpretation"],
+                    "pair_missing_policy": item.get("pair_missing_policy"),
+                    "pair_missing_policy_description": text["pair_missing_policy_description"],
+                    "eligible_count": item.get("eligible_count"),
+                    "eligible_rate": item.get("eligible_rate"),
+                    "missing_pair_rate": item.get("missing_pair_rate"),
+                    "source_observed_medians": item.get("source_observed_medians"),
+                    "source_observed_medians_description": text[
+                        "source_observed_medians_description"
+                    ],
+                    "transform_ig": item.get("transform_ig"),
+                }
+            )
+        return rows
+
+    def explain_augmented_pair_effects(self) -> pd.DataFrame:
+        """Explain augmented-pair effects in standardized and raw units.
+
+        The downstream estimator is fit on standardized augmented-pair values.
+        This method converts each standardized coefficient back to the raw pair
+        scale and states that the reference value is the training-cohort mean
+        of the observed pair term, not a domain-specific baseline. Candidate
+        scoring uses rows where both source values are observed. For selected
+        features, rows where the pair cannot be computed receive the pair
+        feature's training reference raw value before standardization, yielding
+        a neutral standardized value for that pair term. HUGIML pattern
+        features keep their native missing-value handling.
+
+        For logistic-regression downstream models, coefficient columns are
+        log-odds effects.  Product-term effects are expressed on the product
+        scale; changing one individual input does not have a fixed marginal
+        effect because it depends on the current value of the other input.
+        """
+        return pd.DataFrame(self._augmented_pair_effect_rows())
 
     def transform(self, X: Any) -> csr_matrix:
         """Return the binary HUG pattern matrix for X.
@@ -2583,9 +3637,8 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         cpp_is_cat = td._cpp_is_cat
         cpp_is_int = td._cpp_is_int
         cpp_is_precoded = getattr(td, "_cpp_is_precoded", [])
-        # If the wrapper was deserialized without _cpp_is_precoded (models saved
-        # before this fix, or via .hugiml format), reconstruct it from the
-        # classifier's compact adaptive precoded feature set.
+        # If the wrapper was deserialized without _cpp_is_precoded, reconstruct it
+        # from the classifier's compact adaptive precoded feature set.
         if not cpp_is_precoded:
             precoded_features = getattr(self, "_adaptive_precoded_features_", None)
             if precoded_features is None and getattr(self, "_adaptive_code_label_map_", {}):
@@ -2725,7 +3778,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                 )
 
         cat_mask = getattr(self, "cat_cols_mask_", None)
-        if is_df and cat_mask is not None:
+        if is_df and cat_mask is not None and np.any(cat_mask):
             for j, is_cat in enumerate(cat_mask):
                 if j >= n_test_features:
                     break
@@ -2742,51 +3795,63 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             td = self.td_
             cpp_all_edges = getattr(td, "_cpp_all_edges", None)
             if cpp_all_edges is not None:
-                for j in range(min(n_test_features, len(cat_mask))):
-                    if cat_mask[j]:
-                        continue
-                    edges = cpp_all_edges[j] if j < len(cpp_all_edges) else None
-                    if edges is None or len(edges) < 2:
-                        continue
-                    train_min = float(edges[0])
-                    train_max = float(edges[-1])
-                    # Native numeric paths store quantile edges in normalized
-                    # [0, 1] feature space together with col_min/col_range.
-                    # Convert back to the original feature scale before issuing
-                    # range-drift warnings; categorical/adaptive pre-coded
-                    # columns use raw code-space edges and have range=1,min=0.
-                    cpp_col_min = getattr(td, "_cpp_col_min", None)
-                    cpp_col_range = getattr(td, "_cpp_col_range", None)
-                    if (
-                        cpp_col_min is not None
-                        and cpp_col_range is not None
-                        and j < len(cpp_col_min)
-                        and j < len(cpp_col_range)
-                    ):
-                        cr = float(cpp_col_range[j])
-                        cm = float(cpp_col_min[j])
-                        if np.isfinite(cr) and cr > 0.0 and np.isfinite(cm):
-                            train_min = train_min * cr + cm
-                            train_max = train_max * cr + cm
-                    train_span = train_max - train_min
-                    if train_span <= 0:
-                        continue
-                    col = pd.to_numeric(X_test.iloc[:, j], errors="coerce")
-                    finite = col[np.isfinite(col)]
-                    if finite.empty:
-                        continue
-                    test_min, test_max = float(finite.min()), float(finite.max())
-                    if (
-                        test_min < train_min - train_span * 0.5
-                        or test_max > train_max + train_span * 0.5
-                    ):
-                        warnings.warn(
-                            f"Column '{X_test.columns[j]}' has values "
-                            f"[{test_min:.4g}, {test_max:.4g}] outside training "
-                            f"range [{train_min:.4g}, {train_max:.4g}].",
-                            HUGIMLRangeWarning,
-                            stacklevel=4,
+                try:
+                    numeric_idx = [
+                        j
+                        for j in range(min(n_test_features, len(cat_mask), len(cpp_all_edges)))
+                        if not cat_mask[j]
+                        and cpp_all_edges[j] is not None
+                        and len(cpp_all_edges[j]) >= 2
+                    ]
+                    if numeric_idx:
+                        train_min = np.asarray(
+                            [float(cpp_all_edges[j][0]) for j in numeric_idx], dtype=float
                         )
+                        train_max = np.asarray(
+                            [float(cpp_all_edges[j][-1]) for j in numeric_idx], dtype=float
+                        )
+                        cpp_col_min = getattr(td, "_cpp_col_min", None)
+                        cpp_col_range = getattr(td, "_cpp_col_range", None)
+                        if cpp_col_min is not None and cpp_col_range is not None:
+                            cm = np.asarray(
+                                [float(cpp_col_min[j]) for j in numeric_idx], dtype=float
+                            )
+                            cr = np.asarray(
+                                [float(cpp_col_range[j]) for j in numeric_idx], dtype=float
+                            )
+                            ok = np.isfinite(cr) & (cr > 0.0) & np.isfinite(cm)
+                            train_min[ok] = train_min[ok] * cr[ok] + cm[ok]
+                            train_max[ok] = train_max[ok] * cr[ok] + cm[ok]
+                        train_span = train_max - train_min
+                        valid = train_span > 0
+                        if np.any(valid):
+                            vals = X_test.iloc[:, numeric_idx].to_numpy(
+                                dtype=np.float64, copy=False
+                            )
+                            test_min = np.nanmin(np.where(np.isfinite(vals), vals, np.nan), axis=0)
+                            test_max = np.nanmax(np.where(np.isfinite(vals), vals, np.nan), axis=0)
+                            drift = (
+                                valid
+                                & np.isfinite(test_min)
+                                & np.isfinite(test_max)
+                                & (
+                                    (test_min < train_min - train_span * 0.5)
+                                    | (test_max > train_max + train_span * 0.5)
+                                )
+                            )
+                            for pos in np.flatnonzero(drift):
+                                j = numeric_idx[int(pos)]
+                                warnings.warn(
+                                    f"Column '{X_test.columns[j]}' has values "
+                                    f"[{float(test_min[pos]):.4g}, {float(test_max[pos]):.4g}] outside training "
+                                    f"range [{float(train_min[pos]):.4g}, {float(train_max[pos]):.4g}].",
+                                    HUGIMLRangeWarning,
+                                    stacklevel=4,
+                                )
+                except Exception:
+                    # Preserve prediction behaviour if warning-only drift checks
+                    # cannot be vectorized for mixed/object inputs.
+                    pass
 
     # ── Monitoring and drift ──────────────────────────────────────────────────
 
@@ -2992,11 +4057,120 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             )
         return pd.DataFrame(records)
 
-    def feature_importances(self) -> pd.DataFrame:
-        """Map downstream LR coefficients back to HUG pattern labels.
+    def _downstream_feature_display_name(self, name: str) -> str:
+        """Return a compact display label for a downstream feature name."""
+        for prefix in ("orig:", "pattern:", "augmented_pair:"):
+            if name.startswith(prefix):
+                return name[len(prefix) :]
+        return name
 
-        Returns a DataFrame sorted by absolute coefficient magnitude with
-        columns: pattern, coefficient, abs_coefficient, support.
+    def _downstream_feature_type(self, name: str) -> str:
+        """Classify a downstream feature name by its explicit namespace."""
+        if name.startswith("orig:"):
+            return "original"
+        if name.startswith("augmented_pair:"):
+            return "augmented_pair"
+        return "pattern"
+
+    def _pattern_support_lookup(self) -> dict[str, float]:
+        """Return training support by both raw and namespaced pattern label."""
+        n_train = int(getattr(self, "x_train_hup_", np.empty((0, 0))).shape[0])
+        if n_train <= 0:
+            return {}
+        labels = self.get_hug_features()
+        support = np.asarray(self.x_train_hup_.sum(axis=0)).ravel() / max(n_train, 1)
+        lookup: dict[str, float] = {}
+        for label, value in zip(labels, support):
+            val = float(value)
+            lookup[label] = val
+            lookup[f"pattern:{label}"] = val
+        return lookup
+
+    def get_downstream_features(self) -> list[str]:
+        """Return names aligned with the downstream estimator input columns.
+
+        The returned names include a namespace prefix so feature provenance is
+        explicit: ``orig:`` for original features, ``pattern:`` for mined HUG
+        patterns, and ``augmented_pair:`` for augmented pair transforms.  When
+        ``topk_budget_strict=True``, the returned list is already filtered to
+        the columns retained by the fitted strict TopK mask.
+        """
+        check_is_fitted(self)
+        return list(self._get_downstream_feature_names())
+
+    def _downstream_feature_counts(self) -> dict[str, int]:
+        """Return counts by downstream feature family for the fitted estimator."""
+        names = list(
+            getattr(self, "_downstream_feature_names_", []) or self._get_downstream_feature_names()
+        )
+        counts = {
+            "original": sum(1 for name in names if str(name).startswith("orig:")),
+            "pattern": sum(1 for name in names if str(name).startswith("pattern:")),
+            "augmented_pair": sum(1 for name in names if str(name).startswith("augmented_pair:")),
+        }
+        counts["total"] = len(names)
+        return counts
+
+    def get_model_composition(self) -> dict[str, Any]:
+        """Return downstream feature composition and relevant fitted configuration.
+
+        The composition describes the actual feature families entering the
+        downstream estimator after feature-mode construction and optional
+        strict TopK filtering.
+        """
+        check_is_fitted(self)
+        counts = self._downstream_feature_counts()
+        aug_config = dict(getattr(self, "augmented_pair_config_", {}) or {})
+        return {
+            "feature_mode": getattr(self, "feature_mode", "patterns_only"),
+            "topK": getattr(self, "topK", None),
+            "topk_budget_strict": bool(getattr(self, "topk_budget_strict", False)),
+            "augmented_pair_transforms_enabled": bool(
+                getattr(self, "augmented_pair_transforms", False)
+            ),
+            "augmented_pair_config": aug_config,
+            "n_input_features": int(getattr(self, "n_features_in_", 0)),
+            "n_patterns_mined": int(len(getattr(self, "patterns_", []))),
+            "n_downstream_features": counts["total"],
+            "downstream_feature_counts": counts,
+        }
+
+    def _cache_downstream_feature_metadata(self) -> None:
+        """Cache metadata aligned with the fitted downstream feature matrix."""
+        features = self._get_downstream_feature_names()
+        self._downstream_feature_names_ = list(features)
+        n_features = len(features)
+        self._downstream_pattern_support_ = np.full(n_features, np.nan, dtype=np.float64)
+        support_lookup = self._pattern_support_lookup()
+        for idx, feat in enumerate(features):
+            if self._downstream_feature_type(feat) == "pattern":
+                display_name = self._downstream_feature_display_name(feat)
+                self._downstream_pattern_support_[idx] = support_lookup.get(
+                    feat, support_lookup.get(display_name, np.nan)
+                )
+
+        X_meta = getattr(self, "x_train_downstream_", None)
+        if X_meta is not None and n_features == getattr(X_meta, "shape", (0, 0))[1]:
+            X_arr = X_meta.toarray() if issparse(X_meta) else np.asarray(X_meta)
+            finite_mask = np.isfinite(X_arr)
+            self._downstream_non_missing_rate_ = finite_mask.mean(axis=0).astype(np.float64)
+            self._downstream_variance_ = np.nanvar(
+                np.where(finite_mask, X_arr, np.nan), axis=0
+            ).astype(np.float64)
+        else:
+            self._downstream_non_missing_rate_ = np.full(n_features, np.nan, dtype=np.float64)
+            self._downstream_variance_ = np.full(n_features, np.nan, dtype=np.float64)
+
+    def feature_importances(self) -> pd.DataFrame:
+        """Map downstream estimator coefficients to final feature names.
+
+        Returns a DataFrame sorted by absolute coefficient magnitude.  Feature
+        names are aligned to the downstream estimator after feature-mode and
+        optional strict TopK filtering have been applied.  The ``feature_type``
+        column distinguishes original features, mined HUG patterns, and
+        augmented pair transforms.  ``pattern_support`` is populated only for
+        mined HUG patterns; original and augmented-pair features use
+        ``support_type='not_applicable'`` and ``pattern_support=NaN``.
 
         Raises
         ------
@@ -3019,47 +4193,162 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             else raw_coef.ravel()
         )
         features = self._get_downstream_feature_names()
-        n_train = self.x_train_hup_.shape[0]
-        mode = getattr(self, "feature_mode", "patterns_only")
-        original_count = (
-            len(getattr(self, "_original_feature_names_downstream_", []))
-            if mode != "patterns_only"
-            else 0
-        )
+        if len(features) != len(coef):
+            raise RuntimeError(
+                "Downstream feature names are not aligned with estimator coefficients: "
+                f"{len(features)} names for {len(coef)} coefficients."
+            )
 
-        pattern_support = np.asarray(self.x_train_hup_.sum(axis=0)).ravel() / max(n_train, 1)
-        interaction_indices = None
-        if mode == "original_plus_interactions":
-            interaction_indices = np.where(getattr(self, "_interaction_pattern_mask_", []))[0]
+        cached_pattern_support = getattr(self, "_downstream_pattern_support_", None)
+        if cached_pattern_support is not None and len(cached_pattern_support) != len(features):
+            cached_pattern_support = None
+        support_lookup = self._pattern_support_lookup() if cached_pattern_support is None else {}
+        strict_scores = getattr(self, "_strict_topk_feature_scores_", None)
+        strict_score_lookup: dict[str, float] = {}
+        if strict_scores is not None:
+            full_names = getattr(self, "_downstream_feature_names_full_", None)
+            if full_names is None or len(full_names) == 0:
+                full_names = self._get_downstream_feature_names_full()
+            strict_score_lookup = {
+                name: float(score)
+                for name, score in zip(full_names, np.asarray(strict_scores).ravel())
+            }
+
+        aug_lookup = {
+            f"augmented_pair:{item.get('name')}": item
+            for item in getattr(self, "augmented_pair_transforms_", [])
+        }
+
+        non_missing_rates = getattr(self, "_downstream_non_missing_rate_", None)
+        variances = getattr(self, "_downstream_variance_", None)
+        if (
+            non_missing_rates is None
+            or variances is None
+            or len(non_missing_rates) != len(features)
+            or len(variances) != len(features)
+        ):
+            X_meta = getattr(self, "x_train_downstream_", None)
+            if X_meta is not None and len(features) == getattr(X_meta, "shape", (0, 0))[1]:
+                X_arr = X_meta.toarray() if issparse(X_meta) else np.asarray(X_meta)
+                finite_mask = np.isfinite(X_arr)
+                non_missing_rates = finite_mask.mean(axis=0)
+                variances = np.nanvar(np.where(finite_mask, X_arr, np.nan), axis=0)
+            else:
+                non_missing_rates = np.full(len(features), np.nan)
+                variances = np.full(len(features), np.nan)
 
         rows: list[dict[str, object]] = []
-        for i, (feat, c) in enumerate(zip(features, coef)):
-            if i < original_count:
-                support = 1.0
-                ftype = "original"
-            else:
-                pat_idx = i - original_count
-                if interaction_indices is not None:
-                    pat_idx = (
-                        int(interaction_indices[pat_idx])
-                        if pat_idx < len(interaction_indices)
-                        else pat_idx
+        for idx, (feat, c) in enumerate(zip(features, coef)):
+            feature_type = self._downstream_feature_type(feat)
+            display_name = self._downstream_feature_display_name(feat)
+            if feature_type == "pattern":
+                if cached_pattern_support is not None:
+                    pattern_support = float(cached_pattern_support[idx])
+                else:
+                    pattern_support = support_lookup.get(
+                        feat, support_lookup.get(display_name, np.nan)
                     )
-                support = (
-                    float(pattern_support[pat_idx]) if 0 <= pat_idx < len(pattern_support) else 1.0
+                support_type = "pattern_support"
+            else:
+                pattern_support = np.nan
+                support_type = "not_applicable"
+
+            support_value = (
+                round(float(pattern_support), 4) if np.isfinite(pattern_support) else np.nan
+            )
+            aug_meta = aug_lookup.get(feat, {}) if feature_type == "augmented_pair" else {}
+            std_mean = aug_meta.get("standardization_mean", np.nan)
+            std_scale = aug_meta.get("standardization_scale", np.nan)
+            std_scale_float = float(std_scale) if np.isfinite(std_scale) else np.nan
+            coef_raw = (
+                float(c) / std_scale_float
+                if feature_type == "augmented_pair"
+                and np.isfinite(std_scale_float)
+                and std_scale_float != 0.0
+                else np.nan
+            )
+            raw_formula = aug_meta.get("raw_formula", np.nan)
+            if feature_type == "augmented_pair":
+                aug_text = self._augmented_pair_effect_text(
+                    raw_formula=str(raw_formula),
+                    operation=str(aug_meta.get("operation", "")),
+                    coefficient_raw_scale=coef_raw,
+                    standardization_mean=float(std_mean) if np.isfinite(std_mean) else np.nan,
+                    standardization_scale=std_scale_float,
+                    source_observed_medians=aug_meta.get("source_observed_medians", np.nan),
+                    pair_missing_policy=str(
+                        aug_meta.get("pair_missing_policy", "reference_value_for_unavailable_pair")
+                    ),
+                    eligible_rate=float(aug_meta.get("eligible_rate", np.nan)),
+                    missing_pair_rate=float(aug_meta.get("missing_pair_rate", np.nan)),
                 )
-                ftype = "pattern"
+                decision_direction = aug_text["decision_direction"]
+                risk_increases_when = aug_text["risk_increases_when"]
+                unit_effect_interpretation = aug_text["unit_effect_interpretation"]
+                reference_raw_value_description = aug_text["reference_raw_value_description"]
+                source_observed_medians_description = aug_text[
+                    "source_observed_medians_description"
+                ]
+                pair_missing_policy_description = aug_text["pair_missing_policy_description"]
+                raw_scale_note = aug_text["raw_scale_note"]
+                raw_interpretation = aug_text["raw_interpretation"]
+            else:
+                decision_direction = np.nan
+                risk_increases_when = np.nan
+                unit_effect_interpretation = np.nan
+                reference_raw_value_description = np.nan
+                source_observed_medians_description = np.nan
+                pair_missing_policy_description = np.nan
+                raw_scale_note = np.nan
+                raw_interpretation = np.nan
             rows.append(
                 {
-                    "pattern": feat,
-                    "feature_type": ftype,
+                    "pattern": display_name,
+                    "feature": feat,
+                    "display_name": display_name,
+                    "feature_type": feature_type,
                     "coefficient": round(float(c), 6),
                     "abs_coefficient": round(abs(float(c)), 6),
-                    "support": round(support, 4),
+                    "pattern_support": support_value,
+                    "support": support_value,
+                    "support_type": support_type,
+                    "non_missing_rate": round(float(non_missing_rates[idx]), 6),
+                    "variance": round(float(variances[idx]), 6),
+                    "strict_topk_score": round(float(strict_score_lookup.get(feat, np.nan)), 6),
+                    "standardization_mean": std_mean,
+                    "standardization_scale": std_scale,
+                    "raw_formula": raw_formula,
+                    "standardized_formula": aug_meta.get("standardized_formula", np.nan),
+                    "pair_missing_policy": aug_meta.get("pair_missing_policy", np.nan),
+                    "eligible_count": aug_meta.get("eligible_count", np.nan),
+                    "eligible_rate": aug_meta.get("eligible_rate", np.nan),
+                    "missing_pair_rate": aug_meta.get("missing_pair_rate", np.nan),
+                    "source_observed_medians": aug_meta.get("source_observed_medians", np.nan),
+                    "transform_ig": aug_meta.get("transform_ig", np.nan),
+                    "coefficient_standardized": round(float(c), 6)
+                    if feature_type == "augmented_pair"
+                    else np.nan,
+                    "one_std_effect_on_log_odds": round(float(c), 6)
+                    if feature_type == "augmented_pair"
+                    else np.nan,
+                    "coefficient_raw_scale": round(float(coef_raw), 12)
+                    if np.isfinite(coef_raw)
+                    else np.nan,
+                    "one_raw_unit_effect_on_log_odds": round(float(coef_raw), 12)
+                    if np.isfinite(coef_raw)
+                    else np.nan,
+                    "reference_raw_value": std_mean if feature_type == "augmented_pair" else np.nan,
+                    "reference_raw_value_description": reference_raw_value_description,
+                    "decision_direction": decision_direction,
+                    "risk_increases_when": risk_increases_when,
+                    "unit_effect_interpretation": unit_effect_interpretation,
+                    "raw_scale_note": raw_scale_note,
+                    "raw_interpretation": raw_interpretation,
+                    "source_observed_medians_description": source_observed_medians_description,
+                    "pair_missing_policy_description": pair_missing_policy_description,
                 }
             )
-        result: pd.DataFrame = pd.DataFrame(rows)
-        result = result.sort_values("abs_coefficient", ascending=False)
+        result = pd.DataFrame(rows).sort_values("abs_coefficient", ascending=False)
         return pd.DataFrame(result.reset_index(drop=True))
 
     # ── v1.1.0  Adaptive-binning diagnostic plots ─────────────────────────────
@@ -3201,6 +4490,8 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
     def model_summary(self) -> str:
         """Human-readable model summary including top patterns."""
         check_is_fitted(self)
+        composition = self.get_model_composition()
+        counts = composition.get("downstream_feature_counts", {})
         lines = [
             "HUGIMLClassifierNative — Model Summary",
             "=" * 50,
@@ -3211,6 +4502,11 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             f"{self.fit_metadata_.n_classes} classes",
             f"Patterns:     {self.fit_metadata_.n_patterns} "
             f"({self.fit_metadata_.n_compound} compound)",
+            f"Augmented pairs: {counts.get('augmented_pair', 0)} retained",
+            f"Downstream composition: original={counts.get('original', 0)}, "
+            f"patterns={counts.get('pattern', 0)}, "
+            f"augmented_pair={counts.get('augmented_pair', 0)}, "
+            f"total={counts.get('total', 0)}",
             f"Matrix:       {self.x_train_hup_.shape} "
             f"(density={self.fit_metadata_.matrix_density:.4f})",
             f"Downstream:   {getattr(self, 'x_train_downstream_', self.x_train_hup_).shape}",
@@ -3220,17 +4516,35 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         ]
         for stage, ms in self.fit_metadata_.stage_times_ms.items():
             lines.append(f"  {stage:<25} {ms:>8.1f}")
-        lines += ["", "Top 10 patterns by importance:"]
-
         try:
             imp = self.feature_importances().head(10)
-            for _, row in imp.iterrows():
+            has_non_pattern = bool((imp.get("feature_type", "pattern") != "pattern").any())
+            has_augmented = bool((imp.get("feature_type", "pattern") == "augmented_pair").any())
+            section = (
+                "Top 10 downstream features by importance:"
+                if has_non_pattern
+                else "Top 10 patterns by importance:"
+            )
+            lines += ["", section]
+            if has_augmented:
                 lines.append(
-                    f"  {row['pattern']:<40} "
+                    "  (includes augmented pair transforms; use "
+                    "explain_augmented_pair_effects() for raw-scale interpretation)"
+                )
+            for _, row in imp.iterrows():
+                support_text = (
+                    f"pattern_support={row['pattern_support']:.3f}"
+                    if row.get("support_type") == "pattern_support"
+                    else "pattern_support=n/a"
+                )
+                lines.append(
+                    f"  [{row.get('feature_type', 'pattern')}] "
+                    f"{row['pattern']:<40} "
                     f"coef={row['coefficient']:>+8.4f}  "
-                    f"sup={row['support']:.3f}"
+                    f"{support_text}"
                 )
         except AttributeError:
+            lines += ["", "Top downstream features by importance:"]
             lines.append("  (not available — non-LR downstream estimator)")
 
         # ── v1.1.0 adaptive binning section ──────────────────────────────

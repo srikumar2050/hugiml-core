@@ -48,7 +48,7 @@ __all__ = [
 
 @dataclass
 class FeatureLineage:
-    """Provenance record linking an original feature to its HUG patterns.
+    """Provenance record linking an original feature to downstream features.
 
     Attributes
     ----------
@@ -60,33 +60,39 @@ class FeatureLineage:
         Human-readable HUG pattern labels that include this feature.
     pattern_indices : list of int
         Indices into the pattern list for each derived pattern.
+    derived_augmented_pairs : list of str
+        Augmented-pair feature names that use this source feature.
     total_importance : float
-        Sum of absolute LR coefficients for all patterns using this feature.
+        Sum of absolute downstream coefficients for original, HUG pattern,
+        and augmented-pair features linked to this source feature.
+    pattern_importance : float
+        Pattern-only contribution to total_importance.
+    augmented_pair_importance : float
+        Augmented-pair contribution to total_importance.
+    original_feature_importance : float
+        Direct original-feature contribution when original features are included
+        in the downstream estimator.
     """
 
     feature_name: str
     feature_type: str
     derived_patterns: list[str] = field(default_factory=list)
     pattern_indices: list[int] = field(default_factory=list)
+    derived_augmented_pairs: list[str] = field(default_factory=list)
     total_importance: float = 0.0
+    pattern_importance: float = 0.0
+    augmented_pair_importance: float = 0.0
+    original_feature_importance: float = 0.0
 
 
 @dataclass
 class ExplanationStabilityMetrics:
-    """Stability metrics for the pattern-based explanation.
+    """Stability metrics for pattern-based explanations.
 
-    Attributes
-    ----------
-    jaccard_similarity : float
-        Jaccard index between the top-N patterns across two data splits.
-    rank_correlation : float
-        Spearman rank correlation of pattern importances across splits.
-    pattern_overlap_count : int
-        Number of patterns shared between splits.
-    n_patterns_a : int
-        Pattern count in split A.
-    n_patterns_b : int
-        Pattern count in split B.
+    The top-level fields report stability for mined HUG patterns only.  When
+    original or augmented-pair downstream features are present, per-feature-type
+    metrics are available in ``by_feature_type`` so derived feature stability is
+    not conflated with human-readable pattern-rule stability.
     """
 
     jaccard_similarity: float = 0.0
@@ -94,6 +100,7 @@ class ExplanationStabilityMetrics:
     pattern_overlap_count: int = 0
     n_patterns_a: int = 0
     n_patterns_b: int = 0
+    by_feature_type: dict[str, dict[str, float | int]] = field(default_factory=dict)
 
 
 @dataclass
@@ -109,6 +116,8 @@ class ExplainabilityReport:
     n_features: int
     top_patterns: list[dict[str, Any]] = field(default_factory=list)
     feature_lineage: list[dict[str, Any]] = field(default_factory=list)
+    model_composition: dict[str, Any] = field(default_factory=dict)
+    augmented_pair_effects: list[dict[str, Any]] = field(default_factory=list)
     stability: dict[str, Any] | None = None
     shap_available: bool = False
 
@@ -166,12 +175,28 @@ class HUGPatternExplainer:
         int_mask = getattr(clf, "is_int_mask_", np.zeros(len(feature_names), dtype=bool))
         pattern_labels = clf.get_hug_features()
 
-        # Get importances when available
-        coef_map: dict[int, float] = {}
+        # Get downstream importances when available.  Pattern entries are
+        # linked by HUG pattern label; augmented-pair entries are linked through
+        # their source input metadata; direct original features are linked by
+        # their ``orig:<name>`` namespace.
+        pattern_importance: dict[str, float] = {}
+        original_importance: dict[str, float] = {}
+        augmented_importance: dict[str, float] = {}
+        augmented_display: dict[str, str] = {}
         try:
             imp = clf.feature_importances()
-            for idx, row in imp.iterrows():
-                coef_map[idx] = float(row["abs_coefficient"])
+            for _, row in imp.iterrows():
+                ftype = str(row.get("feature_type", "pattern"))
+                feature_key = str(row.get("feature", row.get("pattern", "")))
+                display = str(row.get("display_name", row.get("pattern", feature_key)))
+                importance = float(row.get("abs_coefficient", 0.0))
+                if ftype == "pattern":
+                    pattern_importance[str(row.get("pattern", display))] = importance
+                elif ftype == "original" and feature_key.startswith("orig:"):
+                    original_importance[feature_key[len("orig:") :]] = importance
+                elif ftype == "augmented_pair":
+                    augmented_importance[feature_key] = importance
+                    augmented_display[feature_key] = display
         except Exception:
             logger.debug("feature_importances() unavailable for lineage scoring.", exc_info=True)
 
@@ -190,8 +215,13 @@ class HUGPatternExplainer:
                 feature_type=ftype,
             )
 
+        for fname, importance in original_importance.items():
+            if fname in lineage:
+                lineage[fname].original_feature_importance += importance
+                lineage[fname].total_importance += importance
+
         for pat_idx, label in enumerate(pattern_labels):
-            importance = coef_map.get(pat_idx, 0.0)
+            importance = pattern_importance.get(label, 0.0)
             parts = label.split(", ")
             for part in parts:
                 if "=" in part:
@@ -199,7 +229,26 @@ class HUGPatternExplainer:
                     if fname in lineage:
                         lineage[fname].derived_patterns.append(label)
                         lineage[fname].pattern_indices.append(pat_idx)
+                        lineage[fname].pattern_importance += importance
                         lineage[fname].total_importance += importance
+
+        try:
+            pair_catalog = clf.get_augmented_pair_transforms()
+        except Exception:
+            pair_catalog = []
+        for item in pair_catalog:
+            name = str(item.get("name", ""))
+            feature_key = f"augmented_pair:{name}"
+            importance = augmented_importance.get(feature_key, 0.0)
+            if importance == 0.0:
+                continue
+            display = augmented_display.get(feature_key, str(item.get("raw_formula", name)))
+            for src in item.get("inputs", []) or []:
+                fname = str(src)
+                if fname in lineage:
+                    lineage[fname].derived_augmented_pairs.append(display)
+                    lineage[fname].augmented_pair_importance += importance
+                    lineage[fname].total_importance += importance
 
         return list(lineage.values())
 
@@ -217,9 +266,10 @@ class HUGPatternExplainer:
     ) -> ExplanationStabilityMetrics:
         """Measure explanation stability across two data splits.
 
-        Fits two copies of the classifier on split A and split B, then
-        compares the top-N patterns via Jaccard similarity and rank
-        correlation of importance scores.
+        Fits two copies of the classifier on split A and split B.  The
+        headline metrics compare only mined HUG patterns.  Additional metrics
+        are returned by feature type so original features, HUG patterns, and
+        augmented-pair transforms are not mixed into a single stability score.
 
         Parameters
         ----------
@@ -256,33 +306,61 @@ class HUGPatternExplainer:
             )
             return ExplanationStabilityMetrics()
 
-        set_a = set(imp_a["pattern"].tolist())
-        set_b = set(imp_b["pattern"].tolist())
-        overlap = set_a & set_b
-        union = set_a | set_b
-        jaccard = len(overlap) / len(union) if union else 0.0
+        def _stability_for(frame_a: Any, frame_b: Any, feature_type: str) -> dict[str, float | int]:
+            fa = frame_a[frame_a.get("feature_type", "pattern") == feature_type].head(top_n)
+            fb = frame_b[frame_b.get("feature_type", "pattern") == feature_type].head(top_n)
+            key_col = (
+                "feature" if "feature" in fa.columns and "feature" in fb.columns else "pattern"
+            )
+            set_a = set(fa[key_col].tolist())
+            set_b = set(fb[key_col].tolist())
+            overlap = set_a & set_b
+            union = set_a | set_b
+            jaccard = len(overlap) / len(union) if union else 0.0
+            rank_corr = 0.0
+            if len(overlap) >= 3:
+                shared = list(overlap)
+                ranks_a = [fa.index[fa[key_col] == item].tolist()[0] for item in shared]
+                ranks_b = [fb.index[fb[key_col] == item].tolist()[0] for item in shared]
+                if len(ranks_a) == len(ranks_b) and len(ranks_a) >= 3:
+                    try:
+                        from scipy.stats import spearmanr
 
-        # Rank correlation on shared patterns
-        rank_corr = 0.0
-        if len(overlap) >= 3:
-            shared = list(overlap)
-            ranks_a = [imp_a.index[imp_a["pattern"] == p].tolist()[0] for p in shared if p in set_a]
-            ranks_b = [imp_b.index[imp_b["pattern"] == p].tolist()[0] for p in shared if p in set_b]
-            if len(ranks_a) == len(ranks_b) and len(ranks_a) >= 3:
-                try:
-                    from scipy.stats import spearmanr
+                        corr, _ = spearmanr(ranks_a, ranks_b)
+                        rank_corr = float(corr) if np.isfinite(corr) else 0.0
+                    except Exception:
+                        logger.debug("spearmanr rank correlation failed.", exc_info=True)
+            return {
+                "jaccard_similarity": round(jaccard, 4),
+                "rank_correlation": round(rank_corr, 4),
+                "overlap_count": len(overlap),
+                "n_features_a": len(set_a),
+                "n_features_b": len(set_b),
+            }
 
-                    corr, _ = spearmanr(ranks_a, ranks_b)
-                    rank_corr = float(corr) if np.isfinite(corr) else 0.0
-                except Exception:
-                    logger.debug("spearmanr rank correlation failed.", exc_info=True)
+        feature_types = sorted(
+            set(imp_a.get("feature_type", "pattern").tolist())
+            | set(imp_b.get("feature_type", "pattern").tolist())
+        )
+        by_type = {ft: _stability_for(imp_a, imp_b, ft) for ft in feature_types}
+        pattern_metrics = by_type.get(
+            "pattern",
+            {
+                "jaccard_similarity": 0.0,
+                "rank_correlation": 0.0,
+                "overlap_count": 0,
+                "n_features_a": 0,
+                "n_features_b": 0,
+            },
+        )
 
         return ExplanationStabilityMetrics(
-            jaccard_similarity=round(jaccard, 4),
-            rank_correlation=round(rank_corr, 4),
-            pattern_overlap_count=len(overlap),
-            n_patterns_a=len(set_a),
-            n_patterns_b=len(set_b),
+            jaccard_similarity=float(pattern_metrics["jaccard_similarity"]),
+            rank_correlation=float(pattern_metrics["rank_correlation"]),
+            pattern_overlap_count=int(pattern_metrics["overlap_count"]),
+            n_patterns_a=int(pattern_metrics["n_features_a"]),
+            n_patterns_b=int(pattern_metrics["n_features_b"]),
+            by_feature_type=by_type,
         )
 
     # ------------------------------------------------------------------
@@ -309,18 +387,64 @@ class HUGPatternExplainer:
         """
         clf = self._clf
 
+        def _json_value(value: Any) -> Any:
+            if isinstance(value, np.generic):
+                value = value.item()
+            if isinstance(value, float) and not np.isfinite(value):
+                return None
+            if isinstance(value, (list, tuple)):
+                return [_json_value(v) for v in value]
+            if isinstance(value, dict):
+                return {str(k): _json_value(v) for k, v in value.items()}
+            return value
+
         top_patterns: list[dict[str, Any]] = []
         try:
             imp = clf.feature_importances().head(top_n)
+            governance_columns = [
+                "pattern",
+                "feature",
+                "display_name",
+                "feature_type",
+                "coefficient",
+                "abs_coefficient",
+                "pattern_support",
+                "support_type",
+                "non_missing_rate",
+                "variance",
+                "strict_topk_score",
+                "raw_formula",
+                "standardized_formula",
+                "standardization_mean",
+                "standardization_scale",
+                "reference_raw_value",
+                "reference_raw_value_description",
+                "pair_missing_policy",
+                "pair_missing_policy_description",
+                "eligible_count",
+                "eligible_rate",
+                "missing_pair_rate",
+                "coefficient_standardized",
+                "one_std_effect_on_log_odds",
+                "coefficient_raw_scale",
+                "one_raw_unit_effect_on_log_odds",
+                "decision_direction",
+                "risk_increases_when",
+                "unit_effect_interpretation",
+                "raw_scale_note",
+                "raw_interpretation",
+                "source_observed_medians",
+                "source_observed_medians_description",
+                "transform_ig",
+            ]
             for _, row in imp.iterrows():
-                top_patterns.append(
-                    {
-                        "pattern": row["pattern"],
-                        "coefficient": float(row["coefficient"]),
-                        "abs_coefficient": float(row["abs_coefficient"]),
-                        "support": float(row["support"]),
-                    }
-                )
+                record = {
+                    col: _json_value(row.get(col)) for col in governance_columns if col in row
+                }
+                record.setdefault("pattern", _json_value(row.get("pattern")))
+                record.setdefault("feature", _json_value(row.get("feature", row.get("pattern"))))
+                record.setdefault("feature_type", _json_value(row.get("feature_type", "pattern")))
+                top_patterns.append(record)
         except Exception:
             logger.debug(
                 "feature_importances() unavailable in generate_report; "
@@ -334,7 +458,8 @@ class HUGPatternExplainer:
                         "pattern": row["pattern"],
                         "utility": float(row["utility"]),
                         "information_gain": float(row["information_gain"]),
-                        "support": float(row["support"]),
+                        "pattern_support": float(row["support"]),
+                        "support_type": "pattern_support",
                     }
                 )
 
@@ -344,11 +469,35 @@ class HUGPatternExplainer:
                 "feature_name": fl.feature_name,
                 "feature_type": fl.feature_type,
                 "n_patterns": len(fl.derived_patterns),
+                "n_augmented_pairs": len(fl.derived_augmented_pairs),
                 "total_importance": round(fl.total_importance, 6),
+                "pattern_importance": round(fl.pattern_importance, 6),
+                "augmented_pair_importance": round(fl.augmented_pair_importance, 6),
+                "original_feature_importance": round(fl.original_feature_importance, 6),
                 "derived_patterns": fl.derived_patterns[:5],
+                "derived_augmented_pairs": fl.derived_augmented_pairs[:5],
             }
             for fl in lineage
         ]
+
+        try:
+            model_composition = clf.get_model_composition()
+        except Exception:
+            model_composition = {
+                "feature_mode": getattr(clf, "feature_mode", None),
+                "topk_budget_strict": getattr(clf, "topk_budget_strict", None),
+                "n_patterns_mined": len(getattr(clf, "patterns_", [])),
+            }
+
+        augmented_pair_effects: list[dict[str, Any]] = []
+        try:
+            effects = clf.explain_augmented_pair_effects()
+            for _, row in effects.iterrows():
+                augmented_pair_effects.append({str(k): _json_value(v) for k, v in row.items()})
+        except Exception:
+            logger.debug(
+                "explain_augmented_pair_effects() unavailable in generate_report.", exc_info=True
+            )
 
         shap_available = _shap_is_available()
 
@@ -358,6 +507,8 @@ class HUGPatternExplainer:
             n_features=getattr(clf, "n_features_in_", 0),
             top_patterns=top_patterns,
             feature_lineage=lineage_dicts,
+            model_composition={str(k): _json_value(v) for k, v in model_composition.items()},
+            augmented_pair_effects=augmented_pair_effects,
             shap_available=shap_available,
         )
 
@@ -373,6 +524,7 @@ def shap_values_from_pattern_matrix(
     *,
     background_samples: int = 100,
     check_additivity: bool = False,
+    allow_incomplete: bool = False,
 ) -> np.ndarray | None:
     """Compute SHAP values over the HUG pattern feature space.
 
@@ -380,6 +532,11 @@ def shap_values_from_pattern_matrix(
     binary pattern-presence matrix produced by the classifier's transform()
     method.  The resulting SHAP values are in pattern-space; use
     :func:`aggregate_shap_to_features` to roll them back to original features.
+
+    When the fitted downstream estimator also uses original or augmented-pair
+    features, pattern-space SHAP is incomplete relative to the fitted model.
+    In that case this function warns and returns ``None`` unless
+    ``allow_incomplete=True`` is passed explicitly.
 
     Requires the optional ``shap`` package (``pip install shap``).
 
@@ -393,12 +550,27 @@ def shap_values_from_pattern_matrix(
         Number of background samples for KernelExplainer.
     check_additivity : bool
         Pass to SHAP's explain call.
+    allow_incomplete : bool
+        If False, return None when the fitted downstream estimator uses
+        original or augmented-pair features in addition to HUG patterns.
 
     Returns
     -------
     np.ndarray of shape (n_samples, n_patterns) or None
         SHAP values in pattern space.  Returns None when shap is not installed.
     """
+    downstream_names = list(getattr(classifier, "get_downstream_features", lambda: [])())
+    non_pattern = [name for name in downstream_names if not str(name).startswith("pattern:")]
+    if non_pattern and not allow_incomplete:
+        warnings.warn(
+            "Pattern-space SHAP is incomplete because the fitted downstream estimator "
+            "also uses original or augmented-pair features. Pass allow_incomplete=True "
+            "only if a pattern-only diagnostic is intended.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return None
+
     if not _shap_is_available():
         warnings.warn(
             "SHAP is not installed.  Install it with: pip install shap",
@@ -450,6 +622,17 @@ def aggregate_shap_to_features(
     -------
     dict mapping feature name to mean absolute SHAP value.
     """
+    downstream_names = list(getattr(classifier, "get_downstream_features", lambda: [])())
+    non_pattern = [name for name in downstream_names if not str(name).startswith("pattern:")]
+    if non_pattern:
+        warnings.warn(
+            "Aggregating pattern-space SHAP to original features omits original "
+            "downstream columns and augmented-pair transforms. Use this only as a "
+            "pattern-subspace diagnostic for this fitted model.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+
     feature_names = getattr(classifier, "feature_names_in_", None) or []
     pattern_labels = classifier.get_hug_features()
 

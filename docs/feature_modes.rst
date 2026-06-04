@@ -19,6 +19,30 @@ HUGIML supports three downstream feature representations. The mined pattern matr
      - Original features plus only higher-order ``L > 1`` patterns.
      - Original features should capture marginal effects while HUGIML contributes interaction regions.
 
+
+Augmented pair features
+-----------------------
+
+When ``L > 1``, ``adaptive_binning=True``, and ``augmented_pair_transforms=True``, HUGIML can append native augmented-pair transforms to the downstream feature matrix. These are continuous product or absolute-difference features selected from informative numeric source features. They are not fed back into HUG pattern mining.
+
+Use ``topk_budget_strict=True`` when a single global ``topK`` budget should apply to the final downstream feature space across original features, HUG patterns, and augmented-pair features.
+
+.. code-block:: python
+
+   clf = HUGIMLClassifierNative(
+       B=-1,
+       adaptive_binning=True,
+       L=2,
+       topK=50,
+       feature_mode="original_plus_patterns",
+       augmented_pair_transforms=True,
+       topk_budget_strict=True,
+   )
+
+   clf.fit(X_train, y_train)
+   print(clf.get_model_composition())
+   print(clf.explain_augmented_pair_effects())
+
 Examples
 --------
 
@@ -56,7 +80,7 @@ Examples
 Interpretation notes
 --------------------
 
-``get_hug_features`` and ``get_pattern_info`` are always pattern-only APIs. In hybrid modes, ``feature_importances`` and ``model_summary`` report the downstream feature representation used by the fitted model, which can include original features as well as mined patterns.
+``get_hug_features`` and ``get_pattern_info`` are always pattern-only APIs. In hybrid modes, ``feature_importances`` and ``model_summary`` report the downstream feature representation used by the fitted model, which can include original features, mined patterns, and augmented-pair features. Use ``explain_augmented_pair_effects()`` for raw-scale interpretation of augmented-pair rows.
 
 
 
@@ -65,7 +89,7 @@ Compatibility with transform
 
 ``transform(X)`` and ``fit_transform(X, y)`` intentionally remain pattern-space APIs in every feature mode. This means existing explanation workflows that expect the binary HUG pattern matrix continue to work after enabling a hybrid downstream representation.
 
-In hybrid modes, the fitted downstream estimator receives a private design matrix built from standardized original features plus the selected pattern columns. ``feature_importances()`` and ``model_summary()`` report that downstream feature space so that model diagnostics match what the estimator actually used.
+In hybrid modes, the fitted downstream estimator receives a private design matrix built from standardized original features, selected pattern columns, and any active augmented-pair columns. ``feature_importances()``, ``model_summary()``, and ``get_model_composition()`` report that downstream feature space so that diagnostics match what the estimator actually used.
 
 Operational guidance
 --------------------

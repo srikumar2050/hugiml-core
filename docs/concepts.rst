@@ -115,7 +115,7 @@ Performance and mining behavior
 
 The 1.1.x native path keeps the modeling interface stable but changes where work is bounded internally. The effective ``topK`` value is passed into the native mining stage before candidate retention, rather than being treated only as a post-processing cap. This is closer to the original HUGIML Java implementation and is important for larger datasets because fewer non-final candidates need to be materialized.
 
-For ``L=1`` fits, the native hot path fuses transaction preparation, singleton pattern mining, information-gain filtering, top-K retention, and sparse matrix construction. In 1.1.5 this hot path also supports adaptive binning without first materializing a separate binned matrix, which is the recommended route for large adaptive singleton workflows. Set ``use_hotpath=False`` only when comparing against the older three-stage path for debugging or benchmarking.
+For ``L=1`` fits, the native hot path fuses transaction preparation, singleton pattern mining, information-gain filtering, top-K retention, and sparse matrix construction. In 1.1.5 and later this hot path also supports adaptive binning without first materializing a separate binned matrix, which is the recommended route for large adaptive singleton workflows. Set ``use_hotpath=False`` only when comparing against the older three-stage path for debugging or benchmarking.
 
 Transaction construction is performed in row-stripe chunks on the non-fused path, and materialized native transactions now store compact item ids with shared item-level utility lookup. The resulting model is intended to match the previous transaction semantics while reducing repeated utility storage and making memory use less bursty. This is most useful for wide data, large batches, and cross-validation loops.
 
@@ -124,7 +124,7 @@ For interaction mining, structured constraints are applied exactly. EUCS pruning
 Operational stability controls
 ------------------------------
 
-Use ``n_jobs=-1`` to allow the native backend to use all available OpenMP threads. In 1.1.5 the adaptive bin-selection and bin-code application stages can use this parallelism before the main mining step, so it benefits adaptive workflows as well as the fused ``L=1`` path.
+Use ``n_jobs=-1`` to allow the native backend to use all available OpenMP threads. In 1.1.5 and later the adaptive bin-selection and bin-code application stages can use this parallelism before the main mining step, so it benefits adaptive workflows as well as the fused ``L=1`` path.
 
 ``max_fit_seconds`` is a wall-clock budget for the native mining stage. If the budget or memory pressure prevents the full configuration from completing, HUGIML attempts safer fallback configurations, records the degraded outcome in ``fit_metadata_.degraded``, and raises a clear ``HUGIMLTimeoutError`` or ``HUGIMLMemoryError`` only when it cannot recover. Inspect ``fit_metadata_`` after fitting to review pattern counts, stage timings, memory estimates, OpenMP thread count, and whether a fallback was used.
 

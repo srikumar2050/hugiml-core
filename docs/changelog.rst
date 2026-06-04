@@ -6,6 +6,13 @@ The canonical release notes live in ``CHANGELOG.md`` at the repository root. Kee
 Recent releases
 ---------------
 
+1.1.6 — 2026-06-04
+~~~~~~~~~~~~~~~~~~
+
+* Added native augmented-pair features for ``L > 1`` adaptive-binning models, including product and absolute-difference transforms.
+* Added strict global ``topK`` budgeting across original features, HUG patterns, and augmented-pair features.
+* Added raw-scale augmented-pair interpretation metadata, downstream feature composition summaries, and hybrid-model explainability report fields.
+
 1.1.5 — 2026-06-01
 ~~~~~~~~~~~~~~~~~~
 

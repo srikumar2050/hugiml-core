@@ -146,6 +146,7 @@ _ALGO_SOURCES = [
     "native/mining_l1.cpp",
     "native/matrix.cpp",
     "native/prepare_mine_l1.cpp",
+    "native/augmented_pair.cpp",
 ]
 
 _BIND_SOURCES = [
@@ -165,7 +166,7 @@ _BIND_BASENAMES = frozenset(os.path.basename(s) for s in _BIND_SOURCES)
 # All sources share the same Extension object (required for a single .so).
 # Per-TU compile flags are applied in the build_ext command below.
 
-ext = Pybind11Extension(
+core_ext = Pybind11Extension(
     "_hugiml_core",
     sources=_ALGO_SOURCES + _BIND_SOURCES,
     include_dirs=["native"],
@@ -253,7 +254,7 @@ class _SdistNoSo(_sdist):
 
 
 setup(
-    ext_modules=[ext],
+    ext_modules=[core_ext],
     cmdclass={
         "build_ext": _SplitOptBuildExt,
         "build_py": _BuildPyNoNative,

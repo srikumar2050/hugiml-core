@@ -14,20 +14,19 @@ Why HUGIML?
 
 * **Intrinsic interpretability:** learned HUG patterns are the model representation, not an after-the-fact explanation.
 * **Regulated-domain fit:** model cards, audit artifacts, pruning trails, calibration, drift monitoring, and deployment helpers are included.
-* **Native performance:** computationally intensive mining, transaction construction, and matrix-building stages are C++ accelerated with optional OpenMP support. Version 1.1.5 extends the native L1 and adaptive-binning improvements with lower transaction memory use, fused adaptive L1 processing, earlier ``n_jobs`` parallelism, and cleaner memory/timeout fallback behavior.
+* **Native performance:** computationally intensive mining, transaction construction, and matrix-building stages are C++ accelerated with optional OpenMP support. Version 1.1.6 adds native augmented-pair features for ``L > 1`` adaptive-binning models while retaining the 1.1.5 native L1 and adaptive-binning scalability improvements.
 * **Python ergonomics:** the estimator follows the scikit-learn API and works with pandas DataFrames or NumPy arrays.
 
 
 Current release focus
 ---------------------
 
-The 1.1.5 release keeps the public estimator API stable while improving scalability and native execution reliability:
+The 1.1.6 release expands the downstream feature space for interaction-oriented models while keeping the standard pattern-space APIs stable:
 
-* Materialized native transactions use compact item ids plus shared item-level utility lookup, reducing repeated per-transaction utility storage.
-* The adaptive ``L=1`` workflow is fused into the native hot path, so adaptive bin selection and singleton pattern mining avoid an intermediate binned-matrix materialization.
-* Native adaptive bin selection and bin-code application are parallelized, with ``n_jobs`` applied before adaptive preprocessing.
-* Native memory and timeout failures now surface through cleaner error handling and safer fallback behavior under pressure.
-* Earlier 1.1.x capabilities remain available: the 1.1.4 native ``L=1`` hot path, 1.1.3 topK-in-mining and chunking behavior, and the 1.1.2 feature modes ``patterns_only``, ``original_plus_patterns``, and ``original_plus_interactions``.
+* ``L > 1`` adaptive-binning models can add native product and absolute-difference augmented-pair features to the downstream estimator.
+* ``topk_budget_strict=True`` applies a single global ``topK`` budget across original features, HUG patterns, and augmented-pair features.
+* Interpretability outputs distinguish original, pattern, and augmented-pair features and expose raw-scale augmented-pair effect metadata.
+* Earlier 1.1.x capabilities remain available, including the 1.1.5 native transaction-memory and fused adaptive ``L=1`` improvements.
 
 Installation
 ------------
@@ -52,6 +51,7 @@ The implementation is based on:
    getting_started
    concepts
    feature_modes
+   augmented_features
    explanations
    governance
    monitoring

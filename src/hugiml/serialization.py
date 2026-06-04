@@ -105,6 +105,7 @@ _SAFE_TYPES = frozenset(
         "FitMetadata",
         "PredictionMonitor",
         "DriftDetector",
+        "NativeAugmentedPairTransformBlock",
     ]
 )
 
@@ -472,6 +473,11 @@ def save_model(clf: Any, path: str | os.PathLike) -> None:
         "original_feature_names_downstream": getattr(
             clf, "_original_feature_names_downstream_", []
         ),
+        "topk_budget_strict": bool(getattr(clf, "topk_budget_strict", False)),
+        "downstream_feature_names_full": getattr(clf, "_downstream_feature_names_full_", []),
+        "strict_topk_selected_feature_names": getattr(
+            clf, "_strict_topk_selected_feature_names_", []
+        ),
     }
     if hasattr(clf, "fit_metadata_") and clf.fit_metadata_ is not None:
         import dataclasses
@@ -498,6 +504,45 @@ def save_model(clf: Any, path: str | os.PathLike) -> None:
                 name: {str(b): float(v) for b, v in sc.items()}
                 for name, sc in clf.ig_scores_.items()
             },
+        }
+    # ────────────────────────────────────────────────────────────────────
+    # ── augmented pair transform state ──────────────────────────
+    # Persist the public augmentation parameters and fitted transform catalog
+    # so versioned save/load can round-trip predictions without relying on
+    # pickle.  The augmented pair block is reconstructed during load using
+    # these JSON fields plus scaler arrays stored in arrays.npz.
+    aug_block = getattr(clf, "_augmented_pair_block_", None)
+    fit_state["augmented_pair_state"] = {
+        "augmented_pair_transforms": bool(getattr(clf, "augmented_pair_transforms", True)),
+        "augmented_pair_max_features": int(getattr(clf, "augmented_pair_max_features", 10)),
+        "enabled": bool(getattr(clf, "augmented_pair_transforms_enabled_", False)),
+        "config": getattr(clf, "augmented_pair_config_", {"enabled": False}),
+        "selected_features": getattr(clf, "augmented_pair_selected_features_", []),
+        "transforms": getattr(clf, "augmented_pair_transforms_", []),
+        "block_state": None,
+    }
+    if aug_block is not None:
+        fit_state["augmented_pair_state"]["block_state"] = {
+            "max_features": int(
+                getattr(aug_block, "max_features", getattr(clf, "augmented_pair_max_features", 10))
+            ),
+            "top_ig": int(
+                getattr(aug_block, "top_ig", getattr(clf, "augmented_pair_max_features", 10))
+            ),
+            "budget_topK": getattr(aug_block, "budget_topK", None),
+            "selected_ig_features": list(getattr(aug_block, "selected_ig_features_", [])),
+            "selected_ig_scores": dict(getattr(aug_block, "selected_ig_scores_", {})),
+            "input_bin_edges": getattr(aug_block, "input_bin_edges_", {}),
+            "source_observed_medians": dict(
+                getattr(
+                    aug_block,
+                    "source_observed_medians_",
+                    getattr(aug_block, "numeric_medians_", {}),
+                )
+            ),
+            "kept_specs": list(getattr(aug_block, "kept_specs_", [])),
+            "candidate_count": int(getattr(aug_block, "candidate_count_", 0)),
+            "feature_names": list(getattr(aug_block, "feature_names_", [])),
         }
     # ────────────────────────────────────────────────────────────────────
     members["clf_fit.json"] = _json_dumps(fit_state)
@@ -539,6 +584,56 @@ def save_model(clf: Any, path: str | os.PathLike) -> None:
         clf_arrays["original_numeric_medians_"] = np.asarray(
             clf._original_numeric_medians_, dtype=np.float64
         )
+    if hasattr(clf, "_strict_topk_feature_mask_"):
+        clf_arrays["strict_topk_feature_mask_"] = np.asarray(
+            clf._strict_topk_feature_mask_, dtype=np.bool_
+        )
+    if hasattr(clf, "_strict_topk_feature_scores_"):
+        clf_arrays["strict_topk_feature_scores_"] = np.asarray(
+            clf._strict_topk_feature_scores_, dtype=np.float64
+        )
+    if hasattr(clf, "_downstream_pattern_support_"):
+        clf_arrays["downstream_pattern_support_"] = np.asarray(
+            clf._downstream_pattern_support_, dtype=np.float64
+        )
+    if hasattr(clf, "_downstream_non_missing_rate_"):
+        clf_arrays["downstream_non_missing_rate_"] = np.asarray(
+            clf._downstream_non_missing_rate_, dtype=np.float64
+        )
+    if hasattr(clf, "_downstream_variance_"):
+        clf_arrays["downstream_variance_"] = np.asarray(clf._downstream_variance_, dtype=np.float64)
+    aug_block = getattr(clf, "_augmented_pair_block_", None)
+    if aug_block is not None:
+        if hasattr(aug_block, "scaler_mean_"):
+            clf_arrays["augmented_pair_scaler_mean_"] = np.asarray(
+                aug_block.scaler_mean_, dtype=np.float64
+            )
+        if hasattr(aug_block, "scaler_scale_"):
+            clf_arrays["augmented_pair_scaler_scale_"] = np.asarray(
+                aug_block.scaler_scale_, dtype=np.float64
+            )
+        if hasattr(aug_block, "source_observed_medians_array_"):
+            clf_arrays["augmented_pair_source_observed_medians_"] = np.asarray(
+                aug_block.source_observed_medians_array_, dtype=np.float64
+            )
+        elif hasattr(aug_block, "numeric_medians_array_"):
+            clf_arrays["augmented_pair_source_observed_medians_"] = np.asarray(
+                aug_block.numeric_medians_array_, dtype=np.float64
+            )
+        if hasattr(aug_block, "pair_reference_values_"):
+            clf_arrays["augmented_pair_reference_values_"] = np.asarray(
+                aug_block.pair_reference_values_, dtype=np.float64
+            )
+        if hasattr(aug_block, "left_indices_"):
+            clf_arrays["augmented_pair_left_indices_"] = np.asarray(
+                aug_block.left_indices_, dtype=np.int64
+            )
+        if hasattr(aug_block, "right_indices_"):
+            clf_arrays["augmented_pair_right_indices_"] = np.asarray(
+                aug_block.right_indices_, dtype=np.int64
+            )
+        if hasattr(aug_block, "op_codes_"):
+            clf_arrays["augmented_pair_op_codes_"] = np.asarray(aug_block.op_codes_, dtype=np.int8)
     members["arrays.npz"] = _npz_bytes(**clf_arrays)
 
     # TransactionDataWrapper
@@ -732,6 +827,22 @@ def _load_v3(path: str | os.PathLike) -> Any:
     clf._original_numeric_cols_ = clf_fit.get("original_numeric_cols", [])
     clf._original_cat_cols_ = clf_fit.get("original_cat_cols", [])
     clf._original_dummy_columns_ = clf_fit.get("original_dummy_columns", [])
+    clf.topk_budget_strict = bool(
+        clf_fit.get("topk_budget_strict", getattr(clf, "topk_budget_strict", False))
+    )
+    clf._downstream_feature_names_full_ = list(clf_fit.get("downstream_feature_names_full", []))
+    clf._strict_topk_selected_feature_names_ = list(
+        clf_fit.get("strict_topk_selected_feature_names", [])
+    )
+    clf._strict_topk_feature_mask_ = clf_arrays.get("strict_topk_feature_mask_", None)
+    if clf._strict_topk_feature_mask_ is not None:
+        clf._strict_topk_feature_mask_ = clf._strict_topk_feature_mask_.astype(bool)
+    clf._strict_topk_feature_scores_ = clf_arrays.get(
+        "strict_topk_feature_scores_", np.zeros(0, dtype=np.float64)
+    )
+    clf._downstream_pattern_support_ = clf_arrays.get("downstream_pattern_support_", None)
+    clf._downstream_non_missing_rate_ = clf_arrays.get("downstream_non_missing_rate_", None)
+    clf._downstream_variance_ = clf_arrays.get("downstream_variance_", None)
     clf._original_feature_names_downstream_ = clf_fit.get("original_feature_names_downstream", [])
     if "pattern_orders_" in clf_arrays:
         clf._pattern_orders_ = clf_arrays["pattern_orders_"].astype(int)
@@ -804,6 +915,93 @@ def _load_v3(path: str | os.PathLike) -> Any:
         clf._rebuild_adaptive_code_label_map()
     else:
         clf._adaptive_code_label_map_ = {}
+    # ────────────────────────────────────────────────────────────────────
+    # ── v1.1.5+ augmented pair transform state ──────────────────────────
+    aug_state = clf_fit.get("augmented_pair_state") or {}
+    clf.augmented_pair_transforms = bool(
+        aug_state.get("augmented_pair_transforms", getattr(clf, "augmented_pair_transforms", True))
+    )
+    clf.augmented_pair_max_features = int(
+        aug_state.get(
+            "augmented_pair_max_features", getattr(clf, "augmented_pair_max_features", 10)
+        )
+    )
+    clf.augmented_pair_transforms_ = list(aug_state.get("transforms", []))
+    clf.augmented_pair_selected_features_ = list(aug_state.get("selected_features", []))
+    clf.augmented_pair_transforms_enabled_ = bool(aug_state.get("enabled", False))
+    clf.augmented_pair_config_ = aug_state.get(
+        "config", {"enabled": clf.augmented_pair_transforms_enabled_}
+    )
+    clf._augmented_pair_block_ = None
+    block_state = aug_state.get("block_state")
+    if block_state and clf.augmented_pair_transforms_enabled_:
+        try:
+            from hugiml.classifier import NativeAugmentedPairTransformBlock
+
+            block = NativeAugmentedPairTransformBlock(
+                max_features=int(block_state.get("max_features", clf.augmented_pair_max_features)),
+                budget_topK=block_state.get("budget_topK"),
+            )
+            block.top_ig = int(block_state.get("top_ig", block.max_features))
+            block.selected_ig_features_ = list(block_state.get("selected_ig_features", []))
+            block.selected_ig_scores_ = dict(block_state.get("selected_ig_scores", {}))
+            block.input_bin_edges_ = block_state.get("input_bin_edges", {})
+            block.source_observed_medians_ = dict(
+                block_state.get("source_observed_medians", block_state.get("numeric_medians", {}))
+            )
+            block.numeric_medians_ = dict(block.source_observed_medians_)
+            block.kept_specs_ = list(block_state.get("kept_specs", []))
+            block.candidate_count_ = int(block_state.get("candidate_count", 0))
+            block.feature_names_ = list(block_state.get("feature_names", []))
+            block.augmented_pair_transforms_ = list(clf.augmented_pair_transforms_)
+            block.source_observed_medians_array_ = clf_arrays.get(
+                "augmented_pair_source_observed_medians_",
+                clf_arrays.get(
+                    "augmented_pair_numeric_medians_",
+                    np.asarray(
+                        [
+                            block.source_observed_medians_.get(c, 0.0)
+                            for c in block.selected_ig_features_
+                        ],
+                        dtype=np.float64,
+                    ),
+                ),
+            )
+            block.numeric_medians_array_ = block.source_observed_medians_array_
+            block.pair_reference_values_ = clf_arrays.get(
+                "augmented_pair_reference_values_",
+                np.asarray(
+                    [float(spec.get("reference_raw_value", 0.0)) for spec in block.kept_specs_],
+                    dtype=np.float64,
+                ),
+            )
+            block.scaler_mean_ = clf_arrays.get(
+                "augmented_pair_scaler_mean_", np.zeros(len(block.kept_specs_), dtype=np.float64)
+            )
+            block.scaler_scale_ = clf_arrays.get(
+                "augmented_pair_scaler_scale_", np.ones(len(block.kept_specs_), dtype=np.float64)
+            )
+            block.left_indices_ = clf_arrays.get(
+                "augmented_pair_left_indices_", np.zeros(len(block.kept_specs_), dtype=np.int64)
+            )
+            block.right_indices_ = clf_arrays.get(
+                "augmented_pair_right_indices_", np.zeros(len(block.kept_specs_), dtype=np.int64)
+            )
+            block.op_codes_ = clf_arrays.get(
+                "augmented_pair_op_codes_", np.zeros(len(block.kept_specs_), dtype=np.int8)
+            )
+            # Rebuild the public catalog from restored native arrays so
+            # standardization metadata is available after load.
+            try:
+                block.augmented_pair_transforms_ = block._build_catalog()
+                clf.augmented_pair_transforms_ = list(block.augmented_pair_transforms_)
+            except Exception:
+                block.augmented_pair_transforms_ = list(clf.augmented_pair_transforms_)
+            block.augmented_pair_native_used_ = True
+            clf._augmented_pair_block_ = block
+        except Exception as exc:
+            logger.debug("Could not restore augmented pair transforms: %s", exc, exc_info=True)
+            clf._augmented_pair_block_ = None
     # ────────────────────────────────────────────────────────────────────
 
     # TransactionDataWrapper

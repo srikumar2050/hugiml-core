@@ -14,6 +14,19 @@ Pattern tables
    print(pattern_info.head(20))
    print(importances.head(20))
 
+Hybrid feature interpretation
+-----------------------------
+
+For models that include original features or augmented-pair features in the downstream estimator, ``feature_importances()`` reports the fitted downstream feature space and includes a ``feature_type`` column. Augmented-pair rows include raw formula, standardized formula, observed-row coverage, and raw-scale effect fields.
+
+.. code-block:: python
+
+   print(clf.get_downstream_features())
+   print(clf.get_model_composition())
+   print(clf.explain_augmented_pair_effects())
+
+``model_summary()`` labels mixed models as downstream-feature summaries rather than pattern-only summaries. Pattern-only inspection remains available through ``get_hug_features()`` and ``get_pattern_info()``.
+
 Interpretability metrics
 ------------------------
 
@@ -76,7 +89,7 @@ EBM-style models learn smooth additive shape functions. HUGIML learns bin/catego
 SHAP bridge
 -----------
 
-The optional explainability module can compute SHAP values over the HUG pattern matrix and aggregate them back to original features.
+The optional explainability module can compute SHAP values over the HUG pattern matrix and aggregate them back to original features. This is a pattern-space diagnostic. When the fitted downstream estimator also uses original or augmented-pair features, the SHAP helper reports that the pattern-space result is incomplete unless incomplete reporting is explicitly allowed.
 
 .. code-block:: python
 

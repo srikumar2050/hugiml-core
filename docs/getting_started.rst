@@ -99,7 +99,7 @@ After fitting, inspect both predictive behavior and explanation complexity:
 Performance-oriented starting point
 -----------------------------------
 
-For the current 1.1.5 implementation, start with the native ``L=1`` hot path, a bounded pattern budget, and adaptive binning only when per-feature bin selection is useful. Increase complexity only when validation results justify it:
+For the current implementation, start with the native ``L=1`` hot path, a bounded pattern budget, and adaptive binning only when per-feature bin selection is useful. Increase complexity only when validation results justify it:
 
 .. code-block:: python
 

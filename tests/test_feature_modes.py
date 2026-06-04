@@ -89,9 +89,14 @@ def test_hybrid_modes_have_downstream_feature_count_at_least_patterns_only():
     Xtr, Xte, ytr, yte = _frame_dataset("moons")
     fitted = {mode: _clf(mode).fit(Xtr, ytr) for mode in MODES}
     n_patterns = fitted["patterns_only"].x_train_hup_.shape[1]
-    assert fitted["patterns_only"].x_train_downstream_.shape[1] == n_patterns
+    aug_counts = {mode: len(clf.get_augmented_pair_transforms()) for mode, clf in fitted.items()}
     assert (
-        fitted["original_plus_patterns"].x_train_downstream_.shape[1] == Xtr.shape[1] + n_patterns
+        fitted["patterns_only"].x_train_downstream_.shape[1]
+        == n_patterns + aug_counts["patterns_only"]
+    )
+    assert (
+        fitted["original_plus_patterns"].x_train_downstream_.shape[1]
+        == Xtr.shape[1] + n_patterns + aug_counts["original_plus_patterns"]
     )
     assert (
         fitted["original_plus_interactions"].x_train_downstream_.shape[1]
@@ -154,6 +159,8 @@ def test_original_plus_interactions_uses_only_interaction_patterns_after_origina
     Xtr, Xte, ytr, yte = _frame_dataset("breast")
     clf = _clf_for_frame(Xtr, "original_plus_interactions").fit(Xtr, ytr)
     assert hasattr(clf, "_interaction_pattern_mask_")
-    assert clf.x_train_downstream_.shape[1] == Xtr.shape[1] + int(
-        clf._interaction_pattern_mask_.sum()
+    assert clf.x_train_downstream_.shape[1] == (
+        Xtr.shape[1]
+        + int(clf._interaction_pattern_mask_.sum())
+        + len(clf.get_augmented_pair_transforms())
     )

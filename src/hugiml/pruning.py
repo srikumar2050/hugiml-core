@@ -269,6 +269,9 @@ class PatternEditor:
             hup_tr = clf.transform(X_tr)
             clf.x_train_hup_ = csr_matrix(hup_tr, dtype=np.float32)
 
+        X_downstream = clf._make_downstream_features(X_tr, clf.x_train_hup_, fit=False)
+        X_downstream = clf._apply_strict_topk_budget_fit(X_downstream, y_arr)
+
         if estimator is not None:
             new_est = _copy.deepcopy(estimator)
         else:
@@ -276,7 +279,7 @@ class PatternEditor:
             new_est = _copy.deepcopy(orig_clf_step)
 
         new_model = Pipeline([("clf", new_est)])
-        new_model.fit(clf.x_train_hup_, y_arr)
+        new_model.fit(X_downstream, y_arr)
         clf.model_ = new_model
         self._refitted = True
 
@@ -315,6 +318,8 @@ class PatternEditor:
 
         clf = self._working_clf
         hup_cal = csr_matrix(clf.transform(X_cal), dtype=np.float32)
+        X_downstream_cal = clf._make_downstream_features(X_cal, hup_cal, fit=False)
+        X_downstream_cal = clf._apply_strict_topk_budget_transform(X_downstream_cal)
         y_arr = np.asarray(y_cal, dtype=np.int64)
 
         inner_clf = clf.model_.named_steps["clf"]
@@ -322,10 +327,10 @@ class PatternEditor:
         # is the documented replacement, preserving pre-fitted behaviour.
         try:
             cal_clf = CalibratedClassifierCV(inner_clf, cv="prefit", method=method)
-            cal_clf.fit(hup_cal, y_arr)
+            cal_clf.fit(X_downstream_cal, y_arr)
         except (ValueError, TypeError):
             cal_clf = CalibratedClassifierCV(inner_clf, cv=None, ensemble=False, method=method)
-            cal_clf.fit(hup_cal, y_arr)
+            cal_clf.fit(X_downstream_cal, y_arr)
 
         clf.model_ = Pipeline([("clf", cal_clf)])
         self._calibrated = True
@@ -359,9 +364,12 @@ class PatternEditor:
     # ------------------------------------------------------------------
 
     def list_patterns(self) -> pd.DataFrame:
-        """Return a DataFrame of the *current* (possibly pruned) patterns.
+        """Return editable HUG patterns in the current working model.
 
-        Columns: idx, pattern, coefficient (if available), support.
+        PatternEditor edits mined HUG patterns only.  Original features and
+        augmented-pair downstream features are visible through
+        ``list_downstream_features()`` but are not directly removable by this
+        editor.
         """
         clf = self._working_clf
         labels = clf.get_hug_features()
@@ -369,8 +377,10 @@ class PatternEditor:
 
         try:
             imp = clf.feature_importances()
-            coef_map = dict(zip(imp["pattern"], imp["coefficient"]))
-            sup_map = dict(zip(imp["pattern"], imp["support"]))
+            imp_pat = imp[imp.get("feature_type", "pattern") == "pattern"]
+            coef_map = dict(zip(imp_pat["pattern"], imp_pat["coefficient"]))
+            support_col = "pattern_support" if "pattern_support" in imp_pat.columns else "support"
+            sup_map = dict(zip(imp_pat["pattern"], imp_pat[support_col]))
         except Exception:
             coef_map = {}
             sup_map = {}
@@ -384,11 +394,43 @@ class PatternEditor:
                 {
                     "idx": i,
                     "pattern": lbl,
+                    "feature_type": "pattern",
+                    "editable": True,
                     "coefficient": coef_map.get(lbl, float("nan")),
+                    "pattern_support": round(sup, 4) if sup is not None else float("nan"),
                     "support": round(sup, 4) if sup is not None else float("nan"),
                 }
             )
         return pd.DataFrame(rows)
+
+    def list_downstream_features(self) -> pd.DataFrame:
+        """Return all downstream features with PatternEditor editability.
+
+        The returned table includes original features, HUG patterns, and
+        augmented-pair transforms when present.  Only rows with
+        ``feature_type == 'pattern'`` are directly editable through
+        ``remove()`` and related PatternEditor methods.
+        """
+        clf = self._working_clf
+        try:
+            imp = clf.feature_importances().copy()
+        except Exception:
+            names = list(getattr(clf, "get_downstream_features", lambda: [])())
+            imp = pd.DataFrame({"feature": names})
+            imp["display_name"] = names
+            imp["feature_type"] = [
+                "pattern"
+                if str(name).startswith("pattern:")
+                else "augmented_pair"
+                if str(name).startswith("augmented_pair:")
+                else "original"
+                for name in names
+            ]
+        imp["editable"] = imp["feature_type"].eq("pattern")
+        imp["editor_scope"] = np.where(
+            imp["editable"], "editable_pattern", "downstream_context_only"
+        )
+        return imp.reset_index(drop=True)
 
     def diff(self) -> dict:
         """Return a summary of changes made relative to the original model.
@@ -400,11 +442,23 @@ class PatternEditor:
         original_labels = set(self._orig_clf.get_hug_features())
         current_labels = set(self._working_clf.get_hug_features())
         removed = sorted(original_labels - current_labels)
+        downstream = self.list_downstream_features()
+        non_editable = (
+            downstream[~downstream["editable"]] if "editable" in downstream else pd.DataFrame()
+        )
         return {
+            "scope": "hug_patterns_only",
             "n_original": len(original_labels),
             "n_current": len(current_labels),
             "n_removed": len(removed),
             "removed_patterns": removed,
+            "n_downstream_features_current": int(len(downstream)),
+            "n_non_editable_downstream_features_current": int(len(non_editable)),
+            "non_editable_feature_types_current": (
+                sorted(non_editable["feature_type"].dropna().unique().tolist())
+                if "feature_type" in non_editable
+                else []
+            ),
         }
 
     # ------------------------------------------------------------------
@@ -425,6 +479,8 @@ class PatternEditor:
                 "applied": self._calibrated,
                 "method": self._calibration_method,
             },
+            "editor_scope": "hug_patterns_only",
+            "non_editable_downstream_features_visible": True,
             "removals": [dataclasses.asdict(r) for r in self._audit_log],
         }
         return json.dumps(report, indent=indent, default=str)

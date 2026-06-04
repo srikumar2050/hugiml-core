@@ -134,8 +134,8 @@ Because HUGIML’s explanations are compact, they can be copied directly into mo
 | **Mixed feature types** | Integer, float, categorical — auto-detected or explicitly supplied |
 | **Profile visualisations** | EBM-style 1-D/2-D HUG profiles, active-pattern explanations, coefficient-support views (Plotly) |
 | **Interpretability metrics** | Pattern count, coverage, overlap, sparsity, top-k cumulative contribution |
-| **Adaptive binning** | Per-feature supervised `B` selection — fixes the B-sensitivity trap |
-| **Feature modes** | Pattern-only, original-plus-patterns, and original-plus-interactions downstream representations |
+| **Adaptive binning** | Per-feature supervised `B` selection — addresses the B-sensitivity trap |
+| **Feature modes** | Pattern-only, original-plus-patterns, original-plus-interactions, and optional augmented-pair downstream features |
 | **Pattern pruning** | Regulated remove/refit/calibrate workflow with full JSON audit trail |
 | **Multiclass & imbalance** | Multiclass report, SMOTE/class-weight pipeline, high-cardinality encoding |
 | **Benchmark suite** | Reproducible CV comparison vs EBM, XGBoost, RF, LR, RuleFit, GAM |
@@ -283,9 +283,42 @@ clf_hybrid_interactions = HUGIMLClassifierNative(
 )
 ```
 
-`transform(X)` always returns the HUGIML binary pattern matrix, regardless of `feature_mode`. The feature mode only changes the matrix passed to the downstream estimator inside `fit()`, `predict()`, `predict_proba()`, and `score()`.
+`transform(X)` always returns the HUGIML binary pattern matrix, regardless of `feature_mode` or augmented-pair settings. The feature mode and augmented-pair settings only change the matrix passed to the downstream estimator inside `fit()`, `predict()`, `predict_proba()`, and `score()`.
 
-For hybrid modes, HUGIML standardizes numeric original features internally before concatenating them with the sparse binary pattern matrix. `feature_importances()` and `model_summary()` report the downstream feature representation used by the fitted model, while `get_hug_features()` and `get_pattern_info()` remain pattern-only APIs.
+For hybrid modes, HUGIML standardizes numeric original features internally before concatenating them with the sparse binary pattern matrix and any active augmented-pair columns. `feature_importances()`, `model_summary()`, and `get_model_composition()` report the downstream feature representation used by the fitted model, while `get_hug_features()` and `get_pattern_info()` remain pattern-only APIs.
+
+---
+
+## Augmented Pair Features
+
+For interaction-oriented models, HUGIML can add native augmented-pair features to the downstream estimator. These are continuous product or absolute-difference transforms built from informative numeric features, for example:
+
+```text
+glucose * bmi
+abs(age - duration)
+```
+
+They are considered when `L > 1`, `adaptive_binning=True`, and `augmented_pair_transforms=True` (the default). They are appended only to the downstream estimator; the mined HUG pattern matrix and `transform(X)` remain pattern-space APIs.
+
+Use augmented-pair features when validation suggests that numeric interactions carry signal that is not captured compactly by ordinary HUG patterns alone. For strict fitted-feature budgets, set `topk_budget_strict=True` so original features, HUG patterns, and augmented-pair features compete within one global `topK` budget.
+
+```python
+clf = HUGIMLClassifierNative(
+    B=-1,
+    adaptive_binning=True,
+    L=2,
+    topK=50,
+    feature_mode="original_plus_patterns",
+    augmented_pair_transforms=True,
+    topk_budget_strict=True,
+)
+clf.fit(X_train, y_train)
+
+print(clf.get_model_composition())
+print(clf.explain_augmented_pair_effects())
+```
+
+For selected pair features, HUGIML reports the raw formula, standardized formula, observed-row coverage, missing-pair policy, and raw-scale coefficient interpretation. Pattern-only review remains available through `get_hug_features()` and `get_pattern_info()`.
 
 ---
 

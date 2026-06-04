@@ -20,7 +20,9 @@ from __future__ import annotations
 
 import numpy as np
 import pytest
+from sklearn.datasets import make_classification
 
+from hugiml import HUGIMLClassifierNative
 from hugiml.explainability import (
     ExplainabilityReport,
     ExplanationStabilityMetrics,
@@ -228,3 +230,43 @@ class TestSHAPBridge:
             pytest.skip("shap not installed")
         result = aggregate_shap_to_features(sv, clf)
         assert all(isinstance(k, str) for k in result.keys())
+
+
+def test_explanation_stability_reports_feature_type_specific_metrics():
+    X, y = make_classification(n_samples=180, n_features=6, n_informative=4, random_state=42)
+    clf = HUGIMLClassifierNative(
+        B=-1,
+        adaptive_binning=True,
+        L=2,
+        G=1e-3,
+        topK=15,
+        feature_mode="original_plus_patterns",
+        augmented_pair_transforms=True,
+        augmented_pair_max_features=5,
+        max_fit_seconds=5,
+    )
+    clf.fit(X[:90], y[:90])
+    explainer = HUGPatternExplainer(clf)
+    metrics = explainer.explanation_stability(X[:90], y[:90], X[90:], y[90:], top_n=10)
+    assert isinstance(metrics.by_feature_type, dict)
+    assert "pattern" in metrics.by_feature_type
+    assert metrics.jaccard_similarity == metrics.by_feature_type["pattern"]["jaccard_similarity"]
+
+
+def test_pattern_space_shap_warns_for_mixed_downstream_features():
+    X, y = make_classification(n_samples=120, n_features=5, n_informative=3, random_state=7)
+    clf = HUGIMLClassifierNative(
+        B=-1,
+        adaptive_binning=True,
+        L=2,
+        G=1e-3,
+        topK=12,
+        feature_mode="original_plus_patterns",
+        augmented_pair_transforms=True,
+        augmented_pair_max_features=5,
+        max_fit_seconds=5,
+    ).fit(X, y)
+    with pytest.warns(RuntimeWarning, match="Pattern-space SHAP is incomplete"):
+        assert shap_values_from_pattern_matrix(clf, X[:5]) is None
+    with pytest.warns(RuntimeWarning, match="omits original downstream columns"):
+        aggregate_shap_to_features(np.zeros((5, len(clf.get_hug_features()))), clf)

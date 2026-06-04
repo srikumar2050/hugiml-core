@@ -35,7 +35,7 @@ Your current public page is ``https://hugiml-core.readthedocs.io/en/latest/``. I
 #. In Read the Docs, open **Admin → Advanced Settings** and confirm that the default branch matches your GitHub default branch.
 #. In **Admin → Automation Rules** or **Admin → Versions**, confirm that ``latest`` tracks the branch you are updating.
 #. In **Builds**, start a fresh build for ``latest``. If the previous build is cached, choose the option to wipe the build environment before rebuilding.
-#. Check the build log for the Git commit SHA. It should match the commit containing the 1.1.3 docs.
+#. Check the build log for the Git commit SHA. It should match the commit containing the current release docs.
 #. If GitHub pushes are not triggering builds, reconnect the GitHub integration or recreate the webhook from the RTD project admin page.
 
 Local build check
