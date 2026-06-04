@@ -15,14 +15,10 @@ project = "hugiml-core"
 author = "Srikumar Krishnamoorthy"
 copyright = f"{datetime.now().year}, {author}"
 
-try:
-    import hugiml
-
-    release = hugiml.__version__
-except Exception:  # pragma: no cover - defensive fallback for documentation builds
-    init_text = (SRC / "hugiml" / "__init__.py").read_text(encoding="utf-8")
-    release_match = re.search(r'__version__\s*=\s*["\']([^"\']+)["\']', init_text)
-    release = release_match.group(1) if release_match else ""
+init_text = (SRC / "hugiml" / "__init__.py").read_text(encoding="utf-8")
+release_match = re.search(r'__version__\s*=\s*["\']([^"\']+)["\']', init_text)
+release = release_match.group(1) if release_match else ""
+version = release
 
 extensions = [
     "sphinx.ext.autodoc",
@@ -39,9 +35,6 @@ autodoc_typehints = "description"
 autodoc_default_options = {
     "members": True,
     "member-order": "bysource",
-    # Avoid documenting sklearn metadata-routing helper methods inherited
-    # by BaseEstimator. They create noisy external cross-reference warnings
-    # and distract from the public HUGIML API.
     "exclude-members": "set_fit_request,set_score_request,set_predict_request,set_transform_request,set_partial_fit_request",
 }
 autodoc_mock_imports = [
@@ -83,12 +76,5 @@ html_theme_options = {
     "style_external_links": True,
 }
 
-# Intersphinx is intentionally disabled for deterministic RTD/local builds.
-# Re-enable it only if external inventory availability is required.
-
 todo_include_todos = False
-
-# Third-party docstrings imported through autodoc may contain unresolved
-# intersphinx references on offline or restricted builders. The project pages
-# still surface HUGIML API warnings normally.
 suppress_warnings = ["ref.python", "ref.term", "ref.ref", "toc.not_included", "intersphinx"]
