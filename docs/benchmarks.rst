@@ -4,7 +4,7 @@ Benchmarks
 Benchmark runner
 ----------------
 
-The benchmark runner compares HUGIML with common tabular baselines such as logistic regression, random forests, gradient boosting libraries, EBM, RuleFit, and GAMs when optional dependencies are installed.
+The benchmark runner compares HUGIML with common tabular baselines such as logistic regression, random forests, gradient boosting libraries, EBM, RuleFit, and GAMs when optional dependencies are installed. The v1.1.7 benchmark baseline notebook is refreshed with the current baseline run and HUGIML grid settings used by the exported dashboard.
 
 .. code-block:: bash
 

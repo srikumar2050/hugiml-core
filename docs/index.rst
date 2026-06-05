@@ -14,19 +14,19 @@ Why HUGIML?
 
 * **Intrinsic interpretability:** learned HUG patterns are the model representation, not an after-the-fact explanation.
 * **Regulated-domain fit:** model cards, audit artifacts, pruning trails, calibration, drift monitoring, and deployment helpers are included.
-* **Native performance:** computationally intensive mining, transaction construction, and matrix-building stages are C++ accelerated with optional OpenMP support. Version 1.1.6 adds native augmented-pair features for ``L > 1`` adaptive-binning models while retaining the native L1 and adaptive-binning scalability improvements from the 1.1.x series.
+* **Native performance:** computationally intensive mining, transaction construction, and matrix-building stages are C++ accelerated with optional OpenMP support. Version 1.1.7 adds a native ``L=2`` hot path and expands augmented-pair operations, while retaining the v1.1.6 augmented-feature APIs and earlier native scalability improvements from the 1.1.x series.
 * **Python ergonomics:** the estimator follows the scikit-learn API and works with pandas DataFrames or NumPy arrays.
 
 
 Current release focus
 ---------------------
 
-The 1.1.6 release expands the downstream feature space for interaction-oriented models while keeping the standard pattern-space APIs stable:
+The 1.1.7 release builds on the v1.1.6 augmented-feature interface and keeps the standard pattern-space APIs stable:
 
-* ``L > 1`` adaptive-binning models can add native product and absolute-difference augmented-pair features to the downstream estimator.
-* ``topk_budget_strict=True`` applies a single global ``topK`` budget across original features, HUG patterns, and augmented-pair features.
-* Interpretability outputs distinguish original, pattern, and augmented-pair features and expose raw-scale augmented-pair effect metadata.
-* Earlier 1.1.x capabilities remain available, including compact native transaction memory and fused adaptive ``L=1`` execution.
+* Native mining now includes a dedicated ``L=2`` hot path for common two-item pattern workloads.
+* ``L > 1`` adaptive-binning models can add product, absolute-difference, sum, and signed-difference augmented-pair features to the downstream estimator.
+* The benchmark baseline notebook and exported HTML were refreshed with the current baseline run and HUGIML grid settings.
+* Earlier 1.1.x capabilities remain available, including strict global ``topK`` budgeting, compact native transaction memory, and fused adaptive ``L=1`` execution.
 
 Installation
 ------------

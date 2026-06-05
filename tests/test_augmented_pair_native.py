@@ -48,11 +48,16 @@ def test_native_transform_block_generates_expected_standardized_features():
         a, b = (pos[c] for c in spec["inputs"])
         observed = np.isfinite(X_raw[:, a]) & np.isfinite(X_raw[:, b])
         vals = np.full(X_raw.shape[0], ref, dtype=float)
-        vals[observed] = (
-            X_raw[observed, a] * X_raw[observed, b]
-            if spec["operation"] == "product"
-            else np.abs(X_raw[observed, a] - X_raw[observed, b])
-        )
+        if spec["operation"] == "product":
+            vals[observed] = X_raw[observed, a] * X_raw[observed, b]
+        elif spec["operation"] == "absolute_difference":
+            vals[observed] = np.abs(X_raw[observed, a] - X_raw[observed, b])
+        elif spec["operation"] == "sum":
+            vals[observed] = X_raw[observed, a] + X_raw[observed, b]
+        elif spec["operation"] == "signed_difference":
+            vals[observed] = X_raw[observed, a] - X_raw[observed, b]
+        else:
+            raise AssertionError(f"unexpected op {spec['operation']}")
         manual.append(vals)
     manual = np.vstack(manual).T
     manual = (manual - block.scaler_mean_) / block.scaler_scale_

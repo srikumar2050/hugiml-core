@@ -131,6 +131,12 @@ private:
 // ytrain is pre-extracted to std::vector<int> by the binding layer (GIL held)
 // so this function is safe to call with the GIL released.
 // timeout_s: wall-clock seconds before mining is aborted (0 = no limit).
+std::vector<PatternEntry> mine_patterns_generic_cpp(
+    const TransactionDataCpp& td,
+    const std::vector<int>&   ytrain,
+    int n_cls, int K, int L, double G,
+    double timeout_s = 0.0);
+
 std::vector<PatternEntry> mine_patterns_cpp(
     const TransactionDataCpp& td,
     const std::vector<int>&   ytrain,

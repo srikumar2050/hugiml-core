@@ -6,6 +6,14 @@ The canonical release notes live in ``CHANGELOG.md`` at the repository root. Kee
 Recent releases
 ---------------
 
+1.1.7 — 2026-06-05
+~~~~~~~~~~~~~~~~~~
+
+* Added a native ``L=2`` mining hot path for common two-item pattern workloads.
+* Expanded augmented-pair features with two additional operations: pair sums and signed differences.
+* Revised the benchmark baseline notebook and exported HTML with the updated baseline run and current HUGIML grid settings.
+* Preserved the v1.1.6 augmented-feature APIs, feature-lineage metadata, and serialization compatibility while extending pair-operation coverage.
+
 1.1.6 — 2026-06-04
 ~~~~~~~~~~~~~~~~~~
 

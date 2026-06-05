@@ -164,7 +164,7 @@ py::list score_pair_candidates(
     y_eligible.reserve(static_cast<size_t>(n));
     for (py::ssize_t a = 0; a < p; ++a) {
         for (py::ssize_t b = a + 1; b < p; ++b) {
-            for (int op = 0; op < 2; ++op) {
+            for (int op = 0; op < 4; ++op) {
                 vals.clear();
                 y_eligible.clear();
                 double sum_raw = 0.0;
@@ -172,7 +172,16 @@ py::list score_pair_candidates(
                     const double xl = X(i, a);
                     const double xr = X(i, b);
                     if (!finite_double(xl) || !finite_double(xr)) continue;
-                    const double raw = (op == 0) ? (xl * xr) : std::fabs(xl - xr);
+                    double raw;
+                    if (op == 0) {
+                        raw = xl * xr;
+                    } else if (op == 1) {
+                        raw = std::fabs(xl - xr);
+                    } else if (op == 2) {
+                        raw = xl + xr;
+                    } else {
+                        raw = xl - xr;
+                    }
                     if (!finite_double(raw)) continue;
                     vals.push_back(raw);
                     y_eligible.push_back(y(i));
@@ -183,15 +192,31 @@ py::list score_pair_candidates(
                 const double reference_raw_value = sum_raw / static_cast<double>(m);
                 const double base_entropy = entropy_labels(y_eligible.data(), m, n_classes);
                 auto scored = adaptive_numeric_ig(vals, y_eligible.data(), m, n_classes, base_entropy, 12);
-                const std::string operation = (op == 0) ? "product" : "absolute_difference";
-                const std::string prefix = (op == 0) ? "augmented_pair_prod__" : "augmented_pair_absdiff__";
+                std::string operation;
+                std::string prefix;
+                std::string formula;
+                if (op == 0) {
+                    operation = "product";
+                    prefix = "augmented_pair_prod__";
+                    formula = col_names[static_cast<size_t>(a)] + " * " + col_names[static_cast<size_t>(b)];
+                } else if (op == 1) {
+                    operation = "absolute_difference";
+                    prefix = "augmented_pair_absdiff__";
+                    formula = "abs(" + col_names[static_cast<size_t>(a)] + " - " + col_names[static_cast<size_t>(b)] + ")";
+                } else if (op == 2) {
+                    operation = "sum";
+                    prefix = "augmented_pair_sum__";
+                    formula = col_names[static_cast<size_t>(a)] + " + " + col_names[static_cast<size_t>(b)];
+                } else {
+                    operation = "signed_difference";
+                    prefix = "augmented_pair_diff__";
+                    formula = col_names[static_cast<size_t>(a)] + " - " + col_names[static_cast<size_t>(b)];
+                }
                 py::dict d;
                 d["name"] = prefix + col_names[static_cast<size_t>(a)] + "__" + col_names[static_cast<size_t>(b)];
                 d["operation"] = operation;
                 d["inputs"] = py::make_tuple(col_names[static_cast<size_t>(a)], col_names[static_cast<size_t>(b)]);
-                d["formula"] = (op == 0)
-                    ? (col_names[static_cast<size_t>(a)] + " * " + col_names[static_cast<size_t>(b)])
-                    : ("abs(" + col_names[static_cast<size_t>(a)] + " - " + col_names[static_cast<size_t>(b)] + ")");
+                d["formula"] = formula;
                 d["transform_ig"] = scored.first;
                 d["transform_bin_edges"] = scored.second;
                 d["eligible_count"] = static_cast<int64_t>(m);
@@ -244,7 +269,18 @@ py::array_t<float> transform_pair_features(
             const double xr = X(i, b);
             double raw = ref;
             if (finite_double(xl) && finite_double(xr)) {
-                raw = (ops(t) == 0) ? (xl * xr) : std::fabs(xl - xr);
+                const int8_t op = ops(t);
+                if (op == 0) {
+                    raw = xl * xr;
+                } else if (op == 1) {
+                    raw = std::fabs(xl - xr);
+                } else if (op == 2) {
+                    raw = xl + xr;
+                } else if (op == 3) {
+                    raw = xl - xr;
+                } else {
+                    throw std::invalid_argument("Unknown augmented pair op code.");
+                }
                 if (!finite_double(raw)) raw = ref;
             }
             Z(i, t) = static_cast<float>((raw - means(t)) / sc);
@@ -405,7 +441,7 @@ void bind_augmented_pair(py::module_& m)
         py::arg("X"),
         py::arg("y"),
         py::arg("col_names"),
-        "Score product/absolute-difference pair candidates on observed source pairs with adaptive-binned IG."
+        "Score product/absolute-difference/sum/signed-difference pair candidates on observed source pairs with adaptive-binned IG."
     );
     m.def(
         "transform_pair_features",

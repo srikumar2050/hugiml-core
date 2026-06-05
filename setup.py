@@ -54,6 +54,7 @@ import multiprocessing
 import os
 import platform
 import shutil
+from typing import Any, Callable, cast
 
 from pybind11.setup_helpers import Pybind11Extension, build_ext
 from setuptools import setup
@@ -144,6 +145,7 @@ _ALGO_SOURCES = [
     "native/transaction.cpp",
     "native/mining.cpp",
     "native/mining_l1.cpp",
+    "native/mining_l2.cpp",
     "native/matrix.cpp",
     "native/prepare_mine_l1.cpp",
     "native/augmented_pair.cpp",
@@ -191,36 +193,38 @@ class _SplitOptBuildExt(build_ext):
 
     def finalize_options(self) -> None:
         super().finalize_options()
-        if self.parallel is None:
+        parallel = cast(Any, self).parallel
+        if parallel is None:
             try:
                 jobs = int(os.environ.get("HUGIML_BUILD_JOBS", "0"))
-                self.parallel = jobs if jobs > 0 else multiprocessing.cpu_count()
+                cast(Any, self).parallel = jobs if jobs > 0 else multiprocessing.cpu_count()
             except (ValueError, NotImplementedError):
-                self.parallel = 1
+                cast(Any, self).parallel = 1
 
     def build_extensions(self) -> None:
         # UnixCCompiler._compile(obj, src, ext, cc_args, extra_postargs, pp_opts)
         # MSVCCompiler._compile(obj, src, ext, cc_args, extra_postargs, pp_opts)
         # Both have the same signature; extra_postargs holds our compile flags.
-        orig_compile = self.compiler._compile
+        compiler = cast(Any, self.compiler)
+        orig_compile: Callable[..., None] = compiler._compile
 
         def _per_source_compile(
             obj: str,
             src: str,
             ext_suffix: str,
-            cc_args: list,
-            extra_postargs: list,
-            pp_opts: list,
+            cc_args: list[Any],
+            extra_postargs: list[Any],
+            pp_opts: list[Any],
         ) -> None:
             if os.path.basename(src) in _BIND_BASENAMES:
                 extra_postargs = bind_args
             orig_compile(obj, src, ext_suffix, cc_args, extra_postargs, pp_opts)
 
-        self.compiler._compile = _per_source_compile  # type: ignore[method-assign]
+        compiler._compile = _per_source_compile
         try:
             super().build_extensions()
         finally:
-            self.compiler._compile = orig_compile  # type: ignore[method-assign]
+            compiler._compile = orig_compile
 
 
 # ── Custom build_py: strip native/ from Python package staging ────────────────

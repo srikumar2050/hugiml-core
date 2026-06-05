@@ -19,6 +19,7 @@
  */
 
 #include "mining.hpp"
+#include "mining_l2.hpp"
 #include "math.hpp"
 
 #include <algorithm>
@@ -586,7 +587,7 @@ void THUIsl::explore(std::vector<int>  prefix,
 
 // ── Entry point ──────────────────────────────────────────────────────────────
 
-std::vector<PatternEntry> mine_patterns_cpp(
+std::vector<PatternEntry> mine_patterns_generic_cpp(
     const TransactionDataCpp& td,
     const std::vector<int>&   ytrain,
     int n_cls, int K, int L, double G,
@@ -618,6 +619,16 @@ std::vector<PatternEntry> mine_patterns_cpp(
         throw;
     }
     return miner.heap;
+}
+
+std::vector<PatternEntry> mine_patterns_cpp(
+    const TransactionDataCpp& td,
+    const std::vector<int>&   ytrain,
+    int n_cls, int K, int L, double G,
+    double timeout_s) {
+    if (L == 2)
+        return mine_patterns_l2_cpp(td, ytrain, n_cls, K, G, timeout_s);
+    return mine_patterns_generic_cpp(td, ytrain, n_cls, K, L, G, timeout_s);
 }
 
 }  // namespace hugiml

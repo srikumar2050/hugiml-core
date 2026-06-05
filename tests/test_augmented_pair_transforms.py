@@ -46,8 +46,8 @@ def test_augmented_pair_max_features_controls_candidate_pool():
     )
     model.fit(X, y)
     transforms = model.get_augmented_pair_transforms()
-    # C(5, 2) * 2 candidate transforms at most, before topK cap.
-    assert len(transforms) <= 20
+    # C(5, 2) * 4 candidate transforms at most (4 ops: product, abs_diff, sum, signed_diff).
+    assert len(transforms) <= 40
     assert all(t["augmented_pair_max_features"] == 5 for t in transforms)
 
 

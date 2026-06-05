@@ -11,7 +11,7 @@ The repository includes self-contained notebook folders under ``notebooks/``. Ea
    * - ``00_quickstart``
      - End-to-end fitting, pattern extraction, and explanation walkthrough.
    * - ``01_benchmark_baselines``
-     - Comparison against common tabular baselines.
+     - Comparison against common tabular baselines; refreshed in v1.1.7 with the current baseline run and HUGIML grid settings.
    * - ``02_hug_vs_ebm``
      - HUGIML profiles versus EBM-style additive shape functions.
    * - ``03_modeling_special_cases``

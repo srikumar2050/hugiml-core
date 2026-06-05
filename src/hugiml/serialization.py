@@ -916,7 +916,7 @@ def _load_v3(path: str | os.PathLike) -> Any:
     else:
         clf._adaptive_code_label_map_ = {}
     # ────────────────────────────────────────────────────────────────────
-    # ── Augmented pair transform state ─────────────────────────────────
+    # ── v1.1.5+ augmented pair transform state ──────────────────────────
     aug_state = clf_fit.get("augmented_pair_state") or {}
     clf.augmented_pair_transforms = bool(
         aug_state.get("augmented_pair_transforms", getattr(clf, "augmented_pair_transforms", True))

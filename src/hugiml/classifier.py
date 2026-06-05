@@ -143,7 +143,7 @@ except ImportError:
 
 DEFAULT_AUGMENTED_PAIR_MAX_FEATURES = 10
 DEFAULT_AUGMENTED_PAIR_UNBOUNDED_CAP = 100
-AUGMENTED_PAIR_OPS = ("product", "absolute_difference")
+AUGMENTED_PAIR_OPS = ("product", "absolute_difference", "sum", "signed_difference")
 
 
 def _best_ig_score(score_obj: Any) -> float:
@@ -255,15 +255,20 @@ class NativeAugmentedPairTransformBlock:
         self.min_source_ig = None if min_source_ig is None else float(min_source_ig)
         self.unbounded_cap = int(unbounded_cap)
 
-    @staticmethod
-    def _as_frame(X: Any, cols: list[str]) -> pd.DataFrame:
+    def _as_frame(
+        self, X: Any, cols: list[str], full_feature_names: list[str] | None = None
+    ) -> pd.DataFrame:
         if isinstance(X, pd.DataFrame):
             X_df = X
         else:
             arr = np.asarray(X)
             if arr.ndim == 1:
                 arr = arr.reshape(1, -1)
-            names = cols if len(cols) == arr.shape[1] else [f"col{j}" for j in range(arr.shape[1])]
+            schema = list(full_feature_names or getattr(self, "input_feature_names_", []) or [])
+            if schema and len(schema) == arr.shape[1]:
+                names = schema
+            else:
+                names = [f"col{j}" for j in range(arr.shape[1])]
             X_df = pd.DataFrame(arr, columns=names)
         missing = [col for col in cols if col not in X_df.columns]
         if missing:
@@ -277,7 +282,9 @@ class NativeAugmentedPairTransformBlock:
         n_rows = len(X) if hasattr(X, "__len__") else 0
         if not selected:
             return np.zeros((n_rows, 0), dtype=np.float64)
-        X_df = self._as_frame(X, selected)
+        X_df = self._as_frame(
+            X, selected, list(getattr(self, "input_feature_names_", []) or [])
+        )
         try:
             mat = X_df.reindex(columns=selected).to_numpy(dtype=np.float64, copy=True)
         except Exception:
@@ -298,7 +305,16 @@ class NativeAugmentedPairTransformBlock:
             a, b = spec["inputs"]
             left.append(pos[a])
             right.append(pos[b])
-            ops.append(0 if spec["operation"] == "product" else 1)
+            operation = str(spec["operation"])
+            op_map = {
+                "product": 0,
+                "absolute_difference": 1,
+                "sum": 2,
+                "signed_difference": 3,
+            }
+            if operation not in op_map:
+                raise HUGIMLParamError(f"Unknown augmented-pair operation: {operation!r}.")
+            ops.append(op_map[operation])
         return (
             np.asarray(left, dtype=np.int64),
             np.asarray(right, dtype=np.int64),
@@ -314,6 +330,7 @@ class NativeAugmentedPairTransformBlock:
         numeric_cols: list[str],
         budget_topK: int | None = None,
         min_source_ig: float | None = None,
+        full_feature_names: list[str] | None = None,
     ) -> NativeAugmentedPairTransformBlock:
         if not (
             _CORE_AVAILABLE
@@ -324,6 +341,7 @@ class NativeAugmentedPairTransformBlock:
                 "Native augmented pair transforms require _hugiml_core.score_pair_candidates "
                 "and _hugiml_core.transform_pair_features. Rebuild the native extension."
             )
+        self.input_feature_names_ = list(full_feature_names or [])
         if budget_topK is not None:
             self.budget_topK = int(budget_topK)
         if min_source_ig is not None:
@@ -857,7 +875,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         "L": [1, 2],
         "feature_mode": ["patterns_only", "original_plus_patterns"],
         "topK": [30, 50, 100],
-        "G": [1e-3],
+        "G": [1e-2],
     }
 
     def __init__(
@@ -1546,8 +1564,13 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         p = arr.shape[1]
         self.cat_cols_mask_ = np.zeros(p, dtype=bool)
         self.is_int_mask_ = np.zeros(p, dtype=bool)
-        if not hasattr(self, "feature_names_in_"):
-            self.feature_names_in_ = None
+        # Array inputs have no native column labels, but downstream components
+        # (notably augmented-pair transforms) require stable feature names to
+        # align IG scores, selected source columns, and transform-time matrices.
+        # Use deterministic synthetic names instead of leaving feature_names_in_
+        # as None, which previously caused augmented pairs to be silently skipped
+        # for ndarray inputs.
+        self.feature_names_in_ = [f"col{j}" for j in range(p)]
         return self.cat_cols_mask_
 
     @staticmethod
@@ -1634,7 +1657,15 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         raises when string-categorical columns are present.
         """
         is_df = isinstance(X_train, pd.DataFrame)
-        X_df = X_train if is_df else pd.DataFrame(X_train)
+        X_df = X_train if is_df else pd.DataFrame(
+            X_train,
+            columns=(
+                list(getattr(self, "feature_names_in_", []) or [])
+                if getattr(self, "feature_names_in_", None) is not None
+                and len(getattr(self, "feature_names_in_", [])) == np.asarray(X_train).shape[1]
+                else None
+            ),
+        )
         candidates = sorted(set(self.b_candidates or [2, 3, 5, 7, 10, 15]))
         ratio = self.min_marginal_gain_ratio
         cat_mask = self.cat_cols_mask_
@@ -1750,7 +1781,15 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         numerical features are found).
         """
         is_df = isinstance(X_train, pd.DataFrame)
-        X_df = X_train if is_df else pd.DataFrame(X_train)
+        X_df = X_train if is_df else pd.DataFrame(
+            X_train,
+            columns=(
+                list(getattr(self, "feature_names_in_", []) or [])
+                if getattr(self, "feature_names_in_", None) is not None
+                and len(getattr(self, "feature_names_in_", [])) == np.asarray(X_train).shape[1]
+                else None
+            ),
+        )
         candidates = sorted(set(self.b_candidates or [2, 3, 5, 7, 10, 15]))
         ratio = self.min_marginal_gain_ratio
         cat_mask = self.cat_cols_mask_
@@ -1881,7 +1920,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                 arr = arr.reshape(1, -1)
             names = (
                 list(feat_names)
-                if feat_names is not None
+                if feat_names is not None and len(feat_names) == arr.shape[1]
                 else [f"col{j}" for j in range(arr.shape[1])]
             )
             name_to_idx = {name: j for j, name in enumerate(names)}
@@ -1916,7 +1955,11 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             arr = np.asarray(X)
             if arr.ndim == 1:
                 arr = arr.reshape(1, -1)
-            cols = feat_names or [f"col{j}" for j in range(arr.shape[1])]
+            cols = (
+                list(feat_names)
+                if feat_names is not None and len(feat_names) == arr.shape[1]
+                else [f"col{j}" for j in range(arr.shape[1])]
+            )
             X_df = pd.DataFrame(arr, columns=cols)
 
         # Fast labelled path for the common adaptive case: all stored adaptive
@@ -1996,7 +2039,15 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         categorical so the C++ routes them through the string-label path.
         """
         is_df = isinstance(X_train, pd.DataFrame)
-        X_df = X_train if is_df else pd.DataFrame(X_train)
+        if is_df:
+            X_df = X_train
+        else:
+            arr = np.asarray(X_train)
+            if arr.ndim == 1:
+                arr = arr.reshape(1, -1)
+            feat_names = list(getattr(self, "feature_names_in_", []) or [])
+            cols = feat_names if len(feat_names) == arr.shape[1] else [f"col{j}" for j in range(arr.shape[1])]
+            X_df = pd.DataFrame(arr, columns=cols)
         cat_mask = self.cat_cols_mask_
         col_names = list(X_df.columns)
         n_cols = len(col_names)
@@ -2058,7 +2109,11 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             arr = np.asarray(X_test)
             if arr.ndim == 1:
                 arr = arr.reshape(1, -1)
-            cols = feat_names or [f"col{j}" for j in range(arr.shape[1])]
+            cols = (
+                list(feat_names)
+                if feat_names is not None and len(feat_names) == arr.shape[1]
+                else [f"col{j}" for j in range(arr.shape[1])]
+            )
             X_df = pd.DataFrame(arr, columns=cols)
 
         col_names = list(X_df.columns)
@@ -2933,7 +2988,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                     pass
 
         # Numeric columns are scaled; non-numeric columns are one-hot encoded.
-        numeric = X_df.apply(pd.to_numeric, errors="coerce")
+        numeric = X_df.apply(pd.to_numeric, errors="coerce").replace([np.inf, -np.inf], np.nan)
         numeric_cols = [c for c in X_df.columns if not numeric[c].isna().all()]
         X_num = numeric[numeric_cols] if numeric_cols else pd.DataFrame(index=X_df.index)
         X_cat = X_df.drop(columns=numeric_cols, errors="ignore")
@@ -3239,6 +3294,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             self._numeric_feature_names_for_augmented_pairs(),
             budget_topK=pair_budget,
             min_source_ig=self.G,
+            full_feature_names=list(getattr(self, "feature_names_in_", []) or []),
         )
         self._augmented_pair_block_ = block
         self.augmented_pair_transforms_ = list(block.augmented_pair_transforms_)
@@ -3251,7 +3307,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             "budget_source": "global_strict_topK"
             if bool(getattr(self, "topk_budget_strict", False))
             else "topK",
-            "ops": ["product", "absolute_difference"],
+            "ops": ["product", "absolute_difference", "sum", "signed_difference"],
             "score": "adaptive_binned_ig",
             "min_source_ig": float(
                 getattr(block, "min_source_ig_", max(1e-12, float(self.G or 0.0)))
@@ -3422,6 +3478,39 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             raw_scale_note = (
                 "The raw-unit effect is expressed on the product-term scale, not as a fixed "
                 "one-unit effect of either individual source feature. " + reference_note
+            )
+        elif operation == "sum":
+            risk_when = (
+                "sum_value_increases"
+                if coefficient_raw_scale > 0
+                else "sum_value_decreases"
+                if coefficient_raw_scale < 0
+                else "not_applicable"
+            )
+            unit_text = (
+                f"Each +1 increase in the sum term changes the log-odds by "
+                f"{coefficient_raw_scale:.6g}. The same coefficient applies to a one-unit "
+                "increase in either source feature while the other source feature is kept constant."
+            )
+            raw_scale_note = (
+                "The raw-unit effect is expressed on the pair sum scale. " + reference_note
+            )
+        elif operation == "signed_difference":
+            risk_when = (
+                "left_minus_right_increases"
+                if coefficient_raw_scale > 0
+                else "left_minus_right_decreases"
+                if coefficient_raw_scale < 0
+                else "not_applicable"
+            )
+            unit_text = (
+                f"Each +1 increase in the signed difference term changes the log-odds by "
+                f"{coefficient_raw_scale:.6g}. Increasing the left source feature raises this "
+                "term, while increasing the right source feature lowers it."
+            )
+            raw_scale_note = (
+                "The raw-unit effect is expressed on the signed left-minus-right difference scale. "
+                + reference_note
             )
         else:
             risk_when = (
@@ -4317,6 +4406,8 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                     "strict_topk_score": round(float(strict_score_lookup.get(feat, np.nan)), 6),
                     "standardization_mean": std_mean,
                     "standardization_scale": std_scale,
+                    "operation": aug_meta.get("operation", np.nan),
+                    "inputs": aug_meta.get("inputs", np.nan),
                     "raw_formula": raw_formula,
                     "standardized_formula": aug_meta.get("standardized_formula", np.nan),
                     "pair_missing_policy": aug_meta.get("pair_missing_policy", np.nan),

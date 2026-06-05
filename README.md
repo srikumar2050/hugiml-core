@@ -256,7 +256,7 @@ from hugiml import HUGIMLClassifierNative
 clf = HUGIMLClassifierNative(
     B=10,
     L=2,
-    G=1e-3,
+    G=1e-2,
     topK=150,
     adaptive_binning=True,
     feature_mode="patterns_only",
@@ -266,7 +266,7 @@ clf = HUGIMLClassifierNative(
 clf_hybrid_all = HUGIMLClassifierNative(
     B=10,
     L=2,
-    G=1e-3,
+    G=1e-2,
     topK=150,
     adaptive_binning=True,
     feature_mode="original_plus_patterns",
@@ -276,7 +276,7 @@ clf_hybrid_all = HUGIMLClassifierNative(
 clf_hybrid_interactions = HUGIMLClassifierNative(
     B=10,
     L=2,
-    G=1e-3,
+    G=1e-2,
     topK=150,
     adaptive_binning=True,
     feature_mode="original_plus_interactions",
@@ -308,6 +308,7 @@ clf = HUGIMLClassifierNative(
     adaptive_binning=True,
     L=2,
     topK=50,
+    G=1e-2,
     feature_mode="original_plus_patterns",
     augmented_pair_transforms=True,
     topk_budget_strict=True,
@@ -446,7 +447,7 @@ from hugiml.adaptive import HUGIMLAdaptive
 clf = HUGIMLAdaptive(
     b_candidates=[3, 5, 7, 10, 15],
     L=2,
-    G=1e-4,
+    G=1e-2,
 )
 
 X_enc, y_enc = clf.prepareXy(X_df, y)

@@ -4,6 +4,19 @@ All notable changes to hugiml-core are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
+## [1.1.7] - 2026-06-05
+
+### Added
+
+- Added a native `L=2` mining hot path for common two-item pattern workloads.
+- Expanded augmented-pair features with two additional operations: pair sums and signed differences.
+
+### Changed
+
+- Revised the benchmark baseline notebook and exported HTML with the updated baseline run and current HUGIML grid settings.
+- Kept the v1.1.6 augmented-feature APIs, feature-lineage metadata, and serialization paths compatible with the expanded pair operations.
+
+---
 ## [1.1.6] - 2026-06-04
 
 ### Added
