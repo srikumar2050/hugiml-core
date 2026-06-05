@@ -28,6 +28,7 @@
 #endif
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -305,15 +306,14 @@ std::vector<PatternEntry> mine_patterns_l2_cpp(
     for (auto& th : thread_heaps)
         th.reserve(static_cast<size_t>(K) + 1);
 
-    bool parallel_timed_out = false;
+    std::atomic<bool> parallel_timed_out{false};
 
     #pragma omp parallel for schedule(dynamic, 4) if(m > 64)
     for (int i = m - 2; i >= 0; --i) {
         if (has_deadline && timed_out()) {
-            #pragma omp atomic write
-            parallel_timed_out = true;
+            parallel_timed_out.store(true, std::memory_order_relaxed);
         }
-        if (parallel_timed_out) continue;  // drain remaining iterations
+        if (parallel_timed_out.load(std::memory_order_relaxed)) continue;  // drain remaining iterations
 
         const int tid_omp = omp_get_thread_num();
         auto& local_heap = thread_heaps[static_cast<size_t>(tid_omp)];
@@ -411,7 +411,7 @@ std::vector<PatternEntry> mine_patterns_l2_cpp(
         }
     }
 
-    if (parallel_timed_out)
+    if (parallel_timed_out.load(std::memory_order_relaxed))
         return heap;   // return singletons only; consistent with serial timeout behaviour
 
     // Merge per-thread heaps into the global heap (serial).
