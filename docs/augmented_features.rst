@@ -22,7 +22,7 @@ A fitted downstream estimator can contain three feature families:
 
 * ``pattern`` — mined binary HUG patterns;
 * ``original`` — standardized original features, when ``feature_mode`` includes them;
-* ``augmented_pair`` — native continuous pair transforms such as products and absolute differences.
+* ``augmented_pair`` — native continuous pair transforms such as products, absolute differences, sums, and signed differences.
 
 ``transform(X)`` intentionally remains a pattern-space API and returns only the binary HUG pattern matrix. Use ``get_downstream_features()``, ``feature_importances()``, and ``get_model_composition()`` to inspect the fitted downstream feature space.
 
@@ -50,9 +50,9 @@ Example
 Interpretation
 --------------
 
-Augmented-pair features currently use product and absolute-difference transforms. Public metadata reports the raw formula, standardized formula, information-gain provenance, observed-row coverage, and raw-scale coefficient interpretation.
+Augmented-pair features use product, absolute-difference, sum, and signed-difference transforms. Public metadata reports the raw formula, standardized formula, information-gain provenance, observed-row coverage, and raw-scale coefficient interpretation.
 
-For a product feature such as ``glucose * bmi``, the raw-unit effect is on the product scale. Changing one source variable does not have a fixed marginal effect because it depends on the current value of the other source variable. For an absolute-difference feature such as ``abs(age - duration)``, the raw-unit effect is on the distance scale.
+For a product feature such as ``glucose * bmi``, the raw-unit effect is on the product scale and depends on the current value of the other source variable. For an absolute-difference feature such as ``abs(age - duration)``, the raw-unit effect is on the distance scale. Sum and signed-difference features expose additive pair effects while preserving the same raw-to-standardized metadata structure introduced in v1.1.6.
 
 Candidate scoring uses rows where both source values are observed. For selected pair features, rows where the pair cannot be computed receive the pair feature's training reference raw value before standardization. This gives a neutral standardized value for that pair term and keeps HUG pattern features on their native missing-value handling path.
 
