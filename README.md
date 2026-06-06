@@ -657,6 +657,21 @@ Worked notebooks in [`notebooks/`](notebooks/) are organized as 12 self-containe
 | XGBoost | 0.9882 ± 0.0040 | 0.12 s | Trees × leaves | High-performing ensemble; not directly pattern-interpretable. |
 | LightGBM | 0.9921 ± 0.0028 | 0.07 s | Leaves × trees | Fast histogram boosting. |
 
+### Complexity budget
+
+The number of downstream features passed to the logistic regression (D) depends on `L`, `feature_mode`, and `augmented_pair_transforms`. Notation: **K** = `topK`, **k** = patterns actually mined (≤ K), **k\_aug** = augmented pair features mined (≤ K; ≈ k when the dataset has enough feature pairs), **p** = number of original input features.
+
+| L | `feature_mode` | `augmented_pair_transforms` | D |
+|---|---|---|---|
+| L = 1 | `patterns_only` | — *(no effect at L=1)* | `k` |
+| L = 1 | `original_plus_patterns` | — *(no effect at L=1)* | `k + p` |
+| L > 1 | `patterns_only` | `False` | `k` |
+| L > 1 | `patterns_only` | `True` | `k + k_aug ≈ 2k` |
+| L > 1 | `original_plus_patterns` | `False` | `k + p` |
+| L > 1 | `original_plus_patterns` | `True` | `k + k_aug + p ≈ 2k + p` |
+
+> **Note — `topk_budget_strict = True`.** When enabled, all feature families are assembled first (giving D as above), then a single global information-gain filter scores every downstream feature and retains the best K. The surviving mix of patterns, augmented pairs, and originals is entirely data-driven — whichever feature types carry the highest information gain fill the K slots. D is hard-capped at K; the formulas above give the uncapped ceiling.
+
 ### Missing value robustness
 
 ![Missing value benchmark](docs/images/missing_value_benchmark.png)
