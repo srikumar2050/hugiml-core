@@ -779,7 +779,7 @@ class TestBenchmarkRunner:
     def test_builders_registry(self):
         from hugiml.benchmarks.runner import BUILDERS
 
-        expected = {"HUG-IML", "EBM", "XGBoost", "RandomForest", "LogisticReg", "RuleFit", "GAM"}
+        expected = {"HUG-IML", "EBM", "XGBoost", "LightGBM", "RandomForest", "LogisticReg", "RuleFit", "GAM"}
         assert set(BUILDERS.keys()) == expected
 
     def test_hugiml_builder_returns_fitted_type(self):
@@ -802,9 +802,9 @@ class TestBenchmarkRunner:
         assert clf is not None
 
     def test_optional_builders_return_none_or_clf(self):
-        from hugiml.benchmarks.runner import _build_ebm, _build_xgb
+        from hugiml.benchmarks.runner import _build_ebm, _build_lightgbm, _build_xgb
 
-        for builder in [_build_ebm, _build_xgb]:
+        for builder in [_build_ebm, _build_xgb, _build_lightgbm]:
             result = builder()
             # Either returns an estimator or None (if not installed)
             assert result is None or hasattr(result, "fit")
