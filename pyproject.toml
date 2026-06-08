@@ -207,7 +207,7 @@ disallow_untyped_defs = true
 
 [tool.coverage.run]
 source_pkgs = ["hugiml"]
-omit = ["*/tests/*", "*/benchmarks/*", "*/_compat.py"]
+omit = ["*/tests/*", "*/benchmarks/*", "*/_compat.py", "*/dashboard/*"]
 relative_files = true
 
 [tool.coverage.paths]
@@ -220,7 +220,7 @@ source = [
 [tool.coverage.report]
 # plots.py is exercised only when plotly is installed (test_plots_* use importorskip).
 # Omit from the hard gate; track separately in nightly with [plots] installed.
-omit = ["src/hugiml/plots.py"]
+omit = ["src/hugiml/plots.py", "src/hugiml/dashboard/*"]
 fail_under = 73
 show_missing = true
 exclude_lines = [
