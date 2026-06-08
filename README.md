@@ -29,6 +29,35 @@ checking_status=no_checking          coef= +1.12     support=0.39
 
 ---
 
+## Table of Contents
+
+1. [What Is HUG-IML?](#what-is-hug-iml)
+2. [Installation](#installation)
+3. [Quick Start](#quick-start)
+4. [Feature Modes](#feature-modes)
+5. [Hyperparameter Search](#hyperparameter-search)
+6. [Governance Studio Dashboard](#governance-studio-dashboard)
+7. [Augmented Pair Features](#augmented-pair-features)
+8. [Adaptive Binning](#adaptive-binning)
+9. [Missing Value Handling](#missing-value-handling)
+10. [Model Explanation and Visualisations](#model-explanation-and-visualisations)
+11. [Pattern Pruning](#pattern-pruning)
+12. [Interpretability Metrics](#interpretability-metrics)
+13. [Multiclass, Imbalanced Data, High-Cardinality](#multiclass-imbalanced-data-high-cardinality)
+14. [Drift Detection & Monitoring](#drift-detection--monitoring)
+15. [Calibration](#calibration)
+16. [Serialisation](#serialisation)
+17. [Governance & Model Cards](#governance--model-cards)
+18. [Benchmark Suite](#benchmark-suite)
+19. [Validation Highlights](#validation-highlights)
+20. [Inference Server](#inference-server)
+21. [CI / CD](#ci--cd)
+22. [Repository Structure](#repository-structure)
+23. [License](#license)
+24. [Citation](#citation)
+
+---
+
 ## What Is HUG-IML?
 
 The **High Utility Gain Interpretable Machine Learning (HUG-IML)** framework extracts *High Utility Gain patterns* from labelled tabular data, transforms the input into a binary pattern-presence matrix, and fits an interpretable downstream classifier (logistic regression by default) on that matrix.
@@ -43,113 +72,6 @@ The resulting patterns are human-readable and serve as the primary source of mod
 
 ---
 
-## Validation Highlights
-
-> The finance panels use German Credit / HELOC-style risk features such as loan duration, credit amount, checking status, and repayment-risk signals. The healthcare panels use Pima diabetes-style features such as glucose, BMI, pregnancies, pedigree, and age.
-
-This section summarizes practical comparisons against established interpretable and high-performance tabular baselines. The goal is not to claim that HUGIML always beats boosted trees or EBM; the goal is to show where HUGIML provides a distinct trade-off: **compact, auditable pattern explanations with competitive predictive behavior**.
-
-### HUGIML vs EBM shape profiles
-
-EBM learns smooth additive shape functions. HUGIML learns threshold/category profiles using native bin-level pattern contributions. On Pima diabetes and credit-risk examples, the models can express similar directional behavior, but HUGIML presents it as compact intervals/categories that are easier to audit.
-
-<p align="left">
-  <img src="docs/images/shape-profiles-hugiml-vs-ebm.png" alt="HUGIML native shape profiles compared with EBM shape functions" width="700"  height="300">
-</p>
-
-EBM is excellent for smooth effect inspection; HUGIML is strong when the explanation needs to be reviewed as a set of readable thresholds and pattern contributions.
-
-### Real-world and synthetic non-monotonic benchmarks
-
-The following benchmark panels compare HUGIML with LR, XGBoost, LightGBM, Random Forest, and EBM under explicit fitted-complexity budgets. They are intended as validation visuals, not as a universal ranking of models.
-
-<p align="left">
-  <img src="docs/images/realworld-credit-risk-benchmark.png" alt="Real-world credit risk benchmark comparing HUGIML, LR, XGBoost, LightGBM, Random Forest, and EBM" width="800">
-</p>
-
-**Real-world credit-risk benchmark.** On Give Me Some Credit and Taiwan Credit Card Default, LightGBM and XGBoost achieve the highest raw ROC-AUC. HUGIML improves over LR while remaining in a compact fitted-complexity range. EBM is shown with capped bins (`max_bins=8`, `interactions=0`) so that it is assessed as a competitive interpretable baseline rather than being penalized by excessive bin-score complexity.
-
-<p align="left">
-  <img src="docs/images/synthetic-nonmonotonic-benchmark.png" alt="Synthetic non-monotonic benchmark comparing HUGIML, LR, XGBoost, LightGBM, Random Forest, and EBM" width="800">
-</p>
-
-**Synthetic non-monotonic benchmark.** The synthetic panels use two controlled datasets with interval-like and oscillatory feature effects. They illustrate model behavior when LR is structurally misspecified by a single global slope. HUGIML provides a compact nonlinear lift over LR, while LightGBM and XGBoost remain strongest in raw ROC-AUC. EBM is shown with capped bins (`max_bins=16`, `interactions=0`) to provide a fairer interpretable baseline.
-
-For a detailed benchmark analysis results, refer to the interactive benchmark dashboard here:
-[Open the HUGIML Benchmark Analysis Dashboard](https://srikumar2050.github.io/hugiml-core/hugiml_benchmark_analysis_dashboard.html)
-
-### Native missing-value handling
-
-HUGIML, XGBoost, LightGBM, and EBM can all operate without an external imputation pipeline, but they treat missingness differently.
-
-<p align="left">
-  <img src="docs/images/native-missing-value-schemes.png" alt="Native missing-value schemes in HUGIML, XGBoost, LightGBM, and EBM" width="760">
-</p>
-
-| Model | Native missing-value behavior | What to monitor |
-|---|---|---|
-| **HUGIML** | Missing numerical values are absent from the transaction. Patterns requiring that feature item do not fire. | Missingness rate and activation frequency of top patterns. |
-| **XGBoost** | Each split learns a default route for missing values. | Whether default-route behavior changes under deployment shift. |
-| **LightGBM** | Histogram splits learn how missing values are routed. | Missing-value routing and feature missingness drift. |
-| **EBM** | Missing values can be modeled as a separate bin/effect. | Size and sign of each missing-bin effect. |
-
-Native missing handling is usually preferable to blindly injecting mean/median values. It does not remove all risk: if the missingness mechanism changes, all models that use missingness as signal can drift.
-
-### Adaptive binning
-
-The global `B` parameter controls numerical bin resolution. A single fixed `B` can be too coarse for informative features or too fragmented for noisy ones. Adaptive binning selects per-feature resolution using supervised information gain and elbow stopping.
-
-<p align="left">
-  <img src="docs/images/adaptive-binning-impact.png" alt="Adaptive binning benchmark against fixed bin counts" width="700" height="300">
-</p>
-
-Adaptive binning is a safe default when you do not want to tune `B`; fixed `B=5` is a useful fast baseline; very large fixed `B` can over-fragment patterns.
-
-### Pattern explanations on finance and healthcare datasets
-
-HUGIML keeps explanations close to the model: feature intervals/categories, coefficients, support, utility, and information gain are available directly from the fitted classifier.
-
-<p align="left">
-  <img src="docs/images/pattern-explanations-real-datasets.png" alt="HUGIML pattern explanations on finance and healthcare datasets" width="760">
-</p>
-
-Learned patterns map naturally to domain narratives: glucose/BMI/age in diabetes and duration/checking-status/credit-amount style signals in German Credit or HELOC-style risk scoring.
-
-### Model-card-ready artifacts
-
-Because HUGIML’s explanations are compact, they can be copied directly into model cards, audit packets, validation reports, and deployment reviews.
-
-<p align="left">
-  <img src="docs/images/model-card-governance.png" alt="Model-card-ready HUGIML explanations" width="760">
-</p>
-
----
-
-## Features
-
-| Capability | Details |
-|---|---|
-| **HUG pattern mining** | C++ accelerated via pybind11; optional OpenMP parallelism |
-| **scikit-learn API** | Full `BaseEstimator` / `ClassifierMixin` compliance |
-| **Mixed feature types** | Integer, float, categorical — auto-detected or explicitly supplied |
-| **Profile visualisations** | EBM-style 1-D/2-D HUG profiles, active-pattern explanations, coefficient-support views (Plotly) |
-| **Interpretability metrics** | Pattern count, coverage, overlap, sparsity, top-k cumulative contribution |
-| **Adaptive binning** | Per-feature supervised `B` selection — addresses the B-sensitivity trap |
-| **Feature modes** | Pattern-only, original-plus-patterns, original-plus-interactions, and optional augmented-pair downstream features |
-| **Pattern pruning** | Regulated remove/refit/calibrate workflow with full JSON audit trail |
-| **Multiclass & imbalance** | Multiclass report, SMOTE/class-weight pipeline, high-cardinality encoding |
-| **Benchmark suite** | Reproducible CV comparison vs EBM, XGBoost, RF, LR, RuleFit, GAM |
-| **Calibration** | ECE, MCE, Brier score, reliability diagram data |
-| **Drift detection** | PSI + symmetric KL divergence + label drift |
-| **Monitoring** | Thread-safe `PredictionMonitor`, latency tracking |
-| **Governance** | Model cards (JSON + Markdown), audit artifacts, SBOM |
-| **Observability** | OpenTelemetry tracing, Prometheus metrics (both optional) |
-| **Secure serialisation** | Allowlist-based `_RestrictedUnpickler`, versioned schema |
-| **Deployment** | FastAPI inference server, Docker image, Kubernetes manifests |
-| **CI/CD** | GitHub Actions: lint → coverage → native tests → wheels → PyPI |
-
----
-
 ## Installation
 
 ```bash
@@ -158,6 +80,9 @@ pip install hugiml-core
 
 # With profile plots
 pip install "hugiml-core[plots]"
+
+# With Governance Studio dashboard
+pip install "hugiml-core[dashboard]"
 
 # With benchmark comparison suite
 pip install "hugiml-core[benchmarks]"
@@ -175,7 +100,7 @@ pip install "hugiml-core[mlflow]"
 pip install "hugiml-core[all]"
 ```
 
-**Build from source** requires a C++17 compiler and CMake or pybind11:
+**Build from source** requires a C++17 compiler and pybind11:
 
 ```bash
 git clone https://github.com/srikumar2050/hugiml-core.git
@@ -238,6 +163,7 @@ pred = clf.predict(X_test)
 proba = clf.predict_proba(X_test)
 ```
 
+---
 
 ## Feature Modes
 
@@ -247,45 +173,137 @@ HUGIML can use the mined binary pattern matrix in three downstream feature modes
 |---|---|---|
 | `"patterns_only"` | HUGIML binary pattern matrix only | Standard HUGIML; best when the mined pattern space itself captures the decision boundary. |
 | `"original_plus_patterns"` | Original features plus all mined binary patterns | Useful when the original features contain strong marginal signal and HUGIML patterns add supervised nonlinear refinements. |
-| `"original_plus_interactions"` | Original features plus only `L > 1` mined patterns | Useful when original features should handle marginal effects and HUGIML should contribute interaction/compound-region features. |
+| `"original_plus_interactions"` | Original features plus only `L > 1` mined patterns | Useful when original features should handle marginal effects and HUGIML should contribute interaction/compound-region features only. |
 
 ```python
 from hugiml import HUGIMLClassifierNative
 
 # Backward-compatible default: pattern matrix only
-clf = HUGIMLClassifierNative(
-    B=10,
-    L=2,
-    G=1e-2,
-    topK=150,
-    adaptive_binning=True,
-    feature_mode="patterns_only",
-)
+clf = HUGIMLClassifierNative(B=10, L=2, G=1e-2, topK=150,
+                              adaptive_binning=True, feature_mode="patterns_only")
 
 # Hybrid: original features + all binary HUGIML patterns
-clf_hybrid_all = HUGIMLClassifierNative(
-    B=10,
-    L=2,
-    G=1e-2,
-    topK=150,
-    adaptive_binning=True,
-    feature_mode="original_plus_patterns",
-)
+clf_hybrid = HUGIMLClassifierNative(B=10, L=2, G=1e-2, topK=150,
+                                    adaptive_binning=True, feature_mode="original_plus_patterns")
 
 # Hybrid: original features + higher-order/interaction patterns only
-clf_hybrid_interactions = HUGIMLClassifierNative(
-    B=10,
-    L=2,
-    G=1e-2,
-    topK=150,
-    adaptive_binning=True,
-    feature_mode="original_plus_interactions",
+clf_interactions = HUGIMLClassifierNative(B=10, L=2, G=1e-2, topK=150,
+                                          adaptive_binning=True,
+                                          feature_mode="original_plus_interactions")
+```
+
+`transform(X)` always returns the HUGIML binary pattern matrix, regardless of `feature_mode`. The feature mode only changes the matrix passed to the downstream estimator inside `fit()`, `predict()`, `predict_proba()`, and `score()`.
+
+For hybrid modes, HUGIML standardizes numeric original features internally before concatenating them with the sparse binary pattern matrix and any active augmented-pair columns. `feature_importances()`, `model_summary()`, and `get_model_composition()` report the downstream feature representation, while `get_hug_features()` and `get_pattern_info()` remain pattern-only APIs.
+
+---
+
+## Hyperparameter Search
+
+HUGIML provides a fast cached tuning path for adaptive-binning grids. When `adaptive_binning=True`, the full binning and transaction construction phase runs once per unique `(G, L, topK)` combination; subsequent candidates that vary only `feature_mode` reuse the cached artefacts and skip re-mining.
+
+### `tune()` — cross-validated search with automatic fast path
+
+```python
+result = HUGIMLClassifierNative.tune(
+    X, y,
+    cv=5,
+    shuffle=True,
+    random_state=42,
+    scoring="roc_auc",
+    refit=True,
+)
+
+print(result.best_params_)
+print(f"CV score: {result.best_score_:.4f}")
+print(f"Fast path used: {result.fast_path_used_}")
+
+best_model = result.best_estimator_
+```
+
+A custom grid is supplied via `param_grid`. Only `G`, `L`, `topK`, and `feature_mode` may vary; `B` may appear but is ignored when `adaptive_binning=True`.
+
+```python
+grid = {
+    "G":            [1e-3, 1e-2],
+    "L":            [1, 2],
+    "topK":         [30, 50],
+    "feature_mode": ["patterns_only", "original_plus_patterns"],
+}
+
+result = HUGIMLClassifierNative.tune(
+    X, y,
+    param_grid=grid,
+    base_params={"adaptive_binning": True},
+    cv=3,
+    scoring="roc_auc",
+    refit=True,
 )
 ```
 
-`transform(X)` always returns the HUGIML binary pattern matrix, regardless of `feature_mode` or augmented-pair settings. The feature mode and augmented-pair settings only change the matrix passed to the downstream estimator inside `fit()`, `predict()`, `predict_proba()`, and `score()`.
+### `fast_grid_tune()` — single-split cached path for custom CV loops
 
-For hybrid modes, HUGIML standardizes numeric original features internally before concatenating them with the sparse binary pattern matrix and any active augmented-pair columns. `feature_importances()`, `model_summary()`, and `get_model_composition()` report the downstream feature representation used by the fitted model, while `get_hug_features()` and `get_pattern_info()` remain pattern-only APIs.
+```python
+tune_result = HUGIMLClassifierNative.fast_grid_tune(
+    X_train, y_train,
+    X_val,   y_val,
+    param_grid=grid,
+    base_params={"adaptive_binning": True},
+    scoring="roc_auc",
+    refit_full=False,
+)
+
+print(tune_result["best_params"])
+print(f"Validation score: {tune_result['best_score']:.4f}")
+```
+
+---
+
+## Governance Studio Dashboard
+
+The **HUGIML Governance Studio** is a multi-view Streamlit application that provides audit-ready evidence for interpretable model review.
+
+### Launch
+
+```bash
+# Installed console script (recommended)
+hugiml-dashboard
+
+# Direct Streamlit invocation
+streamlit run src/hugiml/dashboard/app.py
+
+# With custom CV folds and random seed
+hugiml-dashboard -- --cv 5 --random-state 42
+```
+
+### Evidence views
+
+| View | What it shows |
+|---|---|
+| **Overview** | Dataset summary, best CV score, feature mode, top patterns |
+| **Validation** | Per-fold performance metrics and calibration |
+| **Representation Audit** | Complexity budget, feature-family provenance, original vs pattern vs augmented |
+| **Pattern Inventory** | Full pattern table with coefficients, support, utility, and information gain |
+| **Case Review** | Per-row predictions, probability, and active pattern explanations |
+| **Data Quality & Policy** | Feature-level missingness rates and sensitive/proxy column review |
+| **Configuration Comparison** | Side-by-side CV performance across `feature_mode` variants |
+| **Representation Pruning** | Remove original features or downstream representation columns and re-evaluate |
+| **Monitoring** | PSI and KL-divergence drift signals across features |
+
+### Data sources
+
+- **Demo dataset** — built-in credit-risk dataset; no upload required.
+- **Upload** — CSV, TSV, Excel (.xlsx/.xls), or Parquet. Define target column, ID column, excluded columns, sensitive columns, and positive label from the sidebar.
+
+### Demo preview
+
+- [Open the HUGIML Governance Studio Demo](https://srikumar2050.github.io/hugiml-core/hugiml_governance_studio_demo.html)
+
+### Installation
+
+```bash
+pip install "hugiml-core[dashboard]"
+```
 
 ---
 
@@ -298,9 +316,7 @@ glucose * bmi
 abs(age - duration)
 ```
 
-They are considered when `L > 1`, `adaptive_binning=True`, and `augmented_pair_transforms=True` (the default). They are appended only to the downstream estimator; the mined HUG pattern matrix and `transform(X)` remain pattern-space APIs.
-
-Use augmented-pair features when validation suggests that numeric interactions carry signal that is not captured compactly by ordinary HUG patterns alone. For strict fitted-feature budgets, set `topk_budget_strict=True` so original features, HUG patterns, and augmented-pair features compete within one global `topK` budget.
+They are active when `L > 1`, `adaptive_binning=True`, and `augmented_pair_transforms=True` (the default). They are appended only to the downstream estimator; the mined HUG pattern matrix and `transform(X)` remain pattern-space APIs.
 
 ```python
 clf = HUGIMLClassifierNative(
@@ -319,13 +335,86 @@ print(clf.get_model_composition())
 print(clf.explain_augmented_pair_effects())
 ```
 
-For selected pair features, HUGIML reports the raw formula, standardized formula, observed-row coverage, missing-pair policy, and raw-scale coefficient interpretation. Pattern-only review remains available through `get_hug_features()` and `get_pattern_info()`.
+For selected pair features, HUGIML reports the raw formula, standardized formula, observed-row coverage, missing-pair policy, and raw-scale coefficient interpretation.
 
 ---
 
-## Model Explanation Dashboard
+## Adaptive Binning
 
-The explanation dashboard is available directly from a fitted model:
+The global `B` parameter controls how many quantile bins each numerical feature is discretised into. Adaptive binning selects the optimal bin count per feature via supervised information-gain search and elbow stopping.
+
+```python
+from hugiml.adaptive import HUGIMLAdaptive
+
+clf = HUGIMLAdaptive(b_candidates=[3, 5, 7, 10, 15], L=2, G=1e-2)
+
+X_enc, y_enc = clf.prepareXy(X_df, y)
+clf.fit(X_tr, y_tr)
+
+print(clf.per_feature_b_)
+clf.plot_bin_profiles()
+clf.ig_heatmap()
+```
+
+Alternatively, enable adaptive binning directly on `HUGIMLClassifierNative`:
+
+```python
+from hugiml import HUGIMLClassifierNative
+
+clf = HUGIMLClassifierNative(
+    adaptive_binning=True,
+    b_candidates=[3, 5, 7, 10],
+    min_marginal_gain_ratio=0.02,
+)
+```
+
+**How it works:** for each numerical feature, HUGIML evaluates information gain at candidate `B` values and stops when the marginal gain falls below `min_marginal_gain_ratio × current_IG`. This prevents blindly selecting the maximum bin count.
+
+---
+
+## Missing Value Handling
+
+HUGIML treats NaN and Inf values as **not observed** — no imputation and no special parameter are required.
+
+**How it works:** numerical columns are pre-binned at fit time. Non-finite cells become `np.nan` in the label array, and the C++ transaction builder skips them. The corresponding item is absent from the transaction. Patterns requiring that feature do not fire for that row.
+
+```python
+import numpy as np
+from hugiml import HUGIMLClassifierNative
+
+X_train.iloc[5, 2] = np.nan
+
+clf = HUGIMLClassifierNative(B=5, L=2, G=1e-4)
+clf.fit(X_train, y_train)
+
+X_test.iloc[0, 0] = np.nan
+proba = clf.predict_proba(X_test)       # scored using available feature items
+```
+
+### Mining Patterns About Missingness
+
+To mine patterns that involve missingness (e.g., `Glucose_MISSING=1 AND HeartRate=[110,140]`), add binary missingness indicators as preprocessing features:
+
+```python
+def add_missingness_indicators(X, threshold=0.05):
+    X_aug = X.copy()
+    for col in X.columns:
+        if X[col].isna().mean() > threshold:
+            X_aug[f"{col}__MISSING"] = X[col].isna().astype(int)
+    return X_aug
+
+X_with_indicators = add_missingness_indicators(X_raw)
+clf = HUGIMLClassifierNative(B=7, L=2, G=1e-4)
+clf.fit(X_with_indicators, y)
+```
+
+The Governance Studio **Data Quality & Policy** view shows feature-level missingness rates alongside sensitive column review.
+
+---
+
+## Model Explanation and Visualisations
+
+### Interactive Plotly dashboard
 
 ```python
 from hugiml.plots import HUGPlotter
@@ -345,40 +434,52 @@ plotter.plot_feature_importance(top_n=15).show()
 plotter.plot_active_patterns(X_test, sample_idx=0).show()
 ```
 
-Each profile panel shows the learned bin/pattern behavior for a feature: utility or coefficient-like contribution per bin, with support overlay where available. Positive values signal the target class; negative values signal the complementary class.
+Each profile panel shows the learned bin/pattern behavior for a feature: utility or coefficient-like contribution per bin, with support overlay where available.
 
 Existing example dashboards:
 
-**public tabular benchmark classification**  
+**Public tabular benchmark classification**
 ![Feature shape profiles — public tabular benchmark](docs/images/explanation_dashboard_bc.png)
 
-**Credit risk scoring**  
+**Credit risk scoring**
 ![Feature shape profiles — credit risk](docs/images/explanation_dashboard_credit.png)
+
+- [Open the HUGIML Benchmark Analysis Dashboard](https://srikumar2050.github.io/hugiml-core/hugiml_benchmark_analysis_dashboard.html)
+
+### Profile visualisations
+
+```python
+plotter.plot_marginal_bin_profile("age", X=X_test).show()  # EBM-style 1-D shape function
+plotter.plot_feature_combinations("age").show()             # Feature-combination view
+plotter.plot_top_patterns(top_n=20).show()                  # Top patterns by importance
+plotter.plot_active_patterns(X_test, sample_idx=0).show()   # Local explanation for one sample
+```
 
 ---
 
-## Profile Visualisations
+## Pattern Pruning
+
+In regulated domains, analysts often need to remove patterns that reference protected attributes, have high PSI, or are operationally invalid. HUGIML provides a controlled editing workflow with a JSON audit trail.
 
 ```python
-from hugiml.plots import HUGPlotter
+from hugiml.pruning import PatternEditor
 
-plotter = HUGPlotter(clf)
+editor = PatternEditor(clf, operator_name="risk-team")
 
-# EBM-style 1-D shape function: utility per bin + support overlay
-plotter.plot_marginal_bin_profile("age", X=X_test).show()
+print(editor.list_patterns().head(10))
 
-# Feature-combination view for compound patterns
-plotter.plot_feature_combinations("age").show()
+editor.remove([3, 7], reason="references protected attribute 'gender'")
+editor.remove_by_keyword("postcode", reason="high PSI — unstable feature")
+editor.remove_low_support(min_support=0.01, reason="noise patterns")
 
-# Top patterns by importance
-plotter.plot_top_patterns(top_n=20).show()
+editor.refit(X_tr, y_tr)
+editor.calibrate(X_cal, y_cal, method="isotonic")
 
-# Local explanation for one sample
-plotter.plot_active_patterns(X_test, sample_idx=0).show()
-
-# Full interactive dashboard
-plotter.plot_dashboard(X_test, dataset_name="Dataset", output_path="dashboard.html")
+new_clf = editor.finalize()
+print(editor.audit_report())
 ```
+
+The **Representation Pruning** view in the Governance Studio provides an interactive version of this workflow without writing code.
 
 ---
 
@@ -411,142 +512,12 @@ top-10 : 54.7%
 
 ---
 
-## Pattern Pruning: Regulated Editing Workflow
-
-In regulated domains, analysts often need to remove patterns that reference protected attributes, have high PSI, or are operationally invalid. HUGIML provides an EBM-inspired controlled editing workflow with a JSON audit trail.
-
-```python
-from hugiml.pruning import PatternEditor
-
-editor = PatternEditor(clf, operator_name="risk-team")
-
-print(editor.list_patterns().head(10))
-
-editor.remove([3, 7], reason="references protected attribute 'gender'")
-editor.remove_by_keyword("postcode", reason="high PSI — unstable feature")
-editor.remove_low_support(min_support=0.01, reason="noise patterns")
-
-editor.refit(X_tr, y_tr)
-editor.calibrate(X_cal, y_cal, method="isotonic")
-
-new_clf = editor.finalize()
-print(editor.audit_report())
-```
-
----
-
-## Adaptive Binning
-
-The global `B` parameter controls how many quantile bins each numerical feature is discretised into. Choosing one `B` for all features can miss the optimal resolution for informative features or over-fragment noisy ones.
-
-`HUGIMLAdaptive` selects the optimal bin count **per feature** via supervised entropy/information-gain search with elbow stopping.
-
-```python
-from hugiml.adaptive import HUGIMLAdaptive
-
-clf = HUGIMLAdaptive(
-    b_candidates=[3, 5, 7, 10, 15],
-    L=2,
-    G=1e-2,
-)
-
-X_enc, y_enc = clf.prepareXy(X_df, y)
-clf.fit(X_tr, y_tr)
-
-print(clf.per_feature_b_)
-clf.plot_bin_profiles()
-clf.ig_heatmap()
-```
-
-Alternatively, enable adaptive binning directly on `HUGIMLClassifierNative`:
-
-```python
-from hugiml import HUGIMLClassifierNative
-
-clf = HUGIMLClassifierNative(
-    B=10,                              # upper bound
-    adaptive_binning=True,
-    b_candidates=[3, 5, 7, 10],
-    min_marginal_gain_ratio=0.02,       # elbow threshold
-)
-```
-
-**How it works:** for each numerical feature, HUGIML evaluates information gain at candidate `B` values and stops when the marginal gain falls below `min_marginal_gain_ratio × current_IG`. This prevents blindly selecting the maximum bin count.
-
-**NaN handling:** adaptive pre-binning treats non-finite cells as `np.nan`, consistent with native missing-value handling.
-
----
-
-## Missing Value Handling
-
-HUGIML v1.1.0 treats NaN and Inf values as **not observed** — no imputation and no special parameter are required.
-
-**How it works:** numerical columns are pre-binned at fit time. Non-finite cells become `np.nan` in the label array, and the C++ transaction builder skips them. The corresponding item is absent from the transaction. Patterns requiring that feature do not fire for that row.
-
-```python
-import numpy as np
-from hugiml import HUGIMLClassifierNative
-
-X_train.iloc[5, 2] = np.nan
-
-clf = HUGIMLClassifierNative(B=5, L=2, G=1e-4)
-clf.fit(X_train, y_train)
-
-X_test.iloc[0, 0] = np.nan
-proba = clf.predict_proba(X_test)       # scored using available feature items
-```
-
-This differs from median/mean imputation: HUGIML does not fabricate replacement values. It also differs from row dropping: incomplete rows remain usable.
-
-See the benchmark section below for missing-value robustness.
-
-### Mining Patterns About Missingness
-
-In healthcare and finance, **absence of data is often informative**, a missing
-critical lab may indicate the patient was too unstable for testing, or a missing
-field in a credit application may signal intentional concealment.
-
-To mine patterns that **involve** missingness (e.g., `Glucose_MISSING=1 AND HeartRate=[110,140]`),
-add binary missingness indicators as preprocessing features:
-
-```python
-def add_missingness_indicators(X, threshold=0.05):
-    X_aug = X.copy()
-    for col in X.columns:
-        if X[col].isna().mean() > threshold:
-            X_aug[f"{col}__MISSING"] = X[col].isna().astype(int)
-    return X_aug
-
-# Usage
-X_with_indicators = add_missingness_indicators(X_raw)
-clf = HUGIMLClassifierNative(B=7, L=2, G=1e-4)  
-clf.fit(X_with_indicators, y)
-
-# Extract missingness-related patterns
-all_patterns = clf.get_hug_features()
-missing_patterns = [p for p in all_patterns if '__MISSING' in p]
-
-# Example patterns discovered:
-# ['Glucose__MISSING=1 AND Age=[50,65] AND EmergencyAdmit=1',
-#  'Troponin__MISSING=1 AND HeartRate=[110,140]',
-#  'CurrentDebt__MISSING=1 AND Income=low']
-```
-
-**Note:** Apply the same `add_missingness_indicators()` transformation to test/production data. Use `sklearn.pipeline.Pipeline` with `FunctionTransformer` to ensure consistency.
-
----
-
-## Multiclass, Imbalanced Data, High-Cardinality Categoricals
+## Multiclass, Imbalanced Data, High-Cardinality
 
 ### Multiclass Classification
 
 ```python
-from hugiml.multiclass import (
-    MulticlassHUGReport,
-    make_imbalanced_pipeline,
-    encode_high_cardinality,
-    apply_encoding,
-)
+from hugiml.multiclass import MulticlassHUGReport
 
 report = MulticlassHUGReport(clf)
 print(report.importances_for_class(class_label=2, top_n=10))
@@ -557,133 +528,41 @@ print(report.summary())
 
 ```python
 from hugiml.multiclass import make_imbalanced_pipeline
+
 clf_bal = make_imbalanced_pipeline(clf_proto, strategy="smote")
 clf_bal.fit(X_tr, y_tr)
 ```
 
 ### High-Cardinality Categorical Reduction
 
-When categorical features have hundreds or thousands of unique values (ZIP codes, ICD-10 diagnoses, merchant IDs), the pattern mining engine faces combinatorial explosion and dramatically slower mining. To reduce cardinality while **preserving discriminative signal**, group rare categories as '__OTHER__':
+When categorical features have hundreds or thousands of unique values (ZIP codes, ICD-10 diagnoses, merchant IDs), grouping rare categories prevents combinatorial explosion in pattern mining:
 
 ```python
 def reduce_high_cardinality(X, y, threshold=50, min_frequency=0.01):
-    """Group rare categories (<min_frequency) as '__OTHER__' for high-cardinality columns"""
+    """Group rare categories (<min_frequency) as '__OTHER__' for high-cardinality columns."""
     X_reduced = X.copy()
-    
-    for col in X.select_dtypes(include=['object', 'category']).columns:
+    for col in X.select_dtypes(include=["object", "category"]).columns:
         if X[col].nunique() <= threshold:
-            continue  # Skip low-cardinality columns
-        
-        # Compute frequency per category
+            continue
         value_counts = X[col].value_counts()
         min_count = len(X) * min_frequency
-        
-        # Map rare categories to '__OTHER__'
         rare_categories = value_counts[value_counts < min_count].index
         X_reduced[col] = X[col].apply(
-            lambda x: '__OTHER__' if x in rare_categories else x
+            lambda x: "__OTHER__" if x in rare_categories else x
         )
-    
     return X_reduced
 
-# Usage
 X_reduced = reduce_high_cardinality(X_raw, y, threshold=50, min_frequency=0.01)
 clf = HUGIMLClassifierNative(B=7, L=2, G=1e-4)
 clf.fit(X_reduced, y)
 
-# Example: 10,000 ZIP codes → ~100 frequent ZIPs + '__OTHER__'
-# Patterns: "ZIP_CODE=10001 AND Income=low" or "ZIP_CODE=__OTHER__ AND CreditScore=[600,650]"
-
-# Or use existing utility (basic target encoding):
+# Or use built-in target encoding:
 from hugiml.multiclass import encode_high_cardinality, apply_encoding
 X_enc, enc_map = encode_high_cardinality(X_tr, y_tr, threshold=20, method="target_mean")
 X_te_enc = apply_encoding(X_te, enc_map)
 ```
 
-**Note:** Learn category groupings on training data only, then apply the same mapping to test/production data. Use a custom sklearn transformer or save the learned `rare_categories` mapping separately to ensure consistency.
-
----
-
-## Benchmark Suite
-
-Reproduce paper claims or benchmark on your own datasets:
-
-```bash
-# Run full CV comparison
-python -m hugiml.benchmarks.runner
-
-# Specific datasets
-python -m hugiml.benchmarks.runner --datasets german_credit pima adult
-
-# Save results
-python -m hugiml.benchmarks.runner --output benchmarks/results/
-```
-
-Or use the installed console script:
-
-```bash
-hugiml-bench --datasets german_credit --output results/
-```
-
-Worked notebooks in [`notebooks/`](notebooks/) are organized as 12 self-contained folders. Each folder includes an `.ipynb` notebook and, where available, matching `.py`, `.html`, data, and metadata artifacts.
-
-| Folder | Notebook | Brief description |
-|---|---|---|
-| [`00_quickstart`](notebooks/00_quickstart/) | [`nb00_pattern_explanation_walkthrough.ipynb`](notebooks/00_quickstart/nb00_pattern_explanation_walkthrough.ipynb) | Quick end-to-end walkthrough of fitting HUGIML, extracting patterns, and reading pattern-level explanations. |
-| [`01_benchmark_baselines`](notebooks/01_benchmark_baselines/) | [`nb01_benchmark_baselines.ipynb`](notebooks/01_benchmark_baselines/nb01_benchmark_baselines.ipynb) | Benchmark comparison across HUGIML and common tabular baselines such as XGBoost, LightGBM, Random Forest, and logistic regression. |
-| [`02_hug_vs_ebm`](notebooks/02_hug_vs_ebm/) | [`nb02_hug_vs_ebm.ipynb`](notebooks/02_hug_vs_ebm/nb02_hug_vs_ebm.ipynb) | Side-by-side comparison of HUGIML pattern profiles and EBM-style additive shape functions. |
-| [`03_modeling_special_cases`](notebooks/03_modeling_special_cases/) | [`nb03_modeling_special_cases.ipynb`](notebooks/03_modeling_special_cases/nb03_modeling_special_cases.ipynb) | Practical modeling cases including multiclass targets, imbalance, high-cardinality categoricals, adaptive binning, and pruning workflows. |
-| [`04_credit_risk`](notebooks/04_credit_risk/) | [`nb04_credit_risk.ipynb`](notebooks/04_credit_risk/nb04_credit_risk.ipynb) | Credit-risk governance example using German Credit-style data, scorecard-style features, and auditable risk patterns. |
-| [`05_aml`](notebooks/05_aml/) | [`nb05_aml.ipynb`](notebooks/05_aml/nb05_aml.ipynb) | Anti-money-laundering example focused on suspicious transaction pattern discovery and model review artifacts. |
-| [`06_mobile_money`](notebooks/06_mobile_money/) | [`nb06_mobile_money_fraud.ipynb`](notebooks/06_mobile_money/nb06_mobile_money_fraud.ipynb) | Mobile-money fraud example showing compact transaction-risk patterns and operational fraud-review signals. |
-| [`07_basel_ca`](notebooks/07_basel_ca/) | [`nb07_basel_ca.ipynb`](notebooks/07_basel_ca/nb07_basel_ca.ipynb) | Basel capital-adequacy oriented example for regulated risk analytics and explainable model validation. |
-| [`08_clinical`](notebooks/08_clinical/) | [`nb08_healthcare_breast_cancer.ipynb`](notebooks/08_clinical/nb08_healthcare_breast_cancer.ipynb) | Clinical classification example using breast-cancer features to demonstrate interpretable healthcare pattern explanations. |
-| [`09_insurance`](notebooks/09_insurance/) | [`nb09_insurance_underwriting.ipynb`](notebooks/09_insurance/nb09_insurance_underwriting.ipynb) | Insurance underwriting example with risk-selection patterns and model-card-friendly feature narratives. |
-| [`10_medicare`](notebooks/10_medicare/) | [`nb10_medicare_program_integrity.ipynb`](notebooks/10_medicare/nb10_medicare_program_integrity.ipynb) | Medicare program-integrity example for suspicious provider/claim behavior and audit-ready pattern summaries. |
-| [`11_workforce_analytics`](notebooks/11_workforce_analytics/) | [`nb11_workforce_attrition.ipynb`](notebooks/11_workforce_analytics/nb11_workforce_attrition.ipynb) | Workforce attrition analytics example showing HR risk patterns, explanation tables, and governance-oriented summaries. |
-
-### Observed results: public benchmark snapshot
-
-![Benchmark comparison](docs/images/benchmark_comparison.png)
-
-> The shipped benchmark runner supports multiple public datasets; the top validation visuals above emphasize healthcare and credit-risk examples.
-
-| Model | AUC (mean±std) | Fit time/fold | Complexity budget | Remarks |
-|---|---:|---:|---|---|
-| HUG B=3 | 0.9907 ± 0.0031 | 0.32 s | **topK** patterns | `topK` is an explicit cap; actual mined patterns can be lower. |
-| HUG B=5 | 0.9909 ± 0.0028 | 0.34 s | **topK** patterns | More bins per feature. |
-| HUG adaptive | 0.9954 ± 0.0022 | 1.20 s | **topK** patterns | Per-feature B increases fit time. |
-| EBM | 0.9940 ± 0.0025 | 11.0 s | Additive terms + interactions | Reference interpretable baseline. |
-| XGBoost | 0.9882 ± 0.0040 | 0.12 s | Trees × leaves | High-performing ensemble; not directly pattern-interpretable. |
-| LightGBM | 0.9921 ± 0.0028 | 0.07 s | Leaves × trees | Fast histogram boosting. |
-
-### Complexity budget
-
-The number of downstream features passed to the logistic regression (D) depends on `L`, `feature_mode`, and `augmented_pair_transforms`. Notation: **K** = `topK`, **k** = patterns actually mined (≤ K), **k\_aug** = augmented pair features mined (≤ K; ≈ k when the dataset has enough feature pairs), **p** = number of original input features.
-
-| L | `feature_mode` | `augmented_pair_transforms` | D |
-|---|---|---|---|
-| L = 1 | `patterns_only` | — *(no effect at L=1)* | `k` |
-| L = 1 | `original_plus_patterns` | — *(no effect at L=1)* | `k + p` |
-| L > 1 | `patterns_only` | `False` | `k` |
-| L > 1 | `patterns_only` | `True` | `k + k_aug ≈ 2k` |
-| L > 1 | `original_plus_patterns` | `False` | `k + p` |
-| L > 1 | `original_plus_patterns` | `True` | `k + k_aug + p ≈ 2k + p` |
-
-> **Note — `topk_budget_strict = True`.** When enabled, all feature families are assembled first (giving D as above), then a single global information-gain filter scores every downstream feature and retains the best K. The surviving mix of patterns, augmented pairs, and originals is entirely data-driven — whichever feature types carry the highest information gain fill the K slots. D is hard-capped at K; the formulas above give the uncapped ceiling.
-
-### Missing value robustness
-
-![Missing value benchmark](docs/images/missing_value_benchmark.png)
-
-Simulation setup: Wine dataset, 3-fold stratified CV, missing rates 0–40%, mechanisms MCAR, MAR, and MNAR.
-
-**Observations:**
-
-- HUGIML fit time can decrease with more missing data because the transaction miner processes shorter transactions.
-- Tree models often route missing values through learned default directions.
-- Imputation-based pipelines may learn artifacts when the imputed distribution is stable in train/test but shifts in deployment.
-- HUGIML’s “no item” semantics give interpretable absence: a pattern simply does not fire if one of its features is unavailable.
+**Note:** Learn category groupings on training data only, then apply the same mapping to test/production data.
 
 ---
 
@@ -698,6 +577,21 @@ print(clf.monitor.report())
 
 report = clf.detect_drift(X_new, current_labels=y_new)
 print(report)
+```
+
+The **Monitoring** view in the Governance Studio shows PSI and KL-divergence drift signals per feature from the fitted model's training baseline.
+
+---
+
+## Calibration
+
+```python
+from hugiml.calibration import evaluate_calibration
+
+result = evaluate_calibration(y_te.values, proba[:, 1])
+
+print(f"ECE: {result.ece:.4f}")
+print(f"Brier: {result.brier_score:.4f}")
 ```
 
 ---
@@ -733,18 +627,172 @@ card.save("model_card.json")
 
 Model cards should include top positive/negative patterns, missing-value behavior, calibration metrics, drift-monitoring plan, and any pattern-pruning audit trail.
 
+The **Governance Studio dashboard** provides interactive governance evidence views that complement programmatic model cards with visual audit artifacts.
+
 ---
 
-## Calibration
+## Benchmark Suite
 
-```python
-from hugiml.calibration import evaluate_calibration
+Reproduce paper claims or benchmark on your own datasets:
 
-result = evaluate_calibration(y_te.values, proba[:, 1])
+```bash
+# Run full CV comparison
+python -m hugiml.benchmarks.runner
 
-print(f"ECE: {result.ece:.4f}")
-print(f"Brier: {result.brier_score:.4f}")
+# Specific datasets
+python -m hugiml.benchmarks.runner --datasets german_credit pima adult
+
+# Save results
+python -m hugiml.benchmarks.runner --output benchmarks/results/
 ```
+
+Or use the installed console script:
+
+```bash
+hugiml-bench --datasets german_credit --output results/
+```
+
+### Scalability dashboard
+
+For runtime and memory scaling evidence, see the static scalability dashboard:
+
+- [Open the HUGIML Scalability Dashboard](https://srikumar2050.github.io/hugiml-core/hugiml_scalability_dashboard.html)
+
+The dashboard summarizes measured fit time, prediction latency, memory delta, pattern counts, and test AUC against XGBoost and LightGBM. It covers sample-size scaling, feature-count scaling, and parameter sweeps over `B`, `G`, `topK`, `L`, and adaptive binning. HUGIML retains many training and test artifacts to support governance and audit requirements. 
+
+Worked notebooks in [`notebooks/`](notebooks/) are organized as 12 self-contained folders:
+
+| Folder | Notebook | Brief description |
+|---|---|---|
+| [`00_quickstart`](notebooks/00_quickstart/) | [`nb00_pattern_explanation_walkthrough.ipynb`](notebooks/00_quickstart/nb00_pattern_explanation_walkthrough.ipynb) | Quick end-to-end walkthrough of fitting HUGIML, extracting patterns, and reading pattern-level explanations. |
+| [`01_benchmark_baselines`](notebooks/01_benchmark_baselines/) | [`nb01_benchmark_baselines.ipynb`](notebooks/01_benchmark_baselines/nb01_benchmark_baselines.ipynb) | Benchmark comparison across HUGIML and common tabular baselines such as XGBoost, LightGBM, Random Forest, and logistic regression. |
+| [`02_hug_vs_ebm`](notebooks/02_hug_vs_ebm/) | [`nb02_hug_vs_ebm.ipynb`](notebooks/02_hug_vs_ebm/nb02_hug_vs_ebm.ipynb) | Side-by-side comparison of HUGIML pattern profiles and EBM-style additive shape functions. |
+| [`03_modeling_special_cases`](notebooks/03_modeling_special_cases/) | [`nb03_modeling_special_cases.ipynb`](notebooks/03_modeling_special_cases/nb03_modeling_special_cases.ipynb) | Practical modeling cases including multiclass targets, imbalance, high-cardinality categoricals, adaptive binning, and pruning workflows. |
+| [`04_credit_risk`](notebooks/04_credit_risk/) | [`nb04_credit_risk.ipynb`](notebooks/04_credit_risk/nb04_credit_risk.ipynb) | Credit-risk governance example using German Credit-style data, scorecard-style features, and auditable risk patterns. |
+| [`05_aml`](notebooks/05_aml/) | [`nb05_aml.ipynb`](notebooks/05_aml/nb05_aml.ipynb) | Anti-money-laundering example focused on suspicious transaction pattern discovery and model review artifacts. |
+| [`06_mobile_money`](notebooks/06_mobile_money/) | [`nb06_mobile_money_fraud.ipynb`](notebooks/06_mobile_money/nb06_mobile_money_fraud.ipynb) | Mobile-money fraud example showing compact transaction-risk patterns and operational fraud-review signals. |
+| [`07_basel_ca`](notebooks/07_basel_ca/) | [`nb07_basel_ca.ipynb`](notebooks/07_basel_ca/nb07_basel_ca.ipynb) | Basel capital-adequacy oriented example for regulated risk analytics and explainable model validation. |
+| [`08_clinical`](notebooks/08_clinical/) | [`nb08_healthcare_breast_cancer.ipynb`](notebooks/08_clinical/nb08_healthcare_breast_cancer.ipynb) | Clinical classification example using breast-cancer features to demonstrate interpretable healthcare pattern explanations. |
+| [`09_insurance`](notebooks/09_insurance/) | [`nb09_insurance_underwriting.ipynb`](notebooks/09_insurance/nb09_insurance_underwriting.ipynb) | Insurance underwriting example with risk-selection patterns and model-card-friendly feature narratives. |
+| [`10_medicare`](notebooks/10_medicare/) | [`nb10_medicare_program_integrity.ipynb`](notebooks/10_medicare/nb10_medicare_program_integrity.ipynb) | Medicare program-integrity example for suspicious provider/claim behavior and audit-ready pattern summaries. |
+| [`11_workforce_analytics`](notebooks/11_workforce_analytics/) | [`nb11_workforce_attrition.ipynb`](notebooks/11_workforce_analytics/nb11_workforce_attrition.ipynb) | Workforce attrition analytics example showing HR risk patterns, explanation tables, and governance-oriented summaries. |
+
+---
+
+## Validation Highlights
+
+> The finance panels use German Credit / HELOC-style risk features such as loan duration, credit amount, checking status, and repayment-risk signals. The healthcare panels use Pima diabetes-style features such as glucose, BMI, pregnancies, pedigree, and age.
+
+### HUGIML vs EBM shape profiles
+
+<p align="left">
+  <img src="docs/images/shape-profiles-hugiml-vs-ebm.png" alt="HUGIML native shape profiles compared with EBM shape functions" width="700"  height="300">
+</p>
+
+EBM is excellent for smooth effect inspection; HUGIML is strong when the explanation needs to be reviewed as a set of readable thresholds and pattern contributions.
+
+### Real-world and synthetic benchmarks
+
+<p align="left">
+  <img src="docs/images/realworld-credit-risk-benchmark.png" alt="Real-world credit risk benchmark comparing HUGIML, LR, XGBoost, LightGBM, Random Forest, and EBM" width="800">
+</p>
+
+<p align="left">
+  <img src="docs/images/synthetic-nonmonotonic-benchmark.png" alt="Synthetic non-monotonic benchmark comparing HUGIML, LR, XGBoost, LightGBM, Random Forest, and EBM" width="800">
+</p>
+
+### Native missing-value handling
+
+<p align="left">
+  <img src="docs/images/native-missing-value-schemes.png" alt="Native missing-value schemes in HUGIML, XGBoost, LightGBM, and EBM" width="760">
+</p>
+
+| Model | Native missing-value behavior | What to monitor |
+|---|---|---|
+| **HUGIML** | Missing numerical values are absent from the transaction. Patterns requiring that feature item do not fire. | Missingness rate and activation frequency of top patterns. |
+| **XGBoost** | Each split learns a default route for missing values. | Whether default-route behavior changes under deployment shift. |
+| **LightGBM** | Histogram splits learn how missing values are routed. | Missing-value routing and feature missingness drift. |
+| **EBM** | Missing values can be modeled as a separate bin/effect. | Size and sign of each missing-bin effect. |
+
+### Adaptive binning
+
+<p align="left">
+  <img src="docs/images/adaptive-binning-impact.png" alt="Adaptive binning benchmark against fixed bin counts" width="700" height="300">
+</p>
+
+Adaptive binning is a safe default when you do not want to tune `B`; fixed `B=5` is a useful fast baseline.
+
+### Pattern explanations
+
+<p align="left">
+  <img src="docs/images/pattern-explanations-real-datasets.png" alt="HUGIML pattern explanations on finance and healthcare datasets" width="760">
+</p>
+
+### Model-card-ready artifacts
+
+<p align="left">
+  <img src="docs/images/model-card-governance.png" alt="Model-card-ready HUGIML explanations" width="760">
+</p>
+
+### Observed benchmark results
+
+![Benchmark comparison](docs/images/benchmark_comparison.png)
+
+| Model | AUC (mean±std) | Fit time/fold | Complexity budget | Remarks |
+|---|---:|---:|---|---|
+| HUG B=3 | 0.9907 ± 0.0031 | 0.32 s | **topK** patterns | `topK` is an explicit cap; actual mined patterns can be lower. |
+| HUG B=5 | 0.9909 ± 0.0028 | 0.34 s | **topK** patterns | More bins per feature. |
+| HUG adaptive | 0.9954 ± 0.0022 | 1.20 s | **topK** patterns | Per-feature B increases fit time. |
+| EBM | 0.9940 ± 0.0025 | 11.0 s | Additive terms + interactions | Reference interpretable baseline. |
+| XGBoost | 0.9882 ± 0.0040 | 0.12 s | Trees × leaves | High-performing ensemble; not directly pattern-interpretable. |
+| LightGBM | 0.9921 ± 0.0028 | 0.07 s | Leaves × trees | Fast histogram boosting. |
+
+### Complexity budget
+
+The number of downstream features passed to the logistic regression (D) depends on `L`, `feature_mode`, and `augmented_pair_transforms`. **K** = `topK`, **k** = patterns actually mined (≤ K), **k_aug** = augmented pair features (≤ K), **p** = number of original input features.
+
+| L | `feature_mode` | `augmented_pair_transforms` | D |
+|---|---|---|---|
+| L = 1 | `patterns_only` | — *(no effect at L=1)* | `k` |
+| L = 1 | `original_plus_patterns` | — *(no effect at L=1)* | `k + p` |
+| L > 1 | `patterns_only` | `False` | `k` |
+| L > 1 | `patterns_only` | `True` | `k + k_aug ≈ 2k` |
+| L > 1 | `original_plus_patterns` | `False` | `k + p` |
+| L > 1 | `original_plus_patterns` | `True` | `k + k_aug + p ≈ 2k + p` |
+
+> **`topk_budget_strict = True`** assembles all feature families first, then applies a single global information-gain filter retaining the best K features. D is hard-capped at K.
+
+### Missing value robustness
+
+![Missing value benchmark](docs/images/missing_value_benchmark.png)
+
+---
+
+## Capabilities Summary
+
+| Capability | Details |
+|---|---|
+| **HUG pattern mining** | C++ accelerated via pybind11; optional OpenMP parallelism |
+| **scikit-learn API** | Full `BaseEstimator` / `ClassifierMixin` compliance |
+| **Mixed feature types** | Integer, float, categorical — auto-detected or explicitly supplied |
+| **Feature modes** | Pattern-only, original-plus-patterns, original-plus-interactions, augmented-pair downstream features |
+| **Fast hyperparameter search** | Cached adaptive-binning grid; mining runs once per unique `(G, L, topK)` group |
+| **Governance Studio** | Multi-view Streamlit dashboard with audit evidence views and upload support |
+| **Profile visualisations** | EBM-style 1-D/2-D HUG profiles, active-pattern explanations, coefficient-support views (Plotly) |
+| **Interpretability metrics** | Pattern count, coverage, overlap, sparsity, top-k cumulative contribution |
+| **Adaptive binning** | Per-feature supervised `B` selection — addresses the B-sensitivity trap |
+| **Pattern pruning** | Regulated remove/refit/calibrate workflow with full JSON audit trail |
+| **Multiclass & imbalance** | Multiclass report, SMOTE/class-weight pipeline, high-cardinality encoding |
+| **Benchmark suite** | Reproducible CV comparison vs EBM, XGBoost, RF, LR, RuleFit, GAM |
+| **Scalability dashboard** | Static runtime, latency, memory, n-scaling, p-scaling, and parameter-sweep evidence vs XGBoost and LightGBM |
+| **Calibration** | ECE, MCE, Brier score, reliability diagram data |
+| **Drift detection** | PSI + symmetric KL divergence + label drift |
+| **Monitoring** | Thread-safe `PredictionMonitor`, latency tracking |
+| **Governance** | Model cards (JSON + Markdown), audit artifacts, SBOM |
+| **Observability** | OpenTelemetry tracing, Prometheus metrics (both optional) |
+| **Secure serialisation** | Allowlist-based `_RestrictedUnpickler`, versioned schema |
+| **Deployment** | FastAPI inference server, Docker image, Kubernetes manifests |
+| **CI/CD** | GitHub Actions: lint → coverage → native tests → wheels → PyPI |
 
 ---
 
@@ -771,7 +819,7 @@ Kubernetes manifests are in [`kubernetes/deployment.yaml`](kubernetes/deployment
 | Workflow | Trigger | What it does |
 |---|---|---|
 | [`ci.yml`](.github/workflows/ci.yml) | Every push / PR | Lint, type-check, coverage gate, native tests, sanitizer build, benchmark regression, wheel build |
-| [`release.yml`](.github/workflows/release.yml) | Git tag `v*.*.*` | Build platform wheels, generate SBOM, publish to PyPI, create GitHub 
+| [`release.yml`](.github/workflows/release.yml) | Git tag `v*.*.*` | Build platform wheels, generate SBOM, publish to PyPI, create GitHub release |
 
 ---
 
@@ -795,14 +843,19 @@ hugiml-core/
 │       ├── pruning.py           Pattern editor + audit trail
 │       ├── adaptive.py          Per-feature adaptive binning
 │       ├── multiclass.py        Multiclass / imbalanced / encoding
+│       ├── dashboard/           Governance Studio Streamlit application
+│       │   ├── app.py           Entry point (hugiml-dashboard console script)
+│       │   ├── runner.py        Model training and scoring helpers
+│       │   ├── components/      Individual evidence-view renderers
+│       │   └── ...
 │       └── benchmarks/          CV comparison suite
-├── notebooks/                   Worked examples
+├── notebooks/                   Worked examples (12 domain folders)
 ├── tests/                       Pytest suite
 ├── benchmarks/                  Micro-benchmarks and regression gate
 ├── docker/                      Dockerfile + FastAPI inference server
 ├── kubernetes/                  Deployment manifests
 ├── scripts/                     Build and utility scripts
-├── docs/                        Documentation and model-card templates
+├── docs/                        Sphinx documentation and model-card templates
 ├── .github/workflows/           CI/CD pipelines
 ├── pyproject.toml
 └── setup.py
@@ -821,7 +874,6 @@ Apache License 2.0 — see [LICENSE](LICENSE).
 If you use hugiml-core in research or commercial work, please cite:
 
 ```bibtex
-
 @article{krishnamoorthy2026interpretability,
   title        = {Interpretability Myopia: Governance Fitness in Financial Risk Models},
   author       = {Krishnamoorthy, Srikumar},

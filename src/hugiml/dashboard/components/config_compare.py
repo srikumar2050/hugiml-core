@@ -1,0 +1,156 @@
+"""Configuration comparison component."""
+
+from __future__ import annotations
+
+from typing import Any
+
+import pandas as pd
+import streamlit as st
+
+from hugiml.dashboard.display import dataframe_for_display
+from hugiml.dashboard.runner import fit_hugiml_config
+
+
+def _family_counts(model: Any, X: pd.DataFrame | None = None) -> dict[str, int]:
+    if model is None:
+        return {"original": 0, "pattern": 0, "augmented": 0, "total": 0}
+
+    meta = getattr(model, "fit_metadata_", None)
+    counts = getattr(meta, "downstream_feature_counts", {}) if meta is not None else {}
+    if not isinstance(counts, dict):
+        counts = {}
+
+    original = int(counts.get("original", len(getattr(model, "feature_names_in_", [])) or (X.shape[1] if X is not None else 0)))
+    pattern = int(counts.get("pattern", len(getattr(model, "patterns_", [])) or len(getattr(model, "raw_patterns_", []))))
+    augmented = int(counts.get("augmented_pair", len(getattr(model, "augmented_pair_transforms_", []))))
+    total = original + pattern + augmented
+    return {"original": original, "pattern": pattern, "augmented": augmented, "total": total}
+
+
+def _result_row(label: str, result: Any, X: pd.DataFrame | None = None) -> dict:
+    model = getattr(result, "best_estimator_", None)
+    counts = _family_counts(model, X)
+    params = getattr(result, "best_params_", {}) or {}
+    return {
+        "run": label,
+        "status": getattr(result, "status_", "ok"),
+        "cv_score": getattr(result, "best_score_", None),
+        "L": params.get("L", getattr(model, "L", None) if model is not None else None),
+        "topK": params.get("topK", getattr(model, "topK", None) if model is not None else None),
+        "G": params.get("G", getattr(model, "G", None) if model is not None else None),
+        "feature_mode": params.get("feature_mode", getattr(model, "feature_mode", None) if model is not None else None),
+        "strict_budget": bool(params.get("topk_budget_strict", getattr(model, "topk_budget_strict", False) if model is not None else False)),
+        "original_features": counts["original"],
+        "pattern_features": counts["pattern"],
+        "augmented_features": counts["augmented"],
+        "displayed_total": counts["total"],
+        "diagnostic": getattr(result, "error_", None),
+    }
+
+
+def _explain_failure(result: Any) -> None:
+    status = getattr(result, "status_", "ok")
+    if status == "ok":
+        return
+
+    message = getattr(result, "error_", "") or ""
+    st.error("Candidate configuration did not produce a fitted model.")
+    if status == "no_patterns":
+        st.warning(
+            "No HUG patterns were mined for this candidate configuration. "
+            "`original_plus_patterns` still requires at least one selected pattern. "
+            "Try lowering `G`, increasing `topK`, using `L=1/2` appropriately, or using `patterns_only` only when patterns are expected."
+        )
+    else:
+        st.warning("The candidate fit failed. See diagnostic details below.")
+
+    with st.expander("Candidate failure diagnostic", expanded=True):
+        st.code(message)
+
+
+def render_config_comparison(ctx: dict, *args, **kwargs) -> None:
+    st.subheader("Configuration Comparison")
+    st.markdown(
+        """
+        <div class="hugiml-section-note">
+          <p>This is a different HUGIML configuration run, not pruning. Strict budget is a supported
+          configuration option and is passed explicitly into the candidate run. If a candidate mines
+          zero patterns, the run is reported as invalid instead of crashing the dashboard.</p>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    base_model = ctx["model"]
+    X = ctx["X"]
+    y = ctx["y"]
+
+    with st.container(border=True):
+        st.markdown("#### Candidate HUGIML configuration")
+        c1, c2, c3 = st.columns(3)
+        L = int(c1.selectbox("L", [1, 2], index=1 if getattr(base_model, "L", 2) == 2 else 0))
+        topK = int(c2.number_input("topK", min_value=1, max_value=500, value=int(getattr(base_model, "topK", 50) or 50), step=5))
+        G = float(c3.selectbox("G", [1e-1, 1e-2, 1e-3, 1e-4], index=1))
+
+        c4, c5 = st.columns([0.7, 0.3])
+        feature_mode = c4.selectbox(
+            "feature_mode",
+            ["patterns_only", "original_plus_patterns", "original_plus_interactions"],
+            index=1,
+        )
+        strict = c5.checkbox(
+            "Strict budget",
+            value=bool(getattr(base_model, "topk_budget_strict", False)),
+            help="Supported HUGIML setting. When enabled, the final representation is constrained to the configured topK budget where applicable.",
+        )
+
+        params = {
+            "adaptive_binning": True,
+            "B": -1,
+            "L": L,
+            "topK": topK,
+            "G": G,
+            "feature_mode": feature_mode,
+            "topk_budget_strict": bool(strict),
+        }
+
+        run = st.button("Fit candidate configuration", type="primary", width="stretch")
+
+    if run:
+        with st.spinner("Fitting candidate configuration..."):
+            result = fit_hugiml_config(
+                X,
+                y,
+                params=params,
+                cv=int(ctx.get("cv", 3)),
+                scoring="roc_auc",
+                random_state=int(ctx.get("random_state", 2026)),
+                raise_on_error=False,
+            )
+            st.session_state["hugiml_config_compare_result"] = result
+
+    candidate = st.session_state.get("hugiml_config_compare_result")
+    if candidate is None:
+        st.info("Fit a candidate configuration to compare it with the current selected model.")
+        return
+
+    _explain_failure(candidate)
+
+    rows = [
+        _result_row("Current selected model", ctx["result"], X),
+        _result_row("Candidate configuration", candidate, X),
+    ]
+    df = pd.DataFrame(rows)
+
+    if df["cv_score"].notna().all():
+        base_score = float(df.loc[0, "cv_score"])
+        cand_score = float(df.loc[1, "cv_score"])
+        df["score_delta_vs_current"] = [0.0, cand_score - base_score]
+
+    st.markdown("#### Comparison")
+    st.dataframe(dataframe_for_display(df), width="stretch", hide_index=True)
+
+    candidate_rows = pd.DataFrame(getattr(candidate, "results_", []))
+    if not candidate_rows.empty:
+        st.markdown("#### Candidate fold / diagnostic evidence")
+        st.dataframe(candidate_rows, width="stretch", hide_index=True)

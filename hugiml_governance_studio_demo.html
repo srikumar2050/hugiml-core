@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>HUGIML Governance Studio Demo</title>
+<style>
+:root{
+  --bg:#f5f7fb;--panel:#ffffff;--panel2:#f9fafb;--ink:#172033;--muted:#667085;--line:#e4e7ec;
+  --brand:#2563eb;--brand2:#06b6d4;--chip:rgba(37,99,235,.10);--heroA:rgba(37,99,235,.20);--heroB:rgba(6,182,212,.15);
+  --good:#027a48;--warn:#b54708;--bad:#b42318;--shadow:0 10px 28px rgba(16,24,40,.08);--radius:16px;
+}
+body[data-theme="forest"]{--brand:#10b981;--brand2:#84cc16;--chip:rgba(16,185,129,.12);--heroA:rgba(16,185,129,.22);--heroB:rgba(132,204,22,.15);--shadow:0 10px 28px rgba(5,122,85,.10)}
+body[data-theme="dark"]{--bg:#0b1020;--panel:#111827;--panel2:#0f172a;--ink:#f8fafc;--muted:#cbd5e1;--line:#334155;--brand:#60a5fa;--brand2:#a78bfa;--chip:rgba(96,165,250,.16);--heroA:rgba(30,41,59,.88);--heroB:rgba(96,165,250,.18);--shadow:0 12px 32px rgba(0,0,0,.35)}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}
+.app{display:grid;grid-template-columns:300px 1fr;min-height:100vh}
+.sidebar{background:var(--panel);border-right:1px solid var(--line);padding:18px;position:sticky;top:0;height:100vh;overflow:auto}
+.main{padding:24px 28px 42px}
+.brand{display:flex;gap:12px;align-items:center;margin-bottom:18px}
+.brandmark{height:38px;width:38px;border-radius:12px;background:linear-gradient(135deg,var(--brand),var(--brand2));display:grid;place-items:center;color:white;font-weight:900}
+.brand h1{font-size:16px;margin:0;line-height:1.1}.brand p{font-size:12px;margin:3px 0 0;color:var(--muted)}
+.group{border:1px solid var(--line);border-radius:14px;padding:12px;margin-bottom:12px;background:var(--panel2)}
+.group h3{margin:0 0 10px;font-size:12px;color:var(--muted);text-transform:uppercase;letter-spacing:.06em}
+.field{margin-bottom:10px}.field label{display:block;font-size:12px;color:var(--muted);margin-bottom:5px}
+select,.fake-input{width:100%;padding:9px 10px;border:1px solid var(--line);border-radius:10px;background:var(--panel);color:var(--ink)}
+select[multiple]{min-height:86px}.fake-input.disabled{opacity:.72;background:var(--panel2);cursor:not-allowed}
+.radio-row{display:flex;gap:7px;flex-wrap:wrap}.pill{border:1px solid var(--line);background:var(--panel);color:var(--ink);border-radius:999px;padding:7px 10px;font-weight:700;font-size:12px;cursor:pointer}
+.pill.active{background:var(--chip);border-color:var(--brand);color:var(--ink)}
+.nav{display:flex;flex-direction:column;gap:5px}.nav button{border:0;background:transparent;color:var(--ink);text-align:left;padding:9px 10px;border-radius:10px;cursor:pointer}
+.nav button.active{background:var(--chip);font-weight:800;color:var(--ink)}
+.hero{background:radial-gradient(circle at 5% 5%,var(--heroA),transparent 34%),radial-gradient(circle at 92% 15%,var(--heroB),transparent 30%),var(--panel);border:1px solid color-mix(in srgb,var(--brand) 30%,var(--line));border-radius:22px;padding:24px 26px;box-shadow:var(--shadow);margin-bottom:18px}
+.hero h2{margin:0 0 8px;font-size:clamp(26px,3vw,38px);letter-spacing:-.04em}.hero p{margin:0;color:var(--muted);max-width:1080px;line-height:1.55}
+.chips{display:flex;gap:8px;flex-wrap:wrap;margin-top:14px}.chip{border:1px solid color-mix(in srgb,var(--brand) 32%,var(--line));background:var(--chip);border-radius:999px;padding:6px 10px;font-weight:750;font-size:12px}
+.section{display:none}.section.active{display:block}.section h2{margin:0 0 10px;font-size:24px;letter-spacing:-.02em}
+.note{border:1px solid var(--line);border-left:5px solid var(--brand);background:linear-gradient(90deg,var(--heroA),transparent),var(--panel);border-radius:13px;padding:12px 14px;margin:8px 0 16px;color:var(--muted);line-height:1.45}
+.grid4{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}.grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}.grid2{display:grid;grid-template-columns:repeat(2,1fr);gap:12px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);padding:14px;box-shadow:var(--shadow)}
+.metric{border-top:4px solid var(--brand);min-height:104px}.metric .label{color:var(--muted);font-size:12px;font-weight:800}.metric .value{font-size:25px;font-weight:900;letter-spacing:-.03em;margin-top:6px}.muted,.small{color:var(--muted);font-size:12px;line-height:1.45}
+.table-wrap{overflow:auto;border:1px solid var(--line);border-radius:12px;background:var(--panel)}table{width:100%;border-collapse:collapse;font-size:13px}th,td{padding:10px 11px;border-bottom:1px solid var(--line);vertical-align:top}th{text-align:left;background:var(--panel2);font-size:12px;color:var(--muted)}tr:last-child td{border-bottom:0}
+.badge{display:inline-block;padding:3px 8px;border-radius:999px;font-size:12px;font-weight:800}.good{background:#ecfdf3;color:#027a48}.blue{background:#eff8ff;color:#175cd3}.warn{background:#fffaeb;color:#b54708}
+body[data-theme="dark"] .good{background:rgba(2,122,72,.22);color:#86efac}body[data-theme="dark"] .blue{background:rgba(37,99,235,.22);color:#bfdbfe}body[data-theme="dark"] .warn{background:rgba(180,83,9,.22);color:#fbbf24}
+.tabs{display:flex;gap:8px;flex-wrap:wrap;margin:10px 0}.tab{border:1px solid var(--line);background:var(--panel);color:var(--ink);border-radius:999px;padding:8px 12px;cursor:pointer;font-weight:750}.tab.active{background:var(--chip);border-color:var(--brand)}
+.tabpane{display:none}.tabpane.active{display:block}
+.upload-panel{border:1px dashed color-mix(in srgb,var(--brand) 45%,var(--line));background:var(--panel);border-radius:14px;padding:12px;margin-top:8px}
+@media(max-width:980px){.app{grid-template-columns:1fr}.sidebar{position:relative;height:auto}.grid4,.grid3,.grid2{grid-template-columns:1fr}.main{padding:18px}}
+</style>
+</head>
+<body data-theme="ocean">
+<div class="app">
+  <aside class="sidebar">
+    <div class="brand"><div class="brandmark">H</div><div><h1>HUGIML Governance Studio</h1><p>Audit evidence workspace</p></div></div>
+
+    <div class="group"><h3>Theme</h3>
+      <div class="radio-row">
+        <button class="pill active" data-theme-btn="ocean">Ocean</button>
+        <button class="pill" data-theme-btn="forest">Forest</button>
+        <button class="pill" data-theme-btn="dark">Dark</button>
+      </div>
+    </div>
+
+    <div class="group"><h3>Data source</h3>
+      <div class="radio-row">
+        <button class="pill active" data-source="demo">Demo</button>
+        <button class="pill" data-source="upload">Upload</button>
+      </div>
+      <div id="demoControls">
+        <div class="field"><label>Sample dataset</label>
+          <select id="sample">
+            <option value="credit">Credit risk</option>
+            <option value="churn">Customer churn</option>
+            <option value="claims">Claims review</option>
+          </select>
+        </div>
+      </div>
+      <div id="uploadControls" style="display:none">
+        <div class="upload-panel">
+          <div class="field"><label>Dataset file</label><div class="fake-input disabled">Upload disabled in static preview</div></div>
+          <p class="small">The installed Streamlit dashboard accepts CSV, TSV, Excel, and Parquet files. This static demo keeps the upload workflow visible but does not load user files.</p>
+        </div>
+      </div>
+    </div>
+
+    <div class="group"><h3>Column roles</h3>
+      <div class="field"><label>Target column</label><select id="target"></select></div>
+      <div class="field"><label>ID column</label><select id="idcol"></select></div>
+      <div class="field"><label>Exclude from modeling</label><select id="exclude" multiple></select></div>
+      <div class="field"><label>Sensitive/proxy review</label><select id="sensitive" multiple></select></div>
+    </div>
+
+    <div class="group"><h3>Run settings</h3>
+      <div class="field"><label>CV folds</label><select><option>3</option><option selected>5</option></select></div>
+      <div class="field"><label>Random seed</label><select><option selected>2026</option><option>42</option></select></div>
+    </div>
+
+    <div class="group"><h3>Evidence views</h3><div class="nav" id="nav"></div></div>
+  </aside>
+
+  <main class="main">
+    <div class="hero">
+      <h2>HUGIML Governance Studio</h2>
+      <p>Preview the inbuilt dashboard for validation evidence, representation provenance, pattern inventory, case review, pruning analysis, and monitoring signals.</p>
+      <div class="chips">
+        <span class="chip" id="chipData">Data</span>
+        <span class="chip" id="chipRows">Rows</span>
+        <span class="chip" id="chipFeatures">Features</span>
+        <span class="chip" id="chipScore">Best CV</span>
+        <span class="chip" id="chipMode">Mode</span>
+      </div>
+    </div>
+    <div id="content"></div>
+  </main>
+</div>
+
+<script>
+const samples = {
+  credit: {
+    label:'Credit risk demo', rows:1250, features:18, target:'target', id:'customer_id',
+    best:'0.8421', positive:'22.8%', mode:'original_plus_patterns', highShare:'6.72%',
+    cols:['customer_id','target','age','income','loan_amount','credit_utilization','late_payments','region','employment_years','debt_to_income','age_band'],
+    exclude:['customer_id','free_text_notes'], sensitive:['age_band','region'],
+    metricNames:['Rows reviewed','Model features','Best CV score','Positive rate'],
+    validation:[['Current selected model','2','50','0.01','original_plus_patterns','0.8421','ok'],['Candidate A','1','50','0.01','patterns_only','0.8164','ok'],['Candidate B','2','100','0.001','original_plus_patterns','0.8398','ok']],
+    counts:{original:18,patterns:47,augmented:12,total:77},
+    patterns:[['1','credit_utilization=[0.62, 0.91) AND late_payments≥2','0.183','credit_utilization, late_payments','selected'],['2','debt_to_income=[0.41, 0.70)','0.147','debt_to_income','selected'],['3','age_band=young AND employment_years<2','0.119','age_band, employment_years','policy review'],['4','region=R3 AND payment_delay≥1','0.104','region, payment_delay','proxy review']],
+    caseId:'CASE-0001', pred:'1', prob:'0.7814', review:'High priority',
+    caseSummary:[['age','34','false','numeric input'],['income','58000','false','numeric input'],['credit_utilization','0.74','false','numeric input'],['late_payments','2','false','numeric input'],['region','R3','false','categorical input'],['age_band','young','false','categorical input']],
+    allValues:[['age','34','false'],['income','58000','false'],['loan_amount','142000','false'],['credit_utilization','0.74','false'],['late_payments','2','false'],['employment_years','1.6','false'],['debt_to_income','0.48','false'],['region','R3','false']],
+    activePatterns:[['1','credit_utilization=[0.62, 0.91) AND late_payments≥2','active'],['3','age_band=young AND employment_years<2','active']],
+    missing:[['income','1.44','18','float64'],['employment_years','0.64','8','float64'],['credit_utilization','0.24','3','float64'],['region','0.00','0','category']],
+    dist:[['income','numeric_distribution','psi','0.0184','Distribution metric only'],['region','categorical_distribution','total_variation_distance','0.0312','Distribution metric only'],['credit_utilization','numeric_distribution','psi','0.0441','Distribution metric only']],
+    bands:[['[0.0, 0.2)','632','0.506'],['[0.2, 0.4)','306','0.245'],['[0.4, 0.6)','184','0.147'],['[0.6, 0.8)','44','0.035'],['[0.8, 1.0]','84','0.067']],
+    activation:[['1','credit_utilization=[0.62, 0.91) AND late_payments≥2','0.092','115'],['2','debt_to_income=[0.41, 0.70)','0.146','183']],
+    configCandidate:['Candidate configuration','ok','0.8398','2','100','0.001','original_plus_patterns','True','91'],
+    pruneRows:[['Current selected model','0.8421','0','18','47','12','77','0.0'],['Representation-pruned rerun','0.8356','2','18','45','12','75','2.6']],
+    pruning:{orig:[['late_payments','Original features','Remove and rerun HUGIML'],['region','Original features','Remove and rerun HUGIML']],patterns:[['credit_utilization=[0.62, 0.91) AND late_payments≥2','credit_utilization, late_payments','Remove pattern column and refit downstream estimator'],['region=R3 AND payment_delay≥1','region, payment_delay','Remove pattern column and refit downstream estimator']],aug:[['credit_utilization × late_payments','credit_utilization, late_payments','Remove generated column'],['income / loan_amount','income, loan_amount','Remove generated column']]}
+  },
+  churn: {
+    label:'Customer churn demo', rows:2400, features:22, target:'target', id:'account_id',
+    best:'0.8734', positive:'18.6%', mode:'original_plus_patterns', highShare:'4.88%',
+    cols:['account_id','target','tenure_months','monthly_charge','support_tickets','contract_type','region','usage_gb','payment_delay_days','age_band','plan_tier','auto_pay'],
+    exclude:['account_id','last_call_notes'], sensitive:['age_band','region'],
+    validation:[['Current selected model','2','50','0.01','original_plus_patterns','0.8734','ok'],['Candidate A','1','50','0.01','patterns_only','0.8429','ok'],['Candidate B','2','100','0.001','original_plus_patterns','0.8691','ok']],
+    counts:{original:22,patterns:39,augmented:9,total:70},
+    patterns:[['1','tenure_months<6 AND support_tickets≥3','0.211','tenure_months, support_tickets','selected'],['2','contract_type=monthly AND payment_delay_days≥5','0.188','contract_type, payment_delay_days','selected'],['3','usage_gb=[0, 12) AND plan_tier=basic','0.133','usage_gb, plan_tier','selected'],['4','region=West AND auto_pay=false','0.091','region, auto_pay','proxy review']],
+    caseId:'ACCT-0142', pred:'1', prob:'0.6912', review:'Retention review',
+    caseSummary:[['tenure_months','4','false','numeric input'],['monthly_charge','79.90','false','numeric input'],['support_tickets','4','false','numeric input'],['contract_type','monthly','false','categorical input'],['payment_delay_days','7','false','numeric input'],['auto_pay','false','false','categorical input']],
+    allValues:[['tenure_months','4','false'],['monthly_charge','79.90','false'],['support_tickets','4','false'],['contract_type','monthly','false'],['region','West','false'],['usage_gb','8.4','false'],['payment_delay_days','7','false'],['plan_tier','basic','false']],
+    activePatterns:[['1','tenure_months<6 AND support_tickets≥3','active'],['2','contract_type=monthly AND payment_delay_days≥5','active']],
+    missing:[['usage_gb','0.83','20','float64'],['payment_delay_days','0.46','11','float64'],['contract_type','0.00','0','category'],['region','0.00','0','category']],
+    dist:[['monthly_charge','numeric_distribution','psi','0.0249','Distribution metric only'],['contract_type','categorical_distribution','total_variation_distance','0.0450','Distribution metric only'],['support_tickets','numeric_distribution','psi','0.0582','Distribution metric only']],
+    bands:[['[0.0, 0.2)','1488','0.620'],['[0.2, 0.4)','494','0.206'],['[0.4, 0.6)','250','0.104'],['[0.6, 0.8)','51','0.021'],['[0.8, 1.0]','117','0.049']],
+    activation:[['1','tenure_months<6 AND support_tickets≥3','0.071','170'],['2','contract_type=monthly AND payment_delay_days≥5','0.084','202']],
+    configCandidate:['Candidate configuration','ok','0.8691','2','100','0.001','original_plus_patterns','True','82'],
+    pruneRows:[['Current selected model','0.8734','0','22','39','9','70','0.0'],['Representation-pruned rerun','0.8662','2','22','37','9','68','2.9']],
+    pruning:{orig:[['support_tickets','Original features','Remove and rerun HUGIML'],['region','Original features','Remove and rerun HUGIML']],patterns:[['tenure_months<6 AND support_tickets≥3','tenure_months, support_tickets','Remove pattern column and refit downstream estimator'],['contract_type=monthly AND payment_delay_days≥5','contract_type, payment_delay_days','Remove pattern column and refit downstream estimator']],aug:[['monthly_charge × support_tickets','monthly_charge, support_tickets','Remove generated column'],['usage_gb / tenure_months','usage_gb, tenure_months','Remove generated column']]}
+  },
+  claims: {
+    label:'Claims review demo', rows:1800, features:20, target:'target', id:'claim_id',
+    best:'0.8116', positive:'12.4%', mode:'original_plus_patterns', highShare:'3.11%',
+    cols:['claim_id','target','claim_amount','policy_age_months','prior_claims','channel','region','customer_age','risk_band','provider_type','days_to_report','repair_estimate'],
+    exclude:['claim_id','adjuster_notes'], sensitive:['customer_age','region'],
+    validation:[['Current selected model','2','50','0.01','original_plus_patterns','0.8116','ok'],['Candidate A','1','50','0.01','patterns_only','0.7889','ok'],['Candidate B','2','100','0.001','original_plus_patterns','0.8072','ok']],
+    counts:{original:20,patterns:34,augmented:8,total:62},
+    patterns:[['1','claim_amount≥8500 AND prior_claims≥2','0.176','claim_amount, prior_claims','selected'],['2','days_to_report>10 AND channel=agent','0.149','days_to_report, channel','selected'],['3','risk_band=high AND repair_estimate≥7000','0.126','risk_band, repair_estimate','selected'],['4','region=R2 AND provider_type=external','0.083','region, provider_type','proxy review']],
+    caseId:'CLM-0088', pred:'1', prob:'0.7348', review:'Manual review',
+    caseSummary:[['claim_amount','9200','false','numeric input'],['prior_claims','3','false','numeric input'],['days_to_report','12','false','numeric input'],['channel','agent','false','categorical input'],['risk_band','high','false','categorical input'],['provider_type','external','false','categorical input']],
+    allValues:[['claim_amount','9200','false'],['policy_age_months','18','false'],['prior_claims','3','false'],['channel','agent','false'],['region','R2','false'],['customer_age','46','false'],['risk_band','high','false'],['repair_estimate','7600','false']],
+    activePatterns:[['1','claim_amount≥8500 AND prior_claims≥2','active'],['2','days_to_report>10 AND channel=agent','active']],
+    missing:[['repair_estimate','1.22','22','float64'],['days_to_report','0.39','7','float64'],['provider_type','0.17','3','category'],['region','0.00','0','category']],
+    dist:[['claim_amount','numeric_distribution','psi','0.0311','Distribution metric only'],['provider_type','categorical_distribution','total_variation_distance','0.0524','Distribution metric only'],['days_to_report','numeric_distribution','psi','0.0473','Distribution metric only']],
+    bands:[['[0.0, 0.2)','1204','0.669'],['[0.2, 0.4)','338','0.188'],['[0.4, 0.6)','159','0.088'],['[0.6, 0.8)','43','0.024'],['[0.8, 1.0]','56','0.031']],
+    activation:[['1','claim_amount≥8500 AND prior_claims≥2','0.063','113'],['2','days_to_report>10 AND channel=agent','0.052','94']],
+    configCandidate:['Candidate configuration','ok','0.8072','2','100','0.001','original_plus_patterns','True','74'],
+    pruneRows:[['Current selected model','0.8116','0','20','34','8','62','0.0'],['Representation-pruned rerun','0.8044','2','20','32','8','60','3.2']],
+    pruning:{orig:[['prior_claims','Original features','Remove and rerun HUGIML'],['region','Original features','Remove and rerun HUGIML']],patterns:[['claim_amount≥8500 AND prior_claims≥2','claim_amount, prior_claims','Remove pattern column and refit downstream estimator'],['region=R2 AND provider_type=external','region, provider_type','Remove pattern column and refit downstream estimator']],aug:[['claim_amount × prior_claims','claim_amount, prior_claims','Remove generated column'],['repair_estimate / policy_age_months','repair_estimate, policy_age_months','Remove generated column']]}
+  }
+};
+
+const views=['Overview','Validation','Representation Audit','Pattern Inventory','Case Review','Data Quality & Policy','Configuration Comparison','Representation Pruning','Monitoring'];
+let currentKey='credit';
+const content=document.getElementById('content');
+const nav=document.getElementById('nav');
+
+function s(){return samples[currentKey]}
+function esc(x){return String(x).replace(/[&<>"]/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[m]))}
+function table(headers,rows){return `<div class="table-wrap"><table><thead><tr>${headers.map(h=>`<th>${esc(h)}</th>`).join('')}</tr></thead><tbody>${rows.map(r=>`<tr>${r.map(c=>`<td>${String(c).startsWith('<span')?c:esc(c)}</td>`).join('')}</tr>`).join('')}</tbody></table></div>`}
+function metrics(items){return `<div class="grid4">${items.map(i=>`<div class="card metric"><div class="label">${esc(i[0])}</div><div class="value">${esc(i[1])}</div><div class="muted">${esc(i[2]||'')}</div></div>`).join('')}</div>`}
+function render(activeView='Overview'){content.innerHTML=views.map(v=>`<section class="section ${v===activeView?'active':''}" data-view="${v}">${section(v)}</section>`).join('');nav.innerHTML=views.map(v=>`<button class="${v===activeView?'active':''}" data-nav="${v}">${v}</button>`).join('');bindNav();bindTabs();updateSidebarAndChips()}
+function section(v){if(v==='Overview')return overview();if(v==='Validation')return validation();if(v==='Representation Audit')return representation();if(v==='Pattern Inventory')return patterns();if(v==='Case Review')return caseReview();if(v==='Data Quality & Policy')return quality();if(v==='Configuration Comparison')return configCompare();if(v==='Representation Pruning')return pruning();if(v==='Monitoring')return monitoring();return ''}
+function overview(){const x=s();return `<h2>Executive Overview</h2><div class="note">Concise governance summary of the fitted HUGIML model. Auditability is represented through explicit artifacts, not a synthetic interpretability score.</div>${metrics([['Rows reviewed',x.rows.toLocaleString(),'Loaded training/review frame'],['Model features',String(x.features),'Original modeling inputs'],['Best CV score',x.best,'ROC-AUC'],['Positive rate',x.positive,'Derived from target']])}<div class="grid2" style="margin-top:14px"><div class="card"><h3>Evidence status</h3>${table(['Area','Status','Evidence'],[['Validation','<span class="badge good">Available</span>','CV/tuning result table'],['Representation audit','<span class="badge good">Available</span>','Original, HUG pattern, augmented families'],['Case review','<span class="badge good">Available</span>','Prediction, probability, row values'],['Monitoring','<span class="badge blue">Review</span>','Prediction, missingness, distribution split']])}</div><div class="card"><h3>Selected HUGIML configuration</h3>${table(['Parameter','Value','Meaning'],[['L','2','Maximum pattern order'],['topK','50','Selected pattern budget'],['G','0.01','Mining threshold'],['feature_mode',x.mode,'Original features plus selected HUG patterns']])}</div></div>`}
+function validation(){const x=s();return `<h2>Validation Evidence</h2><div class="note">Shows tuning/CV evidence for HUGIML and comparison-ready metrics. The installed benchmark command can run broader model comparisons separately.</div>${metrics([['Best displayed score',x.best,'ROC-AUC'],['Rows compared',String(x.validation.length),'CV/grid rows shown'],['Strict budget','False','TopK budget setting'],['Fast path','Used','When eligible']])}${table(['Run','L','topK','G','feature_mode','CV ROC-AUC','Status'],x.validation)}`}
+function representation(){const x=s();return `<h2>Representation Audit</h2><div class="note">Feature-family provenance separates original inputs, HUG patterns, and augmented/generated features.</div>${metrics([['Original features',String(x.counts.original),'Input columns used'],['HUG patterns',String(x.counts.patterns),'Selected mined patterns'],['Augmented features',String(x.counts.augmented),'Generated representation columns'],['Displayed total',String(x.counts.total),'Downstream representation']])}<div class="grid2" style="margin-top:14px"><div class="card"><h3>Feature-family counts</h3>${table(['Family','Count','Audit implication'],[['Original features',String(x.counts.original),'Direct trace to uploaded data'],['HUG patterns',String(x.counts.patterns),'Human-readable conditional evidence'],['Augmented features',String(x.counts.augmented),'Generated feature provenance required']])}</div><div class="card"><h3>Sensitive/proxy review</h3>${table(['Column','Role','Action'],[...x.sensitive.map(c=>[c,'Sensitive/proxy review','Check distribution and pattern usage']),[x.id,'ID column','Excluded from modeling']])}</div></div>`}
+function patterns(){const x=s();return `<h2>Pattern Inventory</h2><div class="note">HUG patterns are shown as explicit evidence. Search/filter is available in the installed dashboard.</div>${table(['Rank','Pattern','Utility','Source features','Status'],x.patterns)}`}
+function caseReview(){const x=s();return `<h2>Case Review</h2><div class="note">Case-level traceability shows prediction, probability, source row values, and active HUG pattern indicators when exposed by the fitted model.</div>${metrics([['Case ID',x.caseId,'Selected row'],['Predicted class',x.pred,'Positive class'],['Predicted probability',x.prob,'Model score'],['Review status',x.review,'Case-level review cue']])}<div class="tabs"><button class="tab active" data-tab="summary">Case summary</button><button class="tab" data-tab="allvalues">All input values</button><button class="tab" data-tab="activepatterns">Pattern evidence</button></div><div class="tabpane active" data-pane="summary">${table(['Feature','Value','Missing','Evidence type'],x.caseSummary)}</div><div class="tabpane" data-pane="allvalues">${table(['Feature','Value','Missing'],x.allValues)}</div><div class="tabpane" data-pane="activepatterns">${table(['Rank','Active HUG pattern','Activation'],x.activePatterns)}</div>`}
+function quality(){const x=s();return `<h2>Data Quality & Policy</h2><div class="note">Missingness and sensitive/proxy review are grouped together. Sensitive columns are surfaced for governance review; they are not automatically removed.</div><div class="grid2"><div class="card"><h3>Feature-level missingness</h3>${table(['Feature','Missing %','N missing','dtype'],x.missing)}</div><div class="card"><h3>Sensitive / proxy review</h3>${table(['Column','Reason','Dashboard action'],x.sensitive.map(c=>[c,'Potential proxy or policy-sensitive field','Review patterns, distribution, and pruning impact']))}</div></div>`}
+function configCompare(){const x=s();return `<h2>Configuration Comparison</h2><div class="note">This is a different HUGIML configuration run, not pruning. Strict topK budget is a supported setting and is passed explicitly in the installed dashboard.</div>${table(['Run','Status','CV score','L','topK','G','feature_mode','strict_budget','Displayed total'],[['Current selected model','ok',x.best,'2','50','0.01',x.mode,'False',String(x.counts.total)],x.configCandidate])}`}
+function pruning(){const x=s();return `<h2>Representation Pruning</h2><div class="note">Choose one HUGIML representation family to prune. Original-feature pruning reruns HUGIML; HUG pattern and augmented-feature pruning remove downstream representation columns when the transform is exposed.</div><div class="tabs"><button class="tab active" data-tab="orig">Original features</button><button class="tab" data-tab="hugp">HUG patterns</button><button class="tab" data-tab="aug">Augmented features</button></div><div class="tabpane active" data-pane="orig">${table(['Feature','Family','Pruning action'],x.pruning.orig)}</div><div class="tabpane" data-pane="hugp">${table(['Pattern','Source features','Pruning action'],x.pruning.patterns)}</div><div class="tabpane" data-pane="aug">${table(['Augmented feature','Source features','Pruning action'],x.pruning.aug)}</div><div style="margin-top:14px">${table(['Run','CV score','Removed items','Original','HUG patterns','Augmented','Displayed total','Reduction %'],x.pruneRows)}</div>`}
+function monitoring(){const x=s();return `<h2>Monitoring</h2><div class="note">The installed dashboard avoids calling drift APIs without a proper external reference/current baseline. It reports transparent monitoring evidence from the loaded data and fitted model.</div>${metrics([['Cases scored',x.rows.toLocaleString(),'Current loaded frame'],['Mean probability',meanProbApprox(x),'Prediction distribution'],['Share probability ≥ 0.80',x.highShare,'High-score share'],['Max missingness',x.missing[0][1]+'%','Feature-level']])}<div class="tabs"><button class="tab active" data-tab="pred">Prediction distribution</button><button class="tab" data-tab="miss">Missingness</button><button class="tab" data-tab="dist">Distribution review</button><button class="tab" data-tab="act">Pattern activation</button></div><div class="tabpane active" data-pane="pred">${table(['Probability band','N cases','Share'],x.bands)}</div><div class="tabpane" data-pane="miss">${table(['Feature','Missing %','N missing','dtype'],x.missing)}</div><div class="tabpane" data-pane="dist"><p class="small">Reference = first 70% of loaded rows; current = remaining 30%. This is a dashboard review split, not a production drift decision.</p>${table(['Feature','Review type','Metric','Value','Interpretation'],x.dist)}</div><div class="tabpane" data-pane="act">${table(['Rank','Pattern','Activation rate','N active'],x.activation)}</div>`}
+function meanProbApprox(x){return currentKey==='credit'?'0.2847':currentKey==='churn'?'0.2315':'0.1972'}
+function bindNav(){document.querySelectorAll('[data-nav]').forEach(b=>b.onclick=()=>{document.querySelectorAll('[data-nav]').forEach(x=>x.classList.remove('active'));b.classList.add('active');document.querySelectorAll('.section').forEach(sec=>sec.classList.toggle('active',sec.dataset.view===b.dataset.nav));window.scrollTo({top:0,behavior:'smooth'})})}
+function bindTabs(){document.querySelectorAll('.section').forEach(sec=>{sec.querySelectorAll('[data-tab]').forEach(btn=>btn.onclick=()=>{sec.querySelectorAll('[data-tab]').forEach(b=>b.classList.remove('active'));btn.classList.add('active');sec.querySelectorAll('[data-pane]').forEach(p=>p.classList.toggle('active',p.dataset.pane===btn.dataset.tab))})})}
+function updateSidebarAndChips(){const x=s();document.getElementById('chipData').textContent='Data: '+x.label;document.getElementById('chipRows').textContent='Rows: '+x.rows.toLocaleString();document.getElementById('chipFeatures').textContent='Features: '+x.features;document.getElementById('chipScore').textContent='Best CV: '+x.best;document.getElementById('chipMode').textContent='Mode: '+x.mode;document.getElementById('target').innerHTML=x.cols.map(c=>`<option ${c===x.target?'selected':''}>${esc(c)}</option>`).join('');document.getElementById('idcol').innerHTML=['<none>',...x.cols.filter(c=>c===x.id)].map(c=>`<option ${c===x.id?'selected':''}>${esc(c)}</option>`).join('');document.getElementById('exclude').innerHTML=x.exclude.map(c=>`<option selected>${esc(c)}</option>`).join('');document.getElementById('sensitive').innerHTML=x.sensitive.map(c=>`<option selected>${esc(c)}</option>`).join('')}
+document.querySelectorAll('[data-theme-btn]').forEach(b=>b.onclick=()=>{document.querySelectorAll('[data-theme-btn]').forEach(x=>x.classList.remove('active'));b.classList.add('active');document.body.dataset.theme=b.dataset.themeBtn});
+document.querySelectorAll('[data-source]').forEach(b=>b.onclick=()=>{document.querySelectorAll('[data-source]').forEach(x=>x.classList.remove('active'));b.classList.add('active');document.getElementById('demoControls').style.display=b.dataset.source==='demo'?'block':'none';document.getElementById('uploadControls').style.display=b.dataset.source==='upload'?'block':'none'});
+document.getElementById('sample').onchange=e=>{const active=document.querySelector('[data-nav].active')?.dataset.nav||'Overview';currentKey=e.target.value;render(active)};
+render('Overview');
+</script>
+</body>
+</html>

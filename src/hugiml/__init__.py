@@ -81,7 +81,7 @@ Benchmark runner (CLI)::
 
 from __future__ import annotations
 
-__version__ = "1.1.7"
+__version__ = "1.1.8"
 __author__ = "Srikumar Krishnamoorthy"
 __license__ = "Apache-2.0"
 __paper__ = (

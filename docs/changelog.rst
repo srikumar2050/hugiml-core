@@ -6,6 +6,14 @@ The canonical release notes live in ``CHANGELOG.md`` at the repository root. Kee
 Recent releases
 ---------------
 
+1.1.8 — 2026-06-08
+~~~~~~~~~~~~~~~~~~
+
+* Added fast tuning for eligible adaptive-binning hyperparameter searches, reducing repeated mining work during cross-validation while preserving ordinary tuning behavior for unsupported grids.
+* Added HUGIML Governance Studio, a Streamlit dashboard for validation, representation audit, pattern inventory, case review, configuration comparison, pruning analysis, monitoring, and report-oriented review workflows.
+* Improved ``feature_mode="original_plus_interactions"`` so higher-order pattern selection is based on structural pattern order rather than parsing display labels.
+* Expanded benchmark and dashboard runner utilities for more consistent validation-fold comparisons.
+
 1.1.7 — 2026-06-05
 ~~~~~~~~~~~~~~~~~~
 

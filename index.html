@@ -1,9 +1,266 @@
 <!doctype html>
-<html>
-  <head>
-    <meta http-equiv="refresh" content="0; url=hugiml_benchmark_analysis_dashboard.html">
-  </head>
-  <body>
-    <p><a href="hugiml_benchmark_analysis_dashboard.html">Open dashboard</a></p>
-  </body>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>HUGIML Dashboards</title>
+  <style>
+    :root {
+      --bg: #f5f7fb;
+      --panel: #ffffff;
+      --ink: #172033;
+      --muted: #667085;
+      --line: #e4e7ec;
+      --brand: #2563eb;
+      --brand2: #06b6d4;
+      --brand3: #7c3aed;
+      --shadow: 0 14px 36px rgba(16, 24, 40, 0.08);
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background:
+        radial-gradient(circle at 8% 8%, rgba(37, 99, 235, 0.18), transparent 32%),
+        radial-gradient(circle at 92% 12%, rgba(6, 182, 212, 0.14), transparent 30%),
+        var(--bg);
+      color: var(--ink);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    main {
+      max-width: 1100px;
+      margin: 0 auto;
+      padding: 56px 22px;
+    }
+    .hero {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 24px;
+      padding: 32px;
+      box-shadow: var(--shadow);
+      margin-bottom: 22px;
+    }
+    h1 {
+      margin: 0 0 10px 0;
+      font-size: clamp(2rem, 4vw, 3.2rem);
+      letter-spacing: -0.05em;
+      line-height: 1.05;
+    }
+    .hero-sub {
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.58;
+      max-width: 860px;
+      font-size: 1rem;
+    }
+    .hero-chips {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-top: 16px;
+    }
+    .hero-chip {
+      display: inline-block;
+      padding: 5px 11px;
+      border-radius: 999px;
+      background: rgba(37, 99, 235, 0.10);
+      border: 1px solid rgba(37, 99, 235, 0.22);
+      color: var(--brand);
+      font-weight: 800;
+      font-size: 0.78rem;
+    }
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 18px;
+      margin-top: 4px;
+    }
+    .card {
+      display: block;
+      text-decoration: none;
+      color: inherit;
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 22px;
+      padding: 24px;
+      box-shadow: var(--shadow);
+      transition: transform 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+      position: relative;
+      overflow: hidden;
+    }
+    .card::before {
+      content: '';
+      position: absolute;
+      top: 0; left: 0; right: 0;
+      height: 4px;
+      border-radius: 22px 22px 0 0;
+    }
+    .card.c1::before { background: linear-gradient(90deg, var(--brand), var(--brand2)); }
+    .card.c2::before { background: linear-gradient(90deg, var(--brand2), #10b981); }
+    .card.c3::before { background: linear-gradient(90deg, var(--brand3), #ec4899); }
+    .card:hover {
+      transform: translateY(-3px);
+      border-color: rgba(37, 99, 235, 0.38);
+      box-shadow: 0 20px 48px rgba(16, 24, 40, 0.13);
+    }
+    .card-icon {
+      width: 44px;
+      height: 44px;
+      border-radius: 13px;
+      display: grid;
+      place-items: center;
+      font-size: 22px;
+      margin-bottom: 14px;
+    }
+    .c1 .card-icon { background: rgba(37, 99, 235, 0.10); }
+    .c2 .card-icon { background: rgba(6, 182, 212, 0.10); }
+    .c3 .card-icon { background: rgba(124, 58, 237, 0.10); }
+    .chip {
+      display: inline-block;
+      margin-bottom: 12px;
+      padding: 5px 10px;
+      border-radius: 999px;
+      font-weight: 800;
+      font-size: 0.76rem;
+    }
+    .c1 .chip { background: rgba(37,99,235,.10); border: 1px solid rgba(37,99,235,.22); color: var(--brand); }
+    .c2 .chip { background: rgba(6,182,212,.10);  border: 1px solid rgba(6,182,212,.30);  color: #0891b2; }
+    .c3 .chip { background: rgba(124,58,237,.10); border: 1px solid rgba(124,58,237,.25); color: var(--brand3); }
+    .card h2 {
+      margin: 0 0 9px 0;
+      font-size: 1.2rem;
+      letter-spacing: -0.025em;
+      line-height: 1.25;
+    }
+    .card p {
+      font-size: 0.91rem;
+      color: var(--muted);
+      line-height: 1.58;
+      margin: 0;
+    }
+    .card-meta {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-top: 16px;
+      padding-top: 14px;
+      border-top: 1px solid var(--line);
+    }
+    .meta-tag {
+      font-size: 0.73rem;
+      color: var(--muted);
+      background: var(--bg);
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 3px 9px;
+      font-weight: 700;
+    }
+    footer {
+      margin-top: 26px;
+      color: var(--muted);
+      font-size: 0.86rem;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    footer a { color: var(--brand); text-decoration: none; }
+    footer a:hover { text-decoration: underline; }
+    @media (max-width: 860px) {
+      .grid { grid-template-columns: 1fr; }
+      main { padding-top: 28px; }
+      footer { flex-direction: column; align-items: flex-start; }
+    }
+    @media (min-width: 861px) and (max-width: 1050px) {
+      .grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <section class="hero">
+      <h1>HUGIML interactive dashboards</h1>
+      <p class="hero-sub">
+        Interactive evidence views for benchmark analysis, governance audit, and scalability profiling.
+        Each dashboard is a self-contained static HTML file — open locally or serve via GitHub Pages.
+      </p>
+      <div class="hero-chips">
+        <span class="hero-chip">HUG-IML v1.1.8</span>
+        <span class="hero-chip">IEEE Access 2024</span>
+        <span class="hero-chip">Static · no server required</span>
+      </div>
+    </section>
+
+    <section class="grid">
+
+      <!-- Benchmark analysis -->
+      <a class="card c1" href="hugiml_benchmark_analysis_dashboard.html">
+        <div class="card-icon">📊</div>
+        <span class="chip">Benchmark analysis</span>
+        <h2>HUGIML Benchmark Analysis Dashboard</h2>
+        <p>
+          Interactive benchmark report comparing HUGIML with model baselines — XGBoost, LightGBM,
+          EBM, Random Forest, and Logistic Regression — across datasets, metrics, and runtime evidence.
+          Includes ROC curves, complexity budgets, and missing-value robustness panels.
+        </p>
+        <div class="card-meta">
+          <span class="meta-tag">AUC comparison</span>
+          <span class="meta-tag">Runtime</span>
+          <span class="meta-tag">Missing values</span>
+          <span class="meta-tag">Complexity</span>
+        </div>
+      </a>
+
+      <!-- Governance studio demo -->
+      <a class="card c2" href="hugiml_governance_studio_demo.html">
+        <div class="card-icon">🏛️</div>
+        <span class="chip">Governance preview</span>
+        <h2>HUGIML Governance Studio Demo</h2>
+        <p>
+          Static preview of the inbuilt Streamlit governance dashboard: validation evidence,
+          representation audit, HUG pattern inventory, case-level explanations,
+          representation pruning, data quality review, and monitoring signals.
+        </p>
+        <div class="card-meta">
+          <span class="meta-tag">Validation</span>
+          <span class="meta-tag">Patterns</span>
+          <span class="meta-tag">Pruning</span>
+          <span class="meta-tag">Monitoring</span>
+        </div>
+      </a>
+
+      <!-- Scalability dashboard (new) -->
+      <a class="card c3" href="hugiml_scalability_dashboard.html">
+        <div class="card-icon">⚡</div>
+        <span class="chip">Scalability</span>
+        <h2>HUGIML Scalability Dashboard</h2>
+        <p>
+          Measured fit-time and inference-latency scaling vs XGBoost and LightGBM.
+          Covers n from 1k to 500k (measured) and up to 1B (extrapolated),
+          p up to 5 000, and parameter sweeps over B, G, topK, L, and adaptive binning.
+        </p>
+        <div class="card-meta">
+          <span class="meta-tag">n-scaling to 1B</span>
+          <span class="meta-tag">p up to 5 000</span>
+          <span class="meta-tag">Param sweep</span>
+          <span class="meta-tag">Latency</span>
+          <span class="meta-tag">Regime map</span>
+        </div>
+      </a>
+
+    </section>
+
+    <footer>
+      <span>For local analysis, install the package extras and run the dashboard/benchmark commands.</span>
+      <span>
+        <a href="https://doi.org/10.1109/ACCESS.2024.3455563" target="_blank">IEEE Access 2024</a>
+        &nbsp;·&nbsp;
+        <a href="https://github.com/srikumar2050/hugiml-core" target="_blank">GitHub</a>
+        &nbsp;·&nbsp;
+        <a href="https://hugiml-core.readthedocs.io" target="_blank">Docs</a>
+      </span>
+    </footer>
+  </main>
+</body>
 </html>

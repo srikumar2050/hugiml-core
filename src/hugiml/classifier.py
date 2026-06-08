@@ -557,6 +557,7 @@ except ImportError:
 __all__ = [
     "HUGIMLClassifierNative",
     "FitMetadata",
+    "HUGIMLTuneResult",
 ]
 
 logger = logging.getLogger(__name__)
@@ -2540,16 +2541,25 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                 t = self._timer()
                 n_train = len(y_train)
                 n_pats = len(self.patterns_)
-                # Build train matrix from fused COO (no bitmap scan needed)
-                rows, cols = _l1_result.get_coo()
-                # The fused COO is ordered by pattern index matching raw_patterns_
-                # (both sorted by descending utility).  If patterns_ was reordered
-                # by dedup we would need to remap cols — but dedup is skipped here
-                # so the order is identical.
-                data = np.ones(len(rows), dtype=np.float32)
-                self.x_train_hup_ = csr_matrix(
-                    (data, (rows, cols)), shape=(n_train, n_pats), dtype=np.float32
-                )
+                if n_pats == 0:
+                    # original_plus_* modes are allowed to continue with an
+                    # empty pattern block; the downstream matrix will contain
+                    # the original feature block and any enabled augmented block.
+                    # Do not call native build/get_coo paths with an empty
+                    # pattern list because native code rejects that as
+                    # "patterns list is empty — nothing to build".
+                    self.x_train_hup_ = csr_matrix((n_train, 0), dtype=np.float32)
+                else:
+                    # Build train matrix from fused COO (no bitmap scan needed)
+                    rows, cols = _l1_result.get_coo()
+                    # The fused COO is ordered by pattern index matching raw_patterns_
+                    # (both sorted by descending utility).  If patterns_ was reordered
+                    # by dedup we would need to remap cols — but dedup is skipped here
+                    # so the order is identical.
+                    data = np.ones(len(rows), dtype=np.float32)
+                    self.x_train_hup_ = csr_matrix(
+                        (data, (rows, cols)), shape=(n_train, n_pats), dtype=np.float32
+                    )
                 stage_times["build_matrix"] = t.ms
 
             else:
@@ -2620,15 +2630,34 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                 t = self._timer()
                 n_train = len(y_train)
                 n_pats = len(self.patterns_)
-                if _cached_coo is not None:
-                    rows, cols = _cached_coo
+                if n_pats == 0:
+                    # original_plus_* modes are allowed to continue with an
+                    # empty pattern block.  Avoid calling native
+                    # build_train_matrix with an empty pattern list.
+                    self.x_train_hup_ = csr_matrix((n_train, 0), dtype=np.float32)
                 else:
-                    rows, cols = _core.build_train_matrix(self.td_, self.patterns_)
-                data = np.ones(len(rows), dtype=np.float32)
-                self.x_train_hup_ = csr_matrix(
-                    (data, (rows, cols)), shape=(n_train, n_pats), dtype=np.float32
-                )
+                    if _cached_coo is not None:
+                        rows, cols = _cached_coo
+                    else:
+                        rows, cols = _core.build_train_matrix(self.td_, self.patterns_)
+                    data = np.ones(len(rows), dtype=np.float32)
+                    self.x_train_hup_ = csr_matrix(
+                        (data, (rows, cols)), shape=(n_train, n_pats), dtype=np.float32
+                    )
                 stage_times["build_matrix"] = t.ms
+
+            # Optional internal cache-only path used by fast_grid_tune().
+            # At this point adaptive metadata, transaction data, mined patterns,
+            # and the training HUG matrix are available.  Skipping downstream
+            # fitting, rich feature metadata, and drift-baseline construction is
+            # correctness-preserving for tuning because each evaluated candidate
+            # rebuilds its own downstream matrix/model from these cached mining
+            # artefacts.
+            if bool(getattr(self, "_fast_tune_cache_only", False)):
+                self.td_ = _TransactionDataWrapper(self.td_, self)
+                self._native_available_ = True
+                self._fast_tune_stage_times_ = dict(stage_times)
+                return self
 
             # Stage 5: fit downstream classifier
             t = self._timer()
@@ -2918,22 +2947,85 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         return np.array(X, copy=True)
 
     def _pattern_order_from_label(self, label: str) -> int:
-        """Infer pattern order from a human-readable HUG pattern label."""
+        """Infer pattern order from a human-readable HUG pattern label.
+
+        .. deprecated::
+            This method is retained for backward compatibility only.
+            ``_setup_feature_mode_metadata`` derives pattern order directly
+            from ``PatternEntry.items`` (the C++ item-ID list), which is the
+            authoritative source of pattern length and is not affected by
+            comma characters inside numeric interval notation such as
+            ``age=[29.2, 38.4)``.
+
+        The fallback parser intentionally counts feature assignments, not
+        comma-separated chunks.  Numeric intervals contain commas, so a label
+        like ``age=[29.2, 38.4)`` must remain order-1.  A conjunction such as
+        ``age=[29,50), income=[50k,80k)`` is order-2 because it contains two
+        top-level ``feature=...`` assignments.
+        """
         import re
 
-        matches = re.findall(r"\bcol\d+\s*=", str(label))
-        if matches:
-            return len(matches)
-        if "," in str(label):
-            return len([part for part in str(label).split(",") if part.strip()])
+        s = str(label or "").strip()
+        if not s:
+            return 1
+
+        # Fast path for native / ndarray labels such as
+        # ``col0=[29.2, 38.4), col1=A``.  Count distinct column tokens rather
+        # than commas so interval bounds do not inflate the order.
+        col_matches = re.findall(r"\b(col\d+)\s*=", s)
+        if col_matches:
+            return max(1, len(set(col_matches)))
+
+        # Human-readable labels are emitted as ``name=value`` assignments,
+        # with conjunctions separated by either commas or explicit boolean
+        # markers (``AND``, ``and`` or ``&``).  Count assignment starts that
+        # occur at the beginning of the string or after one of those top-level
+        # separators.  The feature-name pattern must start with a
+        # letter/underscore, so commas inside numeric intervals, e.g.
+        # ``[29.2, 38.4)``, are not mistaken for new assignments.
+        assignment_matches = re.findall(
+            r"(?:^|,|\s+(?:AND|and|&)\s+)\s*([A-Za-z_][A-Za-z0-9_ .:/\-]*)\s*=",
+            s,
+        )
+        if assignment_matches:
+            return max(1, len({name.strip() for name in assignment_matches if name.strip()}))
+
+        # Last-resort fallback for unknown legacy formats: a label with an
+        # explicit boolean conjunction marker is treated as an interaction;
+        # otherwise keep the conservative singleton default.  Do not split on
+        # commas here because interval labels contain commas.
+        if re.search(r"\s+(?:AND|and|&)\s+", s):
+            return 2
         return 1
 
     def _setup_feature_mode_metadata(self) -> None:
-        """Cache pattern-order masks used by hybrid feature modes."""
-        features = self.get_hug_features()
-        orders = np.asarray([self._pattern_order_from_label(f) for f in features], dtype=int)
-        if len(orders) != self.x_train_hup_.shape[1]:
-            orders = np.ones(self.x_train_hup_.shape[1], dtype=int)
+        """Cache pattern-order masks used by hybrid feature modes.
+
+        Pattern order (number of features in a pattern) is read directly from
+        ``PatternEntry.items`` — the C++ item-ID list — rather than inferred
+        from the human-readable label string.  Label-string parsing
+        (``_pattern_order_from_label``) mis-counts numeric singletons such as
+        ``age=[29.2, 38.4)`` as order-2 because of the comma inside the
+        interval notation, causing ``original_plus_interactions`` to
+        incorrectly include numeric singletons in the downstream feature
+        matrix.  Using ``len(pe.items)`` gives the correct structural count:
+        1 for singletons, 2 for pair conjunctions, regardless of feature type
+        or label format.
+        """
+        patterns = getattr(self, "patterns_", None)
+        n_hup_cols = self.x_train_hup_.shape[1]
+        if patterns is not None and len(patterns) == n_hup_cols:
+            # Primary path: read order from C++ PatternEntry.items directly.
+            orders = np.asarray([len(pe.items) for pe in patterns], dtype=int)
+        else:
+            # Fallback: patterns_ unavailable or length mismatch — should not
+            # occur after a completed fit, but guard defensively.
+            features = self.get_hug_features()
+            orders = np.asarray(
+                [self._pattern_order_from_label(f) for f in features], dtype=int
+            )
+        if len(orders) != n_hup_cols:
+            orders = np.ones(n_hup_cols, dtype=int)
         self._pattern_orders_ = orders
         self._interaction_pattern_mask_ = orders > 1
 
@@ -3021,7 +3113,9 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             X_num = numeric.reindex(columns=num_cols)
             X_num_filled = X_num.fillna(med).fillna(0.0)
             if len(num_cols):
-                X_num_arr = self._original_scaler_.transform(X_num_filled)
+                X_num_arr = self._original_scaler_.transform(
+                    X_num_filled.to_numpy(dtype=np.float64, copy=False)
+                )
             else:
                 X_num_arr = np.empty((len(X_df), 0))
             cat_cols = getattr(self, "_original_cat_cols_", [])
@@ -4654,3 +4748,722 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         # ─────────────────────────────────────────────────────────────────
 
         return "\n".join(lines)
+
+# =============================================================================
+# Exact cached grid tuning helper
+# =============================================================================
+
+def _hugiml_auc_score_for_fast_grid(y_true: Any, proba: np.ndarray, classes: np.ndarray) -> float:
+    """Internal validation AUC scorer used by fast_grid_tune()."""
+    from sklearn.metrics import roc_auc_score
+
+    y_arr = np.asarray(y_true)
+    if proba.ndim != 2:
+        raise HUGIMLValidationError("predict_proba must return a 2D array.")
+    if proba.shape[1] == 2:
+        return float(roc_auc_score(y_arr, proba[:, 1]))
+    return float(roc_auc_score(y_arr, proba, multi_class="ovr", average="macro"))
+
+
+def _hugiml_expand_grid_for_fast_tune(param_grid: dict[str, list] | None) -> list[dict[str, Any]]:
+    """Expand a compact sklearn-style parameter grid for fast HUGIML tuning."""
+    from itertools import product
+
+    grid = HUGIMLClassifierNative.default_param_grid() if param_grid is None else param_grid
+    if not isinstance(grid, dict) or not grid:
+        raise HUGIMLParamError("param_grid must be a non-empty dict of parameter lists.")
+    keys = list(grid.keys())
+    values = []
+    for key in keys:
+        val = grid[key]
+        if isinstance(val, (str, bytes)) or not hasattr(val, "__iter__"):
+            val = [val]
+        val = list(val)
+        if not val:
+            raise HUGIMLParamError(f"param_grid[{key!r}] must contain at least one value.")
+        values.append(val)
+    return [dict(zip(keys, vals)) for vals in product(*values)]
+
+
+def _hugiml_validate_fast_tune_grid(candidates: list[dict[str, Any]]) -> dict[str, list]:
+    """Validate that a grid is safe for exact cached tuning.
+
+    The fast path is exact when adaptive binning is enabled and only mining/
+    representation dimensions vary: G, L, topK, and feature_mode.  Because G is
+    part of the native mining call, candidates are cached in separate fixed-G
+    groups.  B may appear and even vary, but is ignored while
+    adaptive_binning=True because per-feature binning supplies the effective
+    discretisation.
+    """
+    if not candidates:
+        raise HUGIMLParamError("No grid candidates supplied.")
+
+    varying = {
+        key
+        for key in set().union(*(set(c.keys()) for c in candidates))
+        if len({repr(c.get(key, None)) for c in candidates}) > 1
+    }
+    allowed_varying = {"B", "G", "L", "topK", "feature_mode"}
+    disallowed = sorted(varying - allowed_varying)
+    if disallowed:
+        raise HUGIMLParamError(
+            "fast_grid_tune requires only G, L, topK, and feature_mode to vary "
+            f"(B is ignored under adaptive_binning=True). Varying unsupported keys: {disallowed}."
+        )
+
+    adaptive_values = {bool(c.get("adaptive_binning", True)) for c in candidates}
+    if adaptive_values != {True}:
+        raise HUGIMLParamError("fast_grid_tune requires adaptive_binning=True for every candidate.")
+
+    g_values = sorted({float(c.get("G", 1e-2)) for c in candidates})
+    L_values = sorted({int(c.get("L", 1)) for c in candidates})
+    topk_values = sorted({int(c.get("topK", 30)) for c in candidates})
+    feature_modes = sorted({str(c.get("feature_mode", "patterns_only")) for c in candidates})
+    if any(k <= 0 for k in topk_values):
+        raise HUGIMLParamError("fast_grid_tune currently supports positive integer topK values only.")
+    if any(L < 1 for L in L_values):
+        raise HUGIMLParamError("fast_grid_tune currently supports L >= 1 only.")
+
+    allowed_modes = {"patterns_only", "original_plus_patterns", "original_plus_interactions"}
+    bad_modes = sorted(set(feature_modes) - allowed_modes)
+    if bad_modes:
+        raise HUGIMLParamError(f"Unsupported feature_mode values for fast_grid_tune: {bad_modes}.")
+
+    return {
+        "L_values": L_values,
+        "topK_values": topk_values,
+        "feature_modes": feature_modes,
+        "G_values": g_values,
+        # Backward-compatible key used by older callers/tests.
+        "G": g_values,
+    }
+
+
+def _hugiml_shallow_candidate_from_base(base: HUGIMLClassifierNative) -> HUGIMLClassifierNative:
+    """Create a candidate that shares immutable cached mining artefacts with base."""
+    cand = base.__class__(**base.get_params(deep=False))
+    share_attrs = [
+        "cat_cols_mask_",
+        "is_int_mask_",
+        "feature_names_in_",
+        "_bin_edges_",
+        "_missing_col_edges_",
+        "_adaptive_code_label_map_",
+        "_adaptive_precoded_features_",
+        "per_feature_b_",
+        "ig_scores_",
+        "td_",
+        "raw_patterns_",
+        "classes_",
+        "n_features_in_",
+        "_native_available_",
+    ]
+    for attr in share_attrs:
+        if hasattr(base, attr):
+            setattr(cand, attr, getattr(base, attr))
+    return cand
+
+
+def _hugiml_prepare_candidate_from_cached_base(
+    base: HUGIMLClassifierNative,
+    X_train_original: Any,
+    y_train: Any,
+    L_value: int,
+    topK_value: int,
+    feature_mode: str,
+) -> HUGIMLClassifierNative:
+    """Build and fit one exact candidate from a max-topK cached base model."""
+    cand = _hugiml_shallow_candidate_from_base(base)
+    cand.L = int(L_value)
+    cand.topK = int(topK_value)
+    cand.feature_mode = str(feature_mode)
+
+    raw_patterns = list(getattr(base, "raw_patterns_", []))[: int(topK_value)]
+    n_train = len(y_train)
+    if int(L_value) == 1:
+        cand.patterns_ = raw_patterns
+        # Fused L=1 path returns columns in raw_patterns_ order; slicing is exact.
+        cand.x_train_hup_ = getattr(base, "x_train_hup_")[:, : len(cand.patterns_)]
+    else:
+        native_td = getattr(getattr(base, "td_", None), "_td", getattr(base, "td_", None))
+        old_td = getattr(cand, "td_", None)
+        cand.td_ = native_td
+        cand.patterns_, cached_coo = cand._deduplicate_patterns_by_coverage(raw_patterns, n_train)
+        cand.td_ = old_td
+        if cached_coo is not None:
+            rows, cols = cached_coo
+        elif len(cand.patterns_) > 0:
+            rows, cols = _core.build_train_matrix(native_td, cand.patterns_)
+        else:
+            rows = cols = np.zeros(0, dtype=np.int32)
+        data = np.ones(len(rows), dtype=np.float32)
+        cand.x_train_hup_ = csr_matrix(
+            (data, (rows, cols)), shape=(n_train, len(cand.patterns_)), dtype=np.float32
+        )
+
+    if len(cand.patterns_) == 0 and cand.feature_mode == "patterns_only":
+        raise HUGIMLMiningError(
+            "No HUG patterns found for cached candidate. Try reducing G, increasing topK, "
+            "or using original_plus_patterns."
+        )
+
+    cand._setup_feature_mode_metadata()
+    cand._setup_augmented_pair_transforms(X_train_original, y_train, fit=True)
+    X_down = cand._make_downstream_features(X_train_original, cand.x_train_hup_, fit=True)
+    X_down = cand._apply_strict_topk_budget_fit(X_down, y_train)
+    cand.x_train_downstream_ = X_down
+    cand.model_ = Pipeline([("clf", cand._make_estimator(len(cand.classes_)))])
+    cand.model_.fit(X_down, y_train)
+    # Intentionally avoid drift baseline and rich metadata during tuning. The
+    # returned best_model is immediately usable for prediction; call fit() on the
+    # selected params if full production metadata/drift baseline is required.
+    return cand
+
+
+def _hugiml_fast_grid_tune(
+    cls,
+    X_train: Any,
+    y_train: Any,
+    X_val: Any,
+    y_val: Any,
+    param_grid: dict[str, list] | None = None,
+    *,
+    base_params: dict[str, Any] | None = None,
+    scoring: str = "roc_auc",
+    refit_full: bool = False,
+    return_results: bool = True,
+) -> dict[str, Any]:
+    """Exact cached tuner for the compact adaptive HUGIML grid.
+
+    Requirements
+    ------------
+    - adaptive_binning=True for every candidate.
+    - G may vary; the tuner partitions candidates into fixed-G cache groups.
+    - Only G, L, topK, and feature_mode vary. B may appear in the grid but is
+      ignored for cache partitioning because adaptive binning chooses per-feature
+      bins and fit() passes sentinel B=2 to the native transaction builder.
+    - max_fit_seconds must be None to guarantee equivalence to the ordinary grid
+      loop; timeout/degradation can make cached mining fits differ from
+      standalone candidates.
+
+    Returns a dict with best_model, best_params, best_score, cv_results, and
+    cache timings. Uses the same scorer as the ordinary grid path for all
+    supported scoring values. During tuning it skips drift-baseline and rich final
+    metadata; set refit_full=True to refit the selected model with normal fit().
+    """
+    t_start = time.perf_counter()
+    candidates = _hugiml_expand_grid_for_fast_tune(param_grid)
+    grid_info = _hugiml_validate_fast_tune_grid(candidates)
+    params0 = dict(base_params or {})
+    params0.setdefault("adaptive_binning", True)
+    params0.setdefault("use_hotpath", True)
+    # Do not set a single global G here; G is part of mining and is fixed per
+    # cache group below.  A caller-supplied base G is used only for candidates
+    # that omit G from the grid.
+    params0.setdefault("G", grid_info["G_values"][0])
+    if params0.get("max_fit_seconds", None) is not None:
+        raise HUGIMLParamError(
+            "fast_grid_tune requires max_fit_seconds=None for exact equivalence."
+        )
+
+    y_train_arr = cls._safe_cast_y(y_train)
+    y_val_arr = np.asarray(y_val)
+    X_train_original = cls(**params0)._copy_input_for_downstream(X_train)
+
+    # Correctness note: topK is NOT derived by mining max(topK) once and slicing.
+    # Empirically, the native miner can return additional valid patterns when a
+    # larger topK is requested, so a smaller standalone topK run is not always
+    # equivalent to a prefix of the larger run.  To guarantee identical validation
+    # scores to the ordinary grid loop, cache one mining fit per (G, L, topK)
+    # group and reuse that cache only across feature_mode candidates.  Within
+    # each cache fit, fit() already sorts raw_patterns_ by descending utility with
+    # tuple(items) tie-breaking before downstream construction.
+    base_by_G_L_topK: dict[tuple[float, int, int], HUGIMLClassifierNative] = {}
+    cache_fit_seconds: dict[str, float] = {}
+    needed_cache_keys = sorted(
+        {
+            (
+                float(c.get("G", params0.get("G", 1e-2))),
+                int(c.get("L", 1)),
+                int(c.get("topK", 30)),
+            )
+            for c in candidates
+        }
+    )
+    for G_value, L_value, topK_value in needed_cache_keys:
+        base_fit_params = dict(params0)
+        base_fit_params.update(
+            {
+                "adaptive_binning": True,
+                "L": int(L_value),
+                "topK": int(topK_value),
+                # Use the richest ordinary mode so raw input is preserved and
+                # empty-pattern fallbacks do not fail while building the cache.
+                "feature_mode": "original_plus_patterns",
+                "G": float(G_value),
+            }
+        )
+        # B may be present in the original grid, but it is intentionally ignored
+        # under adaptive_binning=True.
+        t_fit = time.perf_counter()
+        base = cls(**base_fit_params)
+        base._fast_tune_cache_only = True
+        base.fit(X_train, y_train_arr)
+        base.__dict__.pop("_fast_tune_cache_only", None)
+        cache_fit_seconds[
+            f"G={float(G_value):.12g},L={int(L_value)},topK={int(topK_value)}"
+        ] = time.perf_counter() - t_fit
+        base_by_G_L_topK[(float(G_value), int(L_value), int(topK_value))] = base
+
+    rows: list[dict[str, Any]] = []
+    best_score = -np.inf
+    best_model: HUGIMLClassifierNative | None = None
+    best_params: dict[str, Any] | None = None
+
+    for candidate_params in candidates:
+        L_value = int(candidate_params.get("L", 1))
+        topK_value = int(candidate_params.get("topK", 30))
+        feature_mode = str(candidate_params.get("feature_mode", "patterns_only"))
+        G_value = float(candidate_params.get("G", params0.get("G", 1e-2)))
+        t_cand = time.perf_counter()
+        status = "ok"
+        err = None
+        score = np.nan
+        model = None
+        try:
+            model = _hugiml_prepare_candidate_from_cached_base(
+                base_by_G_L_topK[(G_value, L_value, topK_value)],
+                X_train_original,
+                y_train_arr,
+                L_value,
+                topK_value,
+                feature_mode,
+            )
+            score = _hugiml_score_model_for_tune(model, X_val, y_val_arr, scoring)
+            if np.isfinite(score) and score > best_score:
+                best_score = float(score)
+                best_model = model
+                best_params = dict(candidate_params)
+                best_params["adaptive_binning"] = True
+                best_params["G"] = G_value
+        except Exception as exc:  # keep failed candidates visible like GridSearchCV error_score=np.nan
+            status = "failed"
+            err = f"{type(exc).__name__}: {exc}"
+        rows.append(
+            {
+                "params": dict(candidate_params),
+                "L": L_value,
+                "topK": topK_value,
+                "feature_mode": feature_mode,
+                "G": G_value,
+                "mean_test_score": score,
+                "status": status,
+                "error": err,
+                "elapsed_seconds": time.perf_counter() - t_cand,
+            }
+        )
+
+    if best_model is None or best_params is None:
+        raise HUGIMLValidationError("All fast_grid_tune candidates failed.")
+
+    if refit_full:
+        refit_params = dict(params0)
+        refit_params.update(best_params)
+        # Keep user-supplied B if present; adaptive_binning ignores it for transaction B.
+        best_model = cls(**refit_params).fit(X_train, y_train_arr)
+
+    result = {
+        "best_model": best_model,
+        "best_params": best_params,
+        "best_score": float(best_score),
+        "cv_results": rows if return_results else None,
+        "cache_fit_seconds_by_G_L_topK": cache_fit_seconds,
+        "cache_topK_strategy": "exact_per_G_L_topK_utility_ordered",
+        "elapsed_seconds": time.perf_counter() - t_start,
+        "method": "exact_cached_adaptive_grid",
+        "scoring": str(scoring),
+    }
+    return result
+
+
+@dataclasses.dataclass
+class HUGIMLTuneResult:
+    """Result object returned by HUGIMLClassifierNative.tune().
+
+    Attributes mirror the small subset of GridSearchCV-style fields users need
+    for quick HUGIML tuning while keeping the API lightweight.
+    """
+
+    best_estimator_: HUGIMLClassifierNative
+    best_params_: dict[str, Any]
+    best_score_: float
+    results_: Any
+    fast_path_used_: bool
+    elapsed_seconds_: float
+    n_splits_: int
+    scoring: str
+    cv_splits_: list[tuple[np.ndarray, np.ndarray]]
+    shuffle: bool
+    random_state: int | None
+
+    # Backward-compatible aliases for dict-style code in notebooks.
+    @property
+    def best_model(self) -> HUGIMLClassifierNative:
+        return self.best_estimator_
+
+    @property
+    def best_params(self) -> dict[str, Any]:
+        return self.best_params_
+
+    @property
+    def best_score(self) -> float:
+        return self.best_score_
+
+    @property
+    def cv_results(self) -> Any:
+        return self.results_
+
+    @property
+    def cv_splits(self) -> list[tuple[np.ndarray, np.ndarray]]:
+        return self.cv_splits_
+
+
+def _hugiml_params_key(params: dict[str, Any]) -> tuple[tuple[str, str], ...]:
+    """Stable hashable key for parameter dictionaries used in tuning results."""
+    return tuple(sorted((str(k), repr(v)) for k, v in dict(params).items()))
+
+
+def _hugiml_score_model_for_tune(
+    model: HUGIMLClassifierNative,
+    X_val: Any,
+    y_val: Any,
+    scoring: str,
+) -> float:
+    """Score one fitted model for HUGIMLClassifierNative.tune()."""
+    from sklearn.metrics import accuracy_score, balanced_accuracy_score, f1_score
+
+    scoring_norm = str(scoring).lower()
+    if scoring_norm in {"roc_auc", "auc"}:
+        proba = model.predict_proba(X_val)
+        return _hugiml_auc_score_for_fast_grid(y_val, proba, model.classes_)
+    pred = model.predict(X_val)
+    if scoring_norm == "accuracy":
+        return float(accuracy_score(y_val, pred))
+    if scoring_norm == "balanced_accuracy":
+        return float(balanced_accuracy_score(y_val, pred))
+    if scoring_norm in {"f1", "f1_binary"}:
+        return float(f1_score(y_val, pred))
+    if scoring_norm == "f1_macro":
+        return float(f1_score(y_val, pred, average="macro"))
+    if scoring_norm == "f1_weighted":
+        return float(f1_score(y_val, pred, average="weighted"))
+    raise HUGIMLParamError(
+        "Unsupported scoring value. Supported: 'roc_auc', 'accuracy', "
+        "'balanced_accuracy', 'f1', 'f1_macro', 'f1_weighted'."
+    )
+
+
+def _hugiml_standard_grid_tune_one_split(
+    cls,
+    X_train: Any,
+    y_train: Any,
+    X_val: Any,
+    y_val: Any,
+    candidates: list[dict[str, Any]],
+    base_params: dict[str, Any],
+    scoring: str,
+) -> dict[str, Any]:
+    """Ordinary per-candidate grid evaluation for grids not eligible for fast path."""
+    rows: list[dict[str, Any]] = []
+    best_score = -np.inf
+    best_model: HUGIMLClassifierNative | None = None
+    best_params: dict[str, Any] | None = None
+    y_train_arr = cls._safe_cast_y(y_train)
+    for candidate_params in candidates:
+        t_cand = time.perf_counter()
+        params = dict(base_params)
+        params.update(candidate_params)
+        status = "ok"
+        err = None
+        score = np.nan
+        model = None
+        try:
+            model = cls(**params).fit(X_train, y_train_arr)
+            score = _hugiml_score_model_for_tune(model, X_val, y_val, scoring)
+            if np.isfinite(score) and score > best_score:
+                best_score = float(score)
+                best_model = model
+                best_params = dict(candidate_params)
+        except Exception as exc:
+            status = "failed"
+            err = f"{type(exc).__name__}: {exc}"
+        rows.append(
+            {
+                "params": dict(candidate_params),
+                "L": candidate_params.get("L", params.get("L")),
+                "topK": candidate_params.get("topK", params.get("topK")),
+                "feature_mode": candidate_params.get("feature_mode", params.get("feature_mode")),
+                "mean_test_score": score,
+                "status": status,
+                "error": err,
+                "elapsed_seconds": time.perf_counter() - t_cand,
+            }
+        )
+    if best_model is None or best_params is None:
+        raise HUGIMLValidationError("All tune candidates failed on a validation split.")
+    return {
+        "best_model": best_model,
+        "best_params": best_params,
+        "best_score": float(best_score),
+        "cv_results": rows,
+        "elapsed_seconds": sum(float(r["elapsed_seconds"]) for r in rows),
+        "method": "ordinary_grid",
+    }
+
+
+def _hugiml_tune(
+    cls,
+    X: Any,
+    y: Any,
+    *,
+    cv: int | Any = 5,
+    scoring: str = "roc_auc",
+    param_grid: dict[str, list] | None = None,
+    refit: bool = True,
+    base_params: dict[str, Any] | None = None,
+    random_state: int | None = 42,
+    shuffle: bool = True,
+    cv_splits: list[tuple[Any, Any]] | None = None,
+    use_fast_path: bool = True,
+    return_dataframe: bool = True,
+) -> HUGIMLTuneResult:
+    """Tune HUGIML on full X, y using stratified CV and optional fast-grid caching.
+
+    This is the main public convenience API for quick HUGIML model selection.
+    The regular constructor remains a single-configuration estimator; this
+    method owns grid search, cross-validation, aggregation, and optional refit.
+
+    Parameters
+    ----------
+    X, y : array-like or DataFrame/Series
+        Full training data.
+    cv : int or splitter, default=5
+        Number of stratified folds, or any sklearn-compatible splitter with
+        split(X, y). Integer cv uses StratifiedKFold.
+    scoring : {'roc_auc', 'accuracy', 'balanced_accuracy', 'f1', 'f1_macro', 'f1_weighted'}
+        Validation metric. 'roc_auc' supports binary and multiclass OVR macro AUC.
+    param_grid : dict or None
+        sklearn-style grid. None uses HUGIMLClassifierNative.default_param_grid().
+    refit : bool, default=True
+        If True, refit the best configuration on the full X, y with normal fit().
+    base_params : dict or None
+        Constructor parameters shared by every candidate.
+    random_state : int or None, default=42
+        Random seed for StratifiedKFold when cv is an integer.
+    shuffle : bool, default=True
+        Whether StratifiedKFold shuffles before splitting.
+    cv_splits : list of (train_idx, val_idx) or None, default=None
+        Exact fold indices to use. When supplied, cv, shuffle, and random_state
+        are ignored for split generation, and the same indices are returned in
+        result.cv_splits_ for reuse by other models.
+    use_fast_path : bool, default=True
+        Use exact cached fast-grid evaluation when the grid qualifies; otherwise
+        fall back to ordinary per-candidate evaluation.
+    return_dataframe : bool, default=True
+        Return results_ as a pandas DataFrame when pandas is available.
+
+    Returns
+    -------
+    HUGIMLTuneResult
+        GridSearchCV-like result object with best_estimator_, best_params_,
+        best_score_, results_, fast_path_used_, elapsed_seconds_, and n_splits_.
+    """
+    from sklearn.model_selection import StratifiedKFold
+
+    t_start = time.perf_counter()
+    base_params0 = dict(base_params or {})
+    candidates = _hugiml_expand_grid_for_fast_tune(param_grid)
+
+    y_arr = cls._safe_cast_y(y)
+    n_samples = len(y_arr)
+    if cv_splits is not None:
+        splits = []
+        for split_idx, (train_idx, val_idx) in enumerate(cv_splits, start=1):
+            tr = np.asarray(train_idx, dtype=np.int64)
+            va = np.asarray(val_idx, dtype=np.int64)
+            if tr.ndim != 1 or va.ndim != 1:
+                raise HUGIMLParamError("Each cv_splits entry must contain 1D train and validation indices.")
+            if tr.size == 0 or va.size == 0:
+                raise HUGIMLParamError(f"cv_splits entry {split_idx} has an empty train or validation index.")
+            if np.any(tr < 0) or np.any(va < 0) or np.any(tr >= n_samples) or np.any(va >= n_samples):
+                raise HUGIMLParamError(f"cv_splits entry {split_idx} contains indices outside [0, n_samples).")
+            if np.intersect1d(tr, va).size > 0:
+                raise HUGIMLParamError(f"cv_splits entry {split_idx} has overlapping train and validation indices.")
+            splits.append((tr.copy(), va.copy()))
+    elif isinstance(cv, int):
+        if cv < 2:
+            raise HUGIMLParamError("cv must be >= 2 when provided as an integer.")
+        splitter = StratifiedKFold(n_splits=int(cv), shuffle=bool(shuffle), random_state=random_state)
+        splits = [(np.asarray(tr, dtype=np.int64), np.asarray(va, dtype=np.int64)) for tr, va in splitter.split(X, y_arr)]
+    else:
+        splits = [(np.asarray(tr, dtype=np.int64), np.asarray(va, dtype=np.int64)) for tr, va in cv.split(X, y_arr)]
+    if not splits:
+        raise HUGIMLParamError("cv produced no splits.")
+
+    def _take_rows(obj: Any, idx: np.ndarray) -> Any:
+        if hasattr(obj, "iloc"):
+            return obj.iloc[idx]
+        return np.asarray(obj)[idx]
+
+    fast_path_allowed = False
+    if use_fast_path:
+        try:
+            _hugiml_validate_fast_tune_grid(candidates)
+            # The cached fast path is exact only for adaptive-binning grids with
+            # no fit-time timeout/degradation. Candidate grids that explicitly
+            # set adaptive_binning=False are rejected above; this additional
+            # guard covers the common case where adaptive_binning or
+            # max_fit_seconds is supplied only through base_params.
+            if bool(base_params0.get("adaptive_binning", True)) and base_params0.get("max_fit_seconds", None) is None:
+                fast_path_allowed = True
+        except Exception:
+            fast_path_allowed = False
+
+    fold_rows: list[dict[str, Any]] = []
+    fold_methods: list[str] = []
+    for fold_idx, (train_idx, val_idx) in enumerate(splits, start=1):
+        X_train = _take_rows(X, train_idx)
+        X_val = _take_rows(X, val_idx)
+        y_train = y_arr[train_idx]
+        y_val = y_arr[val_idx]
+        if fast_path_allowed:
+            try:
+                split_result = cls.fast_grid_tune(
+                    X_train,
+                    y_train,
+                    X_val,
+                    y_val,
+                    param_grid=param_grid,
+                    base_params=base_params0,
+                    scoring=scoring,
+                    refit_full=False,
+                    return_results=True,
+                )
+            except Exception:
+                # Preserve correctness over speed: an unexpected cached-path
+                # failure for one fold should fall back to the ordinary
+                # per-candidate evaluation rather than aborting tuning.
+                fast_path_allowed = False
+                split_result = _hugiml_standard_grid_tune_one_split(
+                    cls,
+                    X_train,
+                    y_train,
+                    X_val,
+                    y_val,
+                    candidates,
+                    base_params0,
+                    scoring,
+                )
+        else:
+            split_result = _hugiml_standard_grid_tune_one_split(
+                cls,
+                X_train,
+                y_train,
+                X_val,
+                y_val,
+                candidates,
+                base_params0,
+                scoring,
+            )
+        fold_methods.append(str(split_result.get("method", "unknown")))
+        for row in split_result.get("cv_results") or []:
+            params = dict(row.get("params", {}))
+            fold_rows.append(
+                {
+                    "fold": fold_idx,
+                    "params_key": _hugiml_params_key(params),
+                    "params": params,
+                    "L": row.get("L", params.get("L")),
+                    "topK": row.get("topK", params.get("topK")),
+                    "feature_mode": row.get("feature_mode", params.get("feature_mode")),
+                    "split_test_score": row.get("mean_test_score", np.nan),
+                    "status": row.get("status", "ok"),
+                    "error": row.get("error"),
+                    "elapsed_seconds": row.get("elapsed_seconds", np.nan),
+                }
+            )
+
+    if not fold_rows:
+        raise HUGIMLValidationError("No tuning results were produced.")
+
+    grouped: dict[tuple[tuple[str, str], ...], list[dict[str, Any]]] = {}
+    for row in fold_rows:
+        grouped.setdefault(row["params_key"], []).append(row)
+
+    summary_rows: list[dict[str, Any]] = []
+    for key, rows_for_key in grouped.items():
+        scores = np.asarray([float(r["split_test_score"]) for r in rows_for_key], dtype=float)
+        finite = scores[np.isfinite(scores)]
+        first_params = dict(rows_for_key[0]["params"])
+        summary_rows.append(
+            {
+                "params": first_params,
+                "L": first_params.get("L"),
+                "topK": first_params.get("topK"),
+                "feature_mode": first_params.get("feature_mode"),
+                "mean_test_score": float(np.mean(finite)) if finite.size else np.nan,
+                "std_test_score": float(np.std(finite, ddof=0)) if finite.size else np.nan,
+                "n_successful_splits": int(finite.size),
+                "n_splits": int(len(splits)),
+                "mean_elapsed_seconds": float(np.nanmean([r["elapsed_seconds"] for r in rows_for_key])),
+                "status": "ok" if finite.size == len(splits) else "partial_or_failed",
+            }
+        )
+    summary_rows.sort(
+        key=lambda r: (
+            -float(r["mean_test_score"]) if np.isfinite(r["mean_test_score"]) else np.inf,
+            repr(r["params"]),
+        )
+    )
+    if not summary_rows or not np.isfinite(summary_rows[0]["mean_test_score"]):
+        raise HUGIMLValidationError("All tune candidates failed across CV splits.")
+    for rank, row in enumerate(summary_rows, start=1):
+        row["rank_test_score"] = rank
+
+    best_params = dict(base_params0)
+    best_params.update(dict(summary_rows[0]["params"]))
+    best_score = float(summary_rows[0]["mean_test_score"])
+    if refit:
+        best_estimator = cls(**best_params).fit(X, y_arr)
+    else:
+        # Return a fitted estimator from the first fold for convenience.  It is
+        # valid for immediate inspection/prediction on that fold's fitted state,
+        # but refit=True is recommended for production use.
+        train_idx, val_idx = splits[0]
+        best_estimator = cls(**best_params).fit(_take_rows(X, train_idx), y_arr[train_idx])
+
+    if return_dataframe:
+        try:
+            results_obj = pd.DataFrame(summary_rows)
+        except Exception:
+            results_obj = summary_rows
+    else:
+        results_obj = summary_rows
+
+    return HUGIMLTuneResult(
+        best_estimator_=best_estimator,
+        best_params_=best_params,
+        best_score_=best_score,
+        results_=results_obj,
+        fast_path_used_=bool(fast_path_allowed and all(m == "exact_cached_adaptive_grid" for m in fold_methods)),
+        elapsed_seconds_=time.perf_counter() - t_start,
+        n_splits_=int(len(splits)),
+        scoring=str(scoring),
+        cv_splits_=[(tr.copy(), va.copy()) for tr, va in splits],
+        shuffle=bool(shuffle),
+        random_state=random_state,
+    )
+
+
+HUGIMLClassifierNative.fast_grid_tune = classmethod(_hugiml_fast_grid_tune)
+HUGIMLClassifierNative.tune = classmethod(_hugiml_tune)
