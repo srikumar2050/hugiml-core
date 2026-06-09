@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>HUGIML Scalability — L1 Hotpath Benchmark</title>
+<title>HUGIML Scalability Analysis</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
 <style>
 :root{--bg:#f5f7fb;--panel:#fff;--p2:#f9fafb;--ink:#172033;--mu:#667085;--ln:#e4e7ec;--brand:#2563eb;--b2:#06b6d4;--chip:rgba(37,99,235,.10);--ha:rgba(37,99,235,.15);--hb:rgba(6,182,212,.12);--sh:0 8px 24px rgba(16,24,40,.08);--ra:14px;--opp:#2563eb;--po:#0891b2;--xgb:#d97706;--lgb:#16a34a}
@@ -84,7 +84,7 @@ body[data-t=dark] .bl{background:rgba(74,222,128,.2);color:#bbf7d0}
 <body data-t="light">
 <div class="app">
 <aside class="sb">
-  <div class="logo"><div class="logoi">&#9889;</div><div class="logt"><h1>HUGIML Scalability</h1><p>v1.1.8 &middot; L1 hotpath benchmark</p></div></div>
+  <div class="logo"><div class="logoi">&#9889;</div><div class="logt"><h1>HUGIML Scalability</h1><p>v1.1.8</p></div></div>
   <div class="box"><h3>Theme</h3><div class="pills"><button class="pill on" data-th="light">Light</button><button class="pill" data-th="dark">Dark</button></div></div>
   <div class="box"><h3>Dataset</h3>
     <select id="dsSel">
@@ -103,7 +103,7 @@ body[data-t=dark] .bl{background:rgba(74,222,128,.2);color:#bbf7d0}
       <button class="nb" data-s="mth">&#128203; Methodology</button>
     </nav>
   </div>
-  <div class="foot">HUGIML v1.1.8 &middot; fresh4 clean rerun &middot; 4 threads &middot; test-set AUC</div>
+  <div class="foot">HUGIML v1.1.8 &middot; 4 threads &middot; test-set AUC</div>
 </aside>
 <main class="main">
 
@@ -192,7 +192,7 @@ body[data-t=dark] .bl{background:rgba(74,222,128,.2);color:#bbf7d0}
         <tr><td style="color:var(--mu);padding:3px 10px 3px 0">Train/test split</td><td style="font-weight:700">75% / 25%, stratified, seed=42</td></tr>
         <tr><td style="color:var(--mu);padding:3px 10px 3px 0">Metric</td><td style="font-weight:700">Test-set ROC AUC</td></tr>
         <tr><td style="color:var(--mu);padding:3px 10px 3px 0">Memory</td><td style="font-weight:700">Peak RSS &#8722; RSS after data load</td></tr>
-        <tr><td style="color:var(--mu);padding:3px 10px 3px 0">Run type</td><td style="font-weight:700">fresh4 clean rerun &middot; success-only</td></tr>
+        
       </table>
     </div>
     <div class="card">
@@ -222,7 +222,6 @@ body[data-t=dark] .bl{background:rgba(74,222,128,.2);color:#bbf7d0}
 </main>
 </div>
 <script>
-// ─── DATA (fresh4 clean rerun, all four models present at every point) ────────
 const DATASETS={
   sparse_nonlinear:{
     ns:[
@@ -315,7 +314,7 @@ const baseOpts=(c,xtype,xCb,xL,yL)=>({responsive:true,maintainAspectRatio:false,
 const META={
   sparse_nonlinear:{
     label:'Sparse Nonlinear',
-    desc:'float32 features; nonlinear signal in 8 of p features, rest noise. p=20 for n-scaling (n up to 1.5M); p=20&#8211;2000 for p-scaling. 4 threads, fresh4 clean rerun.',
+    desc:'float32 features; nonlinear signal in 8 of p features, rest noise. p=20 for n-scaling (n up to 1.5M); p=20&#8211;2000 for p-scaling. 4 threads',
     chips:['n up to 1.5M','p=20&#8211;2000','binary classification','4 threads'],
     dsNote:'Sparse signal, p=20. All 4 models at every point.',
     kpi_n_label:'Largest n measured',
@@ -336,7 +335,7 @@ const META={
   },
   threshold_grid:{
     label:'Threshold Grid',
-    desc:'Uniform(&#8722;1,1) features; up to 96 threshold-rule terms, labels median-binarised. p=200 for n-scaling (n up to 200k); p=20&#8211;2000 for p-scaling. 4 threads, fresh4 clean rerun.',
+    desc:'Uniform(&#8722;1,1) features; up to 96 threshold-rule terms, labels median-binarised. p=200 for n-scaling (n up to 200k); p=20&#8211;2000 for p-scaling. 4 threads',
     chips:['n up to 200k','p=20&#8211;2000','threshold signal','4 threads'],
     dsNote:'Threshold grid, p=200. XGB/LGB show strong AUC improvement with n.',
     kpi_n_label:'Largest n measured',
@@ -367,7 +366,7 @@ function setDs(name){
 function updateText(){
   const name=document.getElementById('dsSel').value;
   const m=META[name];
-  qs('ov_title','HUGIML L1 Hotpath &#8212; '+m.label);
+  qs('ov_title','HUGIML '+m.label);
   qs('ov_desc',m.desc);
   qs('ov_chips',m.chips.map(c=>'<span class="chip">'+c+'</span>').join(''));
   qs('ov_cbs',m.cbs.map(([i,h])=>'<div class="cb"><span>'+i+'</span><div>'+h+'</div></div>').join(''));
