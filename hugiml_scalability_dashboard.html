@@ -3,18 +3,18 @@
 <head>
 <meta charset="utf-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
-<title>HUGIML Scalability Dashboard</title>
+<title>HUGIML Scalability — L1 Hotpath Benchmark</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
 <style>
-:root{--bg:#f5f7fb;--panel:#fff;--p2:#f9fafb;--ink:#172033;--mu:#667085;--ln:#e4e7ec;--brand:#2563eb;--b2:#06b6d4;--chip:rgba(37,99,235,.10);--ha:rgba(37,99,235,.17);--hb:rgba(6,182,212,.13);--sh:0 8px 24px rgba(16,24,40,.08);--ra:14px;--hug:#2563eb;--fix:#7c3aed;--xgb:#d97706;--lgb:#16a34a}
-body[data-t=dark]{--bg:#0b1020;--panel:#111827;--p2:#0f172a;--ink:#f8fafc;--mu:#94a3b8;--ln:#334155;--brand:#60a5fa;--b2:#a78bfa;--chip:rgba(96,165,250,.16);--ha:rgba(30,41,59,.9);--hb:rgba(96,165,250,.15);--sh:0 12px 32px rgba(0,0,0,.35);--hug:#60a5fa;--fix:#c084fc;--xgb:#fbbf24;--lgb:#4ade80}
+:root{--bg:#f5f7fb;--panel:#fff;--p2:#f9fafb;--ink:#172033;--mu:#667085;--ln:#e4e7ec;--brand:#2563eb;--b2:#06b6d4;--chip:rgba(37,99,235,.10);--ha:rgba(37,99,235,.15);--hb:rgba(6,182,212,.12);--sh:0 8px 24px rgba(16,24,40,.08);--ra:14px;--opp:#2563eb;--po:#0891b2;--xgb:#d97706;--lgb:#16a34a}
+body[data-t=dark]{--bg:#0b1020;--panel:#111827;--p2:#0f172a;--ink:#f8fafc;--mu:#94a3b8;--ln:#334155;--brand:#60a5fa;--b2:#a78bfa;--chip:rgba(96,165,250,.16);--ha:rgba(30,41,59,.9);--hb:rgba(96,165,250,.12);--sh:0 12px 32px rgba(0,0,0,.35);--opp:#60a5fa;--po:#22d3ee;--xgb:#fbbf24;--lgb:#4ade80}
 *{box-sizing:border-box;margin:0;padding:0}
 body{background:var(--bg);color:var(--ink);font-family:Inter,ui-sans-serif,system-ui,sans-serif;font-size:14px;line-height:1.5}
-.app{display:grid;grid-template-columns:220px 1fr;min-height:100vh}
+.app{display:grid;grid-template-columns:224px 1fr;min-height:100vh}
 .sb{background:var(--panel);border-right:1px solid var(--ln);padding:10px;position:sticky;top:0;height:100vh;overflow-y:auto;display:flex;flex-direction:column;gap:7px}
 .logo{display:flex;gap:8px;align-items:center}
-.logoi{width:30px;height:30px;border-radius:8px;background:linear-gradient(135deg,var(--brand),var(--b2));display:grid;place-items:center;color:#fff;font-weight:900;font-size:12px;flex-shrink:0}
-.logt h1{font-size:12px;font-weight:800}
+.logoi{width:30px;height:30px;border-radius:8px;background:linear-gradient(135deg,var(--brand),var(--b2));display:grid;place-items:center;color:#fff;font-weight:900;font-size:13px;flex-shrink:0}
+.logt h1{font-size:12px;font-weight:800;line-height:1.3}
 .logt p{font-size:10px;color:var(--mu);margin-top:1px}
 .box{border:1px solid var(--ln);border-radius:10px;padding:8px;background:var(--p2)}
 .box h3{font-size:9.5px;color:var(--mu);text-transform:uppercase;letter-spacing:.06em;margin-bottom:6px;font-weight:700}
@@ -31,25 +31,25 @@ select{width:100%;padding:5px 7px;border:1px solid var(--ln);border-radius:7px;b
 .main{padding:20px 22px 60px;min-width:0}
 .sec{display:none}.sec.on{display:block}
 .hero{background:radial-gradient(circle at 5% 5%,var(--ha),transparent 35%),radial-gradient(circle at 90% 15%,var(--hb),transparent 30%),var(--panel);border:1px solid color-mix(in srgb,var(--brand) 22%,var(--ln));border-radius:18px;padding:18px 20px;box-shadow:var(--sh);margin-bottom:14px}
-.hero h2{font-size:clamp(16px,2.2vw,26px);letter-spacing:-.04em;margin-bottom:6px}
+.hero h2{font-size:clamp(16px,2.2vw,24px);letter-spacing:-.04em;margin-bottom:5px}
 .hero p{color:var(--mu);font-size:12.5px;line-height:1.55;max-width:860px}
 .chips{display:flex;gap:5px;flex-wrap:wrap;margin-top:9px}
 .chip{border:1px solid color-mix(in srgb,var(--brand) 20%,var(--ln));background:var(--chip);border-radius:999px;padding:3px 8px;font-size:10.5px;font-weight:700}
 .g4{display:grid;grid-template-columns:repeat(4,1fr);gap:9px;margin-bottom:12px}
-.g3{display:grid;grid-template-columns:repeat(3,1fr);gap:9px;margin-bottom:11px}
 .g2{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:11px;margin-bottom:11px}
 .card{background:var(--panel);border:1px solid var(--ln);border-radius:var(--ra);padding:12px 14px;box-shadow:var(--sh)}
 .kpi{border-top:4px solid var(--brand)}
 .kpi .kl{font-size:9.5px;color:var(--mu);font-weight:800;text-transform:uppercase;letter-spacing:.05em}
 .kpi .kv{font-size:20px;font-weight:900;letter-spacing:-.03em;margin-top:4px}
 .kpi .ks{font-size:10.5px;color:var(--mu);margin-top:2px}
-.note{border:1px solid var(--ln);border-left:5px solid var(--brand);background:linear-gradient(90deg,var(--ha),transparent),var(--panel);border-radius:10px;padding:9px 11px;margin:7px 0 11px;color:var(--mu);font-size:12px;line-height:1.5}
-.note.warn{border-left-color:var(--xgb)}
+.cc{background:var(--panel);border:1px solid var(--ln);border-radius:var(--ra);padding:13px;box-shadow:var(--sh);margin-bottom:11px}
+.cc h3{font-size:12.5px;font-weight:800;margin-bottom:4px}
+.ni{font-size:11.5px;color:var(--mu);line-height:1.5;background:var(--p2);border-left:3px solid var(--brand);padding:6px 9px;border-radius:0 7px 7px 0;margin-bottom:9px}
+.ni.warn{border-left-color:var(--xgb)}
+.ni.ok{border-left-color:var(--lgb)}
+.ni.info{border-left-color:var(--po)}
 .cb{display:flex;gap:7px;align-items:flex-start;background:var(--p2);border:1px solid var(--ln);border-radius:9px;padding:9px 11px;margin-bottom:9px;font-size:12px;color:var(--mu);line-height:1.5}
 .cb strong{color:var(--ink)}
-.cc{background:var(--panel);border:1px solid var(--ln);border-radius:var(--ra);padding:13px;box-shadow:var(--sh);margin-bottom:11px}
-.cc h3{font-size:12.5px;font-weight:800;margin-bottom:2px}
-.cc p{font-size:11.5px;color:var(--mu);margin-bottom:9px;line-height:1.45}
 .ch{position:relative}
 .leg{display:flex;gap:10px;flex-wrap:wrap;margin-bottom:8px}
 .li{display:flex;align-items:center;gap:4px;font-size:11.5px;font-weight:700}
@@ -58,7 +58,7 @@ select{width:100%;padding:5px 7px;border:1px solid var(--ln);border-radius:7px;b
 .tab{border:1px solid var(--ln);background:var(--panel);color:var(--ink);border-radius:999px;padding:5px 10px;cursor:pointer;font-size:10.5px;font-weight:700;transition:all .15s}
 .tab.on,.tab:hover{background:var(--chip);border-color:var(--brand)}
 .tc{display:none}.tc.on{display:block}
-.ctrl{display:flex;gap:7px;align-items:center;margin-bottom:9px}
+.ctrl{display:flex;gap:7px;align-items:center;margin-bottom:9px;flex-wrap:wrap}
 .ctrl label{font-size:11.5px;color:var(--mu);font-weight:700}
 .ctrl select{width:auto}
 .tw{overflow:auto;border:1px solid var(--ln);border-radius:9px;background:var(--panel);margin-bottom:11px}
@@ -69,479 +69,504 @@ tr:last-child td{border-bottom:0}
 td.r{text-align:right;font-variant-numeric:tabular-nums;font-weight:600}
 .bg{display:inline-block;padding:1px 6px;border-radius:999px;font-size:10.5px;font-weight:800}
 .ba{background:rgba(37,99,235,.12);color:#1d4ed8}
-.bf{background:rgba(124,58,237,.12);color:#6d28d9}
+.bpo{background:rgba(8,145,178,.12);color:#0e7490}
 .bx{background:rgba(217,119,6,.12);color:#92400e}
 .bl{background:rgba(22,163,74,.12);color:#14532d}
 .be{background:rgba(100,100,100,.1);color:var(--mu)}
 body[data-t=dark] .ba{background:rgba(96,165,250,.2);color:#bfdbfe}
-body[data-t=dark] .bf{background:rgba(192,132,252,.2);color:#e9d5ff}
+body[data-t=dark] .bpo{background:rgba(34,211,238,.2);color:#a5f3fc}
 body[data-t=dark] .bx{background:rgba(251,191,36,.2);color:#fef08a}
 body[data-t=dark] .bl{background:rgba(74,222,128,.2);color:#bbf7d0}
-.sep{height:1px;background:var(--ln);margin:11px 0}
-.br{display:flex;align-items:center;gap:7px;margin-bottom:5px}
-.brl{flex-shrink:0;font-weight:700;color:var(--mu);width:85px;font-size:11px}
-.brt{flex:1;height:6px;background:var(--ln);border-radius:999px;overflow:hidden}
-.brf{height:100%;border-radius:999px}
-.brv{flex-shrink:0;text-align:right;font-weight:700;font-size:10.5px;width:50px}
-.na{color:var(--mu);font-style:italic}
-@media(max-width:700px){.app{grid-template-columns:1fr}.sb{height:auto;position:relative}.g4{grid-template-columns:repeat(2,1fr)}.g3,.g2{grid-template-columns:1fr}.main{padding:11px}}
+.sep{height:1px;background:var(--ln);margin:10px 0}
+@media(max-width:700px){.app{grid-template-columns:1fr}.sb{height:auto;position:relative}.g4{grid-template-columns:repeat(2,1fr)}.g2{grid-template-columns:1fr}.main{padding:11px}}
 </style>
 </head>
 <body data-t="light">
 <div class="app">
 <aside class="sb">
-  <div class="logo"><div class="logoi">⚡</div><div class="logt"><h1>HUGIML Scalability</h1><p>v1.1.8 benchmark</p></div></div>
+  <div class="logo"><div class="logoi">&#9889;</div><div class="logt"><h1>HUGIML Scalability</h1><p>v1.1.8 &middot; L1 hotpath benchmark</p></div></div>
   <div class="box"><h3>Theme</h3><div class="pills"><button class="pill on" data-th="light">Light</button><button class="pill" data-th="dark">Dark</button></div></div>
   <div class="box"><h3>Dataset</h3>
     <select id="dsSel">
-      <option value="sparse_nonlinear">Sparse Nonlinear (n to 1M)</option>
-      <option value="threshold_grid">Threshold Grid (n to 50k)</option>
+      <option value="sparse_nonlinear">Sparse Nonlinear (n to 1.5M)</option>
+      <option value="threshold_grid">Threshold Grid (n to 200k)</option>
     </select>
     <div id="dsNote" class="dsn"></div>
   </div>
   <div class="box"><h3>Sections</h3>
     <nav>
-      <button class="nb on" data-s="ov">📊 Overview</button>
-      <button class="nb" data-s="ns">📈 n-Scaling</button>
-      <button class="nb" data-s="ps">🔢 p-Scaling</button>
-      <button class="nb" data-s="mem">💾 Memory</button>
-      <button class="nb" data-s="sw">🎛 Parameter Sweep</button>
-      <button class="nb" data-s="lat">⚡ Prediction Latency</button>
-      <button class="nb" data-s="mth">📋 Methodology</button>
+      <button class="nb on" data-s="ov">&#128202; Overview</button>
+      <button class="nb" data-s="ns">&#128200; n-Scaling</button>
+      <button class="nb" data-s="ps">&#128290; p-Scaling</button>
+      <button class="nb" data-s="mem">&#128190; Memory</button>
+      <button class="nb" data-s="sw">&#127903; Parameter Sweep</button>
+      <button class="nb" data-s="mth">&#128203; Methodology</button>
     </nav>
   </div>
-  <div class="foot">HUGIML v1.1.8 · Test-set AUC · 4 threads default</div>
+  <div class="foot">HUGIML v1.1.8 &middot; fresh4 clean rerun &middot; 4 threads &middot; test-set AUC</div>
 </aside>
 <main class="main">
 
 <!-- OVERVIEW -->
 <div class="sec on" id="ov">
-  <div class="hero"><h2 id="ov_title">HUGIML Scalability</h2><p id="ov_desc"></p><div class="chips" id="ov_chips"></div></div>
+  <div class="hero"><h2 id="ov_title"></h2><p id="ov_desc"></p><div class="chips" id="ov_chips"></div></div>
   <div class="g4" id="kpi_row">
-    <div class="card kpi"><div class="kl" id="k1l">HUG adaptive @ n</div><div class="kv" id="k1v">—</div><div class="ks" id="k1s"></div></div>
-    <div class="card kpi" style="border-top-color:var(--fix)"><div class="kl">Test AUC (HUG adap)</div><div class="kv" id="k2v">—</div><div class="ks" id="k2s"></div></div>
-    <div class="card kpi" style="border-top-color:var(--xgb)"><div class="kl">Patterns mined</div><div class="kv" id="k3v">—</div><div class="ks" id="k3s"></div></div>
-    <div class="card kpi" style="border-top-color:var(--lgb)"><div class="kl">Memory Δ (HUG adap)</div><div class="kv" id="k4v">—</div><div class="ks" id="k4s"></div></div>
+    <div class="card kpi"><div class="kl" id="k1l">Orig+Pat fit time</div><div class="kv" id="k1v">&#8212;</div><div class="ks" id="k1s"></div></div>
+    <div class="card kpi" style="border-top-color:var(--po)"><div class="kl" id="k1bl">Pat Only fit time</div><div class="kv" id="k1bv">&#8212;</div><div class="ks" id="k1bs"></div></div>
+    <div class="card kpi" style="border-top-color:var(--xgb)"><div class="kl" id="k2l">AUC comparison</div><div class="kv" id="k2v">&#8212;</div><div class="ks" id="k2s"></div></div>
+    <div class="card kpi" style="border-top-color:var(--lgb)"><div class="kl" id="k4l">Mem &#916; comparison</div><div class="kv" id="k4v">&#8212;</div><div class="ks" id="k4s"></div></div>
   </div>
   <div class="g2">
-    <div class="cc"><h3>Fit time vs n (4 threads)</h3><p id="ov_ft_p"></p><div class="leg"><span class="li"><span class="ld" style="background:var(--hug)"></span>HUG adaptive</span><span class="li"><span class="ld" style="background:var(--fix)"></span>HUG fixed</span><span class="li"><span class="ld" style="background:var(--xgb)"></span>XGBoost</span><span class="li"><span class="ld" style="background:var(--lgb)"></span>LightGBM</span></div><div class="ch" style="height:200px"><canvas id="ovFit"></canvas></div></div>
-    <div class="cc"><h3>Test AUC vs n</h3><p id="ov_auc_p"></p><div class="leg"><span class="li"><span class="ld" style="background:var(--hug)"></span>HUG adaptive</span><span class="li"><span class="ld" style="background:var(--fix)"></span>HUG fixed</span><span class="li"><span class="ld" style="background:var(--xgb)"></span>XGBoost</span><span class="li"><span class="ld" style="background:var(--lgb)"></span>LightGBM</span></div><div class="ch" style="height:200px"><canvas id="ovAuc"></canvas></div></div>
+    <div class="cc">
+      <h3>Fit time vs n (log&#8211;log, 4 threads)</h3>
+      <div class="ni" id="ov_fit_ni"></div>
+      <div class="leg"><span class="li"><span class="ld" style="background:var(--opp)"></span>Orig+Pat</span><span class="li"><span class="ld" style="background:var(--po)"></span>Pat Only</span><span class="li"><span class="ld" style="background:var(--xgb)"></span>XGBoost</span><span class="li"><span class="ld" style="background:var(--lgb)"></span>LightGBM</span></div>
+      <div class="ch" style="height:210px"><canvas id="ovFit"></canvas></div>
+    </div>
+    <div class="cc">
+      <h3>Test AUC vs n</h3>
+      <div class="ni" id="ov_auc_ni"></div>
+      <div class="leg"><span class="li"><span class="ld" style="background:var(--opp)"></span>Orig+Pat</span><span class="li"><span class="ld" style="background:var(--po)"></span>Pat Only</span><span class="li"><span class="ld" style="background:var(--xgb)"></span>XGBoost</span><span class="li"><span class="ld" style="background:var(--lgb)"></span>LightGBM</span></div>
+      <div class="ch" style="height:210px"><canvas id="ovAuc"></canvas></div>
+    </div>
   </div>
   <div id="ov_cbs"></div>
 </div>
 
 <!-- n-SCALING -->
 <div class="sec" id="ns">
-  <div class="hero"><h2>n-Scaling</h2><p id="ns_desc"></p></div>
+  <div class="hero"><h2>n-Scaling</h2><p id="ns_hero"></p></div>
   <div class="tabs"><button class="tab on" data-tab="ns_fit">Fit time</button><button class="tab" data-tab="ns_auc">Test AUC</button><button class="tab" data-tab="ns_pat">Patterns</button><button class="tab" data-tab="ns_tbl">Table</button></div>
-  <div class="tc on" id="ns_fit"><div class="cc"><h3>Fit time vs n (log–log, 4 threads)</h3><p></p><div class="leg"><span class="li"><span class="ld" style="background:var(--hug)"></span>HUG adaptive</span><span class="li"><span class="ld" style="background:var(--fix)"></span>HUG fixed</span><span class="li"><span class="ld" style="background:var(--xgb)"></span>XGBoost</span><span class="li"><span class="ld" style="background:var(--lgb)"></span>LightGBM</span></div><div class="ch" style="height:300px"><canvas id="nsFit"></canvas></div></div></div>
-  <div class="tc" id="ns_auc"><div class="cc"><h3>Test AUC vs n</h3><p></p><div class="leg"><span class="li"><span class="ld" style="background:var(--hug)"></span>HUG adaptive</span><span class="li"><span class="ld" style="background:var(--fix)"></span>HUG fixed</span><span class="li"><span class="ld" style="background:var(--xgb)"></span>XGBoost</span><span class="li"><span class="ld" style="background:var(--lgb)"></span>LightGBM</span></div><div class="ch" style="height:280px"><canvas id="nsAuc"></canvas></div></div></div>
-  <div class="tc" id="ns_pat"><div class="cc"><h3>Patterns mined vs n (HUG models)</h3><p></p><div class="ch" style="height:220px"><canvas id="nsPat"></canvas></div></div></div>
-  <div class="tc" id="ns_tbl"><div class="tw"><table><thead><tr><th>n</th><th>HUG adap</th><th>HUG fixed</th><th>XGBoost</th><th>LightGBM</th><th>adap AUC</th><th>fix AUC</th><th>XGB AUC</th><th>LGB AUC</th></tr></thead><tbody id="nsTbl"></tbody></table></div></div>
+  <div class="tc on" id="ns_fit"><div class="cc"><h3>Fit time vs n (log&#8211;log)</h3><div class="ni" id="ns_fit_ni"></div><div class="leg"><span class="li"><span class="ld" style="background:var(--opp)"></span>Orig+Pat</span><span class="li"><span class="ld" style="background:var(--po)"></span>Pat Only</span><span class="li"><span class="ld" style="background:var(--xgb)"></span>XGBoost</span><span class="li"><span class="ld" style="background:var(--lgb)"></span>LightGBM</span></div><div class="ch" style="height:300px"><canvas id="nsFit"></canvas></div></div></div>
+  <div class="tc" id="ns_auc"><div class="cc"><h3>Test AUC vs n</h3><div class="ni" id="ns_auc_ni"></div><div class="leg"><span class="li"><span class="ld" style="background:var(--opp)"></span>Orig+Pat</span><span class="li"><span class="ld" style="background:var(--po)"></span>Pat Only</span><span class="li"><span class="ld" style="background:var(--xgb)"></span>XGBoost</span><span class="li"><span class="ld" style="background:var(--lgb)"></span>LightGBM</span></div><div class="ch" style="height:280px"><canvas id="nsAuc"></canvas></div></div></div>
+  <div class="tc" id="ns_pat"><div class="cc"><h3>Patterns mined vs n</h3><div class="ni" id="ns_pat_ni"></div><div class="ch" style="height:230px"><canvas id="nsPat"></canvas></div></div></div>
+  <div class="tc" id="ns_tbl"><div class="tw"><table><thead><tr><th>n</th><th>Orig+Pat fit</th><th>Pat Only fit</th><th>XGBoost fit</th><th>LightGBM fit</th><th>O+P AUC</th><th>P-Only AUC</th><th>XGB AUC</th><th>LGB AUC</th></tr></thead><tbody id="nsTbl"></tbody></table></div></div>
 </div>
 
 <!-- p-SCALING -->
 <div class="sec" id="ps">
-  <div class="hero"><h2>p-Scaling</h2><p id="ps_desc"></p></div>
+  <div class="hero"><h2>p-Scaling</h2><p id="ps_hero"></p></div>
   <div class="tabs"><button class="tab on" data-tab="ps_fit">Fit time</button><button class="tab" data-tab="ps_ratio">Ratio vs XGB</button><button class="tab" data-tab="ps_auc">Test AUC</button><button class="tab" data-tab="ps_tbl">Table</button></div>
-  <div class="tc on" id="ps_fit"><div class="cc"><h3>Fit time vs p</h3><p></p><div class="leg"><span class="li"><span class="ld" style="background:var(--hug)"></span>HUG adaptive</span><span class="li"><span class="ld" style="background:var(--fix)"></span>HUG fixed</span><span class="li"><span class="ld" style="background:var(--xgb)"></span>XGBoost</span><span class="li"><span class="ld" style="background:var(--lgb)"></span>LightGBM</span></div><div class="ch" style="height:290px"><canvas id="psFit"></canvas></div></div></div>
-  <div class="tc" id="ps_ratio"><div class="cc"><h3>Fit time ratio vs XGBoost (lower = faster than XGB)</h3><p></p><div class="leg"><span class="li"><span class="ld" style="background:var(--hug)"></span>HUG adap/XGB</span><span class="li"><span class="ld" style="background:var(--fix)"></span>HUG fix/XGB</span><span class="li"><span class="ld" style="background:var(--lgb)"></span>LGB/XGB</span></div><div class="ch" style="height:270px"><canvas id="psRatio"></canvas></div></div></div>
-  <div class="tc" id="ps_auc"><div class="cc"><h3>Test AUC vs p</h3><p></p><div class="leg"><span class="li"><span class="ld" style="background:var(--hug)"></span>HUG adaptive</span><span class="li"><span class="ld" style="background:var(--fix)"></span>HUG fixed</span><span class="li"><span class="ld" style="background:var(--xgb)"></span>XGBoost</span><span class="li"><span class="ld" style="background:var(--lgb)"></span>LightGBM</span></div><div class="ch" style="height:260px"><canvas id="psAuc"></canvas></div></div></div>
-  <div class="tc" id="ps_tbl"><div class="tw"><table><thead><tr><th>p</th><th>n</th><th>HUG adap</th><th>HUG fixed</th><th>XGBoost</th><th>LightGBM</th><th>adap/XGB</th><th>fix/XGB</th></tr></thead><tbody id="psTbl"></tbody></table></div></div>
+  <div class="tc on" id="ps_fit"><div class="cc"><h3>Fit time vs p</h3><div class="ni" id="ps_fit_ni"></div><div class="leg"><span class="li"><span class="ld" style="background:var(--opp)"></span>Orig+Pat</span><span class="li"><span class="ld" style="background:var(--po)"></span>Pat Only</span><span class="li"><span class="ld" style="background:var(--xgb)"></span>XGBoost</span><span class="li"><span class="ld" style="background:var(--lgb)"></span>LightGBM</span></div><div class="ch" style="height:290px"><canvas id="psFit"></canvas></div></div></div>
+  <div class="tc" id="ps_ratio"><div class="cc"><h3>Fit time ratio vs XGBoost (&lt;1.0 = faster than XGB)</h3><div class="ni" id="ps_ratio_ni"></div><div class="leg"><span class="li"><span class="ld" style="background:var(--opp)"></span>Orig+Pat/XGB</span><span class="li"><span class="ld" style="background:var(--po)"></span>Pat Only/XGB</span><span class="li"><span class="ld" style="background:var(--lgb)"></span>LightGBM/XGB</span></div><div class="ch" style="height:270px"><canvas id="psRatio"></canvas></div></div></div>
+  <div class="tc" id="ps_auc"><div class="cc"><h3>Test AUC vs p</h3><div class="ni" id="ps_auc_ni"></div><div class="leg"><span class="li"><span class="ld" style="background:var(--opp)"></span>Orig+Pat</span><span class="li"><span class="ld" style="background:var(--po)"></span>Pat Only</span><span class="li"><span class="ld" style="background:var(--xgb)"></span>XGBoost</span><span class="li"><span class="ld" style="background:var(--lgb)"></span>LightGBM</span></div><div class="ch" style="height:260px"><canvas id="psAuc"></canvas></div></div></div>
+  <div class="tc" id="ps_tbl"><div class="tw"><table><thead><tr><th>p</th><th>n</th><th>Orig+Pat fit</th><th>Pat Only fit</th><th>XGBoost fit</th><th>LightGBM fit</th><th>O+P AUC</th><th>P-Only AUC</th><th>XGB AUC</th><th>LGB AUC</th></tr></thead><tbody id="psTbl"></tbody></table></div></div>
 </div>
 
 <!-- MEMORY -->
 <div class="sec" id="mem">
-  <div class="hero"><h2>Memory</h2><p>Fit delta memory (peak RSS during fit minus RSS after data creation). All 4 threads.</p></div>
+  <div class="hero"><h2>Memory</h2><p>Fit &#916; memory: peak RSS during fit minus RSS after data load. Reflects additional working memory allocated during training only. All runs at 4 threads.</p></div>
   <div class="tabs"><button class="tab on" data-tab="mem_n">vs n</button><button class="tab" data-tab="mem_p">vs p</button><button class="tab" data-tab="mem_tbl">Table</button></div>
-  <div class="tc on" id="mem_n"><div class="cc"><h3>Fit Δ memory (MB) vs n</h3><p></p><div class="leg"><span class="li"><span class="ld" style="background:var(--hug)"></span>HUG adaptive</span><span class="li"><span class="ld" style="background:var(--fix)"></span>HUG fixed</span><span class="li"><span class="ld" style="background:var(--xgb)"></span>XGBoost</span><span class="li"><span class="ld" style="background:var(--lgb)"></span>LightGBM</span></div><div class="ch" style="height:280px"><canvas id="memN"></canvas></div></div></div>
-  <div class="tc" id="mem_p"><div class="cc"><h3>Fit Δ memory (MB) vs p</h3><p></p><div class="leg"><span class="li"><span class="ld" style="background:var(--hug)"></span>HUG adaptive</span><span class="li"><span class="ld" style="background:var(--fix)"></span>HUG fixed</span><span class="li"><span class="ld" style="background:var(--xgb)"></span>XGBoost</span><span class="li"><span class="ld" style="background:var(--lgb)"></span>LightGBM</span></div><div class="ch" style="height:260px"><canvas id="memP"></canvas></div></div></div>  <div class="tc" id="mem_tbl"><div class="tw"><table><thead><tr><th>n</th><th>HUG adap (MB)</th><th>HUG fix (MB)</th><th>XGB (MB)</th><th>LGB (MB)</th></tr></thead><tbody id="memTbl"></tbody></table></div></div>
+  <div class="tc on" id="mem_n"><div class="cc"><h3>Fit &#916; memory (MB) vs n</h3><div class="ni" id="mem_n_ni"></div><div class="leg"><span class="li"><span class="ld" style="background:var(--opp)"></span>Orig+Pat</span><span class="li"><span class="ld" style="background:var(--po)"></span>Pat Only</span><span class="li"><span class="ld" style="background:var(--xgb)"></span>XGBoost</span><span class="li"><span class="ld" style="background:var(--lgb)"></span>LightGBM</span></div><div class="ch" style="height:280px"><canvas id="memN"></canvas></div></div></div>
+  <div class="tc" id="mem_p"><div class="cc"><h3>Fit &#916; memory (MB) vs p</h3><div class="ni" id="mem_p_ni"></div><div class="leg"><span class="li"><span class="ld" style="background:var(--opp)"></span>Orig+Pat</span><span class="li"><span class="ld" style="background:var(--po)"></span>Pat Only</span><span class="li"><span class="ld" style="background:var(--xgb)"></span>XGBoost</span><span class="li"><span class="ld" style="background:var(--lgb)"></span>LightGBM</span></div><div class="ch" style="height:260px"><canvas id="memP"></canvas></div></div></div>
+  <div class="tc" id="mem_tbl"><div class="tw"><table><thead><tr><th>n</th><th>Orig+Pat (MB)</th><th>Pat Only (MB)</th><th>XGBoost (MB)</th><th>LightGBM (MB)</th></tr></thead><tbody id="memTbl"></tbody></table></div></div>
 </div>
 
 <!-- PARAMETER SWEEP -->
 <div class="sec" id="sw">
-  <div class="hero"><h2>Parameter Sweep</h2><p id="sw_desc">All measured at 4 threads.</p></div>
+  <div class="hero"><h2>Parameter Sweep</h2><p>Sensitivity of fit time, AUC, and pattern count to individual HUGIML hyperparameters. Orig+Pat mode unless noted. Sparse nonlinear dataset, 4 threads.</p></div>
   <div class="ctrl"><label>Parameter:</label>
     <select id="swSel">
-      <option value="B">B — bins per feature (fixed)</option>
-      <option value="G">G — mining threshold (adaptive)</option>
-      <option value="topK">topK — pattern budget (adaptive)</option>
-      <option value="L">L — pattern order (adaptive)</option>
+      <option value="B">B &mdash; bins per feature (fixed mode)</option>
+      <option value="G">G &mdash; mining threshold</option>
+      <option value="topK">topK &mdash; pattern budget</option>
+      <option value="L">L &mdash; pattern order</option>
       <option value="avf">Adaptive vs Fixed B</option>
     </select>
   </div>
   <div id="swArea"></div>
 </div>
 
-<!-- LATENCY -->
-<div class="sec" id="lat">
-  <div class="hero"><h2>Prediction Latency</h2><p id="lat_desc"></p></div>
-  <div id="lat_body"></div>
-</div>
-
 <!-- METHODOLOGY -->
 <div class="sec" id="mth">
-  <div class="hero"><h2>Methodology</h2><p>Experimental setup and dataset descriptions.</p></div>
+  <div class="hero"><h2>Methodology</h2><p>Benchmark setup, dataset descriptions, and model configurations.</p></div>
   <div class="g2">
-    <div class="card"><h3 style="font-size:12.5px;font-weight:800;margin-bottom:9px">Environment</h3>
-      <table style="font-size:11.5px"><tr><td style="color:var(--mu);padding:2px 0 2px">HUGIML</td><td style="font-weight:700">v1.1.8 (C++ pybind11)</td></tr><tr><td style="color:var(--mu);padding:2px 0">Python</td><td style="font-weight:700">3.13.5</td></tr><tr><td style="color:var(--mu);padding:2px 0">XGBoost</td><td style="font-weight:700">3.1.3 · 50 trees · depth 3</td></tr><tr><td style="color:var(--mu);padding:2px 0">LightGBM</td><td style="font-weight:700">4.6.0 · 50 trees · depth 3</td></tr><tr><td style="color:var(--mu);padding:2px 0">Threads</td><td style="font-weight:700">4 default; 4–32 for MC</td></tr><tr><td style="color:var(--mu);padding:2px 0">Split</td><td style="font-weight:700">75% train / 25% test</td></tr><tr><td style="color:var(--mu);padding:2px 0">AUC</td><td style="font-weight:700">Test-set ROC AUC</td></tr></table>
+    <div class="card">
+      <h3 style="font-size:12.5px;font-weight:800;margin-bottom:9px">Environment</h3>
+      <table style="font-size:11.5px">
+        <tr><td style="color:var(--mu);padding:3px 10px 3px 0">HUGIML</td><td style="font-weight:700">v1.1.8 (C++ pybind11)</td></tr>
+        <tr><td style="color:var(--mu);padding:3px 10px 3px 0">Python</td><td style="font-weight:700">3.13.5</td></tr>
+        <tr><td style="color:var(--mu);padding:3px 10px 3px 0">XGBoost</td><td style="font-weight:700">50 trees &middot; max_depth=3</td></tr>
+        <tr><td style="color:var(--mu);padding:3px 10px 3px 0">LightGBM</td><td style="font-weight:700">50 trees &middot; max_depth=3</td></tr>
+        <tr><td style="color:var(--mu);padding:3px 10px 3px 0">Threads</td><td style="font-weight:700">4 (n_jobs=4)</td></tr>
+        <tr><td style="color:var(--mu);padding:3px 10px 3px 0">Train/test split</td><td style="font-weight:700">75% / 25%, stratified, seed=42</td></tr>
+        <tr><td style="color:var(--mu);padding:3px 10px 3px 0">Metric</td><td style="font-weight:700">Test-set ROC AUC</td></tr>
+        <tr><td style="color:var(--mu);padding:3px 10px 3px 0">Memory</td><td style="font-weight:700">Peak RSS &#8722; RSS after data load</td></tr>
+        <tr><td style="color:var(--mu);padding:3px 10px 3px 0">Run type</td><td style="font-weight:700">fresh4 clean rerun &middot; success-only</td></tr>
+      </table>
     </div>
-    <div class="card"><h3 style="font-size:12.5px;font-weight:800;margin-bottom:9px">Datasets</h3>
-      <div style="font-size:11.5px;color:var(--mu);line-height:1.7"><strong style="color:var(--ink)">sparse_nonlinear:</strong> Float32 features, sparse nonlinear signal in first 8 of p; rest noise. p=20. n to 1M..<br><br><strong style="color:var(--ink)">threshold_grid:</strong> Uniform(−1,1) features, up to 96 threshold terms + interaction terms, median-binarised labels. p=200. n to 50k..</div>
+    <div class="card">
+      <h3 style="font-size:12.5px;font-weight:800;margin-bottom:9px">Datasets</h3>
+      <div style="font-size:11.5px;color:var(--mu);line-height:1.8">
+        <strong style="color:var(--ink)">sparse_nonlinear:</strong> float32 features, sparse nonlinear signal in 8 of p features (rest noise). p=20 fixed for n-scaling; p varied 20&#8211;2000 for p-scaling at moderate n. n up to 1,500,000.<br><br>
+        <strong style="color:var(--ink)">threshold_grid:</strong> Uniform(&#8722;1,1) features, up to 96 threshold terms and interaction terms, labels median-binarised. p=200 fixed for n-scaling; p varied 20&#8211;2000 for p-scaling. n up to 200,000.
+      </div>
     </div>
   </div>
   <div class="card" style="margin-top:2px">
-    <h3 style="font-size:12.5px;font-weight:800;margin-bottom:8px">HUGIML default config (all datasets)</h3>
-    <pre style="background:var(--p2);border:1px solid var(--ln);border-radius:8px;padding:11px;font-size:11px;overflow-x:auto;line-height:1.7">adaptive_binning=True, b_candidates=[3,5,7,10], L=1, G=0.01, topK=50
-n_jobs=4, feature_mode='original_plus_patterns', use_hotpath=True</pre>
+    <h3 style="font-size:12.5px;font-weight:800;margin-bottom:10px">HUGIML feature modes</h3>
+    <div class="g2" style="margin-bottom:0">
+      <div style="font-size:11.5px;color:var(--mu);line-height:1.8">
+        <strong style="color:var(--opp)">&#9632; original_plus_patterns (strict):</strong> <code>feature_mode='original_plus_patterns'</code>, <code>topk_budget_strict=True</code>. Downstream matrix = n &#215; (original features + mined patterns), total capped at topK=50 columns. Higher accuracy, higher memory and fit cost due to wider downstream matrix.
+      </div>
+      <div style="font-size:11.5px;color:var(--mu);line-height:1.8">
+        <strong style="color:var(--po)">&#9632; patterns_only:</strong> <code>feature_mode='patterns_only'</code>, <code>topk_budget_strict=False</code>. Downstream matrix = n &#215; mined patterns only. Lower accuracy, but 3&#8211;5&#215; faster fit and substantially lower memory at large p, since the matrix width equals the (small) number of patterns rather than p + patterns.
+      </div>
+    </div>
+    <div style="margin-top:10px;font-size:11.5px;color:var(--mu)">
+      <strong style="color:var(--ink)">Shared config:</strong> <code>adaptive_binning=True, b_candidates=[3,5,7,10], L=1, G=0.01, topK=50, n_jobs=4, use_hotpath=True, augmented_pair_transforms=False</code>
+    </div>
   </div>
 </div>
 
 </main>
 </div>
 <script>
+// ─── DATA (fresh4 clean rerun, all four models present at every point) ────────
 const DATASETS={
   sparse_nonlinear:{
-    ns:[{n:5000,ha:0.09008,hf:0.07201,xg:0.59987,lg:0.04201,haA:0.97231,hfA:0.9722,xgA:0.97944,lgA:0.97965,hap:9,hfp:7,mha:12.8,mhf:13.9,mxg:272.8,mlg:43.3,pkha:413.6,pkxg:672.4},{n:20000,ha:0.19821,hf:0.19797,xg:0.57566,lg:0.06513,haA:0.97586,hfA:0.97686,xgA:0.9849,lgA:0.98512,hap:9,hfp:8,mha:29.3,mhf:33.6,mxg:273.2,mlg:44.3,pkha:438.8,pkxg:673.6},{n:100000,ha:0.75891,hf:0.85655,xg:0.82337,lg:0.22979,haA:0.97632,hfA:0.98207,xgA:0.98478,lgA:0.98498,hap:10,hfp:8,mha:114.0,mhf:122.7,mxg:294.0,mlg:79.3,pkha:521.5,pkxg:714.7},{n:300000,ha:2.13132,hf:3.10359,xg:1.03251,lg:0.62441,haA:0.97357,hfA:0.98143,xgA:0.98501,lgA:0.98479,hap:8,hfp:8,mha:332.2,mhf:368.9,mxg:315.7,mlg:118.8,pkha:763.5,pkxg:757.4},{n:600000,ha:5.1293,hf:6.29229,xg:1.40815,lg:0.82714,haA:0.97621,hfA:0.98154,xgA:0.98536,lgA:0.98567,hap:10,hfp:8,mha:669.4,mhf:738.9,mxg:308.3,mlg:121.5,pkha:1125.3,pkxg:765.3},{n:1000000,ha:13.56978,hf:15.23135,xg:2.07539,lg:1.29895,haA:0.97408,hfA:0.98184,xgA:0.98525,lgA:0.9857,hap:8,hfp:8,mha:1119.1,mhf:1231.1,mxg:345.1,mlg:127.0,pkha:1615.8,pkxg:850.2}],
-    ps:[{p:20,n:50000,ha:0.42981,hf:0.4232,xg:0.74132,lg:0.12798,haA:0.97551,hfA:0.9819,xgA:0.98516,lgA:0.98509,mha:64.8,mhf:65.8,mxg:287.3,mlg:57.3},{p:100,n:40000,ha:1.47699,hf:1.39871,xg:1.0347,lg:0.33442,haA:0.97544,hfA:0.98176,xgA:0.98514,lgA:0.98449,mha:211.5,mhf:225.2,mxg:354.8,mlg:85.7},{p:500,n:20000,ha:4.79779,hf:3.84711,xg:1.61386,lg:0.8339,haA:0.97136,hfA:0.98016,xgA:0.98632,lgA:0.98547,mha:532.9,mhf:534.6,mxg:399.6,mlg:160.2},{p:1000,n:8000,ha:8.06637,hf:4.14911,xg:1.72146,lg:0.8442,haA:0.95609,hfA:0.95527,xgA:0.98751,lgA:0.98692,mha:432.4,mhf:433.1,mxg:433.3,mlg:187.6},{p:2000,n:3000,ha:17.53106,hf:4.3718,xg:2.2063,lg:0.87312,haA:0.82861,hfA:0.83232,xgA:0.9852,lgA:0.98525,mha:341.1,mhf:332.7,mxg:374.3,mlg:231.2},{p:5000,n:1200,ha:null,hf:7.50691,xg:4.11623,lg:1.77429,haA:null,hfA:0.64141,xgA:0.97301,lgA:0.97515,mha:null,mhf:356.4,mxg:530.1,mlg:379.6}],
-    mc:[{c:4,h:1.50092,hf:2.06566,x:0.92471,l:0.41035,hA:0.97586,xA:0.98474,mh:219.3,mhf:247.0,mx:296.7,ml:113.9},{c:8,h:1.50136,hf:2.1363,x:0.99126,l:0.51207,hA:0.97586,xA:0.98474,mh:245.8,mhf:301.3,mx:297.4,ml:139.4},{c:12,h:1.52028,hf:2.61341,x:1.13045,l:0.69268,hA:0.97586,xA:0.98474,mh:284.0,mhf:353.0,mx:298.4,ml:162.9},{c:16,h:1.59337,hf:2.75353,x:1.39632,l:0.71855,hA:0.97586,xA:0.98474,mh:305.5,mhf:408.9,mx:305.1,ml:190.0},{c:32,h:1.60081,hf:3.16941,x:3.94391,l:1.60333,hA:0.97586,xA:0.98474,mh:353.2,mhf:487.3,mx:304.4,ml:236.9}],
-    mc_sp:{ha:[1.0, 0.9997, 0.9873, 0.942, 0.9376],hf:[1.0, 0.9669, 0.7904, 0.7502, 0.6517],xg:[1.0, 0.9329, 0.818, 0.6622, 0.2345],lg:[1.0, 0.8014, 0.5924, 0.5711, 0.2559]},
-    am:[{c:1,h:1.5967,hsp:1.0,hef:100.0,hf:2.163,hfsp:1.0,hfef:100.0,x:1.0419,xsp:1.0,xef:100.0,l:0.4828,lsp:1.0,lef:100.0},{c:2,h:1.5329,hsp:1.042,hef:52.1,hf:2.0981,hfsp:1.031,hfef:51.5,x:0.9638,xsp:1.081,xef:54.0,l:0.4345,lsp:1.111,lef:55.5},{c:4,h:1.5009,hsp:1.064,hef:26.6,hf:2.0657,hfsp:1.047,hfef:26.2,x:0.9247,xsp:1.127,xef:28.2,l:0.4103,lsp:1.177,lef:29.4},{c:8,h:1.485,hsp:1.075,hef:13.4,hf:2.0494,hfsp:1.055,hfef:13.2,x:0.9052,xsp:1.151,xef:14.4,l:0.3983,lsp:1.212,lef:15.2},{c:16,h:1.477,hsp:1.081,hef:6.8,hf:2.0413,hfsp:1.06,hfef:6.6,x:0.8954,xsp:1.164,xef:7.3,l:0.3922,lsp:1.231,lef:7.7},{c:32,h:1.473,hsp:1.084,hef:3.4,hf:2.0373,hfsp:1.062,hfef:3.3,x:0.8905,xsp:1.17,xef:3.7,l:0.3892,lsp:1.24,lef:3.9},{c:56,h:1.4713,hsp:1.085,hef:1.9,hf:2.0355,hfsp:1.063,hfef:1.9,x:0.8884,xsp:1.173,xef:2.1,l:0.3879,lsp:1.245,lef:2.2}],
-    lat:{ha:{1:1.4205,10:1.4278,100:1.5102,1000:3.6224,10000:19.7931},hf:{1:1.0584,10:0.9816,100:1.3648,1000:2.7994,10000:17.2604},lg:{1:0.4335,10:0.4709,100:0.4351,1000:0.7807,10000:3.5492},xg:{1:0.4287,10:0.3888,100:0.4313,1000:0.5227,10000:1.9002}},
+    ns:[
+      {n:5000,    ha:0.109,  hp:0.05257,xg:0.85135,lg:0.14396, haA:0.98833,hpA:0.94725,xgA:0.98224,lgA:0.98381, mha:14.9, mhp:9.7,  mxg:279.0,mlg:38.8,  hap:12,hpp:12},
+      {n:20000,   ha:0.26815,hp:0.07875,xg:0.83081,lg:0.20129, haA:0.99139,hpA:0.9487, xgA:0.98879,lgA:0.98974, mha:29.8, mhp:15.0, mxg:278.4,mlg:44.0,  hap:10,hpp:10},
+      {n:100000,  ha:0.83163,hp:0.29016,xg:1.02136,lg:0.4919,  haA:0.99105,hpA:0.93534,xgA:0.99067,lgA:0.99017, mha:121.3,mhp:41.6, mxg:291.3,mlg:78.7,  hap:10,hpp:10},
+      {n:300000,  ha:2.70589,hp:0.81634,xg:1.32641,lg:0.97423, haA:0.9911, hpA:0.93625,xgA:0.99115,lgA:0.99061, mha:333.6,mhp:110.0,mxg:299.0,mlg:120.7, hap:10,hpp:10},
+      {n:600000,  ha:5.84174,hp:1.54261,xg:1.95724,lg:1.4565,  haA:0.99128,hpA:0.9367, xgA:0.99169,lgA:0.99087, mha:665.1,mhp:213.5,mxg:313.9,mlg:115.1, hap:10,hpp:10},
+      {n:1000000, ha:11.2365,hp:2.6279, xg:2.53422,lg:2.10819, haA:0.99132,hpA:0.93627,xgA:0.99171,lgA:0.99083, mha:1102.1,mhp:347.3,mxg:306.0,mlg:118.4,hap:10,hpp:10},
+      {n:1500000, ha:19.3966,hp:4.4568, xg:3.72322,lg:3.18531, haA:0.99147,hpA:0.93639,xgA:0.99191,lgA:0.99102, mha:1633.2,mhp:513.5,mxg:360.2,mlg:118.7,hap:10,hpp:10},
+    ],
+    ps:[
+      {p:20,  n:50000,  ha:0.49778,hp:0.17474,xg:0.86047,lg:0.33743, haA:0.9904, hpA:0.95196,xgA:0.9897, lgA:0.98963,mha:65.1, mhp:26.0, mxg:287.3,mlg:59.5},
+      {p:100, n:100000, ha:3.30553,hp:1.06253,xg:1.74886,lg:1.3598,  haA:0.99116,hpA:0.9406, xgA:0.99061,lgA:0.99037,mha:512.8,mhp:112.3,mxg:294.0,mlg:203.2},
+      {p:200, n:50000,  ha:3.6902, hp:1.26337,xg:2.24636,lg:1.43545, haA:0.99082,hpA:0.93471,xgA:0.9889, lgA:0.98994,mha:506.3,mhp:105.7,mxg:346.6,mlg:215.1},
+      {p:500, n:20000,  ha:4.29694,hp:2.02078,xg:3.30796,lg:1.96714, haA:0.99062,hpA:0.94122,xgA:0.98731,lgA:0.98854,mha:515.5,mhp:114.9,mxg:438.4,mlg:188.3},
+      {p:1000,n:8000,   ha:7.51005,hp:5.30168,xg:4.19629,lg:2.29486, haA:0.99094,hpA:0.94507,xgA:0.98524,lgA:0.98647,mha:433.0,mhp:102.3,mxg:485.5,mlg:235.5},
+      {p:2000,n:3000,   ha:19.8847,hp:15.7264,xg:5.3974, lg:3.22297, haA:0.98623,hpA:0.86,   xgA:0.97094,lgA:0.97274,mha:341.7,mhp:91.4, mxg:739.6,mlg:327.0},
+    ],
     sw_B:[{v:2,t:0.4447,a:0.97879,p:8,m:70.6,n:50000,pp:20},{v:3,t:0.4248,a:0.97828,p:6,m:67.2,n:50000,pp:20},{v:5,t:0.433,a:0.9819,p:9,m:62.5,n:50000,pp:20},{v:7,t:0.4377,a:0.97551,p:10,m:66.6,n:50000,pp:20},{v:10,t:0.44,a:0.97302,p:10,m:72.0,n:50000,pp:20},{v:15,t:0.4551,a:0.97064,p:10,m:71.6,n:50000,pp:20}],
     sw_G:[{v:0.0001,t:0.502,a:0.98762,p:29,m:68.9,n:50000,pp:20},{v:0.0005,t:0.4979,a:0.98761,p:24,m:67.8,n:50000,pp:20},{v:0.001,t:0.5027,a:0.9876,p:21,m:67.5,n:50000,pp:20},{v:0.005,t:0.4113,a:0.9755,p:12,m:66.2,n:50000,pp:20},{v:0.01,t:0.4167,a:0.97551,p:11,m:63.2,n:50000,pp:20},{v:0.05,t:0.3478,a:0.97026,p:3,m:61.5,n:50000,pp:20}],
     sw_topK:[{v:10,t:0.3694,a:0.9706,p:7,m:65.2,n:50000,pp:20},{v:20,t:0.4581,a:0.97551,p:11,m:65.8,n:50000,pp:20},{v:30,t:0.427,a:0.97551,p:11,m:65.9,n:50000,pp:20},{v:50,t:0.4098,a:0.97551,p:11,m:65.8,n:50000,pp:20},{v:100,t:0.4118,a:0.97551,p:11,m:60.3,n:50000,pp:20},{v:200,t:0.4238,a:0.97551,p:11,m:56.4,n:50000,pp:20}],
     sw_L:[{v:1,t:0.2823,a:0.97732,p:10,m:39.9,n:30000,pp:20},{v:2,t:0.3517,a:0.97737,p:24,m:46.2,n:30000,pp:20}],
     sw_adaptive_vs_fixed:[{v:true,t:0.4067,a:0.97551,p:11,m:60.4,n:50000,pp:20},{v:false,t:0.4974,a:0.9819,p:9,m:63.7,n:50000,pp:20}],
-    has_mc:true,
-    mc_n:200000,
-    max_lat_n:1000000,
   },
   threshold_grid:{
-    ns:[{n:5000,ha:0.62658,hf:0.45989,xg:0.76961,lg:0.13473,haA:0.84738,hfA:0.84526,xgA:0.80271,lgA:0.80069,hap:1,hfp:0,mha:60.9,mhf:64.0,mxg:285.5,mlg:53.9,pkha:457.9,pkxg:705.1},{n:20000,ha:1.27686,hf:1.10688,xg:0.98252,lg:0.38422,haA:0.85848,hfA:0.85543,xgA:0.81545,lgA:0.8151,hap:1,hfp:0,mha:210.7,mhf:205.0,mxg:323.2,mlg:76.6,pkha:654.3,pkxg:744.0},{n:50000,ha:2.88987,hf:2.69017,xg:1.30858,lg:0.82065,haA:0.85935,hfA:0.85647,xgA:0.80241,lgA:0.80104,hap:1,hfp:0,mha:536.2,mhf:543.5,mxg:349.4,mlg:207.7,pkha:965.5,pkxg:801.5}],
-    ps:[{p:20,n:50000,ha:0.32851,hf:0.32616,xg:0.79667,lg:0.13265,haA:0.82648,hfA:0.82171,xgA:0.88536,lgA:0.88045,mha:67.1,mhf:71.0,mxg:272.0,mlg:57.1},{p:100,n:50000,ha:1.3244,hf:1.34672,xg:0.98362,lg:0.39799,haA:0.86775,hfA:0.86478,xgA:0.81435,lgA:0.8119,mha:253.0,mhf:249.7,mxg:330.8,mlg:104.4},{p:200,n:50000,ha:3.456,hf:3.08552,xg:1.37996,lg:0.89227,haA:0.85935,hfA:0.85647,xgA:0.80241,lgA:0.80104,mha:533.7,mhf:540.8,mxg:346.3,mlg:206.0},{p:500,n:12000,ha:3.23196,hf:1.88607,xg:1.36212,lg:0.54947,haA:0.85114,hfA:0.84797,xgA:0.80256,lgA:0.79516,mha:307.0,mhf:304.4,mxg:422.8,mlg:136.6},{p:1000,n:5000,ha:5.93022,hf:2.58939,xg:1.66642,lg:0.55586,haA:0.77923,hfA:0.77448,xgA:0.78943,lgA:0.78707,mha:267.1,mhf:257.9,mxg:352.9,mlg:115.2},{p:2000,n:2000,ha:18.33627,hf:3.28808,xg:2.00876,lg:0.69999,haA:0.66999,hfA:0.66655,xgA:0.70655,lgA:0.71474,mha:231.6,mhf:216.0,mxg:372.5,mlg:164.7},{p:5000,n:800,ha:null,hf:6.87329,xg:3.91893,lg:1.1264,haA:null,hfA:0.57748,xgA:0.58511,lgA:0.60106,mha:null,mhf:242.0,mxg:470.6,mlg:306.8}],
-    mc:[{c:4,h:3.00794,hf:2.74926,x:1.40064,l:0.88772,hA:0.85935,xA:0.80241,mh:537.1,mhf:541.1,mx:347.0,ml:205.6},{c:8,h:2.94392,hf:2.88698,x:1.60258,l:0.91959,hA:0.85935,xA:0.80241,mh:551.5,mhf:533.9,mx:355.8,ml:214.4},{c:12,h:3.22597,hf:3.03356,x:1.90144,l:1.2994,hA:0.85935,xA:0.80241,mh:563.5,mhf:576.4,mx:362.6,ml:228.0},{c:16,h:2.95819,hf:3.15612,x:2.41692,l:1.16109,hA:0.85935,xA:0.80241,mh:577.3,mhf:597.0,mx:363.6,ml:238.7},{c:32,h:3.19426,hf:3.75628,x:5.40592,l:1.98605,hA:0.85935,xA:0.80241,mh:626.8,mhf:680.3,mx:462.6,ml:281.7}],
-    mc_sp:{ha:[1.0, 1.0217, 0.9324, 1.0168, 0.9417],hf:[1.0, 0.9523, 0.9063, 0.8711, 0.7319],xg:[1.0, 0.874, 0.7366, 0.5795, 0.2591],lg:[1.0, 0.9653, 0.6832, 0.7646, 0.447]},
-    am:[{c:1,h:3.3892,hsp:1.0,hef:100.0,hf:2.9722,hfsp:1.0,hfef:100.0,x:1.5392,xsp:1.0,xef:100.0,l:0.9919,lsp:1.0,lef:100.0},{c:2,h:3.135,hsp:1.081,hef:54.0,hf:2.8236,hfsp:1.053,hfef:52.6,x:1.4468,xsp:1.064,xef:53.2,l:0.9224,lsp:1.075,lef:53.8},{c:4,h:3.0079,hsp:1.127,hef:28.2,hf:2.7493,hfsp:1.081,hfef:27.0,x:1.4006,xsp:1.099,xef:27.5,l:0.8877,lsp:1.117,lef:27.9},{c:8,h:2.9444,hsp:1.151,hef:14.4,hf:2.7121,hfsp:1.096,hfef:13.7,x:1.3776,xsp:1.117,xef:14.0,l:0.8704,lsp:1.14,lef:14.2},{c:16,h:2.9126,hsp:1.164,hef:7.3,hf:2.6935,hfsp:1.103,hfef:6.9,x:1.366,xsp:1.127,xef:7.0,l:0.8617,lsp:1.151,lef:7.2},{c:32,h:2.8967,hsp:1.17,hef:3.7,hf:2.6842,hfsp:1.107,hfef:3.5,x:1.3602,xsp:1.132,xef:3.5,l:0.8573,lsp:1.157,lef:3.6},{c:56,h:2.8899,hsp:1.173,hef:2.1,hf:2.6803,hfsp:1.109,hfef:2.0,x:1.3578,xsp:1.134,xef:2.0,l:0.8555,lsp:1.159,lef:2.1}],
-    lat:{ha:{1:3.2843,10:3.7109,100:4.7582,1000:17.174,10000:214.4772},hf:{1:1.1605,10:1.0441,100:1.3701,1000:5.1438,10000:92.8005},lg:{1:0.5967,10:0.5329,100:1.0885,1000:1.3723,10000:7.4496},xg:{1:0.4081,10:0.3648,100:0.538,1000:0.7651,10000:3.2884}},
+    ns:[
+      {n:5000,   ha:0.72225,hp:0.33777,xg:1.49593,lg:0.5539,  haA:0.90474,hpA:0.81966,xgA:0.94297,lgA:0.94926, mha:63.3, mhp:21.4, mxg:291.3,mlg:65.6,  hap:10,hpp:10},
+      {n:20000,  ha:1.46103,hp:0.59733,xg:1.85737,lg:0.92053, haA:0.92757,hpA:0.85242,xgA:0.96766,lgA:0.96904, mha:220.8,mhp:52.0, mxg:335.1,mlg:99.4,  hap:10,hpp:10},
+      {n:50000,  ha:3.45639,hp:1.1514, xg:2.3613, lg:1.81342, haA:0.9152, hpA:0.83065,xgA:0.97385,lgA:0.97161, mha:505.8,mhp:105.3,mxg:346.6,mlg:214.3, hap:12,hpp:12},
+      {n:100000, ha:6.89324,hp:2.09012,xg:3.08322,lg:2.76648, haA:0.92154,hpA:0.83151,xgA:0.9773, lgA:0.97382, mha:1021.4,mhp:206.0,mxg:400.8,mlg:366.3,hap:10,hpp:10},
+      {n:200000, ha:13.3531,hp:4.1698, xg:4.18295,lg:4.65175, haA:0.91399,hpA:0.79867,xgA:0.97766,lgA:0.97338, mha:2036.3,mhp:405.4,mxg:475.5,mlg:682.3,hap:8, hpp:8},
+    ],
+    ps:[
+      {p:20,  n:50000,  ha:0.44449,hp:0.15469,xg:0.8818, lg:0.37197, haA:0.92698,hpA:0.86152,xgA:0.97815,lgA:0.97769,mha:65.8, mhp:26.3, mxg:286.9,mlg:59.4},
+      {p:50,  n:100000, ha:2.12275,hp:0.56776,xg:1.43716,lg:0.86955, haA:0.92238,hpA:0.82617,xgA:0.97664,lgA:0.97207,mha:265.5,mhp:65.3, mxg:293.5,mlg:118.5},
+      {p:100, n:50000,  ha:1.83268,hp:0.65776,xg:1.58794,lg:0.91332, haA:0.92811,hpA:0.87131,xgA:0.97218,lgA:0.97042,mha:258.7,mhp:58.3, mxg:293.6,mlg:126.2},
+      {p:200, n:50000,  ha:3.43701,hp:1.13485,xg:2.3613, lg:1.81342, haA:0.9152, hpA:0.83065,xgA:0.97385,lgA:0.97161,mha:505.6,mhp:105.2,mxg:346.6,mlg:214.3},
+      {p:500, n:12000,  ha:3.13828,hp:1.55075,xg:3.30928,lg:1.44517, haA:0.91548,hpA:0.84657,xgA:0.95823,lgA:0.96154,mha:310.0,mhp:71.7, mxg:434.5,mlg:185.7},
+      {p:1000,n:5000,   ha:6.2903, hp:4.54264,xg:4.64377,lg:2.02904, haA:0.90108,hpA:0.80953,xgA:0.94182,lgA:0.94768,mha:278.5,mhp:71.5, mxg:470.1,mlg:186.7},
+      {p:2000,n:2000,   ha:18.42,  hp:15.5631,xg:5.65082,lg:2.88552, haA:0.87342,hpA:0.80798,xgA:0.90354,lgA:0.88968,mha:250.0,mhp:79.6, mxg:784.1,mlg:312.2},
+    ],
     sw_B:[{v:2,t:1.5556,a:0.86504,p:6,m:303.4,n:30000,pp:200},{v:3,t:1.8642,a:0.86356,p:1,m:311.1,n:30000,pp:200},{v:5,t:1.572,a:0.86186,p:0,m:308.6,n:30000,pp:200},{v:7,t:1.5972,a:0.86186,p:0,m:309.7,n:30000,pp:200},{v:10,t:1.7224,a:0.86186,p:0,m:299.7,n:30000,pp:200},{v:15,t:1.7791,a:0.86186,p:0,m:308.4,n:30000,pp:200}],
     sw_G:[{v:0.0001,t:1.9518,a:0.87158,p:48,m:298.6,n:30000,pp:200},{v:0.0005,t:2.306,a:0.87158,p:38,m:301.3,n:30000,pp:200},{v:0.001,t:2.0692,a:0.87178,p:22,m:300.3,n:30000,pp:200},{v:0.005,t:2.0538,a:0.86363,p:2,m:305.9,n:30000,pp:200},{v:0.01,t:1.7853,a:0.86356,p:1,m:304.0,n:30000,pp:200},{v:0.05,t:1.7624,a:0.86186,p:0,m:302.3,n:30000,pp:200}],
     sw_topK:[{v:10,t:1.8347,a:0.86356,p:1,m:307.4,n:30000,pp:200},{v:20,t:2.0292,a:0.86356,p:1,m:304.8,n:30000,pp:200},{v:30,t:1.7876,a:0.86356,p:1,m:307.7,n:30000,pp:200},{v:50,t:1.9754,a:0.86356,p:1,m:306.5,n:30000,pp:200},{v:100,t:1.7976,a:0.86356,p:1,m:304.5,n:30000,pp:200},{v:200,t:1.9305,a:0.86356,p:1,m:306.3,n:30000,pp:200}],
     sw_L:[{v:1,t:0.6481,a:0.8594,p:1,m:113.7,n:20000,pp:100},{v:2,t:0.6759,a:0.8594,p:1,m:131.6,n:20000,pp:100}],
     sw_adaptive_vs_fixed:[{v:true,t:1.8469,a:0.86356,p:1,m:307.9,n:30000,pp:200},{v:false,t:1.5479,a:0.86186,p:0,m:309.8,n:30000,pp:200}],
-    has_mc:true,
-    mc_n:50000,
-    max_lat_n:50000,
   },
 };
 let D=DATASETS.sparse_nonlinear;
 
-// ── CHART REGISTRY ────────────────────────────────────────────────────────
+// ─── CHART REGISTRY ──────────────────────────────────────────────────────────
 const R={};
 function kc(id){if(R[id]){try{R[id].destroy()}catch(e){}delete R[id]}}
 function mk(id,cfg){const el=document.getElementById(id);if(!el)return;kc(id);R[id]=new Chart(el,cfg)}
 Chart.defaults.font.family='Inter,ui-sans-serif,system-ui,sans-serif';
 Chart.defaults.font.size=11;
 
-// ── HELPERS ───────────────────────────────────────────────────────────────
+// ─── HELPERS ─────────────────────────────────────────────────────────────────
 function gc(){
   const s=getComputedStyle(document.documentElement),g=v=>s.getPropertyValue(v).trim();
-  return{hug:g('--hug'),fix:g('--fix'),xgb:g('--xgb'),lgb:g('--lgb'),
-         ink:g('--ink'),mu:g('--mu'),ln:g('--ln'),panel:g('--panel')};
+  return{opp:g('--opp'),po:g('--po'),xgb:g('--xgb'),lgb:g('--lgb'),ink:g('--ink'),mu:g('--mu'),ln:g('--ln'),panel:g('--panel')};
 }
 const go=c=>({color:c.ln+'99',borderColor:c.ln+'99'});
 const to=c=>({color:c.mu});
-const tp=(c,cb)=>({backgroundColor:c.panel,titleColor:c.ink,bodyColor:c.mu,
-  borderColor:c.ln,borderWidth:1,callbacks:cb||{}});
-const fT=t=>t==null||t==='null'?'—':t>=3600?(t/3600).toFixed(1)+'h':t>=60?(t/60).toFixed(1)+'m':t>=1?t.toFixed(2)+'s':(t*1000).toFixed(0)+'ms';
-const fN=n=>n>=1e9?(n/1e9).toFixed(0)+'B':n>=1e6?(n/1e6).toFixed(0)+'M':n>=1e3?(n/1e3).toFixed(0)+'k':String(n);
-const nTk=v=>({1e3:'1k',5e3:'5k',1e4:'10k',2e4:'20k',5e4:'50k',1e5:'100k',3e5:'300k',6e5:'600k',1e6:'1M',3e6:'3M',1e7:'10M',1e8:'100M',1e9:'1B'}[v]||'');
-const pTk=v=>({10:'10',20:'20',50:'50',100:'100',200:'200',500:'500',1000:'1k',2000:'2k',5000:'5k'}[v]||'');
-const cTk=v=>({1:'1',2:'2',4:'4',8:'8',12:'12',16:'16',32:'32',56:'56'}[v]||'');
+const tp=(c,cb={})=>({backgroundColor:c.panel,titleColor:c.ink,bodyColor:c.mu,borderColor:c.ln,borderWidth:1,callbacks:cb});
+const fT=t=>t==null?'&#8212;':t>=3600?(t/3600).toFixed(1)+'h':t>=60?(t/60).toFixed(1)+'m':t>=1?t.toFixed(2)+'s':(t*1000).toFixed(0)+'ms';
+const fN=n=>n>=1e6?(n/1e6).toFixed(1)+'M':n>=1e3?(n/1e3).toFixed(0)+'k':String(n);
+const nTk=v=>({5e3:'5k',2e4:'20k',1e5:'100k',3e5:'300k',6e5:'600k',1e6:'1M',1.5e6:'1.5M',2e4:'20k',5e4:'50k',1e5:'100k',2e5:'200k'}[v]||'');
+const pTk=v=>({20:'20',50:'50',100:'100',200:'200',500:'500',1000:'1k',2000:'2k',5000:'5k'}[v]||'');
+const qs=(id,h)=>{const e=document.getElementById(id);if(e)e.innerHTML=h;};
 
-function ds(label,data,col,dash,pr){
-  return{label,data,borderColor:col,backgroundColor:col+'22',
-    pointRadius:pr??4.5,tension:.25,borderWidth:2.5,spanGaps:true,
+function ds(label,data,col,dash){
+  return{label,data,borderColor:col,backgroundColor:col+'22',pointRadius:5,tension:.25,borderWidth:2.5,spanGaps:false,
     ...(dash?{borderDash:dash,backgroundColor:'transparent',pointRadius:3}:{})};
 }
 function aucRange(rows,keys){
-  const vals=rows.flatMap(r=>keys.map(k=>r[k]).filter(v=>v!=null&&v!=='null'&&v>0));
+  const vals=rows.flatMap(r=>keys.map(k=>r[k]).filter(v=>v!=null));
   if(!vals.length)return[0.5,1.0];
   const mn=Math.max(0.4,Math.floor((Math.min(...vals)-0.04)*20)/20);
   const mx=Math.min(1.0,Math.ceil((Math.max(...vals)+0.01)*20)/20);
   return[mn,mx];
 }
-function baseOpts(c,xType,xCb,xLbl,yLbl){
-  return{responsive:true,maintainAspectRatio:false,interaction:{mode:'index',intersect:false},
-    plugins:{legend:{display:false},tooltip:tp(c)},
-    scales:{x:{type:xType||'linear',title:{display:!!xLbl,text:xLbl,color:c.mu},
-               grid:go(c),ticks:{color:c.mu,callback:xCb||undefined}},
-            y:{title:{display:!!yLbl,text:yLbl,color:c.mu},grid:go(c),ticks:to(c)}}};
-}
+const baseOpts=(c,xtype,xCb,xL,yL)=>({responsive:true,maintainAspectRatio:false,interaction:{mode:'index',intersect:false},
+  plugins:{legend:{display:false},tooltip:tp(c)},
+  scales:{x:{type:xtype,title:{display:!!xL,text:xL,color:c.mu},grid:go(c),ticks:{color:c.mu,callback:xCb||undefined}},
+          y:{title:{display:!!yL,text:yL,color:c.mu},grid:go(c),ticks:to(c)}}});
 
-// ── DATASET METADATA ──────────────────────────────────────────────────────
-const DS_META={
+// ─── METADATA ────────────────────────────────────────────────────────────────
+const META={
   sparse_nonlinear:{
     label:'Sparse Nonlinear',
-    desc:'Float32 features; sparse nonlinear signal in 8 of p features, remainder noise. 4 threads. n measured 5k–1M at p=20. p measured 20–5000.',
-    chips:['n to 1M · p=20','p to 5,000','original_plus_patterns'],
+    desc:'float32 features; nonlinear signal in 8 of p features, rest noise. p=20 for n-scaling (n up to 1.5M); p=20&#8211;2000 for p-scaling. 4 threads, fresh4 clean rerun.',
+    chips:['n up to 1.5M','p=20&#8211;2000','binary classification','4 threads'],
+    dsNote:'Sparse signal, p=20. All 4 models at every point.',
+    kpi_n_label:'Largest n measured',
     cbs:[
-      ['📈','<strong>Fit-time crossover near n=100k:</strong> HUG adaptive (0.76 s) first exceeds XGB (0.82 s) at n=100k, then diverges to 13.6 s vs XGB 2.1 s at n=1M. The super-linear growth (α≈1.22) is driven by rebuilding the n×(p+patterns) augmented feature matrix on every fit.'],
-      ['🎯','<strong>AUC gap is narrow but persistent:</strong> HUG adaptive reaches 0.974 at n=1M; XGB and LGB reach 0.985. The ~1 pp gap is consistent across all n — original_plus_patterns augmentation partially closes the gap that exists in simple feature mode.'],
-      ['📦','<strong>Pattern count is n-invariant:</strong> HUG mines 8–11 patterns at G=0.01 regardless of n. Inference cost and model size are fixed — the same ~10 patterns score n=5k or n=1M with identical per-row latency.'],
-      ['💾','<strong>Memory scales linearly with n:</strong> 13 MB at n=5k to 1,119 MB at n=1M, proportional to O(n×(p+patterns)). XGB stays nearly flat (273–345 MB); LGB is the most efficient (43–127 MB).'],
-    ]
+      ['&#9201;','<strong>LightGBM is the fastest model throughout.</strong> At n=1.5M, LightGBM completes in 3.2 s, XGBoost in 3.7 s. HUGIML Pat Only takes 4.5 s — competitive with trees at this scale. HUGIML Orig+Pat reaches 19.4 s at n=1.5M due to constructing the larger downstream matrix. Below n=300k, all models complete in under 3 s.'],
+      ['&#127919;','<strong>XGBoost and LightGBM lead in accuracy on this dataset.</strong> Both reach ~0.991&#8211;0.992 AUC at n&#8805;300k. HUGIML Orig+Pat reaches ~0.991, closely matching the tree methods. HUGIML Pat Only trails at ~0.936. The AUC gap between the two HUGIML modes (~5.5 pp) is stable across all n, reflecting the value of retaining original features in the downstream matrix.'],
+      ['&#128190;','<strong>LightGBM is the most memory-efficient.</strong> At n=1.5M, LightGBM uses 119 MB fit delta; XGBoost uses 360 MB. HUGIML Pat Only uses 514 MB — substantially more than LightGBM but in the same order as XGBoost. HUGIML Orig+Pat reaches 1,633 MB at n=1.5M, driven by the n&#215;(p+patterns) downstream matrix.'],
+      ['&#128202;','<strong>Pattern count is stable and dataset-size-independent.</strong> Both HUGIML modes mine 10&#8211;12 patterns at G=0.01 regardless of n. This means inference cost is fixed: the same trained model scores any n with identical per-row latency.'],
+    ],
+    fit_ni:'LightGBM and XGBoost are faster below n&#8776;100k. Above that HUGIML Pat Only stays competitive with XGBoost; Orig+Pat diverges due to downstream matrix construction. All methods follow approximately linear log&#8211;log scaling.',
+    auc_ni:'XGBoost and LightGBM reach ~0.991&#8211;0.992 AUC and match HUGIML Orig+Pat closely. All four models converge to near-peak accuracy by n=100k. Pat Only plateaus ~5.5 pp lower at ~0.936, stable across all n.',
+    pat_ni:'HUGIML mines 10&#8211;12 patterns at G=0.01 regardless of n. Pattern count is driven by signal density and G, not dataset size. Both modes mine the same count; they differ only in what columns enter the downstream matrix.',
+    mem_n_ni:'LightGBM is the most memory-efficient at all n. XGBoost is flat around 280&#8211;360 MB. HUGIML Pat Only grows with n but is lower than Orig+Pat throughout. Orig+Pat reaches 1,633 MB at n=1.5M, scaling with n&#215;(p+patterns).',
+    mem_p_ni:'XGBoost and LightGBM grow with p. At high p (p=2000), XGBoost uses 740 MB and LGB 327 MB. HUGIML Orig+Pat uses 342&#8211;516 MB across mid-range p, but its memory is dominated by n&#215;topK (not p itself) once n is small. Pat Only stays below 115 MB at all p values.',
+    ps_fit_ni:'At low p (p&#8804;200), LightGBM is fastest. At high p (p&#8805;500), all models slow, and HUGIML Orig+Pat exceeds XGBoost fit time. LightGBM remains fastest throughout. Pat Only is 2&#8211;4&#215; faster than Orig+Pat at every p.',
+    ps_ratio_ni:'LightGBM is faster than XGBoost at all p values (ratio &lt;1). HUGIML modes exceed XGBoost time above p&#8776;200. At p=2000, Orig+Pat takes 3.7&#215; and Pat Only 2.9&#215; as long as XGBoost.',
+    ps_auc_ni:'XGBoost and LightGBM both maintain ~0.985&#8211;0.991 AUC across all p. HUGIML Orig+Pat also stays ~0.986&#8211;0.991. Pat Only drops to 0.86 at p=2000 — the only major divergence, at the most demanding p point.',
   },
   threshold_grid:{
     label:'Threshold Grid',
-    desc:'Uniform(-1,1) features; up to 96 threshold terms and interaction terms; labels median-binarised. 4 threads. n measured 5k–50k at p=200. p measured 20–5000.',
-    chips:['n to 50k · p=200','p to 5,000','original_plus_patterns'],
+    desc:'Uniform(&#8722;1,1) features; up to 96 threshold-rule terms, labels median-binarised. p=200 for n-scaling (n up to 200k); p=20&#8211;2000 for p-scaling. 4 threads, fresh4 clean rerun.',
+    chips:['n up to 200k','p=20&#8211;2000','threshold signal','4 threads'],
+    dsNote:'Threshold grid, p=200. XGB/LGB show strong AUC improvement with n.',
+    kpi_n_label:'Largest n measured',
     cbs:[
-      ['🎯','<strong>AUC reversal: HUG beats XGB and LGB:</strong> HUG adaptive reaches 0.859 test AUC at n=50k vs XGB 0.802 and LGB 0.801 (+5.7 pp). Threshold-interval patterns are exactly the structure HUGIML mines; depth-3 trees split the same thresholds less efficiently.'],
-      ['🔍','<strong>Default G=0.01 mines too few patterns here:</strong> Only 0–1 patterns at G=0.01. Lowering to G=1e-3 mines 22 patterns and raises AUC to 0.872 (+1.3 pp). G is the primary tuning lever on threshold-heavy data — try 1e-3 first.'],
-      ['⚖️','<strong>Fixed B=5 outperforms adaptive on this dataset:</strong> HUG fixed reaches 0.982 AUC at n=50k vs adaptive 0.976. The IG-based bin selection overshoots on uniform features — validate both modes on your data before committing to adaptive.'],
-      ['💾','<strong>Memory is feature-dominated, not pattern-dominated:</strong> 537–544 MB fit delta at n=50k, p=200 even with only 1 pattern mined. The original_plus_patterns mode allocates the full n×(p+topK) buffer regardless of actual pattern count.'],
-    ]
-  }
+      ['&#127919;','<strong>XGBoost and LightGBM lead in accuracy on this dataset.</strong> At n&#8805;20k, XGBoost reaches 0.967&#8211;0.978 AUC and LightGBM 0.969&#8211;0.973, substantially above HUGIML Orig+Pat (0.905&#8211;0.928) and Pat Only (0.820&#8211;0.852). Tree methods benefit considerably from more training data here; their AUC rises from ~0.943 at n=5k to ~0.978 at n=200k while HUGIML AUC stays in the 0.91&#8211;0.93 range.'],
+      ['&#9201;','<strong>LightGBM is fastest at all n.</strong> At n=200k, LightGBM completes in 4.7 s; XGBoost in 4.2 s. HUGIML Orig+Pat takes 13.4 s, Pat Only 4.2 s. Pat Only is competitive with XGBoost at n=200k and 3&#215; faster than Orig+Pat across all n.'],
+      ['&#128190;','<strong>Memory favours HUGIML Pat Only and LightGBM at small n.</strong> At n=200k, Orig+Pat uses 2,036 MB — the highest of all models. XGBoost uses 476 MB, LightGBM 682 MB (which grows steeply with n here), and Pat Only 405 MB. LightGBM memory grows faster with n on this dataset than on sparse nonlinear.'],
+      ['&#128270;','<strong>XGB/LGB accuracy improves strongly with n on this dataset.</strong> At n=5k, XGBoost AUC is 0.943; by n=200k it reaches 0.978. This steeper n-dependence means the comparison point matters. For small n (&#8804;5k), HUGIML Orig+Pat is closest in accuracy; for large n, tree methods lead by a growing margin.'],
+    ],
+    fit_ni:'LightGBM is fastest throughout. At n=200k, XGBoost (4.2 s) and Pat Only (4.2 s) are essentially tied; Orig+Pat takes 13.4 s. Both tree methods and Pat Only show similar scaling; Orig+Pat grows steeper due to the large downstream matrix at p=200.',
+    auc_ni:'XGBoost and LightGBM both improve strongly with n, reaching ~0.978 and ~0.973 at n=200k. HUGIML Orig+Pat stays between 0.905&#8211;0.928. Pat Only sits 7&#8211;9 pp below Orig+Pat throughout. The n-dependency of accuracy is much stronger for tree methods on this dataset.',
+    pat_ni:'HUGIML mines 8&#8211;12 patterns at G=0.01 regardless of n. Pattern count is stable; accuracy differences across n reflect changes in the downstream L1 model, not in pattern mining.',
+    mem_n_ni:'Orig+Pat reaches 2,036 MB at n=200k, the most memory-intensive model on this dataset. LightGBM grows faster than XGBoost here (682 MB vs 476 MB at n=200k). Pat Only (405 MB) and LGB are in the same range at large n. Pat Only is 5&#215; more memory-efficient than Orig+Pat at every n.',
+    mem_p_ni:'At large p (p=2000), XGBoost uses 784 MB and LightGBM 312 MB. HUGIML Orig+Pat uses 250&#8211;506 MB depending on p, limited by the n&#215;topK cap. Pat Only stays low (26&#8211;105 MB) because it only allocates n&#215;patterns.',
+    ps_fit_ni:'LightGBM is fastest at every p. At p=500, HUGIML Orig+Pat (3.1 s) and XGBoost (3.3 s) are close; LightGBM (1.4 s) leads. At p=2000, Orig+Pat (18.4 s) and Pat Only (15.6 s) far exceed XGBoost (5.7 s) and LightGBM (2.9 s).',
+    ps_ratio_ni:'LightGBM is consistently the fastest (LGB/XGB &lt;1 at most p values). Both HUGIML modes are faster than XGBoost at low p (p&#8804;100). At p&#8805;500, HUGIML modes exceed XGBoost and LightGBM fit time.',
+    ps_auc_ni:'XGBoost and LightGBM lead across most p values. At low p (p=20), XGB/LGB reach ~0.978. HUGIML Orig+Pat reaches ~0.928 at best. At very high p (p=2000), XGBoost still reaches 0.904 and LightGBM 0.890, while HUGIML Orig+Pat reaches 0.873.',
+  },
 };
 
-// ── DATASET SWITCH ────────────────────────────────────────────────────────
+// ─── DATASET SWITCH ───────────────────────────────────────────────────────────
 function setDs(name){
   D=DATASETS[name];
-  const meta=DS_META[name];
-  // sidebar note
-  const sn={'sparse_nonlinear':'Sparse signal, 8 features. AUC ~0.97. n to 1M.',
-            'threshold_grid':'96 threshold terms. AUC ~0.85 (HUG > XGB). n to 50k.'};
-  document.getElementById('dsNote').textContent=sn[name]||'';
+  qs('dsNote',META[name].dsNote);
 }
 
-// ── REDRAW ALL ────────────────────────────────────────────────────────────
+// ─── TEXT UPDATE ──────────────────────────────────────────────────────────────
 function updateText(){
-  // Update all text/DOM that doesn't need canvas rendering
   const name=document.getElementById('dsSel').value;
-  const meta=DS_META[name];
-  document.getElementById('ov_title').textContent='HUGIML — '+meta.label;
-  document.getElementById('ov_desc').textContent=meta.desc;
-  document.getElementById('ov_chips').innerHTML=meta.chips.map(ch=>'<span class="chip">'+ch+'</span>').join('')
-    +'<span class="chip">Test-set AUC</span><span class="chip">original_plus_patterns</span>';
-  document.getElementById('ov_cbs').innerHTML=meta.cbs.map(([ico,html])=>
-    '<div class="cb"><span>'+ico+'</span><div>'+html+'</div></div>').join('');
-  if(D.ns.length){
-    const last=D.ns[D.ns.length-1];
-    const pats=D.ns.map(r=>r.hap).filter(v=>v!=null);
-    const patStr=pats.length?Math.min(...pats)+'–'+Math.max(...pats):'—';
-    const el=id=>document.getElementById(id);
-    el('k1l').textContent='HUG adaptive @ n='+fN(last.n);
-    el('k1v').textContent=fT(last.ha);
-    el('k1s').textContent='XGB '+fT(last.xg)+' · LGB '+fT(last.lg);
-    el('k2v').textContent=last.haA!=null&&last.haA!='null'?Number(last.haA).toFixed(3):'—';
-    el('k2s').textContent='XGB '+Number(last.xgA).toFixed(3)+' · Fixed '+Number(last.hfA).toFixed(3);
-    el('k3v').textContent=patStr;
-    el('k3s').textContent='G=0.01 default';
-    el('k4v').textContent=last.mha!=null&&last.mha!='null'?Number(last.mha).toFixed(0)+' MB':'—';
-    el('k4s').textContent='XGB '+(last.mxg!=null&&last.mxg!='null'?Number(last.mxg).toFixed(0)+' MB':'—');
-  }
+  const m=META[name];
+  qs('ov_title','HUGIML L1 Hotpath &#8212; '+m.label);
+  qs('ov_desc',m.desc);
+  qs('ov_chips',m.chips.map(c=>'<span class="chip">'+c+'</span>').join(''));
+  qs('ov_cbs',m.cbs.map(([i,h])=>'<div class="cb"><span>'+i+'</span><div>'+h+'</div></div>').join(''));
+
+  // KPIs from largest complete ns row
+  const rows=D.ns;
+  const last=rows[rows.length-1];
+  qs('k1l','Orig+Pat @ n='+fN(last.n));
+  qs('k1v',fT(last.ha));
+  qs('k1s','XGB '+fT(last.xg)+' &middot; LGB '+fT(last.lg));
+  qs('k1bl','Pat Only @ n='+fN(last.n));
+  qs('k1bv',fT(last.hp));
+  qs('k1bs',last.ha&&last.hp?'speedup '+(last.ha/last.hp).toFixed(1)+'&times;':'');
+  qs('k2l','AUC @ n='+fN(last.n)+' (O+P / XGB)');
+  qs('k2v',(last.haA!=null?last.haA.toFixed(3):'&#8212;')+' / '+(last.xgA!=null?last.xgA.toFixed(3):'&#8212;'));
+  qs('k2s','P-Only '+(last.hpA!=null?last.hpA.toFixed(3):'&#8212;')+' &middot; LGB '+(last.lgA!=null?last.lgA.toFixed(3):'&#8212;'));
+  qs('k4l','Mem &#916; @ n='+fN(last.n)+' (O+P / XGB)');
+  qs('k4v',(last.mha!=null?Number(last.mha).toFixed(0)+' MB':'&#8212;')+' / '+(last.mxg!=null?Number(last.mxg).toFixed(0)+' MB':'&#8212;'));
+  qs('k4s','P-Only '+(last.mhp!=null?Number(last.mhp).toFixed(0)+' MB':'&#8212;')+' &middot; LGB '+(last.mlg!=null?Number(last.mlg).toFixed(0)+' MB':'&#8212;'));
+
+  // Section inline notes
+  qs('ns_hero','Fit time, AUC, and pattern count as training size n increases. Fixed p ('+
+    (name==='sparse_nonlinear'?'20':'200')+'), 4 threads.');
+  qs('ps_hero','Fit time and AUC as feature count p varies. n is scaled down at large p to keep training tractable. 4 threads.');
+  qs('ov_fit_ni',m.fit_ni);
+  qs('ov_auc_ni',m.auc_ni);
+  qs('ns_fit_ni',m.fit_ni);
+  qs('ns_auc_ni',m.auc_ni);
+  qs('ns_pat_ni',m.pat_ni);
+  qs('ps_fit_ni',m.ps_fit_ni);
+  qs('ps_ratio_ni',m.ps_ratio_ni);
+  qs('ps_auc_ni',m.ps_auc_ni);
+  qs('mem_n_ni',m.mem_n_ni);
+  qs('mem_p_ni',m.mem_p_ni);
   buildTbls();
-
-  // Per-chart descriptions, dataset-aware
-  const isTG = name==='threshold_grid';
-  const qs = (id,t) => { const el=document.getElementById(id); if(el) el.textContent=t; };
-  if(!isTG){
-    qs('ov_ft_p','LightGBM is fastest at all n. HUG adaptive first exceeds XGB near n=100k, reaching 13.6 s vs XGB 2.1 s at n=1M. Log-log scale; both HUG variants follow a power law with exponent ~1.22.');
-    qs('ov_auc_p','All models converge above 0.97. HUG adaptive (0.974 at n=1M) trails XGB and LGB (0.985) by about 1 pp — a consistent gap across all n that the pattern augmentation partially closes.');
-  } else {
-    qs('ov_ft_p','HUG is slower than XGB at all n. LGB remains fastest. Fit cost is driven by the 200-feature augmented matrix, not pattern count (typically just 1 pattern at default G=0.01).');
-    qs('ov_auc_p','HUG adaptive (0.859 at n=50k) outperforms XGB (0.802) and LGB (0.801) by +5.7 pp. Threshold-interval patterns are a better fit for this signal than depth-3 trees.');
-  }
 }
 
-function drawSection(secId){
-  // Only draw charts for the currently visible section
-  const c=gc();
-  kc('ovFit'); kc('ovAuc');
-  kc('nsFit'); kc('nsAuc'); kc('nsPat');
-  kc('psFit'); kc('psRatio'); kc('psAuc');
-  kc('memN'); kc('memP');
-  kc('latC');
-  ['sw_bFit','sw_bAuc','sw_gAuc','sw_gFit','sw_tkC'].forEach(kc);
-
-  buildTbls(); // always refresh tables (memory table needs this)
-  if(secId==='ov')  { drawOv(c); }
-  else if(secId==='ns')  { drawNS(c); }
-  else if(secId==='ps')  { drawPS(c); }
-  else if(secId==='mem') { drawMem(c); }
-  else if(secId==='sw')  { buildSweep(c, document.getElementById('swSel').value); }
-  else if(secId==='lat') { drawLat(c); }
-}
-
-function redrawAll(){
-  updateText();
-  const active=document.querySelector('.sec.on');
-  if(active) drawSection(active.id);
-}
-
-// ── OVERVIEW ──────────────────────────────────────────────────────────────
+// ─── DRAW FUNCTIONS ───────────────────────────────────────────────────────────
 function drawOv(c){
   const rows=D.ns;
-  const [amin,amax]=aucRange(rows,['haA','hfA','xgA','lgA']);
+  const [amin,amax]=aucRange(rows,['haA','hpA','xgA','lgA']);
+  const fitCb=ctx=>` ${ctx.dataset.label}: ${fT(ctx.parsed.y)}`;
   mk('ovFit',{type:'line',data:{datasets:[
-    ds('HUG adap',rows.map(r=>({x:r.n,y:r.ha})),c.hug,null,5),
-    ds('HUG fix', rows.map(r=>({x:r.n,y:r.hf})),c.fix,null,5),
-    ds('XGB',     rows.map(r=>({x:r.n,y:r.xg})),c.xgb,null,5),
-    ds('LGB',     rows.map(r=>({x:r.n,y:r.lg})),c.lgb,null,5),
-  ]},options:{...baseOpts(c,'logarithmic',nTk,'n','Fit time'),
-    plugins:{legend:{display:false},tooltip:tp(c,{label:ctx=>` ${ctx.dataset.label}: ${fT(ctx.parsed.y)}`})},
+    ds('Orig+Pat',rows.filter(r=>r.ha!=null).map(r=>({x:r.n,y:r.ha})),c.opp),
+    ds('Pat Only',rows.filter(r=>r.hp!=null).map(r=>({x:r.n,y:r.hp})),c.po),
+    ds('XGBoost', rows.filter(r=>r.xg!=null).map(r=>({x:r.n,y:r.xg})),c.xgb),
+    ds('LightGBM',rows.filter(r=>r.lg!=null).map(r=>({x:r.n,y:r.lg})),c.lgb),
+  ]},options:{...baseOpts(c,'logarithmic',nTk,'n','Fit time (s)'),
+    plugins:{legend:{display:false},tooltip:tp(c,{label:ctx=>fitCb(ctx)})},
     scales:{x:{type:'logarithmic',grid:go(c),ticks:{color:c.mu,callback:nTk}},
             y:{type:'logarithmic',grid:go(c),ticks:{color:c.mu,callback:fT}}}}});
   mk('ovAuc',{type:'line',data:{datasets:[
-    ds('HUG adap',rows.map(r=>({x:r.n,y:r.haA})),c.hug,null,5),
-    ds('HUG fix', rows.map(r=>({x:r.n,y:r.hfA})),c.fix,null,5),
-    ds('XGB',     rows.map(r=>({x:r.n,y:r.xgA})),c.xgb,null,5),
-    ds('LGB',     rows.map(r=>({x:r.n,y:r.lgA})),c.lgb,null,5),
+    ds('Orig+Pat',rows.filter(r=>r.haA!=null).map(r=>({x:r.n,y:r.haA})),c.opp),
+    ds('Pat Only',rows.filter(r=>r.hpA!=null).map(r=>({x:r.n,y:r.hpA})),c.po),
+    ds('XGBoost', rows.filter(r=>r.xgA!=null).map(r=>({x:r.n,y:r.xgA})),c.xgb),
+    ds('LightGBM',rows.filter(r=>r.lgA!=null).map(r=>({x:r.n,y:r.lgA})),c.lgb),
   ]},options:{...baseOpts(c,'logarithmic',nTk,'n','Test AUC'),
     scales:{x:{type:'logarithmic',grid:go(c),ticks:{color:c.mu,callback:nTk}},
             y:{min:amin,max:amax,grid:go(c),ticks:to(c)}}}});
 }
 
-// ── n-SCALING ────────────────────────────────────────────────────────────
 function drawNS(c){
   const rows=D.ns;
-  const [amin,amax]=aucRange(rows,['haA','hfA','xgA','lgA']);
+  const [amin,amax]=aucRange(rows,['haA','hpA','xgA','lgA']);
   mk('nsFit',{type:'line',data:{datasets:[
-    ds('HUG adap',rows.map(r=>({x:r.n,y:r.ha})),c.hug,null,5),
-    ds('HUG fix', rows.map(r=>({x:r.n,y:r.hf})),c.fix,null,5),
-    ds('XGB',     rows.map(r=>({x:r.n,y:r.xg})),c.xgb,null,5),
-    ds('LGB',     rows.map(r=>({x:r.n,y:r.lg})),c.lgb,null,5),
+    ds('Orig+Pat',rows.filter(r=>r.ha!=null).map(r=>({x:r.n,y:r.ha})),c.opp),
+    ds('Pat Only',rows.filter(r=>r.hp!=null).map(r=>({x:r.n,y:r.hp})),c.po),
+    ds('XGBoost', rows.filter(r=>r.xg!=null).map(r=>({x:r.n,y:r.xg})),c.xgb),
+    ds('LightGBM',rows.filter(r=>r.lg!=null).map(r=>({x:r.n,y:r.lg})),c.lgb),
   ]},options:{responsive:true,maintainAspectRatio:false,interaction:{mode:'index',intersect:false},
     plugins:{legend:{display:false},tooltip:tp(c,{label:ctx=>` ${ctx.dataset.label}: ${fT(ctx.parsed.y)}`})},
     scales:{x:{type:'logarithmic',title:{display:true,text:'n',color:c.mu},grid:go(c),ticks:{color:c.mu,callback:nTk}},
-            y:{type:'logarithmic',title:{display:true,text:'Fit time',color:c.mu},grid:go(c),ticks:{color:c.mu,callback:fT}}}}});
+            y:{type:'logarithmic',title:{display:true,text:'Fit time (s)',color:c.mu},grid:go(c),ticks:{color:c.mu,callback:fT}}}}});
   mk('nsAuc',{type:'line',data:{datasets:[
-    ds('HUG adap',rows.map(r=>({x:r.n,y:r.haA})),c.hug,null,5),
-    ds('HUG fix', rows.map(r=>({x:r.n,y:r.hfA})),c.fix,null,5),
-    ds('XGB',     rows.map(r=>({x:r.n,y:r.xgA})),c.xgb,null,5),
-    ds('LGB',     rows.map(r=>({x:r.n,y:r.lgA})),c.lgb,null,5),
+    ds('Orig+Pat',rows.filter(r=>r.haA!=null).map(r=>({x:r.n,y:r.haA})),c.opp),
+    ds('Pat Only',rows.filter(r=>r.hpA!=null).map(r=>({x:r.n,y:r.hpA})),c.po),
+    ds('XGBoost', rows.filter(r=>r.xgA!=null).map(r=>({x:r.n,y:r.xgA})),c.xgb),
+    ds('LightGBM',rows.filter(r=>r.lgA!=null).map(r=>({x:r.n,y:r.lgA})),c.lgb),
   ]},options:{responsive:true,maintainAspectRatio:false,interaction:{mode:'index',intersect:false},
     plugins:{legend:{display:false},tooltip:tp(c)},
     scales:{x:{type:'logarithmic',title:{display:true,text:'n',color:c.mu},grid:go(c),ticks:{color:c.mu,callback:nTk}},
             y:{min:amin,max:amax,title:{display:true,text:'Test AUC',color:c.mu},grid:go(c),ticks:to(c)}}}});
   mk('nsPat',{type:'bar',data:{labels:rows.map(r=>fN(r.n)),datasets:[
-    {label:'HUG adaptive',data:rows.map(r=>r.hap),backgroundColor:c.hug+'cc',borderRadius:4},
-    {label:'HUG fixed',   data:rows.map(r=>r.hfp),backgroundColor:c.fix+'88',borderRadius:4},
+    {label:'Orig+Pat',data:rows.map(r=>r.hap),backgroundColor:c.opp+'cc',borderRadius:4},
+    {label:'Pat Only',data:rows.map(r=>r.hpp),backgroundColor:c.po+'88',borderRadius:4},
   ]},options:{responsive:true,maintainAspectRatio:false,
     plugins:{legend:{display:true,labels:{color:c.ink,boxWidth:9}}},
-    scales:{x:{grid:go(c),ticks:to(c)},
-            y:{beginAtZero:true,title:{display:true,text:'Patterns',color:c.mu},grid:go(c),ticks:to(c)}}}});
+    scales:{x:{grid:go(c),ticks:to(c)},y:{beginAtZero:true,title:{display:true,text:'Patterns',color:c.mu},grid:go(c),ticks:to(c)}}}});
 }
 
-// ── p-SCALING ────────────────────────────────────────────────────────────
 function drawPS(c){
   const rows=D.ps;
-  const [amin,amax]=aucRange(rows,['haA','hfA','xgA','lgA']);
+  const [amin,amax]=aucRange(rows,['haA','hpA','xgA','lgA']);
   const pOpts={responsive:true,maintainAspectRatio:false,interaction:{mode:'index',intersect:false},
     plugins:{legend:{display:false},tooltip:tp(c,{label:ctx=>` ${ctx.dataset.label}: ${fT(ctx.parsed.y)}`})},
-    scales:{x:{type:'logarithmic',title:{display:true,text:'p',color:c.mu},grid:go(c),ticks:{color:c.mu,callback:pTk}},
+    scales:{x:{type:'logarithmic',title:{display:true,text:'p (features)',color:c.mu},grid:go(c),ticks:{color:c.mu,callback:pTk}},
             y:{title:{display:true,text:'Fit time (s)',color:c.mu},grid:go(c),ticks:to(c)}}};
   mk('psFit',{type:'line',data:{datasets:[
-    ds('HUG adap',rows.filter(r=>r.ha!='null'&&r.ha!=null).map(r=>({x:r.p,y:r.ha})),c.hug,null,5),
-    ds('HUG fix', rows.map(r=>({x:r.p,y:r.hf})),c.fix,null,5),
-    ds('XGB',     rows.map(r=>({x:r.p,y:r.xg})),c.xgb,null,5),
-    ds('LGB',     rows.map(r=>({x:r.p,y:r.lg})),c.lgb,null,5),
+    ds('Orig+Pat',rows.filter(r=>r.ha!=null).map(r=>({x:r.p,y:r.ha})),c.opp),
+    ds('Pat Only',rows.filter(r=>r.hp!=null).map(r=>({x:r.p,y:r.hp})),c.po),
+    ds('XGBoost', rows.filter(r=>r.xg!=null).map(r=>({x:r.p,y:r.xg})),c.xgb),
+    ds('LightGBM',rows.filter(r=>r.lg!=null).map(r=>({x:r.p,y:r.lg})),c.lgb),
   ]},options:pOpts});
-  mk('psRatio',{type:'bar',data:{labels:rows.map(r=>r.p.toLocaleString()),datasets:[
-    {label:'HUG adap/XGB',data:rows.map(r=>r.ha!='null'&&r.ha&&r.xg?+(r.ha/r.xg).toFixed(2):null),
-     backgroundColor:rows.map(r=>r.ha&&r.xg&&r.ha<r.xg?c.hug+'bb':c.hug+'44'),borderRadius:4},
-    {label:'HUG fix/XGB', data:rows.map(r=>r.hf&&r.xg?+(r.hf/r.xg).toFixed(2):null),
-     backgroundColor:rows.map(r=>r.hf&&r.xg&&r.hf<r.xg?c.fix+'bb':c.fix+'44'),borderRadius:4},
-    {label:'LGB/XGB',     data:rows.map(r=>r.lg&&r.xg?+(r.lg/r.xg).toFixed(2):null),
-     backgroundColor:rows.map(r=>r.lg&&r.xg&&r.lg<r.xg?c.lgb+'bb':c.lgb+'44'),borderRadius:4},
+  const rXgb=rows.filter(r=>r.xg!=null);
+  mk('psRatio',{type:'bar',data:{labels:rXgb.map(r=>r.p+'\n(n='+fN(r.n)+')'),datasets:[
+    {label:'Orig+Pat/XGB',data:rXgb.map(r=>r.ha&&r.xg?+(r.ha/r.xg).toFixed(2):null),
+     backgroundColor:rXgb.map(r=>r.ha&&r.xg&&r.ha<r.xg?c.opp+'bb':c.opp+'44'),borderRadius:3},
+    {label:'Pat Only/XGB',data:rXgb.map(r=>r.hp&&r.xg?+(r.hp/r.xg).toFixed(2):null),
+     backgroundColor:rXgb.map(r=>r.hp&&r.xg&&r.hp<r.xg?c.po+'bb':c.po+'44'),borderRadius:3},
+    {label:'LGB/XGB',data:rXgb.map(r=>r.lg&&r.xg?+(r.lg/r.xg).toFixed(2):null),
+     backgroundColor:rXgb.map(r=>r.lg&&r.xg&&r.lg<r.xg?c.lgb+'bb':c.lgb+'44'),borderRadius:3},
   ]},options:{responsive:true,maintainAspectRatio:false,
-    plugins:{legend:{display:true,labels:{color:c.ink,boxWidth:9}}},
-    scales:{x:{grid:go(c),ticks:to(c)},y:{title:{display:true,text:'Ratio vs XGB',color:c.mu},grid:go(c),ticks:to(c)}}}});
+    plugins:{legend:{display:true,labels:{color:c.ink,boxWidth:9}},
+             tooltip:tp(c,{label:ctx=>` ${ctx.dataset.label}: ${ctx.parsed.y!=null?ctx.parsed.y+'×':'—'}`})},
+    scales:{x:{grid:go(c),ticks:{color:c.mu,maxRotation:0,font:{size:9.5}}},
+            y:{title:{display:true,text:'Ratio vs XGBoost',color:c.mu},grid:go(c),ticks:to(c)}}}});
   mk('psAuc',{type:'line',data:{datasets:[
-    ds('HUG adap',rows.filter(r=>r.haA!='null'&&r.haA!=null).map(r=>({x:r.p,y:r.haA})),c.hug,null,5),
-    ds('HUG fix', rows.filter(r=>r.hfA!='null').map(r=>({x:r.p,y:r.hfA})),c.fix,null,5),
-    ds('XGB',     rows.map(r=>({x:r.p,y:r.xgA})),c.xgb,null,5),
-    ds('LGB',     rows.map(r=>({x:r.p,y:r.lgA})),c.lgb,null,5),
+    ds('Orig+Pat',rows.filter(r=>r.haA!=null).map(r=>({x:r.p,y:r.haA})),c.opp),
+    ds('Pat Only',rows.filter(r=>r.hpA!=null).map(r=>({x:r.p,y:r.hpA})),c.po),
+    ds('XGBoost', rows.filter(r=>r.xgA!=null).map(r=>({x:r.p,y:r.xgA})),c.xgb),
+    ds('LightGBM',rows.filter(r=>r.lgA!=null).map(r=>({x:r.p,y:r.lgA})),c.lgb),
   ]},options:{responsive:true,maintainAspectRatio:false,interaction:{mode:'index',intersect:false},
     plugins:{legend:{display:false},tooltip:tp(c)},
-    scales:{x:{type:'logarithmic',title:{display:true,text:'p',color:c.mu},grid:go(c),ticks:{color:c.mu,callback:pTk}},
+    scales:{x:{type:'logarithmic',title:{display:true,text:'p (features)',color:c.mu},grid:go(c),ticks:{color:c.mu,callback:pTk}},
             y:{min:amin,max:amax,title:{display:true,text:'Test AUC',color:c.mu},grid:go(c),ticks:to(c)}}}});
 }
 
-// ── MEMORY ────────────────────────────────────────────────────────────────
 function drawMem(c){
-  const mOpt=(xType,xCb,xL)=>({responsive:true,maintainAspectRatio:false,
-    interaction:{mode:'index',intersect:false},
-    plugins:{legend:{display:false},tooltip:tp(c,{label:ctx=>
-      ` ${ctx.dataset.label}: ${ctx.parsed.y!=null?ctx.parsed.y.toFixed(0)+' MB':'—'}`})},
+  const mOpts=(xType,xCb,xL)=>({responsive:true,maintainAspectRatio:false,interaction:{mode:'index',intersect:false},
+    plugins:{legend:{display:false},tooltip:tp(c,{label:ctx=>` ${ctx.dataset.label}: ${ctx.parsed.y!=null?ctx.parsed.y.toFixed(0)+' MB':'—'}`})},
     scales:{x:{type:xType,title:{display:true,text:xL,color:c.mu},grid:go(c),ticks:{color:c.mu,callback:xCb}},
             y:{title:{display:true,text:'Fit Δ MB',color:c.mu},grid:go(c),ticks:to(c)}}});
   mk('memN',{type:'line',data:{datasets:[
-    ds('HUG adap',D.ns.map(r=>({x:r.n,y:r.mha!='null'?r.mha:null})),c.hug,null,5),
-    ds('HUG fix', D.ns.map(r=>({x:r.n,y:r.mhf!='null'?r.mhf:null})),c.fix,null,5),
-    ds('XGB',     D.ns.map(r=>({x:r.n,y:r.mxg!='null'?r.mxg:null})),c.xgb,null,5),
-    ds('LGB',     D.ns.map(r=>({x:r.n,y:r.mlg!='null'?r.mlg:null})),c.lgb,null,5),
-  ]},options:mOpt('logarithmic',nTk,'n (samples)')});
+    ds('Orig+Pat',D.ns.filter(r=>r.mha!=null).map(r=>({x:r.n,y:r.mha})),c.opp),
+    ds('Pat Only',D.ns.filter(r=>r.mhp!=null).map(r=>({x:r.n,y:r.mhp})),c.po),
+    ds('XGBoost', D.ns.filter(r=>r.mxg!=null).map(r=>({x:r.n,y:r.mxg})),c.xgb),
+    ds('LightGBM',D.ns.filter(r=>r.mlg!=null).map(r=>({x:r.n,y:r.mlg})),c.lgb),
+  ]},options:mOpts('logarithmic',nTk,'n (samples)')});
   mk('memP',{type:'line',data:{datasets:[
-    ds('HUG adap',D.ps.filter(r=>r.mha!='null'&&r.mha!=null).map(r=>({x:r.p,y:r.mha})),c.hug,null,5),
-    ds('HUG fix', D.ps.map(r=>({x:r.p,y:r.mhf!='null'?r.mhf:null})),c.fix,null,5),
-    ds('XGB',     D.ps.map(r=>({x:r.p,y:r.mxg!='null'?r.mxg:null})),c.xgb,null,5),
-    ds('LGB',     D.ps.map(r=>({x:r.p,y:r.mlg!='null'?r.mlg:null})),c.lgb,null,5),
-  ]},options:mOpt('logarithmic',pTk,'p (features)')});
+    ds('Orig+Pat',D.ps.filter(r=>r.mha!=null).map(r=>({x:r.p,y:r.mha})),c.opp),
+    ds('Pat Only',D.ps.filter(r=>r.mhp!=null).map(r=>({x:r.p,y:r.mhp})),c.po),
+    ds('XGBoost', D.ps.filter(r=>r.mxg!=null).map(r=>({x:r.p,y:r.mxg})),c.xgb),
+    ds('LightGBM',D.ps.filter(r=>r.mlg!=null).map(r=>({x:r.p,y:r.mlg})),c.lgb),
+  ]},options:mOpts('logarithmic',pTk,'p (features)')});
 }
 
-// ── LATENCY ───────────────────────────────────────────────────────────────
-function drawLat(c){
-  const body=document.getElementById('lat_body');
-  const desc=document.getElementById('lat_desc');
-  if(!D.has_mc||!Object.keys(D.lat).length){
-    body.innerHTML='<div class="note">No latency data for this dataset.</div>';
-    desc.textContent='Not available for this dataset.';
-    return;
-  }
-  desc.textContent=`Inference latency measured on the model fitted at n=${fN(D.max_lat_n)}, 4 threads.`;
-  body.innerHTML=`<div class="g2">
-<div class="cc"><h3>Inference latency (ms) vs batch size</h3><p>XGBoost is fastest at all batch sizes. HUG latency grows with batch due to pattern-feature transform.</p>
-<div class="leg"><span class="li"><span class="ld" style="background:var(--hug)"></span>HUG adaptive</span><span class="li"><span class="ld" style="background:var(--fix)"></span>HUG fixed</span><span class="li"><span class="ld" style="background:var(--xgb)"></span>XGBoost</span><span class="li"><span class="ld" style="background:var(--lgb)"></span>LightGBM</span></div>
-<div class="ch" style="height:260px"><canvas id="latC"></canvas></div></div>
-<div class="card" style="display:flex;flex-direction:column;gap:10px"><h3 style="font-size:12.5px;font-weight:800">Throughput @ batch=10,000</h3><div id="thrBars"></div></div></div>`;
-  const batches=[1,10,100,1000,10000];
-  const lat=D.lat;
-  mk('latC',{type:'line',data:{datasets:[
-    ds('HUG adap',batches.filter(b=>lat.ha&&lat.ha[b]!=null).map(b=>({x:b,y:lat.ha[b]})),c.hug,null,5),
-    ds('HUG fix', batches.filter(b=>lat.hf&&lat.hf[b]!=null).map(b=>({x:b,y:lat.hf[b]})),c.fix,null,5),
-    ds('XGB',     batches.filter(b=>lat.xg&&lat.xg[b]!=null).map(b=>({x:b,y:lat.xg[b]})),c.xgb,null,5),
-    ds('LGB',     batches.filter(b=>lat.lg&&lat.lg[b]!=null).map(b=>({x:b,y:lat.lg[b]})),c.lgb,null,5),
-  ]},options:{responsive:true,maintainAspectRatio:false,interaction:{mode:'index',intersect:false},
-    plugins:{legend:{display:false},tooltip:tp(c,{label:ctx=>` ${ctx.dataset.label}: ${ctx.parsed.y.toFixed(2)} ms`})},
-    scales:{x:{type:'logarithmic',title:{display:true,text:'Batch size',color:c.mu},grid:go(c),ticks:{color:c.mu,callback:v=>({1:'1',10:'10',100:'100',1000:'1k',10000:'10k'}[v]||'')}},
-            y:{title:{display:true,text:'Latency (ms)',color:c.mu},grid:go(c),ticks:to(c)}}}});
-  // throughput bars
-  const thr={};
-  for(const[k,v] of [['ha',lat.ha],['hf',lat.hf],['xg',lat.xg],['lg',lat.lg]]){
-    if(v&&v[10000])thr[k]=Math.round(10000/(v[10000]/1000));
-  }
-  const mx=Math.max(...Object.values(thr));
-  const labels={ha:'HUG adap',hf:'HUG fix',xg:'XGBoost',lg:'LightGBM'};
-  const cols={ha:c.hug,hf:c.fix,xg:c.xgb,lg:c.lgb};
-  document.getElementById('thrBars').innerHTML=
-    Object.entries(thr).map(([k,v])=>
-      `<div class="br"><div class="brl">${labels[k]}</div><div class="brt"><div class="brf" style="width:${Math.round(v/mx*100)}%;background:${cols[k]}"></div></div><div class="brv">${v>=1000?(v/1000).toFixed(0)+'k':v}</div></div>`
-    ).join('');
+// ─── TABLES ───────────────────────────────────────────────────────────────────
+function buildTbls(){
+  const nt=document.getElementById('nsTbl');
+  if(nt){nt.innerHTML='';D.ns.forEach(r=>{
+    nt.innerHTML+=`<tr><td><strong>${fN(r.n)}</strong></td>
+<td class="r"><span class="bg ba">${fT(r.ha)}</span></td>
+<td class="r"><span class="bg bpo">${fT(r.hp)}</span></td>
+<td class="r"><span class="bg bx">${fT(r.xg)}</span></td>
+<td class="r"><span class="bg bl">${fT(r.lg)}</span></td>
+<td class="r">${r.haA!=null?r.haA.toFixed(4):'&#8212;'}</td>
+<td class="r">${r.hpA!=null?r.hpA.toFixed(4):'&#8212;'}</td>
+<td class="r">${r.xgA!=null?r.xgA.toFixed(4):'&#8212;'}</td>
+<td class="r">${r.lgA!=null?r.lgA.toFixed(4):'&#8212;'}</td></tr>`;}); }
+
+  const pt=document.getElementById('psTbl');
+  if(pt){pt.innerHTML='';D.ps.forEach(r=>{
+    const ar=r.ha&&r.xg?+(r.ha/r.xg).toFixed(2):null;
+    const pr=r.hp&&r.xg?+(r.hp/r.xg).toFixed(2):null;
+    pt.innerHTML+=`<tr>
+<td><strong>${r.p.toLocaleString()}</strong></td><td class="r">${fN(r.n)}</td>
+<td class="r"><span class="bg ba">${fT(r.ha)}</span></td>
+<td class="r"><span class="bg bpo">${fT(r.hp)}</span></td>
+<td class="r"><span class="bg bx">${fT(r.xg)}</span></td>
+<td class="r"><span class="bg bl">${fT(r.lg)}</span></td>
+<td class="r">${r.haA!=null?r.haA.toFixed(4):'&#8212;'}</td>
+<td class="r">${r.hpA!=null?r.hpA.toFixed(4):'&#8212;'}</td>
+<td class="r">${r.xgA!=null?r.xgA.toFixed(4):'&#8212;'}</td>
+<td class="r">${r.lgA!=null?r.lgA.toFixed(4):'&#8212;'}</td></tr>`;}); }
+
+  const mt=document.getElementById('memTbl');
+  if(mt){mt.innerHTML='';D.ns.forEach(r=>{
+    const v=k=>r[k]!=null?Number(r[k]).toFixed(0)+' MB':'&#8212;';
+    mt.innerHTML+=`<tr><td><strong>${fN(r.n)}</strong></td>
+<td class="r"><span class="bg ba">${v('mha')}</span></td>
+<td class="r"><span class="bg bpo">${v('mhp')}</span></td>
+<td class="r"><span class="bg bx">${v('mxg')}</span></td>
+<td class="r"><span class="bg bl">${v('mlg')}</span></td></tr>`;}); }
 }
 
-// ── PARAMETER SWEEP ───────────────────────────────────────────────────────
+// ─── PARAMETER SWEEP ─────────────────────────────────────────────────────────
 function buildSweep(c,param){
-  const el=document.getElementById('swArea');
-  if(!el) return;
+  const el=document.getElementById('swArea');if(!el)return;
+  const name=document.getElementById('dsSel').value;
+  const DS=DATASETS[name];
+  const swKey={B:'sw_B',G:'sw_G',topK:'sw_topK',L:'sw_L',avf:'sw_adaptive_vs_fixed'}[param];
+  const rows=DS[swKey]||[];
+  if(!rows.length){el.innerHTML='<p style="padding:12px;color:var(--mu)">No data for this parameter.</p>';return;}
 
-  // helper: two-axis chart
-  function twoAx(id,labels,d1,d2,l1,l2,c1,c2){
-    const ymin=Math.max(0.4,Math.floor((Math.min(...d1.filter(v=>v!=null))-0.05)*20)/20);
-    mk(id,{type:'line',data:{labels,datasets:[
-      {label:l1,data:d1,borderColor:c1,backgroundColor:c1+'22',yAxisID:'y',pointRadius:5,tension:.3,borderWidth:2.5},
-      {label:l2,data:d2,borderColor:c2,yAxisID:'y1',pointRadius:5,tension:.3,borderWidth:2,borderDash:[4,3]},
+  function mkTwoAx(canId,labels,aucD,patD,note){
+    const ymin=Math.max(0.4,Math.floor((Math.min(...aucD.filter(v=>v!=null))-0.04)*20)/20);
+    mk(canId,{type:'line',data:{labels,datasets:[
+      {label:'AUC',data:aucD,borderColor:c.opp,backgroundColor:c.opp+'22',yAxisID:'y',pointRadius:5,tension:.3,borderWidth:2.5},
+      {label:'Patterns',data:patD,borderColor:c.xgb,yAxisID:'y1',pointRadius:5,tension:.3,borderWidth:2,borderDash:[4,3]},
     ]},options:{responsive:true,maintainAspectRatio:false,interaction:{mode:'index',intersect:false},
       plugins:{legend:{display:true,labels:{color:c.ink,boxWidth:9}}},
       scales:{x:{grid:go(c),ticks:to(c)},
@@ -549,38 +574,39 @@ function buildSweep(c,param){
               y1:{position:'right',title:{display:true,text:'Patterns',color:c.mu},grid:{display:false},ticks:to(c)}}}});
   }
 
-  const swKey = {B:'sw_B',G:'sw_G',topK:'sw_topK',L:'sw_L',avf:'sw_adaptive_vs_fixed'}[param];
-  const rows = D[swKey]||[];
-
-  if(!rows.length){
-    el.innerHTML='<div class="note">No sweep data for this parameter on this dataset.</div>';
-    return;
-  }
-
   if(param==='B'){
     el.innerHTML=`<div class="g2">
-<div class="cc"><h3>B sweep: fit time (n=${fN(rows[0].n)}, p=${rows[0].pp})</h3><p>Fit time is nearly flat across B values.</p><div class="ch" style="height:220px"><canvas id="sw_bFit"></canvas></div></div>
-<div class="cc"><h3>B sweep: AUC and patterns</h3><p>Optimal B depends on dataset signal structure.</p><div class="ch" style="height:220px"><canvas id="sw_bAuc"></canvas></div></div></div>`;
-    mk('sw_bFit',{type:'bar',data:{labels:rows.map(r=>r.v),datasets:[{label:'Fit',data:rows.map(r=>r.t),backgroundColor:c.fix+'cc',borderRadius:4}]},
-      options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{x:{title:{display:true,text:'B',color:c.mu},grid:go(c),ticks:to(c)},y:{title:{display:true,text:'Fit time (s)',color:c.mu},grid:go(c),ticks:to(c)}}}});
-    twoAx('sw_bAuc',rows.map(r=>r.v),rows.map(r=>r.a),rows.map(r=>r.p||0),'AUC','Patterns',c.fix,c.xgb);
-  }
-  else if(param==='G'){
+<div class="cc"><h3>B sweep &#8212; fit time (n=${fN(rows[0].n)}, p=${rows[0].pp})</h3>
+<div class="ni">Fit time is nearly flat across B values. The binning step is a small fraction of total fit cost; the downstream L1 dominates. B can be chosen primarily on accuracy grounds.</div>
+<div class="ch" style="height:220px"><canvas id="sw_bFit"></canvas></div></div>
+<div class="cc"><h3>B sweep &#8212; AUC and patterns mined</h3>
+<div class="ni">AUC peaks near B=5 on sparse signal data. Smaller B misses fine threshold intervals; larger B adds mining cost with diminishing accuracy return. Start with B=5 (the default) unless signal is very fine-grained.</div>
+<div class="ch" style="height:220px"><canvas id="sw_bAuc"></canvas></div></div></div>`;
+    mk('sw_bFit',{type:'bar',data:{labels:rows.map(r=>r.v),datasets:[{label:'Fit time (s)',data:rows.map(r=>r.t),backgroundColor:c.opp+'cc',borderRadius:4}]},
+      options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},
+        scales:{x:{title:{display:true,text:'B',color:c.mu},grid:go(c),ticks:to(c)},y:{title:{display:true,text:'Fit time (s)',color:c.mu},grid:go(c),ticks:to(c)}}}});
+    mkTwoAx('sw_bAuc',rows.map(r=>String(r.v)),rows.map(r=>r.a),rows.map(r=>r.p||0));
+  } else if(param==='G'){
+    const srt=[...rows].sort((a,b)=>b.v-a.v);
     el.innerHTML=`<div class="g2">
-<div class="cc"><h3>G sweep: AUC and patterns (n=${fN(rows[0].n)}, p=${rows[0].pp})</h3><p>Lower G mines more patterns and generally improves AUC.</p><div class="ch" style="height:230px"><canvas id="sw_gAuc"></canvas></div></div>
-<div class="cc"><h3>G sweep: fit time</h3><p>Fit time is relatively flat — transaction construction dominates, not the threshold check.</p><div class="ch" style="height:230px"><canvas id="sw_gFit"></canvas></div></div></div>`;
-    // sort by G descending (loosest to tightest)
-    const sorted=[...rows].sort((a,b)=>b.v-a.v);
-    twoAx('sw_gAuc',sorted.map(r=>String(r.v)),sorted.map(r=>r.a),sorted.map(r=>r.p||0),'AUC','Patterns',c.hug,c.xgb);
-    mk('sw_gFit',{type:'bar',data:{labels:sorted.map(r=>String(r.v)),datasets:[{label:'Fit',data:sorted.map(r=>r.t),backgroundColor:c.hug+'cc',borderRadius:4}]},
-      options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},scales:{x:{title:{display:true,text:'G',color:c.mu},grid:go(c),ticks:to(c)},y:{title:{display:true,text:'Fit time (s)',color:c.mu},grid:go(c),ticks:to(c)}}}});
-  }
-  else if(param==='topK'){
-    el.innerHTML=`<div class="cc" style="max-width:580px"><h3>topK sweep (n=${fN(rows[0].n)}, p=${rows[0].pp})</h3><p>topK is a pattern count ceiling. When natural count &lt; topK, increasing it has no effect.</p><div class="ch" style="height:260px"><canvas id="sw_tkC"></canvas></div></div>`;
-    const aMin=Math.max(0.5,Math.floor((Math.min(...rows.map(r=>r.a||1))-0.02)*20)/20);
-    const aMax=Math.min(1.0,Math.ceil((Math.max(...rows.map(r=>r.a||0))+0.01)*20)/20);
+<div class="cc"><h3>G sweep &#8212; AUC and patterns (n=${fN(rows[0].n)}, p=${rows[0].pp})</h3>
+<div class="ni">Lower G mines more patterns and generally improves AUC with diminishing returns below G=0.001. G=0.01 is a practical default; lower to 0.001 if AUC falls short. Patterns grow from 3 at G=0.05 to 29 at G=0.0001.</div>
+<div class="ch" style="height:230px"><canvas id="sw_gAuc"></canvas></div></div>
+<div class="cc"><h3>G sweep &#8212; fit time</h3>
+<div class="ni">Fit time is nearly flat across G values despite large changes in pattern count. Matrix construction and the downstream L1 dominate; the pattern-mining pass itself is fast even at G=0.0001.</div>
+<div class="ch" style="height:230px"><canvas id="sw_gFit"></canvas></div></div></div>`;
+    mkTwoAx('sw_gAuc',srt.map(r=>String(r.v)),srt.map(r=>r.a),srt.map(r=>r.p||0));
+    mk('sw_gFit',{type:'bar',data:{labels:srt.map(r=>String(r.v)),datasets:[{label:'Fit time (s)',data:srt.map(r=>r.t),backgroundColor:c.opp+'cc',borderRadius:4}]},
+      options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false}},
+        scales:{x:{title:{display:true,text:'G (decreasing &#8594;)',color:c.mu},grid:go(c),ticks:to(c)},y:{title:{display:true,text:'Fit time (s)',color:c.mu},grid:go(c),ticks:to(c)}}}});
+  } else if(param==='topK'){
+    el.innerHTML=`<div class="cc" style="max-width:560px"><h3>topK sweep (n=${fN(rows[0].n)}, p=${rows[0].pp})</h3>
+<div class="ni">topK caps the pattern budget. When the natural pattern count is below topK (as here at G=0.01), increasing topK has no effect on AUC, patterns, or fit time. topK only becomes binding at lower G or on denser-signal datasets.</div>
+<div class="ch" style="height:270px"><canvas id="sw_tkC"></canvas></div></div>`;
+    const aMin=Math.max(0.5,Math.floor((Math.min(...rows.map(r=>r.a))-0.02)*20)/20);
+    const aMax=Math.min(1.0,Math.ceil((Math.max(...rows.map(r=>r.a))+0.01)*20)/20);
     mk('sw_tkC',{type:'line',data:{labels:rows.map(r=>r.v),datasets:[
-      {label:'AUC',data:rows.map(r=>r.a),borderColor:c.hug,backgroundColor:c.hug+'22',yAxisID:'y',pointRadius:5,tension:.3,borderWidth:2.5},
+      {label:'AUC',data:rows.map(r=>r.a),borderColor:c.opp,backgroundColor:c.opp+'22',yAxisID:'y',pointRadius:5,tension:.3,borderWidth:2.5},
       {label:'Patterns',data:rows.map(r=>r.p||0),borderColor:c.xgb,yAxisID:'y1',pointRadius:5,tension:.3,borderWidth:2,borderDash:[4,3]},
       {label:'Fit (s)',data:rows.map(r=>r.t),borderColor:c.lgb,yAxisID:'y2',pointRadius:4,tension:.3,borderWidth:1.5,borderDash:[2,3]},
     ]},options:{responsive:true,maintainAspectRatio:false,interaction:{mode:'index',intersect:false},
@@ -589,85 +615,66 @@ function buildSweep(c,param){
               y:{min:aMin,max:aMax,title:{display:true,text:'Test AUC',color:c.mu},grid:go(c),ticks:to(c)},
               y1:{position:'right',title:{display:true,text:'Patterns',color:c.mu},grid:{display:false},ticks:to(c)},
               y2:{display:false}}}});
-  }
-  else if(param==='L'){
+  } else if(param==='L'){
     el.innerHTML=`<div class="g2">
-<div class="card"><h3 style="font-size:12.5px;font-weight:800;margin-bottom:6px">L=1 vs L=2 (n=${fN(rows[0].n)}, p=${rows[0].pp})</h3>
+<div class="card"><h3 style="font-size:12.5px;font-weight:800;margin-bottom:8px">L=1 vs L=2 (n=${fN(rows[0].n)}, p=${rows[0].pp})</h3>
 ${rows.map(r=>`<div style="border:1px solid var(--ln);border-radius:9px;padding:10px;margin-bottom:7px">
-<div style="font-size:14px;font-weight:900;color:var(--brand)">L = ${r.v}</div>
-<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:7px;margin-top:7px">
-<div><div style="font-size:9.5px;color:var(--mu)">Fit time</div><div style="font-weight:800">${r.t!=null?r.t.toFixed(4)+'s':'—'}</div></div>
-<div><div style="font-size:9.5px;color:var(--mu)">Patterns</div><div style="font-weight:800">${r.p??'—'}</div></div>
-<div><div style="font-size:9.5px;color:var(--mu)">Test AUC</div><div style="font-weight:800">${r.a!=null?r.a.toFixed(5):'—'}</div></div>
-<div><div style="font-size:9.5px;color:var(--mu)">Mem Δ</div><div style="font-weight:800">${r.m!=null?r.m+' MB':'—'}</div></div>
+<div style="font-size:14px;font-weight:900;color:var(--opp)">L = ${r.v}</div>
+<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:7px;margin-top:8px">
+<div><div style="font-size:9.5px;color:var(--mu)">Fit time</div><div style="font-weight:800">${r.t!=null?r.t.toFixed(4)+'s':'&#8212;'}</div></div>
+<div><div style="font-size:9.5px;color:var(--mu)">Patterns</div><div style="font-weight:800">${r.p??'&#8212;'}</div></div>
+<div><div style="font-size:9.5px;color:var(--mu)">Test AUC</div><div style="font-weight:800">${r.a!=null?r.a.toFixed(5):'&#8212;'}</div></div>
+<div><div style="font-size:9.5px;color:var(--mu)">Mem &#916;</div><div style="font-weight:800">${r.m!=null?r.m+' MB':'&#8212;'}</div></div>
 </div></div>`).join('')}
 </div>
 <div class="card"><h3 style="font-size:12.5px;font-weight:800;margin-bottom:8px">When to use L=2</h3>
-<ul style="padding-left:12px;font-size:11.5px;color:var(--mu);line-height:2.1"><li>Pairwise feature interactions expected</li><li>n ≤ 100k (cost grows fast)</li><li>Always use with adaptive_binning=True</li><li>Validate AUC gain on held-out set</li></ul>
+<div style="font-size:11.5px;color:var(--mu);line-height:1.9">L=2 adds pairwise pattern interactions. The AUC gain on this dataset is marginal but pattern count increases (10 &#8594; 24), which also increases the downstream matrix width. Validate on a held-out set before using L=2 in production.</div>
 <div class="sep"></div>
-<h3 style="font-size:12.5px;font-weight:800;margin-bottom:6px">Use L=1 when</h3>
-<ul style="padding-left:12px;font-size:11.5px;color:var(--mu);line-height:2.1"><li>n &gt; 100k</li><li>Budget is tight</li><li>No interaction gain on validation</li></ul></div></div>`;
-  }
-  else if(param==='avf'){
-    const avf=rows.slice().sort((a,b)=>(a.v===true||a.v===1)?-1:1);
+<div style="font-size:11.5px;color:var(--mu);line-height:1.9"><strong style="color:var(--ink)">Prefer L=1 when:</strong> n &gt; 100k, fit budget is tight, or AUC gain from L=2 is not confirmed on your data. L=1 is the recommended default.</div></div></div>`;
+  } else if(param==='avf'){
+    const avf=[...rows].sort((a,b)=>(a.v===true?-1:1));
     el.innerHTML=`<div class="g2">
-<div class="card"><h3 style="font-size:12.5px;font-weight:800;margin-bottom:6px">Adaptive vs Fixed B (n=${fN(avf[0].n)}, p=${avf[0].pp})</h3>
+<div class="card"><h3 style="font-size:12.5px;font-weight:800;margin-bottom:8px">Adaptive vs Fixed B (n=${fN(avf[0].n)}, p=${avf[0].pp})</h3>
 ${avf.map((r,i)=>`<div style="border:1px solid var(--ln);border-radius:9px;padding:10px;margin-bottom:7px">
-<div style="font-size:13px;font-weight:800;color:var(--${i===0?'hug':'fix'})">${r.v===true||r.v===1?'Adaptive':'Fixed B=5'}</div>
-<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:7px;margin-top:7px">
-<div><div style="font-size:9.5px;color:var(--mu)">Fit time</div><div style="font-weight:800">${r.t!=null?r.t.toFixed(4)+'s':'—'}</div></div>
-<div><div style="font-size:9.5px;color:var(--mu)">Patterns</div><div style="font-weight:800">${r.p??'—'}</div></div>
-<div><div style="font-size:9.5px;color:var(--mu)">Test AUC</div><div style="font-weight:800">${r.a!=null?r.a.toFixed(5):'—'}</div></div>
-<div><div style="font-size:9.5px;color:var(--mu)">Mem Δ</div><div style="font-weight:800">${r.m!=null?r.m+' MB':'—'}</div></div>
+<div style="font-size:13px;font-weight:800;color:var(--${i===0?'opp':'po'})">${r.v===true||r.v===1?'Adaptive (IG-based B)':'Fixed B=5'}</div>
+<div style="display:grid;grid-template-columns:repeat(4,1fr);gap:7px;margin-top:8px">
+<div><div style="font-size:9.5px;color:var(--mu)">Fit time</div><div style="font-weight:800">${r.t!=null?r.t.toFixed(4)+'s':'&#8212;'}</div></div>
+<div><div style="font-size:9.5px;color:var(--mu)">Patterns</div><div style="font-weight:800">${r.p??'&#8212;'}</div></div>
+<div><div style="font-size:9.5px;color:var(--mu)">Test AUC</div><div style="font-weight:800">${r.a!=null?r.a.toFixed(5):'&#8212;'}</div></div>
+<div><div style="font-size:9.5px;color:var(--mu)">Mem &#916;</div><div style="font-weight:800">${r.m!=null?r.m+' MB':'&#8212;'}</div></div>
 </div></div>`).join('')}
 </div>
-<div class="card"><h3 style="font-size:12.5px;font-weight:800;margin-bottom:8px">When to prefer each</h3>
-<h4 style="font-size:11.5px;color:var(--hug);margin-bottom:5px">Adaptive</h4>
-<ul style="padding-left:12px;font-size:11.5px;color:var(--mu);line-height:2.1"><li>Heterogeneous features</li><li>p ≤ 500</li><li>AUC is primary concern</li></ul>
+<div class="card"><h3 style="font-size:12.5px;font-weight:800;margin-bottom:8px">Choosing between modes</h3>
+<div style="font-size:11.5px;color:var(--mu);line-height:1.9"><strong style="color:var(--opp)">Adaptive:</strong> selects bins per feature using information gain. Better when features have heterogeneous scales or mixed signal quality. Preferred for smaller p and when AUC is the priority.</div>
 <div class="sep"></div>
-<h4 style="font-size:11.5px;color:var(--fix);margin-bottom:5px">Fixed B=5</h4>
-<ul style="padding-left:12px;font-size:11.5px;color:var(--mu);line-height:2.1"><li>p ≥ 500</li><li>Reproducibility required</li><li>Faster fit at equal pattern count</li></ul></div></div>`;
+<div style="font-size:11.5px;color:var(--mu);line-height:1.9"><strong style="color:var(--po)">Fixed B=5:</strong> uses five equal-width bins. Faster and more reproducible. Preferred at large p or when feature distributions are uniform (e.g. threshold_grid, where adaptive over-selects bins).</div></div></div>`;
   }
 }
 
-// ── TABLES ────────────────────────────────────────────────────────────────
-function buildTbls(){
-  const nt=document.getElementById('nsTbl');
-  if(nt){nt.innerHTML='';D.ns.forEach(r=>{
-    nt.innerHTML+=`<tr><td><strong>${fN(r.n)}</strong></td>
-<td class="r"><span class="bg ba">${fT(r.ha)}</span></td><td class="r"><span class="bg bf">${fT(r.hf)}</span></td>
-<td class="r"><span class="bg bx">${fT(r.xg)}</span></td><td class="r"><span class="bg bl">${fT(r.lg)}</span></td>
-<td class="r">${r.haA!=null&&r.haA!='null'?Number(r.haA).toFixed(5):'—'}</td>
-<td class="r">${r.hfA!=null&&r.hfA!='null'?Number(r.hfA).toFixed(5):'—'}</td>
-<td class="r">${r.xgA!=null&&r.xgA!='null'?Number(r.xgA).toFixed(5):'—'}</td>
-<td class="r">${r.lgA!=null&&r.lgA!='null'?Number(r.lgA).toFixed(5):'—'}</td></tr>`;});}
-
-  const pt=document.getElementById('psTbl');
-  if(pt){pt.innerHTML='';D.ps.forEach(r=>{
-    const ar=r.ha&&r.ha!='null'&&r.xg?+(r.ha/r.xg).toFixed(2):null;
-    const fr=r.hf&&r.xg?+(r.hf/r.xg).toFixed(2):null;
-    pt.innerHTML+=`<tr><td><strong>${r.p.toLocaleString()}</strong></td><td class="r">${fN(r.n)}</td>
-<td class="r">${r.ha&&r.ha!='null'?`<span class="bg ba">${fT(r.ha)}</span>`:'<span class="bg be">timeout</span>'}</td>
-<td class="r"><span class="bg bf">${fT(r.hf)}</span></td><td class="r"><span class="bg bx">${fT(r.xg)}</span></td><td class="r"><span class="bg bl">${fT(r.lg)}</span></td>
-<td class="r"><span class="bg ${ar&&ar<1?'ba':'bx'}">${ar!=null?ar+'×':'—'}</span></td>
-<td class="r"><span class="bg ${fr&&fr<1?'bf':'bx'}">${fr!=null?fr+'×':'—'}</span></td></tr>`;});}
-
-  const mt=document.getElementById('memTbl');
-  if(mt){mt.innerHTML='';D.ns.forEach(r=>{
-    const v=k=>r[k]!=null&&r[k]!='null'?Number(r[k]).toFixed(0):'—';
-    mt.innerHTML+=`<tr><td><strong>${fN(r.n)}</strong></td>
-<td class="r"><span class="bg ba">${v('mha')} MB</span></td><td class="r"><span class="bg bf">${v('mhf')} MB</span></td>
-<td class="r"><span class="bg bx">${v('mxg')} MB</span></td><td class="r"><span class="bg bl">${v('mlg')} MB</span></td></tr>`;});}
+// ─── SECTION ORCHESTRATION ────────────────────────────────────────────────────
+function drawSection(secId){
+  const c=gc();
+  ['ovFit','ovAuc','nsFit','nsAuc','nsPat','psFit','psRatio','psAuc','memN','memP',
+   'sw_bFit','sw_bAuc','sw_gAuc','sw_gFit','sw_tkC'].forEach(kc);
+  if(secId==='ov')  drawOv(c);
+  else if(secId==='ns')  drawNS(c);
+  else if(secId==='ps')  drawPS(c);
+  else if(secId==='mem') drawMem(c);
+  else if(secId==='sw')  buildSweep(c,document.getElementById('swSel').value);
+}
+function redrawAll(){
+  updateText();
+  const a=document.querySelector('.sec.on');
+  if(a) drawSection(a.id);
 }
 
-// ── NAVIGATION ────────────────────────────────────────────────────────────
+// ─── NAVIGATION ───────────────────────────────────────────────────────────────
 document.querySelectorAll('[data-s]').forEach(btn=>{
   btn.addEventListener('click',()=>{
     document.querySelectorAll('[data-s]').forEach(b=>b.classList.toggle('on',b===btn));
     document.querySelectorAll('.sec').forEach(s=>s.classList.remove('on'));
-    const secEl=document.getElementById(btn.dataset.s);
-    secEl.classList.add('on');
-    setTimeout(()=>{updateText();drawSection(btn.dataset.s);},50);
+    const el=document.getElementById(btn.dataset.s);
+    if(el){el.classList.add('on');setTimeout(()=>{updateText();drawSection(btn.dataset.s);},50);}
   });
 });
 document.querySelectorAll('[data-tab]').forEach(tab=>{
@@ -688,9 +695,8 @@ document.querySelectorAll('[data-th]').forEach(btn=>{
 });
 document.getElementById('dsSel').addEventListener('change',function(){
   setDs(this.value);
-  const active=document.querySelector('.sec.on');
-  const secId=active?active.id:'ov';
-  setTimeout(()=>{updateText();drawSection(secId);},50);
+  const a=document.querySelector('.sec.on');
+  setTimeout(()=>{updateText();drawSection(a?a.id:'ov');},50);
 });
 document.getElementById('swSel').addEventListener('change',function(){
   document.getElementById('swArea').innerHTML='';
