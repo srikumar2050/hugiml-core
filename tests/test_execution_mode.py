@@ -3,8 +3,8 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from hugiml import HUGIMLClassifierNative
 import hugiml.classifier as classifier_module
+from hugiml import HUGIMLClassifierNative
 
 
 def _binary_data(n: int = 120, p: int = 4):
