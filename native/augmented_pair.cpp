@@ -341,6 +341,84 @@ std::vector<int32_t> continuous_to_quantile_codes_fixed(const std::vector<double
     return codes;
 }
 
+
+py::tuple strict_topk_filter_dense(
+    py::array_t<float, py::array::c_style | py::array::forcecast> X_arr,
+    py::array_t<int64_t, py::array::c_style | py::array::forcecast> y_arr,
+    py::array_t<uint8_t, py::array::c_style | py::array::forcecast> discrete_mask_arr,
+    int64_t top_k,
+    int max_bins
+) {
+    auto X = X_arr.unchecked<2>();
+    auto y = y_arr.unchecked<1>();
+    auto discrete_mask = discrete_mask_arr.unchecked<1>();
+    const int64_t n_rows = static_cast<int64_t>(X.shape(0));
+    const int64_t n_cols = static_cast<int64_t>(X.shape(1));
+    if (y.shape(0) != static_cast<py::ssize_t>(n_rows)) throw std::invalid_argument("y length does not match n_rows.");
+    if (discrete_mask.shape(0) != static_cast<py::ssize_t>(n_cols)) throw std::invalid_argument("discrete_mask length does not match n_cols.");
+
+    py::array_t<double> scores_arr({static_cast<py::ssize_t>(n_cols)});
+    py::array_t<uint8_t> mask_arr({static_cast<py::ssize_t>(n_cols)});
+    auto scores = scores_arr.mutable_unchecked<1>();
+    auto mask = mask_arr.mutable_unchecked<1>();
+    for (int64_t j = 0; j < n_cols; ++j) {
+        scores(j) = 0.0;
+        mask(j) = 1;
+    }
+    if (n_cols == 0 || n_rows == 0) return py::make_tuple(scores_arr, mask_arr);
+
+    int64_t n_classes = 0;
+    for (int64_t i = 0; i < n_rows; ++i) {
+        const int64_t cls = y(static_cast<py::ssize_t>(i));
+        if (cls >= n_classes) n_classes = cls + 1;
+    }
+    if (n_classes <= 1) {
+        if (top_k >= 0 && top_k < n_cols) {
+            for (int64_t j = top_k; j < n_cols; ++j) mask(j) = 0;
+        }
+        return py::make_tuple(scores_arr, mask_arr);
+    }
+    const int64_t* y_ptr = y_arr.data();
+    const double base_entropy = entropy_labels(y_ptr, static_cast<py::ssize_t>(n_rows), n_classes);
+    if (base_entropy <= 0.0) return py::make_tuple(scores_arr, mask_arr);
+
+    std::vector<int32_t> z(static_cast<size_t>(n_rows), 0);
+    std::vector<double> vals(static_cast<size_t>(n_rows), 0.0);
+
+    for (int64_t j = 0; j < n_cols; ++j) {
+        if (discrete_mask(static_cast<py::ssize_t>(j)) != 0) {
+            for (int64_t i = 0; i < n_rows; ++i) {
+                const float v = X(static_cast<py::ssize_t>(i), static_cast<py::ssize_t>(j));
+                z[static_cast<size_t>(i)] = (std::isfinite(v) && v > 0.5f) ? 1 : 0;
+            }
+            scores(j) = std::max(0.0, discrete_ig(z, y_ptr, static_cast<py::ssize_t>(n_rows), n_classes, base_entropy));
+        } else {
+            for (int64_t i = 0; i < n_rows; ++i) {
+                const float v = X(static_cast<py::ssize_t>(i), static_cast<py::ssize_t>(j));
+                vals[static_cast<size_t>(i)] = std::isfinite(v) ? static_cast<double>(v) : std::numeric_limits<double>::quiet_NaN();
+            }
+            z = continuous_to_quantile_codes_fixed(vals, std::max(2, max_bins));
+            scores(j) = std::max(0.0, discrete_ig(z, y_ptr, static_cast<py::ssize_t>(n_rows), n_classes, base_entropy));
+        }
+    }
+
+    if (top_k >= 0 && top_k < n_cols) {
+        std::vector<int64_t> order(static_cast<size_t>(n_cols));
+        std::iota(order.begin(), order.end(), 0);
+        const size_t k = static_cast<size_t>(top_k);
+        auto cmp = [&](int64_t a, int64_t b) {
+            const double sa = scores(static_cast<py::ssize_t>(a));
+            const double sb = scores(static_cast<py::ssize_t>(b));
+            if (sa == sb) return a < b;
+            return sa > sb;
+        };
+        std::partial_sort(order.begin(), order.begin() + static_cast<std::ptrdiff_t>(k), order.end(), cmp);
+        for (int64_t j = 0; j < n_cols; ++j) mask(j) = 0;
+        for (size_t r = 0; r < k; ++r) mask(static_cast<py::ssize_t>(order[r])) = 1;
+    }
+    return py::make_tuple(scores_arr, mask_arr);
+}
+
 py::tuple strict_topk_filter_csc(
     py::array_t<float, py::array::c_style | py::array::forcecast> data_arr,
     py::array_t<int32_t, py::array::c_style | py::array::forcecast> indices_arr,
@@ -454,6 +532,17 @@ void bind_augmented_pair(py::module_& m)
         py::arg("means"),
         py::arg("scales"),
         "Generate standardized augmented pair features natively; unavailable pairs use per-pair reference values."
+    );
+
+    m.def(
+        "strict_topk_filter_dense",
+        &strict_topk_filter_dense,
+        py::arg("X"),
+        py::arg("y"),
+        py::arg("discrete_mask"),
+        py::arg("top_k"),
+        py::arg("max_bins"),
+        "Score dense downstream columns by IG and return scores plus a topK mask."
     );
 
     m.def(

@@ -98,9 +98,9 @@ Adaptive binning selects a bin count per numerical feature by evaluating candida
 
 .. code-block:: python
 
-   from hugiml import HUGIMLClassifierNative
+   from hugiml import HUGIMLClassifier
 
-   clf = HUGIMLClassifierNative(
+   clf = HUGIMLClassifier(
        adaptive_binning=True,
        b_candidates=[2, 3, 5, 7, 10, 15],
        min_marginal_gain_ratio=0.02,

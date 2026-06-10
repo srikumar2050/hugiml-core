@@ -6,6 +6,16 @@ The canonical release notes live in ``CHANGELOG.md`` at the repository root. Kee
 Recent releases
 ---------------
 
+1.1.9 — 2026-06-10
+~~~~~~~~~~~~~~~~~~
+
+* Added ``HUGIMLClassifier`` as the primary public class name while keeping ``HUGIMLClassifierNative`` backward-compatible.
+* Added ``execution_mode="audit"|"production"``. Audit is the default; production keeps prediction and save/load state while omitting large training-review artifacts.
+* Added clear guidance from audit/governance methods when production-mode models do not retain full traceability data.
+* Reduced memory pressure in strict and hybrid modes through earlier original-feature selection, compact native code storage, CSR-returning matrix paths, and conditional dense/CSR downstream handling.
+* Improved fixed-B numeric handling so clean numeric columns remain numeric and only training columns with missing or infinite values use missing-aware bin labels.
+* Optimized hybrid prediction so selected original columns are prepared directly.
+
 1.1.8 — 2026-06-08
 ~~~~~~~~~~~~~~~~~~
 

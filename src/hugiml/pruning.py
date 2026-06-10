@@ -151,8 +151,16 @@ class PatternEditor:
             keep_mask[i] = False
         keep_idx = np.where(keep_mask)[0]
 
-        # Update patterns and pattern matrix
+        # Update patterns, structural pattern metadata, and the retained
+        # training pattern matrix so downstream refits see a consistent
+        # pattern space.
         clf.patterns_ = [clf.patterns_[i] for i in keep_idx]
+        if hasattr(clf, "_pattern_orders_"):
+            clf._pattern_orders_ = np.asarray(clf._pattern_orders_)[keep_idx]
+        if hasattr(clf, "_interaction_pattern_mask_"):
+            clf._interaction_pattern_mask_ = np.asarray(clf._interaction_pattern_mask_, dtype=bool)[
+                keep_idx
+            ]
         if hasattr(clf, "x_train_hup_") and clf.x_train_hup_ is not None:
             clf.x_train_hup_ = clf.x_train_hup_[:, keep_idx]
 
@@ -269,8 +277,34 @@ class PatternEditor:
             hup_tr = clf.transform(X_tr)
             clf.x_train_hup_ = csr_matrix(hup_tr, dtype=np.float32)
 
-        X_downstream = clf._make_downstream_features(X_tr, clf.x_train_hup_, fit=False)
+        # Recompute downstream construction metadata after pruning.  Hybrid
+        # feature modes may have strict TopK masks and selected original-feature
+        # catalogs that are aligned to the pre-pruned pattern space.
+        for attr in (
+            "_downstream_feature_names_full_",
+            "_strict_topk_feature_scores_",
+            "_strict_topk_feature_mask_",
+            "_strict_topk_selected_feature_names_",
+            "_strict_topk_applied_during_construction_",
+            "_downstream_pattern_support_",
+            "_downstream_non_missing_rate_",
+            "_downstream_variance_",
+            "_original_feature_mask_downstream_",
+            "_original_feature_scores_downstream_",
+            "_original_selected_feature_names_downstream_",
+            "_original_feature_names_downstream_full_",
+        ):
+            clf.__dict__.pop(attr, None)
+        clf._current_y_for_downstream_topk_ = y_arr
+        X_downstream = clf._make_downstream_features(X_tr, clf.x_train_hup_, fit=True)
         X_downstream = clf._apply_strict_topk_budget_fit(X_downstream, y_arr)
+        clf.x_train_downstream_ = X_downstream
+        try:
+            clf._cache_downstream_feature_metadata()
+        except Exception:
+            pass
+        finally:
+            clf.__dict__.pop("_current_y_for_downstream_topk_", None)
 
         if estimator is not None:
             new_est = _copy.deepcopy(estimator)

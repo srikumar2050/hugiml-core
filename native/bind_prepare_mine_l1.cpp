@@ -30,8 +30,12 @@ void bind_prepare_mine_l1(py::module_& m)
         .def_readonly("num_col_indices",  &AdaptiveBinResult::num_col_indices)
         .def("get_X_codes",
             [](const AdaptiveBinResult& r) {
-                // Return X_codes as a (n_rows × n_num_cols) numpy float64 array
-                py::array_t<double> arr({r.n_rows, r.n_num_cols});
+                // Return X_codes as a (n_rows × n_num_cols) numpy int32 array.
+                // -1 is the missing/non-finite sentinel.  The classifier casts
+                // one column at a time only when it must materialize a legacy
+                // pre-binned pandas/NumPy object, avoiding a second full
+                // float64 n×p allocation.
+                py::array_t<int32_t> arr({r.n_rows, r.n_num_cols});
                 auto buf = arr.mutable_unchecked<2>();
                 for (int row = 0; row < r.n_rows; row++)
                     for (int ci = 0; ci < r.n_num_cols; ci++)
@@ -39,7 +43,20 @@ void bind_prepare_mine_l1(py::module_& m)
                             static_cast<size_t>(row) * r.n_num_cols + ci];
                 return arr;
             },
-            "Return pre-coded X as a (n_rows, n_num_cols) float64 array.");
+            "Return pre-coded X as a (n_rows, n_num_cols) int32 array; -1 means missing.")
+        .def("get_X_codes_col",
+            [](const AdaptiveBinResult& r, int ci) {
+                if (ci < 0 || ci >= r.n_num_cols)
+                    throw std::out_of_range("ci out of range in get_X_codes_col");
+                py::array_t<int32_t> arr({r.n_rows});
+                auto buf = arr.mutable_unchecked<1>();
+                for (int row = 0; row < r.n_rows; row++)
+                    buf(row) = r.X_codes_flat[
+                        static_cast<size_t>(row) * r.n_num_cols + static_cast<size_t>(ci)];
+                return arr;
+            },
+            py::arg("ci"),
+            "Return one pre-coded int32 column; -1 means missing.");
 
     // ── L1FitResult (returned by prepare_and_mine_l1) ────────────────────────
     py::class_<L1FitResult>(m, "L1FitResult",
@@ -48,6 +65,8 @@ void bind_prepare_mine_l1(py::module_& m)
         .def_readonly("patterns", &L1FitResult::patterns)
         .def_readonly("adaptive_cols", &L1FitResult::adaptive_cols)
         .def_readonly("adaptive_num_col_indices", &L1FitResult::adaptive_num_col_indices)
+        .def_readonly("original_feature_names", &L1FitResult::original_feature_names)
+        .def_readonly("original_feature_scores", &L1FitResult::original_feature_scores)
         .def("get_coo",
             [](const L1FitResult& r) {
                 auto rows_arr = py::array_t<int32_t>(r.coo_rows.size());
@@ -60,7 +79,40 @@ void bind_prepare_mine_l1(py::module_& m)
                 }
                 return py::make_tuple(rows_arr, cols_arr);
             },
-            "Return (rows, cols) COO arrays for the sparse training matrix.");
+            "Return (rows, cols) COO arrays for the sparse training matrix.")
+        .def("get_csr",
+            [](const L1FitResult& r, int n_rows, int n_cols) {
+                if (n_rows < 0 || n_cols < 0)
+                    throw std::invalid_argument("n_rows and n_cols must be non-negative");
+                py::array_t<int32_t> indptr_arr({n_rows + 1});
+                py::array_t<int32_t> indices_arr({static_cast<py::ssize_t>(r.coo_cols.size())});
+                auto indptr = indptr_arr.mutable_unchecked<1>();
+                auto indices = indices_arr.mutable_unchecked<1>();
+                for (int i = 0; i <= n_rows; ++i) indptr(i) = 0;
+                for (size_t k = 0; k < r.coo_rows.size(); ++k) {
+                    const int rr = r.coo_rows[k];
+                    if (rr < 0 || rr >= n_rows) throw std::out_of_range("COO row out of CSR bounds");
+                    indptr(rr + 1) += 1;
+                }
+                for (int i = 0; i < n_rows; ++i) indptr(i + 1) += indptr(i);
+
+                std::vector<int32_t> cursor(static_cast<size_t>(n_rows));
+                for (int i = 0; i < n_rows; ++i) cursor[static_cast<size_t>(i)] = indptr(i);
+                for (size_t k = 0; k < r.coo_cols.size(); ++k) {
+                    const int rr = r.coo_rows[k];
+                    const int cc = r.coo_cols[k];
+                    if (cc < 0 || cc >= n_cols) throw std::out_of_range("COO col out of CSR bounds");
+                    const int pos = cursor[static_cast<size_t>(rr)]++;
+                    indices(pos) = cc;
+                }
+                int32_t* idx_ptr = static_cast<int32_t*>(indices_arr.mutable_data());
+                for (int i = 0; i < n_rows; ++i) {
+                    std::sort(idx_ptr + indptr(i), idx_ptr + indptr(i + 1));
+                }
+                return py::make_tuple(indptr_arr, indices_arr);
+            },
+            py::arg("n_rows"), py::arg("n_cols"),
+            "Return (indptr, indices) CSR structure directly, avoiding Python COO arrays.");
 
     // ── select_adaptive_bins ─────────────────────────────────────────────────
     m.def("select_adaptive_bins",
@@ -117,7 +169,7 @@ void bind_prepare_mine_l1(py::module_& m)
            py::array_t<uint8_t, py::array::forcecast> is_int,
            py::object X_cat_raw,
            py::object is_precoded_py,
-           int K, double G, double timeout_s)
+           int K, double G, double timeout_s, bool compute_original_scores)
         {
             validate_2d_array(X_num, "X_num");
             validate_mining_params(K, 1, G);   // L=1 always
@@ -156,7 +208,7 @@ void bind_prepare_mine_l1(py::module_& m)
                     std::move(ipc_vec),
                     std::move(cat_strs),
                     std::move(cat_valid),
-                    K, G, timeout_s);
+                    K, G, timeout_s, compute_original_scores);
             } catch (const NativeMemoryError& e) {
                 PyErr_SetString(PyExc_MemoryError, e.what());
                 throw py::error_already_set();
@@ -171,6 +223,7 @@ void bind_prepare_mine_l1(py::module_& m)
         py::arg("X_cat_raw"),
         py::arg("is_precoded") = py::none(),
         py::arg("K") = 200, py::arg("G") = 0.0, py::arg("timeout_s") = 0.0,
+        py::arg("compute_original_scores") = false,
         "Fused L=1 hot path: Phase-1 column stats + single fused scan\n"
         "(no TransList) + IG + top-K heap + direct COO build.\n\n"
         "Returns L1FitResult with td (Phase-1 artefacts; td.transactions empty),\n"
@@ -186,7 +239,7 @@ void bind_prepare_mine_l1(py::module_& m)
            py::object X_cat_raw,
            py::list candidates_py,
            double ratio,
-           int K, double G, double timeout_s)
+           int K, double G, double timeout_s, bool compute_original_scores)
         {
             validate_2d_array(X_num, "X_num");
             validate_mining_params(K, 1, G);
@@ -219,7 +272,7 @@ void bind_prepare_mine_l1(py::module_& m)
                     std::move(cat_strs),
                     std::move(cat_valid),
                     candidates, ratio,
-                    K, G, timeout_s);
+                    K, G, timeout_s, compute_original_scores);
             } catch (const NativeMemoryError& e) {
                 PyErr_SetString(PyExc_MemoryError, e.what());
                 throw py::error_already_set();
@@ -233,6 +286,7 @@ void bind_prepare_mine_l1(py::module_& m)
         py::arg("col_names"), py::arg("is_cat"), py::arg("is_int"),
         py::arg("X_cat_raw"), py::arg("candidates"), py::arg("ratio"),
         py::arg("K") = 200, py::arg("G") = 0.0, py::arg("timeout_s") = 0.0,
+        py::arg("compute_original_scores") = false,
         "Fused adaptive-B + L=1 hot path. Selects adaptive edges and mines L1\n"
         "without materialising X_codes_flat or a Python pre-binned DataFrame.");
 
@@ -244,7 +298,7 @@ void bind_prepare_mine_l1(py::module_& m)
            int B,
            py::object col_names_py,
            py::array_t<uint8_t, py::array::forcecast> is_int,
-           int K, double G, double timeout_s)
+           int K, double G, double timeout_s, bool compute_original_scores)
         {
             validate_2d_array(X_num, "X_num");
             validate_mining_params(K, 1, G);
@@ -258,7 +312,7 @@ void bind_prepare_mine_l1(py::module_& m)
             try {
                 py::gil_scoped_release release;
                 return prepare_and_mine_l1_fixed_numeric_cpp(
-                    X_num, y, B, std::move(col_names_cpp), is_int, K, G, timeout_s);
+                    X_num, y, B, std::move(col_names_cpp), is_int, K, G, timeout_s, compute_original_scores);
             } catch (const NativeMemoryError& e) {
                 PyErr_SetString(PyExc_MemoryError, e.what());
                 throw py::error_already_set();
@@ -271,6 +325,7 @@ void bind_prepare_mine_l1(py::module_& m)
         py::arg("X_num"), py::arg("y"), py::arg("B"),
         py::arg("col_names"), py::arg("is_int"),
         py::arg("K") = 200, py::arg("G") = 0.0, py::arg("timeout_s") = 0.0,
+        py::arg("compute_original_scores") = false,
         "Fast fixed-B dense numeric L=1 hot path.");
 
 }

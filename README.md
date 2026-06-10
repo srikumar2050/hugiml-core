@@ -35,26 +35,27 @@ checking_status=no_checking          coef= +1.12     support=0.39
 2. [Installation](#installation)
 3. [Quick Start](#quick-start)
 4. [Feature Modes](#feature-modes)
-5. [Hyperparameter Search](#hyperparameter-search)
-6. [Governance Studio Dashboard](#governance-studio-dashboard)
-7. [Augmented Pair Features](#augmented-pair-features)
-8. [Adaptive Binning](#adaptive-binning)
-9. [Missing Value Handling](#missing-value-handling)
-10. [Model Explanation and Visualisations](#model-explanation-and-visualisations)
-11. [Pattern Pruning](#pattern-pruning)
-12. [Interpretability Metrics](#interpretability-metrics)
-13. [Multiclass, Imbalanced Data, High-Cardinality](#multiclass-imbalanced-data-high-cardinality)
-14. [Drift Detection & Monitoring](#drift-detection--monitoring)
-15. [Calibration](#calibration)
-16. [Serialisation](#serialisation)
-17. [Governance & Model Cards](#governance--model-cards)
-18. [Benchmark Suite](#benchmark-suite)
-19. [Validation Highlights](#validation-highlights)
-20. [Inference Server](#inference-server)
-21. [CI / CD](#ci--cd)
-22. [Repository Structure](#repository-structure)
-23. [License](#license)
-24. [Citation](#citation)
+5. [Execution Modes](#execution-modes)
+6. [Hyperparameter Search](#hyperparameter-search)
+7. [Governance Studio Dashboard](#governance-studio-dashboard)
+8. [Augmented Pair Features](#augmented-pair-features)
+9. [Adaptive Binning](#adaptive-binning)
+10. [Missing Value Handling](#missing-value-handling)
+11. [Model Explanation and Visualisations](#model-explanation-and-visualisations)
+12. [Pattern Pruning](#pattern-pruning)
+13. [Interpretability Metrics](#interpretability-metrics)
+14. [Multiclass, Imbalanced Data, High-Cardinality](#multiclass-imbalanced-data-high-cardinality)
+15. [Drift Detection & Monitoring](#drift-detection--monitoring)
+16. [Calibration](#calibration)
+17. [Serialisation](#serialisation)
+18. [Governance & Model Cards](#governance--model-cards)
+19. [Benchmark Suite](#benchmark-suite)
+20. [Validation Highlights](#validation-highlights)
+21. [Inference Server](#inference-server)
+22. [CI / CD](#ci--cd)
+23. [Repository Structure](#repository-structure)
+24. [License](#license)
+25. [Citation](#citation)
 
 ---
 
@@ -113,6 +114,8 @@ python setup.py build_ext --inplace
 
 ## Quick Start
 
+`HUGIMLClassifier` is the primary public class name. `HUGIMLClassifierNative` remains available as a backward-compatible alias for existing code.
+
 > **Note on `prepareXy`:** `prepareXy` performs schema and type preparation
 > only — it detects integer, float, and categorical columns and encodes the
 > target. Discretisation, HUG pattern mining, and downstream classifier fitting
@@ -123,9 +126,9 @@ python setup.py build_ext --inplace
 ```python
 import pandas as pd
 from sklearn.model_selection import train_test_split
-from hugiml import HUGIMLClassifierNative
+from hugiml import HUGIMLClassifier
 
-clf = HUGIMLClassifierNative(B=7, L=1, G=5e-3)
+clf = HUGIMLClassifier(B=7, L=1, G=5e-3)
 
 X_enc, y_enc = clf.prepareXy(X_df, y)   # schema/type prep — no model fitting
 
@@ -144,9 +147,9 @@ print(clf.model_summary())
 ### Path B — explicit `allCols` for CV and production pipelines
 
 ```python
-from hugiml import HUGIMLClassifierNative
+from hugiml import HUGIMLClassifier
 
-clf = HUGIMLClassifierNative(
+clf = HUGIMLClassifier(
     allCols=[int_col_names, float_col_names, cat_col_names],
     origColumns=X.columns.tolist(),
     B=15,
@@ -176,18 +179,18 @@ HUGIML can use the mined binary pattern matrix in three downstream feature modes
 | `"original_plus_interactions"` | Original features plus only `L > 1` mined patterns | Useful when original features should handle marginal effects and HUGIML should contribute interaction/compound-region features only. |
 
 ```python
-from hugiml import HUGIMLClassifierNative
+from hugiml import HUGIMLClassifier
 
 # Backward-compatible default: pattern matrix only
-clf = HUGIMLClassifierNative(B=10, L=2, G=1e-2, topK=150,
+clf = HUGIMLClassifier(B=10, L=2, G=1e-2, topK=150,
                               adaptive_binning=True, feature_mode="patterns_only")
 
 # Hybrid: original features + all binary HUGIML patterns
-clf_hybrid = HUGIMLClassifierNative(B=10, L=2, G=1e-2, topK=150,
+clf_hybrid = HUGIMLClassifier(B=10, L=2, G=1e-2, topK=150,
                                     adaptive_binning=True, feature_mode="original_plus_patterns")
 
 # Hybrid: original features + higher-order/interaction patterns only
-clf_interactions = HUGIMLClassifierNative(B=10, L=2, G=1e-2, topK=150,
+clf_interactions = HUGIMLClassifier(B=10, L=2, G=1e-2, topK=150,
                                           adaptive_binning=True,
                                           feature_mode="original_plus_interactions")
 ```
@@ -198,6 +201,33 @@ For hybrid modes, HUGIML standardizes numeric original features internally befor
 
 ---
 
+## Execution Modes
+
+HUGIML supports two execution modes:
+
+| `execution_mode` | Purpose | Behavior |
+|---|---|---|
+| `"audit"` | Default mode for development, validation, governance, and regulated review | Keeps the complete training and traceability artifacts needed by audit, governance, and dashboard APIs. |
+| `"production"` | Lean mode for deployment after validation | Keeps prediction, probability scoring, save, and load behavior, while dropping training/audit-heavy artifacts to reduce retained memory. |
+
+```python
+from hugiml import HUGIMLClassifier
+
+# Full traceability; this is the default.
+audit_model = HUGIMLClassifier(execution_mode="audit")
+audit_model.fit(X_train, y_train)
+
+# Lean retained state for deployment.
+prod_model = HUGIMLClassifier(execution_mode="production")
+prod_model.fit(X_train, y_train)
+prod_model.save_model("model.hugiml")
+loaded = HUGIMLClassifier.load_model("model.hugiml")
+```
+
+In production mode, audit-oriented methods return a clear guidance result or raise a clear message asking you to refit with `execution_mode="audit"` when complete traceability is required.
+
+---
+
 ## Hyperparameter Search
 
 HUGIML provides a fast cached tuning path for adaptive-binning grids. When `adaptive_binning=True`, the full binning and transaction construction phase runs once per unique `(G, L, topK)` combination; subsequent candidates that vary only `feature_mode` reuse the cached artefacts and skip re-mining.
@@ -205,7 +235,7 @@ HUGIML provides a fast cached tuning path for adaptive-binning grids. When `adap
 ### `tune()` — cross-validated search with automatic fast path
 
 ```python
-result = HUGIMLClassifierNative.tune(
+result = HUGIMLClassifier.tune(
     X, y,
     cv=5,
     shuffle=True,
@@ -231,7 +261,7 @@ grid = {
     "feature_mode": ["patterns_only", "original_plus_patterns"],
 }
 
-result = HUGIMLClassifierNative.tune(
+result = HUGIMLClassifier.tune(
     X, y,
     param_grid=grid,
     base_params={"adaptive_binning": True},
@@ -244,7 +274,7 @@ result = HUGIMLClassifierNative.tune(
 ### `fast_grid_tune()` — single-split cached path for custom CV loops
 
 ```python
-tune_result = HUGIMLClassifierNative.fast_grid_tune(
+tune_result = HUGIMLClassifier.fast_grid_tune(
     X_train, y_train,
     X_val,   y_val,
     param_grid=grid,
@@ -319,7 +349,7 @@ abs(age - duration)
 They are active when `L > 1`, `adaptive_binning=True`, and `augmented_pair_transforms=True` (the default). They are appended only to the downstream estimator; the mined HUG pattern matrix and `transform(X)` remain pattern-space APIs.
 
 ```python
-clf = HUGIMLClassifierNative(
+clf = HUGIMLClassifier(
     B=-1,
     adaptive_binning=True,
     L=2,
@@ -356,12 +386,12 @@ clf.plot_bin_profiles()
 clf.ig_heatmap()
 ```
 
-Alternatively, enable adaptive binning directly on `HUGIMLClassifierNative`:
+Alternatively, enable adaptive binning directly on `HUGIMLClassifier`:
 
 ```python
-from hugiml import HUGIMLClassifierNative
+from hugiml import HUGIMLClassifier
 
-clf = HUGIMLClassifierNative(
+clf = HUGIMLClassifier(
     adaptive_binning=True,
     b_candidates=[3, 5, 7, 10],
     min_marginal_gain_ratio=0.02,
@@ -380,11 +410,11 @@ HUGIML treats NaN and Inf values as **not observed** — no imputation and no sp
 
 ```python
 import numpy as np
-from hugiml import HUGIMLClassifierNative
+from hugiml import HUGIMLClassifier
 
 X_train.iloc[5, 2] = np.nan
 
-clf = HUGIMLClassifierNative(B=5, L=2, G=1e-4)
+clf = HUGIMLClassifier(B=5, L=2, G=1e-4)
 clf.fit(X_train, y_train)
 
 X_test.iloc[0, 0] = np.nan
@@ -404,7 +434,7 @@ def add_missingness_indicators(X, threshold=0.05):
     return X_aug
 
 X_with_indicators = add_missingness_indicators(X_raw)
-clf = HUGIMLClassifierNative(B=7, L=2, G=1e-4)
+clf = HUGIMLClassifier(B=7, L=2, G=1e-4)
 clf.fit(X_with_indicators, y)
 ```
 
@@ -553,7 +583,7 @@ def reduce_high_cardinality(X, y, threshold=50, min_frequency=0.01):
     return X_reduced
 
 X_reduced = reduce_high_cardinality(X_raw, y, threshold=50, min_frequency=0.01)
-clf = HUGIMLClassifierNative(B=7, L=2, G=1e-4)
+clf = HUGIMLClassifier(B=7, L=2, G=1e-4)
 clf.fit(X_reduced, y)
 
 # Or use built-in target encoding:
@@ -749,18 +779,34 @@ Adaptive binning is a safe default when you do not want to tune `B`; fixed `B=5`
 
 ### Complexity budget
 
-The number of downstream features passed to the logistic regression (D) depends on `L`, `feature_mode`, and `augmented_pair_transforms`. **K** = `topK`, **k** = patterns actually mined (≤ K), **k_aug** = augmented pair features (≤ K), **p** = number of original input features.
+`topK` is the feature-selection budget **K**. It caps each selected feature family before the final estimator is built, unless `topk_budget_strict=True` is used to apply one global cap. The effective downstream width **D** can be lower than these limits when fewer valid features are mined or selected.
 
-| L | `feature_mode` | `augmented_pair_transforms` | D |
-|---|---|---|---|
-| L = 1 | `patterns_only` | — *(no effect at L=1)* | `k` |
-| L = 1 | `original_plus_patterns` | — *(no effect at L=1)* | `k + p` |
-| L > 1 | `patterns_only` | `False` | `k` |
-| L > 1 | `patterns_only` | `True` | `k + k_aug ≈ 2k` |
-| L > 1 | `original_plus_patterns` | `False` | `k + p` |
-| L > 1 | `original_plus_patterns` | `True` | `k + k_aug + p ≈ 2k + p` |
+| Configuration | Downstream feature budget when `topK = K` |
+|---|---|
+| `patterns_only`, `L = 1` | Up to **K** HUG pattern features. |
+| `patterns_only`, `L > 1`, augmented pairs enabled | Up to **K** HUG pattern features + up to **K** augmented-pair features, so **D ≤ 2K**. |
+| `original_plus_patterns`, `L = 1` | Up to **K** selected original features + up to **K** HUG pattern features, so **D ≤ 2K**. |
+| `original_plus_patterns`, `L > 1`, augmented pairs enabled | Up to **K** selected original features + up to **K** HUG pattern features + up to **K** augmented-pair features, so **D ≤ 3K**. |
+| `original_plus_interactions` | Original features are capped at **K**; retained interaction/pattern features are also bounded by the HUG pattern budget. With augmented pairs enabled, the same additional **K** augmented-pair cap applies. |
+| `topk_budget_strict=True` | HUGIML first avoids oversized family blocks, then applies one global TopK selection across the constructed original, pattern, and augmented-pair candidates, so final **D ≤ K**. |
 
-> **`topk_budget_strict = True`** assembles all feature families first, then applies a single global information-gain filter retaining the best K features. D is hard-capped at K.
+#### Feature-family budgets
+
+`topK` defines the per-family selection budget used by HUGIML when constructing downstream representations. A configuration may include one, two, or three selected feature families:
+
+- HUG pattern features
+- selected original input features
+- augmented-pair features, when enabled for higher-order configurations
+
+Each active family can contribute up to `topK` downstream columns before strict global selection. Therefore, the maximum downstream width is the number of active selected families multiplied by `topK`:
+
+- one active family: up to `topK` columns
+- two active families: up to `2 × topK` columns
+- three active families: up to `3 × topK` columns
+
+For example, with `topK=150`, `original_plus_patterns` at `L=1` can retain up to `150` selected original columns and up to `150` HUG pattern columns, for a maximum downstream width of `300`. With `L>1` and augmented-pair transforms enabled, the same configuration can retain up to `150` selected original columns, `150` HUG pattern columns, and `150` augmented-pair columns, for a maximum downstream width of `450`. When `topk_budget_strict=True`, HUGIML applies one final global TopK selection across the constructed downstream candidates, so the final downstream width is capped at `topK`.
+
+With strict budgeting enabled, HUGIML applies the TopK budget during feature construction rather than after building a full expanded matrix. This keeps the practical downstream width bounded and avoids large intermediate matrices. In hybrid modes, original features are scored and preselected before prediction-time preparation, so prediction prepares only the retained original columns.
 
 ### Missing value robustness
 
@@ -830,7 +876,7 @@ hugiml-core/
 ├── src/
 │   ├── _native/                 C++ extension sources
 │   └── hugiml/
-│       ├── classifier.py        HUGIMLClassifierNative
+│       ├── classifier.py        HUGIMLClassifier / HUGIMLClassifierNative
 │       ├── calibration.py       ECE, Brier, reliability diagrams
 │       ├── explainability.py    SHAP bridge, feature lineage, stability
 │       ├── governance.py        Model cards, audit artifacts

@@ -21,11 +21,11 @@ Why HUGIML?
 Current release focus
 ---------------------
 
-The 1.1.8 release keeps the standard estimator and pattern-space APIs stable while adding workflow-level improvements:
+The 1.1.9 release keeps the v1.1.8 modeling workflow stable while adding deployment-oriented controls and memory improvements:
 
-* Fast tuning for eligible adaptive-binning hyperparameter searches.
-* More robust higher-order pattern selection for ``feature_mode="original_plus_interactions"``.
-* Streamlit Governance Studio for validation, representation audit, prediction review, monitoring views, pruning analysis, and report-oriented review workflows.
+* ``HUGIMLClassifier`` is now the cleaner primary class name; ``HUGIMLClassifierNative`` remains backward-compatible.
+* ``execution_mode="audit"`` keeps full traceability by default, while ``execution_mode="production"`` retains prediction and save/load state with a smaller memory footprint.
+* Strict and hybrid feature modes use earlier feature selection, compact native storage, CSR-returning paths, and improved fixed-B numeric handling.
 
 Installation
 ------------
@@ -51,6 +51,7 @@ The implementation is based on:
    getting_started
    concepts
    feature_modes
+   execution_modes
    augmented_features
    tuning
    explanations

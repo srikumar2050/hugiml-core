@@ -74,7 +74,10 @@ __all__ = [
     "generate_sbom",
 ]
 
-MODEL_SCHEMA_VERSION: int = 3
+# Schema v5 adds execution_mode and lightweight retained training-matrix
+# shape/nnz metadata to clf_fit.json.  Loading remains backward-compatible
+# with v1-v4 because new fields are restored with .get(..., None).
+MODEL_SCHEMA_VERSION: int = 5
 MIN_SCHEMA_VERSION: int = 1
 
 # ── Legacy (v1/v2) pickle-envelope constants ──────────────────────────────────
@@ -101,6 +104,7 @@ _SAFE_MODULES = (
 _SAFE_TYPES = frozenset(
     [
         "HUGIMLClassifierNative",
+        "HUGIMLClassifier",
         "_TransactionDataWrapper",
         "FitMetadata",
         "PredictionMonitor",
@@ -467,6 +471,7 @@ def save_model(clf: Any, path: str | os.PathLike) -> None:
         "_degraded_reason": getattr(clf, "_degraded_reason", None),
         "n_categories_": getattr(clf, "n_categories_", None),
         "feature_mode": getattr(clf, "feature_mode", "patterns_only"),
+        "execution_mode": getattr(clf, "execution_mode", "audit"),
         "original_numeric_cols": getattr(clf, "_original_numeric_cols_", []),
         "original_cat_cols": getattr(clf, "_original_cat_cols_", []),
         "original_dummy_columns": getattr(clf, "_original_dummy_columns_", []),
@@ -478,6 +483,21 @@ def save_model(clf: Any, path: str | os.PathLike) -> None:
         "strict_topk_selected_feature_names": getattr(
             clf, "_strict_topk_selected_feature_names_", []
         ),
+        "original_selected_feature_names_downstream": getattr(
+            clf, "_original_selected_feature_names_downstream_", None
+        ),
+        "original_feature_names_downstream_full": getattr(
+            clf, "_original_feature_names_downstream_full_", None
+        ),
+        "strict_topk_applied_during_construction": bool(
+            getattr(clf, "_strict_topk_applied_during_construction_", False)
+        ),
+        "training_pattern_matrix_shape": getattr(clf, "_training_pattern_matrix_shape_", None),
+        "training_pattern_matrix_nnz": getattr(clf, "_training_pattern_matrix_nnz_", None),
+        "training_downstream_matrix_shape": getattr(
+            clf, "_training_downstream_matrix_shape_", None
+        ),
+        "training_downstream_matrix_nnz": getattr(clf, "_training_downstream_matrix_nnz_", None),
     }
     if hasattr(clf, "fit_metadata_") and clf.fit_metadata_ is not None:
         import dataclasses
@@ -486,10 +506,14 @@ def save_model(clf: Any, path: str | os.PathLike) -> None:
     # ── v1.1.0 missing value handling state ──────────────────────────────
     # _missing_col_edges_ stores quantile edges for columns that had NaN/Inf
     # in training data.  Serialised as float lists for JSON compatibility.
-    if getattr(clf, "_missing_col_edges_", None):
-        fit_state["missing_col_edges"] = {
-            name: edges.tolist() for name, edges in clf._missing_col_edges_.items()
-        }
+    # Schema v5 writes this field unconditionally.  An empty dict explicitly
+    # records the clean-training-data contract: no numeric column required
+    # Python-side missing-value pre-binning, so loaded models should let new
+    # test-time NaN/Inf in those columns be skipped by the native numeric path.
+    missing_edges_state = getattr(clf, "_missing_col_edges_", {}) or {}
+    fit_state["missing_col_edges"] = {
+        name: edges.tolist() for name, edges in missing_edges_state.items()
+    }
     # ─────────────────────────────────────────────────────────────────────
     # ── v1.1.0 adaptive binning state ────────────────────────────────────
     # _bin_edges_ (dict[str, np.ndarray]) is serialised as JSON-compatible
@@ -583,6 +607,20 @@ def save_model(clf: Any, path: str | os.PathLike) -> None:
     if hasattr(clf, "_original_numeric_medians_"):
         clf_arrays["original_numeric_medians_"] = np.asarray(
             clf._original_numeric_medians_, dtype=np.float64
+        )
+    if (
+        hasattr(clf, "_original_feature_mask_downstream_")
+        and getattr(clf, "_original_feature_mask_downstream_", None) is not None
+    ):
+        clf_arrays["original_feature_mask_downstream_"] = np.asarray(
+            clf._original_feature_mask_downstream_, dtype=np.bool_
+        )
+    if (
+        hasattr(clf, "_original_feature_scores_downstream_")
+        and getattr(clf, "_original_feature_scores_downstream_", None) is not None
+    ):
+        clf_arrays["original_feature_scores_downstream_"] = np.asarray(
+            clf._original_feature_scores_downstream_, dtype=np.float64
         )
     if hasattr(clf, "_strict_topk_feature_mask_"):
         clf_arrays["strict_topk_feature_mask_"] = np.asarray(
@@ -824,6 +862,41 @@ def _load_v3(path: str | os.PathLike) -> Any:
     if clf_fit.get("n_categories_") is not None:
         clf.n_categories_ = clf_fit["n_categories_"]
     clf.feature_mode = clf_fit.get("feature_mode", getattr(clf, "feature_mode", "patterns_only"))
+    init_execution_mode = clf_init.get("execution_mode", None)
+    fit_has_execution_mode = "execution_mode" in clf_fit
+    execution_mode = clf_fit.get("execution_mode", getattr(clf, "execution_mode", "audit"))
+    if init_execution_mode is not None and init_execution_mode not in {"audit", "production"}:
+        raise HUGIMLSerializationError(
+            "Invalid execution_mode in clf_init.json: "
+            f"{init_execution_mode!r}. Expected 'audit' or 'production'."
+        )
+    if (
+        fit_has_execution_mode
+        and init_execution_mode is not None
+        and str(init_execution_mode) != str(execution_mode)
+    ):
+        raise HUGIMLSerializationError(
+            "Inconsistent execution_mode between clf_init.json and clf_fit.json: "
+            f"init={init_execution_mode!r}, fit={execution_mode!r}."
+        )
+    if execution_mode not in {"audit", "production"}:
+        raise HUGIMLSerializationError(
+            "Invalid execution_mode in model file: "
+            f"{execution_mode!r}. Expected 'audit' or 'production'."
+        )
+    clf.execution_mode = execution_mode
+    if clf_fit.get("training_pattern_matrix_shape") is not None:
+        clf._training_pattern_matrix_shape_ = tuple(
+            int(v) for v in clf_fit.get("training_pattern_matrix_shape")
+        )
+    if clf_fit.get("training_pattern_matrix_nnz") is not None:
+        clf._training_pattern_matrix_nnz_ = int(clf_fit.get("training_pattern_matrix_nnz"))
+    if clf_fit.get("training_downstream_matrix_shape") is not None:
+        clf._training_downstream_matrix_shape_ = tuple(
+            int(v) for v in clf_fit.get("training_downstream_matrix_shape")
+        )
+    if clf_fit.get("training_downstream_matrix_nnz") is not None:
+        clf._training_downstream_matrix_nnz_ = int(clf_fit.get("training_downstream_matrix_nnz"))
     clf._original_numeric_cols_ = clf_fit.get("original_numeric_cols", [])
     clf._original_cat_cols_ = clf_fit.get("original_cat_cols", [])
     clf._original_dummy_columns_ = clf_fit.get("original_dummy_columns", [])
@@ -833,6 +906,31 @@ def _load_v3(path: str | os.PathLike) -> Any:
     clf._downstream_feature_names_full_ = list(clf_fit.get("downstream_feature_names_full", []))
     clf._strict_topk_selected_feature_names_ = list(
         clf_fit.get("strict_topk_selected_feature_names", [])
+    )
+    clf._original_selected_feature_names_downstream_ = clf_fit.get(
+        "original_selected_feature_names_downstream", None
+    )
+    if clf._original_selected_feature_names_downstream_ is not None:
+        clf._original_selected_feature_names_downstream_ = list(
+            clf._original_selected_feature_names_downstream_
+        )
+    clf._original_feature_names_downstream_full_ = clf_fit.get(
+        "original_feature_names_downstream_full", None
+    )
+    if clf._original_feature_names_downstream_full_ is not None:
+        clf._original_feature_names_downstream_full_ = list(
+            clf._original_feature_names_downstream_full_
+        )
+    clf._strict_topk_applied_during_construction_ = bool(
+        clf_fit.get("strict_topk_applied_during_construction", False)
+    )
+    clf._original_feature_mask_downstream_ = clf_arrays.get(
+        "original_feature_mask_downstream_", None
+    )
+    if clf._original_feature_mask_downstream_ is not None:
+        clf._original_feature_mask_downstream_ = clf._original_feature_mask_downstream_.astype(bool)
+    clf._original_feature_scores_downstream_ = clf_arrays.get(
+        "original_feature_scores_downstream_", np.zeros(0, dtype=np.float64)
     )
     clf._strict_topk_feature_mask_ = clf_arrays.get("strict_topk_feature_mask_", None)
     if clf._strict_topk_feature_mask_ is not None:
@@ -891,8 +989,8 @@ def _load_v3(path: str | os.PathLike) -> Any:
             logger.debug("Could not restore FitMetadata: %s", exc, exc_info=True)
 
     # ── v1.1.0 missing value handling state ──────────────────────────────
-    missing_edges = clf_fit.get("missing_col_edges")
-    if missing_edges:
+    missing_edges = clf_fit.get("missing_col_edges", {})
+    if missing_edges is not None:
         clf._missing_col_edges_ = {
             name: np.array(edges, dtype=np.float64) for name, edges in missing_edges.items()
         }
@@ -1016,7 +1114,7 @@ def _load_v3(path: str | os.PathLike) -> Any:
     clf._fit_lock = threading.RLock()
 
     logger.debug(
-        "Loaded v3 model from %s (%d patterns, schema_version=%d)",
+        "Loaded HUGIML model from %s (%d patterns, schema_version=%d)",
         path,
         len(clf.patterns_),
         schema_ver,

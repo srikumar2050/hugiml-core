@@ -12,7 +12,10 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""HUGIMLClassifierNative — C++ accelerated, scikit-learn compatible classifier.
+"""HUGIMLClassifier — C++ accelerated, scikit-learn compatible classifier.
+
+``HUGIMLClassifier`` is the primary public class name.
+``HUGIMLClassifierNative`` remains as a backward-compatible alias.
 
 Implements the High Utility Gain Interpretable Machine Learning (HUG-IML)
 algorithm from:
@@ -47,9 +50,9 @@ Two usage paths are supported:
 
 **Path A — prepareXy** (recommended when the full dataset is available upfront)::
 
-    from hugiml import HUGIMLClassifierNative
+    from hugiml import HUGIMLClassifier
 
-    clf = HUGIMLClassifierNative()
+    clf = HUGIMLClassifier()
     X, y = clf.prepareXy(X_df, y_series)
     X_tr, X_te, y_tr, y_te = train_test_split(X, y, stratify=y)
     clf.fit(X_tr, y_tr)
@@ -60,7 +63,7 @@ Two usage paths are supported:
 
 **Path B — allCols + origColumns** (cross-validation loops)::
 
-    clf = HUGIMLClassifierNative(
+    clf = HUGIMLClassifier(
         allCols=[int_cols, float_cols, cat_cols],
         origColumns=X_df.columns.tolist(),
     )
@@ -78,7 +81,7 @@ Monitoring and drift detection::
 Versioned serialisation::
 
     clf.save_model("model.hugiml")
-    clf2 = HUGIMLClassifierNative.load_model("model.hugiml")
+    clf2 = HUGIMLClassifier.load_model("model.hugiml")
 """
 
 from __future__ import annotations
@@ -282,9 +285,7 @@ class NativeAugmentedPairTransformBlock:
         n_rows = len(X) if hasattr(X, "__len__") else 0
         if not selected:
             return np.zeros((n_rows, 0), dtype=np.float64)
-        X_df = self._as_frame(
-            X, selected, list(getattr(self, "input_feature_names_", []) or [])
-        )
+        X_df = self._as_frame(X, selected, list(getattr(self, "input_feature_names_", []) or []))
         try:
             mat = X_df.reindex(columns=selected).to_numpy(dtype=np.float64, copy=True)
         except Exception:
@@ -553,12 +554,6 @@ except ImportError:
         except ImportError:
             return 0
 
-
-__all__ = [
-    "HUGIMLClassifierNative",
-    "FitMetadata",
-    "HUGIMLTuneResult",
-]
 
 logger = logging.getLogger(__name__)
 
@@ -907,6 +902,8 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         augmented_pair_transforms: bool = True,
         augmented_pair_max_features: int = 10,
         topk_budget_strict: bool = False,
+        dense_downstream_max_width: int = 200,
+        execution_mode: str = "audit",
     ) -> None:
         self.allCols = allCols
         self.origColumns = origColumns
@@ -927,7 +924,92 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         self.augmented_pair_transforms = augmented_pair_transforms
         self.augmented_pair_max_features = augmented_pair_max_features
         self.topk_budget_strict = topk_budget_strict
+        self.dense_downstream_max_width = dense_downstream_max_width
+        # sklearn estimator compatibility: constructor and set_params must not
+        # validate parameter values.  execution_mode is validated in fit/load.
+        self.execution_mode = execution_mode
         self._fit_lock = threading.RLock()
+
+    # ── Execution-mode retention helpers ─────────────────────────────────────
+
+    def _is_production_mode(self) -> bool:
+        """Return True when audit/governance-heavy artifacts are not retained."""
+        return getattr(self, "execution_mode", "audit") == "production"
+
+    def _audit_artifact_message(self, artifact: str) -> str:
+        return (
+            f"{artifact} is not available because this model was fitted or loaded with "
+            "execution_mode='production'. Refit the model with execution_mode='audit' "
+            "or load a model file that was originally saved from audit mode for complete "
+            "traceability and audit/governance artifacts."
+        )
+
+    def _require_audit_artifact(self, artifact: str, *required_attrs: str) -> None:
+        """Raise a clear error when an audit/governance artifact is unavailable.
+
+        Passing no required attributes is treated as an unconditional audit-only
+        guard in production mode.  When required attributes are supplied, their
+        presence is checked in every execution mode: production receives the
+        governance-oriented retention message, while audit mode receives a
+        fitted-state/corrupt-state message.  This keeps callers such as
+        ``get_pattern_info()`` and drift helpers from falling through to an
+        ``AttributeError`` if an expected audit artifact is absent.
+        """
+        is_prod = self._is_production_mode()
+        if not required_attrs:
+            if is_prod:
+                raise RuntimeError(self._audit_artifact_message(artifact))
+            return
+        missing = [
+            attr
+            for attr in required_attrs
+            if (not hasattr(self, attr)) or getattr(self, attr, None) is None
+        ]
+        if missing:
+            if is_prod:
+                raise RuntimeError(self._audit_artifact_message(artifact))
+            raise RuntimeError(
+                f"{artifact} is unavailable because required fitted artifact(s) "
+                f"are missing: {', '.join(missing)}. Refit the model or reload a "
+                "complete audit-mode model file."
+            )
+
+    def _apply_execution_mode_retention(self) -> None:
+        """Drop audit/governance-heavy training artifacts in production mode.
+
+        Prediction-critical state is retained: td_, patterns_, model_, bin/scaler
+        metadata, selected downstream names/masks, augmented-pair transform
+        metadata, and privacy-safe aggregate downstream metadata that was
+        already cached before retention. Training matrices, drift baselines, and
+        native-only transient score caches are audit/governance artifacts and are
+        intentionally omitted in production mode.
+        """
+        if not self._is_production_mode():
+            return
+        x_hup = getattr(self, "x_train_hup_", None)
+        if x_hup is not None:
+            self._training_pattern_matrix_shape_ = tuple(int(v) for v in x_hup.shape)
+            self._training_pattern_matrix_nnz_ = int(getattr(x_hup, "nnz", 0))
+        x_down = getattr(self, "x_train_downstream_", None)
+        if x_down is not None:
+            self._training_downstream_matrix_shape_ = tuple(int(v) for v in x_down.shape)
+            if hasattr(x_down, "nnz"):
+                self._training_downstream_matrix_nnz_ = int(x_down.nnz)
+            elif hasattr(x_down, "shape"):
+                self._training_downstream_matrix_nnz_ = int(np.count_nonzero(x_down))
+            else:
+                self._training_downstream_matrix_nnz_ = 0
+        for attr in (
+            "x_train_hup_",
+            "x_train_downstream_",
+            # _downstream_* aggregate metadata is retained: it is aligned to
+            # downstream feature names and lets feature_importances() report a
+            # stable schema after production retention without needing training
+            # matrices.
+            "_native_original_feature_scores_downstream_",
+            "_drift_det",
+        ):
+            self.__dict__.pop(attr, None)
 
     # ── Class methods ─────────────────────────────────────────────────────────
 
@@ -973,9 +1055,8 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         adap = ", adaptive" if self.adaptive_binning else ""
         mode = f", feature_mode={self.feature_mode}"
         aug = f", augmented_pair_transforms={self.augmented_pair_transforms}"
-        return (
-            f"HUGIMLClassifierNative(B={self.B}, L={self.L}, G={self.G}{adap}{mode}{aug}{status})"
-        )
+        exec_mode = f", execution_mode={self.execution_mode}"
+        return f"HUGIMLClassifier(B={self.B}, L={self.L}, G={self.G}{adap}{mode}{aug}{exec_mode}{status})"
 
     # ── sklearn protocol ──────────────────────────────────────────────────────
 
@@ -1001,10 +1082,13 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             augmented_pair_transforms=self.augmented_pair_transforms,
             augmented_pair_max_features=self.augmented_pair_max_features,
             topk_budget_strict=self.topk_budget_strict,
+            dense_downstream_max_width=self.dense_downstream_max_width,
+            execution_mode=self.execution_mode,
         )
 
     def set_params(self, **params: Any) -> HUGIMLClassifierNative:
         """Set constructor parameters in-place and return self (sklearn protocol)."""
+        # Defer validation until fit(), matching sklearn estimator conventions.
         for k, v in params.items():
             setattr(self, k, v)
         return self
@@ -1139,12 +1223,22 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             self.augmented_pair_transforms = True
         if not hasattr(self, "topk_budget_strict"):
             self.topk_budget_strict = False
+        if not hasattr(self, "dense_downstream_max_width"):
+            self.dense_downstream_max_width = 200
+        if not hasattr(self, "execution_mode"):
+            self.execution_mode = "audit"
         if not hasattr(self, "augmented_pair_max_features"):
             self.augmented_pair_max_features = 10
         if not hasattr(self, "augmented_pair_transforms_"):
             self.augmented_pair_transforms_ = []
         if not hasattr(self, "augmented_pair_selected_features_"):
             self.augmented_pair_selected_features_ = []
+        if not hasattr(self, "_original_feature_mask_downstream_"):
+            self._original_feature_mask_downstream_ = None
+        if not hasattr(self, "_original_selected_feature_names_downstream_"):
+            self._original_selected_feature_names_downstream_ = None
+        if not hasattr(self, "_strict_topk_applied_during_construction_"):
+            self._strict_topk_applied_during_construction_ = False
         # v1.1.0 missing value handling — absent in models saved before this version
         if not hasattr(self, "_missing_col_edges_"):
             self._missing_col_edges_ = {}
@@ -1421,9 +1515,17 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         if not patterns:
             return [], None
         ordered = sorted(patterns, key=lambda pe: (-pe.ig, -pe.utility))
-        rows_raw, cols_raw = _core.build_train_matrix(self.td_, ordered)
-        rows_np = np.asarray(rows_raw, dtype=np.int64)
-        cols_np = np.asarray(cols_raw, dtype=np.int64)
+        if hasattr(_core, "build_train_matrix_csr"):
+            indptr_raw, indices_raw = _core.build_train_matrix_csr(self.td_, ordered)
+            indptr_np = np.asarray(indptr_raw, dtype=np.int64)
+            cols_np = np.asarray(indices_raw, dtype=np.int64)
+            rows_np = np.repeat(
+                np.arange(max(len(indptr_np) - 1, 0), dtype=np.int64), np.diff(indptr_np)
+            )
+        else:
+            rows_raw, cols_raw = _core.build_train_matrix(self.td_, ordered)
+            rows_np = np.asarray(rows_raw, dtype=np.int64)
+            cols_np = np.asarray(cols_raw, dtype=np.int64)
 
         # build coverage keys without Python-level int() conversions.
         # Sort COO by column index, then use searchsorted to split rows into
@@ -1476,6 +1578,19 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             raise HUGIMLParamError(f"G must be numeric, got {type(self.G).__name__}")
         if self.G < 0:
             raise HUGIMLParamError(f"G must be >= 0, got {self.G}")
+        dense_width = getattr(self, "dense_downstream_max_width", 200)
+        if isinstance(dense_width, bool) or not isinstance(dense_width, int):
+            raise HUGIMLParamError(
+                f"dense_downstream_max_width must be an int >= 0, got {type(dense_width).__name__}"
+            )
+        if int(dense_width) < 0:
+            raise HUGIMLParamError(f"dense_downstream_max_width must be >= 0, got {dense_width}")
+        if getattr(self, "execution_mode", "audit") not in {"audit", "production"}:
+            raise HUGIMLParamError(
+                "execution_mode must be either 'audit' or 'production'. "
+                "Use 'audit' for complete traceability/governance artifacts, "
+                "or 'production' to retain only prediction-critical state."
+            )
         if self.allCols is not None or self.origColumns is not None:
             if self.allCols is None or self.origColumns is None:
                 raise HUGIMLParamError("allCols and origColumns must both be supplied together.")
@@ -1658,14 +1773,18 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         raises when string-categorical columns are present.
         """
         is_df = isinstance(X_train, pd.DataFrame)
-        X_df = X_train if is_df else pd.DataFrame(
-            X_train,
-            columns=(
-                list(getattr(self, "feature_names_in_", []) or [])
-                if getattr(self, "feature_names_in_", None) is not None
-                and len(getattr(self, "feature_names_in_", [])) == np.asarray(X_train).shape[1]
-                else None
-            ),
+        X_df = (
+            X_train
+            if is_df
+            else pd.DataFrame(
+                X_train,
+                columns=(
+                    list(getattr(self, "feature_names_in_", []) or [])
+                    if getattr(self, "feature_names_in_", None) is not None
+                    and len(getattr(self, "feature_names_in_", [])) == np.asarray(X_train).shape[1]
+                    else None
+                ),
+            )
         )
         candidates = sorted(set(self.b_candidates or [2, 3, 5, 7, 10, 15]))
         ratio = self.min_marginal_gain_ratio
@@ -1749,18 +1868,33 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         self.cat_cols_mask_ = new_cat
         self.is_int_mask_ = new_int
 
-        # Apply integer codes to the pre-binned numeric columns in X_pre
-        X_codes_np = adap_result.get_X_codes()  # (n × n_num_cols) float64
+        # Apply integer codes to the pre-binned numeric columns in X_pre.
+        # Native storage is int32 with -1 as the missing sentinel; fetch one
+        # column at a time to avoid materialising a second full float64 code
+        # matrix.  Cast only the one column that pandas needs so NaN can be
+        # represented for the legacy pre-binned path.
         X_pre = X_df.copy()
         for ci in range(adap_result.n_num_cols):
             j_num = adap_result.num_col_indices[ci]
             name = col_names_num[j_num]
             col_raw = pd.to_numeric(X_df[name], errors="coerce").values
-            codes = X_codes_np[:, ci].copy()
-            # Re-apply NaN sentinel for non-finite cells (C++ may have assigned
-            # a valid code to the filtered-out index; replace with np.nan so
-            # the is_precoded C++ handler generates no item for that row/feature).
-            codes[~np.isfinite(col_raw)] = np.nan
+            if hasattr(adap_result, "get_X_codes_col"):
+                codes_i32 = np.asarray(adap_result.get_X_codes_col(ci), dtype=np.int32)
+                missing_codes = codes_i32 < 0
+            else:  # compatibility with older native wheels
+                # Older native wheels expose get_X_codes() as float64 with
+                # np.nan as the missing sentinel.  Casting that matrix directly
+                # to int32 can platform-dependently produce either INT32_MIN or
+                # 0; the latter silently aliases a valid bin.  Detect missing
+                # sentinels before the integer cast.
+                codes_raw = np.asarray(adap_result.get_X_codes()[:, ci])
+                missing_codes = ~np.isfinite(codes_raw)
+                codes_i32 = np.zeros(codes_raw.shape, dtype=np.int32)
+                finite_codes = ~missing_codes
+                if np.any(finite_codes):
+                    codes_i32[finite_codes] = codes_raw[finite_codes].astype(np.int32)
+            codes = codes_i32.astype(np.float32, copy=False)
+            codes[missing_codes | (codes_i32 < 0) | (~np.isfinite(col_raw))] = np.nan
             X_pre[name] = codes
 
         return X_pre if is_df else X_pre
@@ -1782,14 +1916,18 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         numerical features are found).
         """
         is_df = isinstance(X_train, pd.DataFrame)
-        X_df = X_train if is_df else pd.DataFrame(
-            X_train,
-            columns=(
-                list(getattr(self, "feature_names_in_", []) or [])
-                if getattr(self, "feature_names_in_", None) is not None
-                and len(getattr(self, "feature_names_in_", [])) == np.asarray(X_train).shape[1]
-                else None
-            ),
+        X_df = (
+            X_train
+            if is_df
+            else pd.DataFrame(
+                X_train,
+                columns=(
+                    list(getattr(self, "feature_names_in_", []) or [])
+                    if getattr(self, "feature_names_in_", None) is not None
+                    and len(getattr(self, "feature_names_in_", [])) == np.asarray(X_train).shape[1]
+                    else None
+                ),
+            )
         )
         candidates = sorted(set(self.b_candidates or [2, 3, 5, 7, 10, 15]))
         ratio = self.min_marginal_gain_ratio
@@ -2022,22 +2160,22 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
     # ────────────────────────────────────────────────────────────────────────────
 
     def _prebin_nan_cols(self, X_train: Any) -> Any:
-        """Pre-bin ALL numerical columns to string quantile labels.
+        """Pre-bin fixed-B numeric columns that must follow the string path.
 
-        Called in _fit_impl (non-adaptive path) after _resolve_col_meta.
+        Contract for every L value:
+        - Finite numeric columns stay numeric and use the native fixed-B numeric
+          path, including L > 1.
+        - Numeric columns with NaN/Inf during training are pre-binned to the
+          string/categorical path so the fitted transaction data and later
+          predictions share the same missing-value representation.
 
-        Every numerical column is discretised into B equal-frequency bins
-        using the finite training values.  Non-finite cells (NaN, Inf) become
-        ``np.nan`` in the label array; the C++ transaction builder skips those
-        cells, generating no item for that (row, feature) pair.
-
-        By pre-binning all numerical columns unconditionally, NaN at *any*
-        point — training or test time, whatever columns — is handled correctly
-        and identically: the item is simply absent from the transaction.
-
-        Stores edges in ``self._missing_col_edges_[feature_name]``.
-        Updates ``self.cat_cols_mask_`` to mark all pre-binned columns as
-        categorical so the C++ routes them through the string-label path.
+        A new NaN/Inf at prediction time in a column that was clean during
+        training is handled by the native numeric transaction builder, which
+        skips item generation for that cell.  This fit-only helper resets
+        ``_missing_col_edges_`` at the beginning of each call; callers outside
+        the normal fit path should not invoke it incrementally.  For ndarray
+        inputs, the returned object preserves ndarray type when a conversion is
+        needed, avoiding accidental DataFrame type coercion.
         """
         is_df = isinstance(X_train, pd.DataFrame)
         if is_df:
@@ -2047,7 +2185,11 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             if arr.ndim == 1:
                 arr = arr.reshape(1, -1)
             feat_names = list(getattr(self, "feature_names_in_", []) or [])
-            cols = feat_names if len(feat_names) == arr.shape[1] else [f"col{j}" for j in range(arr.shape[1])]
+            cols = (
+                feat_names
+                if len(feat_names) == arr.shape[1]
+                else [f"col{j}" for j in range(arr.shape[1])]
+            )
             X_df = pd.DataFrame(arr, columns=cols)
         cat_mask = self.cat_cols_mask_
         col_names = list(X_df.columns)
@@ -2063,7 +2205,12 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                 continue  # already categorical — C++ handles np.nan natively
 
             col = pd.to_numeric(X_df.iloc[:, j], errors="coerce").values
-            finite = col[np.isfinite(col)]
+            finite_mask = np.isfinite(col)
+            if bool(np.all(finite_mask)):
+                # Consistent fast path for every L: finite numeric columns
+                # remain numeric and are binned by native fixed-B code.
+                continue
+            finite = col[finite_mask]
             edges = (
                 _adap_quantile_edges(finite, self.B) if finite.size > 0 else np.array([0.0, 1.0])
             )
@@ -2082,18 +2229,18 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         for name, edges in self._missing_col_edges_.items():
             col = pd.to_numeric(X_df[name], errors="coerce").values
             X_pre[name] = _adap_apply_edges(col, edges)
-        return X_pre if is_df else X_pre
+        return X_pre if is_df else X_pre.to_numpy()
 
     def _handle_test_nan(self, X_test: Any) -> tuple:
-        """Apply training-time bin edges to all pre-binned columns at test time.
+        """Apply training-time missing-column bin edges at test time.
 
-        All numerical columns are pre-binned during _fit_impl (non-adaptive path),
-        so ``_missing_col_edges_`` contains edges for every numerical column.
-
-        At test time the input still carries raw float values.  This method
-        converts every pre-binned column to its string bin labels using the
-        stored training edges.  Non-finite values (NaN, Inf) become ``np.nan``
-        → C++ skips → no item for that (row, feature) pair.
+        In fixed-B non-adaptive models, this converts only the columns recorded
+        in ``_missing_col_edges_`` back to the exact string-label representation
+        used at fit time.  The rule is identical for L == 1 and L > 1: only
+        numeric columns that had NaN/Inf during training are recorded here.
+        Numeric columns not recorded in ``_missing_col_edges_`` remain numeric
+        and are binned by C++ directly; if they contain new non-finite values at
+        prediction time, the native numeric transaction builder skips them.
 
         Returns ``(X_modified, local_cat_mask)``.  ``self.cat_cols_mask_``
         is never mutated; ``local_cat_mask`` is a per-call copy.
@@ -2126,10 +2273,9 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             if j >= len(base_cat):
                 continue
 
-            # Column was pre-binned at training time: convert ALL raw float
-            # values to string bin labels so C++ item lookups match.
-            # base_cat[j] is already True (set by _prebin_nan_cols); we
-            # still need to apply edges because test data arrives as raw floats.
+            # Column was pre-binned at training time because it contained
+            # NaN/Inf during fit: convert raw float values to the same string
+            # bin labels so C++ item lookups match.
             if name in missing_edges:
                 col = pd.to_numeric(X_df.iloc[:, j], errors="coerce").values
                 if not modified:
@@ -2144,7 +2290,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
 
         if not modified:
             return X_test, base_cat
-        return (X_df if is_df else X_df), local_cat
+        return (X_df if is_df else X_df.to_numpy()), local_cat
 
     # ── End v1.1.0 missing value handling methods ─────────────────────────────
 
@@ -2214,6 +2360,8 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             "x_train_hup_",
             "fit_metadata_",
             "_original_scaler_",
+            "_original_numeric_medians_",
+            "_original_numeric_medians_array_",
             "_original_feature_names_downstream_",
             "_pattern_orders_",
             "_interaction_pattern_mask_",
@@ -2221,6 +2369,18 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             "_augmented_pair_block_",
             "augmented_pair_transforms_",
             "augmented_pair_selected_features_",
+            "_native_original_feature_names_downstream_",
+            "_native_original_feature_scores_downstream_",
+            "_strict_topk_applied_during_construction_",
+            "_strict_topk_feature_mask_",
+            "_strict_topk_feature_scores_",
+            "_strict_topk_selected_feature_names_",
+            "_downstream_feature_names_full_",
+            "_training_pattern_matrix_shape_",
+            "_training_pattern_matrix_nnz_",
+            "_training_downstream_matrix_shape_",
+            "_training_downstream_matrix_nnz_",
+            "_drift_det",
         ):
             self.__dict__.pop(_attr, None)
 
@@ -2294,29 +2454,16 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                 )
         # ─────────────────────────────────────────────────────────────────
 
-        # ── v1.1.0 missing value pre-binning (non-adaptive path) ──────────
-        # Adaptive path handles non-finite values in _apply_adaptive_binning
-        # (via _adap_apply_edges which now maps non-finite → np.nan).
-        # Non-adaptive path: pre-bin NaN-containing columns here so the C++
-        # receives them as categorical with np.nan → no item generated.
+        # ── Fixed-B non-finite handling (non-adaptive path) ───────────────
+        # Use one consistent scheme for every L: numeric columns stay numeric
+        # unless they contain NaN/Inf during training.  Columns with training
+        # non-finite cells are pre-binned to the string/categorical path so
+        # fit and predict use the same missing-value representation.  Clean
+        # numeric columns, including L>1 columns, use the native numeric path;
+        # new test-time NaN/Inf values are skipped by native item generation.
         if not self.adaptive_binning:
-            # The optimized dense numeric fixed-B L1 hotpath can skip
-            # non-finite numeric cells natively, so it must keep columns
-            # numeric.  All other non-adaptive paths retain the established
-            # v1.1.4 behaviour: pre-bin numeric columns to categorical labels
-            # so NaN/Inf cells generate no item and serialization/test-time
-            # handling remains identical.
-            cat_mask0 = self._resolve_col_meta(X_train)
-            _use_fixed_numeric_l1 = (
-                os.environ.get("HUGIML_DISABLE_FIXED_NUMERIC_L1_FASTPATH", "0") != "1"
-                and self.use_hotpath
-                and _CORE_AVAILABLE
-                and self.L == 1
-                and hasattr(_core, "prepare_and_mine_l1_fixed_numeric")
-                and not bool(np.any(cat_mask0))
-            )
-            if not _use_fixed_numeric_l1:
-                X_train = self._prebin_nan_cols(X_train)
+            self._resolve_col_meta(X_train)
+            X_train = self._prebin_nan_cols(X_train)
         # ─────────────────────────────────────────────────────────────────
 
         mem = _MemoryTracker()
@@ -2428,6 +2575,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                         K_eff,
                         self.G,
                         remaining_s,
+                        compute_original_scores=(self.feature_mode != "patterns_only"),
                     )
                 elif self.adaptive_binning and hasattr(_core, "prepare_and_mine_l1_adaptive"):
                     candidates = sorted(set(self.b_candidates or [2, 3, 5, 7, 10, 15]))
@@ -2443,6 +2591,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                         K_eff,
                         self.G,
                         remaining_s,
+                        compute_original_scores=(self.feature_mode != "patterns_only"),
                     )
 
                     # Install adaptive metadata for predict()/transform() so test
@@ -2496,8 +2645,21 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                         K_eff,
                         self.G,
                         remaining_s,
+                        compute_original_scores=(self.feature_mode != "patterns_only"),
                     )
                 self.td_ = _l1_result.td
+                if self.feature_mode != "patterns_only":
+                    native_orig_names = [
+                        f"orig:{name}"
+                        for name in list(getattr(_l1_result, "original_feature_names", []) or [])
+                    ]
+                    native_orig_scores = np.asarray(
+                        list(getattr(_l1_result, "original_feature_scores", []) or []),
+                        dtype=np.float64,
+                    )
+                    if native_orig_names and len(native_orig_names) == len(native_orig_scores):
+                        self._native_original_feature_names_downstream_ = native_orig_names
+                        self._native_original_feature_scores_downstream_ = native_orig_scores
                 cpp_mem_bytes = self.td_.memory_usage_bytes()
                 n_items = len(self.td_.item_twu)
                 K = self._effective_topK(n_items)
@@ -2550,16 +2712,26 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                     # "patterns list is empty — nothing to build".
                     self.x_train_hup_ = csr_matrix((n_train, 0), dtype=np.float32)
                 else:
-                    # Build train matrix from fused COO (no bitmap scan needed)
-                    rows, cols = _l1_result.get_coo()
-                    # The fused COO is ordered by pattern index matching raw_patterns_
-                    # (both sorted by descending utility).  If patterns_ was reordered
-                    # by dedup we would need to remap cols — but dedup is skipped here
-                    # so the order is identical.
-                    data = np.ones(len(rows), dtype=np.float32)
-                    self.x_train_hup_ = csr_matrix(
-                        (data, (rows, cols)), shape=(n_train, n_pats), dtype=np.float32
-                    )
+                    # Build train matrix from fused native CSR when available.  This
+                    # avoids copying COO rows/cols into Python and lets scipy consume the
+                    # compact CSR structure directly.  get_coo remains as a compatibility
+                    # fallback for older native wheels.
+                    if hasattr(_l1_result, "get_csr"):
+                        indptr, indices = _l1_result.get_csr(n_train, n_pats)
+                        data = np.ones(len(indices), dtype=np.float32)
+                        self.x_train_hup_ = csr_matrix(
+                            (data, indices, indptr), shape=(n_train, n_pats), dtype=np.float32
+                        )
+                    else:
+                        rows, cols = _l1_result.get_coo()
+                        # The fused COO is ordered by pattern index matching raw_patterns_
+                        # (both sorted by descending utility).  If patterns_ was reordered
+                        # by dedup we would need to remap cols — but dedup is skipped here
+                        # so the order is identical.
+                        data = np.ones(len(rows), dtype=np.float32)
+                        self.x_train_hup_ = csr_matrix(
+                            (data, (rows, cols)), shape=(n_train, n_pats), dtype=np.float32
+                        )
                 stage_times["build_matrix"] = t.ms
 
             else:
@@ -2638,12 +2810,22 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                 else:
                     if _cached_coo is not None:
                         rows, cols = _cached_coo
+                        data = np.ones(len(rows), dtype=np.float32)
+                        self.x_train_hup_ = csr_matrix(
+                            (data, (rows, cols)), shape=(n_train, n_pats), dtype=np.float32
+                        )
+                    elif hasattr(_core, "build_train_matrix_csr"):
+                        indptr, indices = _core.build_train_matrix_csr(self.td_, self.patterns_)
+                        data = np.ones(len(indices), dtype=np.float32)
+                        self.x_train_hup_ = csr_matrix(
+                            (data, indices, indptr), shape=(n_train, n_pats), dtype=np.float32
+                        )
                     else:
                         rows, cols = _core.build_train_matrix(self.td_, self.patterns_)
-                    data = np.ones(len(rows), dtype=np.float32)
-                    self.x_train_hup_ = csr_matrix(
-                        (data, (rows, cols)), shape=(n_train, n_pats), dtype=np.float32
-                    )
+                        data = np.ones(len(rows), dtype=np.float32)
+                        self.x_train_hup_ = csr_matrix(
+                            (data, (rows, cols)), shape=(n_train, n_pats), dtype=np.float32
+                        )
                 stage_times["build_matrix"] = t.ms
 
             # Optional internal cache-only path used by fast_grid_tune().
@@ -2665,9 +2847,14 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             self._setup_augmented_pair_transforms(
                 X_train_original_for_downstream, y_train, fit=True
             )
-            self.x_train_downstream_ = self._make_downstream_features(
-                X_train_original_for_downstream, self.x_train_hup_, fit=True
-            )
+            self._current_y_for_downstream_topk_ = y_train
+            try:
+                self.x_train_downstream_ = self._make_downstream_features(
+                    X_train_original_for_downstream, self.x_train_hup_, fit=True
+                )
+            finally:
+                if hasattr(self, "_current_y_for_downstream_topk_"):
+                    delattr(self, "_current_y_for_downstream_topk_")
             self.x_train_downstream_ = self._apply_strict_topk_budget_fit(
                 self.x_train_downstream_, y_train
             )
@@ -2682,15 +2869,20 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             self._native_available_ = True
             stage_times["compat"] = t.ms
 
-            # Drift baseline
-            self._drift_det = DriftDetector()
-            self._drift_det.fit_baseline(
-                X_num,
-                cat_mask,
-                getattr(self, "feature_names_in_", None)
-                or [f"col{j}" for j in range(X_num.shape[1])],
-                y=y_train,
-            )
+            t = self._timer()
+            if self._is_production_mode():
+                self.__dict__.pop("_drift_det", None)
+                stage_times["drift_baseline"] = 0.0
+            else:
+                self._drift_det = DriftDetector()
+                self._drift_det.fit_baseline(
+                    X_num,
+                    cat_mask,
+                    getattr(self, "feature_names_in_", None)
+                    or [f"col{j}" for j in range(X_num.shape[1])],
+                    y=y_train,
+                )
+                stage_times["drift_baseline"] = t.ms
 
         rss_delta_mb = (_get_peak_rss_kb() - rss_before) / 1024
         n_compound = sum(1 for pe in self.patterns_ if len(pe.items) > 1)
@@ -2739,6 +2931,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                 topK=self.topK,
                 adaptive_binning=self.adaptive_binning,
                 feature_mode=self.feature_mode,
+                execution_mode=self.execution_mode,
             ),
             memory_peak_mb=round(mem.traced_peak_mb, 1),
             memory_rss_mb=round(rss_delta_mb, 1),
@@ -2746,6 +2939,8 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             openmp_threads=actual_threads,
             degraded=hasattr(self, "_degraded_reason"),
         )
+
+        self._apply_execution_mode_retention()
 
         if self.verbose:
             logger.info("  fit complete: %s", self.fit_metadata_.summary())
@@ -2843,17 +3038,13 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         np.ndarray, shape (n_samples, n_classes)
         """
         check_is_fitted(self)
-        # skip the full DataFrame.copy() when feature_mode="patterns_only"
-        # (the default).  _make_downstream_features returns Z_patterns immediately
-        # in that mode without reading X_original, so the copy is wasted.
-        # Non-patterns_only modes still copy to preserve original values across
-        # adaptive pre-binning and chunked slicing.
-        _needs_original = getattr(self, "feature_mode", "patterns_only") != "patterns_only" or bool(
-            getattr(self, "augmented_pair_transforms_", [])
-        )
-        X_test_original_for_downstream = (
-            self._copy_input_for_downstream(X_test) if _needs_original else X_test
-        )
+        # Keep the same representation used to fit the downstream original
+        # feature block: raw user input before adaptive/fixed-B pre-binning.
+        # _build_test_hup applies _handle_test_nan() internally for the HUG
+        # pattern matrix only; original_plus_* downstream columns are fitted
+        # from raw X_train_original_for_downstream and therefore must transform
+        # the raw test input as well.
+        X_test_original_for_downstream = X_test
         # ── v1.1.0 adaptive pre-binning ───────────────────────────────────
         if getattr(self, "adaptive_binning", False) and getattr(self, "_bin_edges_", None):
             X_test = self._prebin_for_predict(X_test)
@@ -2920,13 +3111,13 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         np.ndarray, shape (n_samples,)
         """
         check_is_fitted(self)
-        # skip copy only when neither feature_mode nor augmented_pair_transforms need raw input.
-        _needs_original = getattr(self, "feature_mode", "patterns_only") != "patterns_only" or bool(
-            getattr(self, "augmented_pair_transforms_", [])
-        )
-        X_test_original_for_downstream = (
-            self._copy_input_for_downstream(X_test) if _needs_original else X_test
-        )
+        # Keep the same representation used to fit the downstream original
+        # feature block: raw user input before adaptive/fixed-B pre-binning.
+        # _build_test_hup applies _handle_test_nan() internally for the HUG
+        # pattern matrix only; original_plus_* downstream columns are fitted
+        # from raw X_train_original_for_downstream and therefore must transform
+        # the raw test input as well.
+        X_test_original_for_downstream = X_test
         # ── v1.1.0 adaptive pre-binning ───────────────────────────────────
         if getattr(self, "adaptive_binning", False) and getattr(self, "_bin_edges_", None):
             X_test = self._prebin_for_predict(X_test)
@@ -2941,10 +3132,17 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
     # ── Downstream feature modes ─────────────────────────────────────────────
 
     def _copy_input_for_downstream(self, X: Any) -> Any:
-        """Preserve raw input before adaptive/pre-binning for hybrid modes."""
+        """Preserve raw input before adaptive/pre-binning for hybrid modes.
+
+        Downstream original-feature preparation is read-only.  For ndarray inputs
+        the mining/pre-binning stages either consume X without mutation or bind a
+        new pre-binned object to the local X_train variable, so a full eager copy
+        here only adds O(n*p) time and memory.  DataFrames still get a shallow
+        schema-stable copy because later preprocessing may add/reorder columns.
+        """
         if isinstance(X, pd.DataFrame):
             return X.copy()
-        return np.array(X, copy=True)
+        return np.asarray(X)
 
     def _pattern_order_from_label(self, label: str) -> int:
         """Infer pattern order from a human-readable HUG pattern label.
@@ -3013,7 +3211,14 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         or label format.
         """
         patterns = getattr(self, "patterns_", None)
-        n_hup_cols = self.x_train_hup_.shape[1]
+        if hasattr(self, "x_train_hup_"):
+            n_hup_cols = int(self.x_train_hup_.shape[1])
+        elif getattr(self, "_training_pattern_matrix_shape_", None) is not None:
+            n_hup_cols = int(self._training_pattern_matrix_shape_[1])
+        elif patterns is not None:
+            n_hup_cols = int(len(patterns))
+        else:
+            n_hup_cols = 0
         if patterns is not None and len(patterns) == n_hup_cols:
             # Primary path: read order from C++ PatternEntry.items directly.
             orders = np.asarray([len(pe.items) for pe in patterns], dtype=int)
@@ -3021,13 +3226,142 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             # Fallback: patterns_ unavailable or length mismatch — should not
             # occur after a completed fit, but guard defensively.
             features = self.get_hug_features()
-            orders = np.asarray(
-                [self._pattern_order_from_label(f) for f in features], dtype=int
-            )
+            orders = np.asarray([self._pattern_order_from_label(f) for f in features], dtype=int)
         if len(orders) != n_hup_cols:
             orders = np.ones(n_hup_cols, dtype=int)
         self._pattern_orders_ = orders
         self._interaction_pattern_mask_ = orders > 1
+
+    def _prepare_selected_original_features_for_downstream_transform(
+        self, X: Any, selected_names: list[str]
+    ) -> tuple[np.ndarray, list[str]]:
+        """Materialize only persisted selected original downstream columns at predict time.
+
+        Fit still prepares the full original block once so scoring/serialization stay
+        unchanged.  Prediction should not rebuild all original columns and then apply
+        the fitted TopK mask: in original_plus_* modes the retained original columns
+        are already known from ``_original_selected_feature_names_downstream_``.
+        This helper constructs just those columns, preserving the exact fitted
+        StandardScaler/median-imputation/dummy-column contract.
+        """
+        selected_names = list(selected_names or [])
+        if not selected_names:
+            n_rows = (
+                len(X)
+                if not isinstance(X, np.ndarray)
+                else (1 if np.asarray(X).ndim == 1 else np.asarray(X).shape[0])
+            )
+            return self._empty_dense_block(n_rows), []
+
+        selected_raw = [
+            str(name)[5:] if str(name).startswith("orig:") else str(name) for name in selected_names
+        ]
+        num_cols = list(getattr(self, "_original_numeric_cols_", []))
+        cat_cols = list(getattr(self, "_original_cat_cols_", []))
+        dummy_cols = list(getattr(self, "_original_dummy_columns_", []))
+        num_pos = {str(c): i for i, c in enumerate(num_cols)}
+        dummy_set = {str(c) for c in dummy_cols}
+        selected_numeric = [name for name in selected_raw if name in num_pos]
+        selected_dummy = [name for name in selected_raw if name in dummy_set]
+
+        train_names = list(getattr(self, "feature_names_in_", []) or [])
+        train_pos = {str(c): i for i, c in enumerate(train_names)}
+        is_df = isinstance(X, pd.DataFrame)
+        arr = None if is_df else np.asarray(X)
+        if arr is not None and arr.ndim == 1:
+            arr = arr.reshape(1, -1)
+        n_rows = len(X) if is_df else int(arr.shape[0])
+
+        blocks: list[np.ndarray] = []
+        block_names: list[str] = []
+
+        if selected_numeric:
+            idx_in_num = np.asarray([num_pos[name] for name in selected_numeric], dtype=np.int64)
+            if is_df:
+                X_num_sel = pd.DataFrame(index=X.index)
+                for name in selected_numeric:
+                    X_num_sel[name] = X[name] if name in X.columns else np.nan
+                raw_num = (
+                    X_num_sel.apply(pd.to_numeric, errors="coerce")
+                    .replace([np.inf, -np.inf], np.nan)
+                    .to_numpy(dtype=np.float64, copy=True)
+                )
+            else:
+                assert arr is not None
+                raw_num = np.empty((n_rows, len(selected_numeric)), dtype=np.float64)
+                for out_j, name in enumerate(selected_numeric):
+                    src_j = train_pos.get(name, out_j)
+                    if 0 <= src_j < arr.shape[1]:
+                        raw_num[:, out_j] = np.asarray(arr[:, src_j], dtype=np.float64)
+                    else:
+                        raw_num[:, out_j] = np.nan
+                raw_num[~np.isfinite(raw_num)] = np.nan
+
+            med_arr = getattr(self, "_original_numeric_medians_array_", None)
+            if med_arr is None or len(med_arr) != len(num_cols):
+                med = getattr(self, "_original_numeric_medians_", pd.Series(dtype=float))
+                med_arr = med.reindex(num_cols).fillna(0.0).to_numpy(dtype=np.float64, copy=True)
+            med_sel = np.asarray(med_arr, dtype=np.float64)[idx_in_num]
+            bad = ~np.isfinite(raw_num)
+            if bad.any():
+                raw_num[bad] = np.take(med_sel, np.nonzero(bad)[1])
+
+            scaler = self._original_scaler_
+            mean = np.asarray(getattr(scaler, "mean_", np.zeros(len(num_cols))), dtype=np.float64)[
+                idx_in_num
+            ]
+            scale = np.asarray(getattr(scaler, "scale_", np.ones(len(num_cols))), dtype=np.float64)[
+                idx_in_num
+            ]
+            scale = np.where(scale == 0.0, 1.0, scale)
+            blocks.append(((raw_num - mean) / scale).astype(np.float32, copy=False))
+            block_names.extend([f"orig:{name}" for name in selected_numeric])
+
+        if selected_dummy:
+            if is_df:
+                X_cat = X.reindex(columns=cat_cols)
+            else:
+                assert arr is not None
+                data = {}
+                for name in cat_cols:
+                    src_j = train_pos.get(str(name), None)
+                    if src_j is not None and 0 <= src_j < arr.shape[1]:
+                        data[name] = arr[:, src_j]
+                    else:
+                        data[name] = np.full(n_rows, np.nan, dtype=object)
+                X_cat = pd.DataFrame(data)
+            X_cat_dum = (
+                pd.get_dummies(X_cat.astype("string"), dummy_na=True)
+                if len(cat_cols)
+                else pd.DataFrame(index=range(n_rows))
+            )
+            X_cat_dum = X_cat_dum.reindex(columns=selected_dummy, fill_value=0)
+            blocks.append(X_cat_dum.to_numpy(dtype=np.float32, copy=False))
+            block_names.extend([f"orig:{name}" for name in selected_dummy])
+
+        # Preserve fitted selected_names order even when numeric and dummy columns
+        # are interleaved.  The two blocks above are built by type for speed; this
+        # final gather restores the exact downstream coefficient alignment.
+        if not blocks:
+            return self._empty_dense_block(n_rows), []
+        by_name = {}
+        dense_concat = (
+            np.hstack(blocks).astype(np.float32, copy=False) if len(blocks) > 1 else blocks[0]
+        )
+        for j, name in enumerate(block_names):
+            by_name[name] = dense_concat[:, j]
+        missing_selected = [name for name in selected_names if name not in by_name]
+        if missing_selected:
+            raise HUGIMLSchemaError(
+                "Selected original downstream feature(s) are unavailable during transform: "
+                f"{missing_selected[:10]!r}. This usually indicates schema drift or a "
+                "model/metadata mismatch. Refit the model or provide input columns "
+                "matching the training schema."
+            )
+        out = np.empty((n_rows, len(selected_names)), dtype=np.float32)
+        for j, name in enumerate(selected_names):
+            out[:, j] = by_name[name]
+        return out, list(selected_names)
 
     def _prepare_original_features_for_downstream(self, X: Any, fit: bool = False):
         """Prepare original input features for hybrid downstream estimators.
@@ -3036,6 +3370,60 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         any pattern diagnostics.  It is used only by predict/fit when
         feature_mode includes original features.
         """
+        # Fast all-numeric ndarray fit/transform path.  Avoid constructing a
+        # DataFrame and running pandas apply/to_numeric over every column for the
+        # common large-n benchmark path.  This preserves the exact fitted
+        # StandardScaler/median-imputation/original feature-name contract.
+        if not isinstance(X, pd.DataFrame):
+            arr = np.asarray(X)
+            if arr.ndim == 1:
+                arr = arr.reshape(1, -1)
+            names = getattr(self, "feature_names_in_", None)
+            if names is None or len(names) != arr.shape[1]:
+                names = [f"col{j}" for j in range(arr.shape[1])]
+            cat_mask = getattr(self, "cat_cols_mask_", None)
+            if cat_mask is not None and not bool(np.any(cat_mask)):
+                raw = np.array(arr, dtype=np.float64, copy=True)
+                raw[~np.isfinite(raw)] = np.nan
+                if fit:
+                    self._original_numeric_cols_ = list(names)
+                    self._original_cat_cols_ = []
+                    med_arr = np.nanmedian(raw, axis=0) if raw.shape[1] else np.empty(0)
+                    med_arr = np.where(np.isfinite(med_arr), med_arr, 0.0).astype(
+                        np.float64, copy=False
+                    )
+                    self._original_numeric_medians_array_ = med_arr.copy()
+                    self._original_numeric_medians_ = pd.Series(med_arr, index=list(names))
+                    bad = ~np.isfinite(raw)
+                    if bad.any():
+                        raw[bad] = np.take(med_arr, np.nonzero(bad)[1])
+                    self._original_scaler_ = StandardScaler()
+                    X_num_arr = (
+                        self._original_scaler_.fit_transform(raw)
+                        if raw.shape[1]
+                        else np.empty((raw.shape[0], 0))
+                    )
+                    self._original_dummy_columns_ = []
+                    self._original_feature_names_downstream_ = list(names)
+                    return X_num_arr.astype(np.float32, copy=False)
+                num_cols = list(getattr(self, "_original_numeric_cols_", []))
+                if (
+                    num_cols
+                    and list(names) == num_cols
+                    and not getattr(self, "_original_cat_cols_", [])
+                ):
+                    med_arr = getattr(self, "_original_numeric_medians_array_", None)
+                    if med_arr is None or len(med_arr) != raw.shape[1]:
+                        med = getattr(self, "_original_numeric_medians_", pd.Series(dtype=float))
+                        med_arr = (
+                            med.reindex(num_cols).fillna(0.0).to_numpy(dtype=np.float64, copy=True)
+                        )
+                    bad = ~np.isfinite(raw)
+                    if bad.any():
+                        raw[bad] = np.take(med_arr, np.nonzero(bad)[1])
+                    X_num_arr = self._original_scaler_.transform(raw)
+                    return X_num_arr.astype(np.float32, copy=False)
+
         if isinstance(X, pd.DataFrame):
             X_df = X.copy()
         else:
@@ -3075,7 +3463,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                     if bad.any():
                         X_num_arr_raw[bad] = np.take(med_arr, np.nonzero(bad)[1])
                     X_num_arr = self._original_scaler_.transform(X_num_arr_raw)
-                    return csr_matrix(X_num_arr.astype(np.float32, copy=False))
+                    return X_num_arr.astype(np.float32, copy=False)
                 except Exception:
                     pass
 
@@ -3138,33 +3526,395 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             self._original_feature_names_downstream_ = list(
                 getattr(self, "_original_numeric_cols_", [])
             ) + list(getattr(self, "_original_dummy_columns_", []))
-        return csr_matrix(X_base.astype(np.float32, copy=False))
+        return X_base.astype(np.float32, copy=False)
+
+    def _as_dense_float32(self, X: Any) -> np.ndarray:
+        """Return a dense float32 2-D array without changing estimator semantics."""
+        arr = X.toarray() if issparse(X) else np.asarray(X)
+        if arr.ndim == 1:
+            arr = arr.reshape(-1, 1)
+        return arr.astype(np.float32, copy=False)
+
+    def _empty_dense_block(self, n_rows: int) -> np.ndarray:
+        return np.empty((int(n_rows), 0), dtype=np.float32)
+
+    def _original_topk_budget_enabled(self) -> bool:
+        """Whether original features should be pre-budgeted before downstream fit."""
+        return self.topK is not None and int(self.topK) >= 0
+
+    def _select_original_topk_fit(
+        self, X_base: Any, y: Any, names: list[str]
+    ) -> tuple[Any, list[str]]:
+        """Select at most topK original downstream columns and persist the mask.
+
+        The mask is applied before concatenating originals with pattern blocks.
+        This makes original_plus_* non-strict mode symmetric with mined and
+        augmented features: originals contribute at most topK columns when a
+        finite topK budget is configured.  Strict mode then performs the global
+        topK pass over this already-budgeted candidate set.
+        """
+        n_cols = len(names)
+        self._original_feature_names_downstream_full_ = list(names)
+        self._original_feature_scores_downstream_ = np.zeros(n_cols, dtype=np.float64)
+        self._original_feature_mask_downstream_ = np.ones(n_cols, dtype=bool)
+        self._original_selected_feature_names_downstream_ = list(names)
+        if n_cols == 0 or not self._original_topk_budget_enabled():
+            return X_base, list(names)
+        budget = min(max(1, int(self.topK)), n_cols)
+        if budget >= n_cols:
+            native_scores = getattr(self, "_native_original_feature_scores_downstream_", None)
+            if native_scores is not None and len(native_scores) == n_cols:
+                self._original_feature_scores_downstream_ = np.asarray(
+                    native_scores, dtype=np.float64
+                )
+            return X_base, list(names)
+
+        native_names = list(getattr(self, "_native_original_feature_names_downstream_", []) or [])
+        native_scores = getattr(self, "_native_original_feature_scores_downstream_", None)
+        if (
+            native_names == list(names)
+            and native_scores is not None
+            and len(native_scores) == n_cols
+        ):
+            scores = np.asarray(native_scores, dtype=np.float64)
+            order = np.lexsort((np.arange(n_cols), -scores))
+            keep_idx = np.sort(order[:budget])
+            mask = np.zeros(n_cols, dtype=bool)
+            mask[keep_idx] = True
+        else:
+            # Non-fused or schema-mismatch path: still native, but necessarily
+            # uses the dense downstream block because no preparation-stage score
+            # metadata is available for this fit.
+            scores, mask = self._strict_topk_dense_column_scores(X_base, y, names, top_k=budget)
+
+        selected_names = [name for name, keep in zip(names, mask) if keep]
+        self._original_feature_scores_downstream_ = scores
+        self._original_feature_mask_downstream_ = mask
+        self._original_selected_feature_names_downstream_ = list(selected_names)
+        return X_base[:, mask], selected_names
+
+    def _select_original_topk_transform(
+        self, X_base: Any, names: list[str]
+    ) -> tuple[Any, list[str]]:
+        """Apply the persisted original-feature prefilter at transform time."""
+        mask = getattr(self, "_original_feature_mask_downstream_", None)
+        selected_names = getattr(self, "_original_selected_feature_names_downstream_", None)
+        if mask is None:
+            return X_base, list(names)
+        mask_arr = np.asarray(mask, dtype=bool)
+        if mask_arr.size != len(names):
+            return X_base, list(names)
+        if bool(np.all(mask_arr)):
+            return X_base, list(names if selected_names is None else selected_names)
+        return X_base[:, mask_arr], list(names if selected_names is None else selected_names)
+
+    def _selected_original_downstream_names(self) -> list[str]:
+        names = getattr(self, "_original_selected_feature_names_downstream_", None)
+        if names is not None:
+            return list(names)
+        return [f"orig:{name}" for name in getattr(self, "_original_feature_names_downstream_", [])]
+
+    def _strict_topk_dense_column_scores(
+        self, X: Any, y: Any, names: list[str], top_k: int = -1
+    ) -> tuple[np.ndarray, np.ndarray]:
+        """Score dense downstream columns and return ``(scores, mask)``.
+
+        Prefer the native dense TopK helper when the v1.1.9 extension exposes it,
+        but fall back to the same Python IG scoring used by the sparse path when
+        the Python package is run against a v1.1.8 native wheel.  This preserves
+        correctness for hybrid feature modes with ``topk_budget_strict=True``.
+        """
+        X_arr = np.ascontiguousarray(self._as_dense_float32(X), dtype=np.float32)
+        n_cols = int(X_arr.shape[1])
+        if n_cols == 0:
+            return np.zeros(0, dtype=np.float64), np.zeros(0, dtype=bool)
+        y_codes, _ = pd.factorize(np.asarray(y), sort=True)
+        y_codes = np.ascontiguousarray(y_codes.astype(np.int64, copy=False))
+        discrete_mask_bool = self._strict_topk_discrete_mask(names).astype(bool, copy=False)
+        max_bins = max(
+            8,
+            int(
+                getattr(self, "B", 8) if getattr(self, "B", 8) and getattr(self, "B", 8) > 0 else 16
+            ),
+        )
+        if _CORE_AVAILABLE and hasattr(_core, "strict_topk_filter_dense"):
+            discrete_mask = np.ascontiguousarray(discrete_mask_bool.astype(np.uint8, copy=False))
+            scores, mask = _core.strict_topk_filter_dense(
+                X_arr, y_codes, discrete_mask, int(top_k), int(max_bins)
+            )
+            return np.asarray(scores, dtype=np.float64), np.asarray(mask, dtype=bool)
+
+        n_classes = int(np.max(y_codes)) + 1 if y_codes.size else 0
+        scores = np.zeros(n_cols, dtype=np.float64)
+        if n_classes > 1:
+            for j in range(n_cols):
+                col = np.asarray(X_arr[:, j], dtype=np.float64)
+                if bool(discrete_mask_bool[j]):
+                    vals = np.where(col > 0.5, 1, 0).astype(np.int64, copy=False)
+                else:
+                    vals = _continuous_to_quantile_codes(col, max_bins=max_bins)
+                scores[j] = _information_gain_from_codes(vals, y_codes, n_classes)
+
+        budget = int(top_k)
+        mask = np.ones(n_cols, dtype=bool)
+        if budget >= 0 and budget < n_cols:
+            budget = max(1, budget)
+            order = np.lexsort((np.arange(n_cols), -scores))
+            keep_idx = np.sort(order[:budget])
+            mask = np.zeros(n_cols, dtype=bool)
+            mask[keep_idx] = True
+        return scores, mask
+
+    def _combine_dense_blocks(self, blocks: list[Any], n_rows: int) -> np.ndarray:
+        """Combine selected downstream blocks as one dense float32 matrix."""
+        dense_blocks = []
+        for block in blocks:
+            if block is None or int(getattr(block, "shape", (n_rows, 0))[1]) == 0:
+                continue
+            dense_blocks.append(self._as_dense_float32(block))
+        if not dense_blocks:
+            return self._empty_dense_block(n_rows)
+        if len(dense_blocks) == 1:
+            return dense_blocks[0]
+        return np.hstack(dense_blocks).astype(np.float32, copy=False)
+
+    def _dense_downstream_width_threshold(self) -> int:
+        """Width threshold for materializing hybrid downstream matrices as dense.
+
+        Hybrid feature modes contain dense original columns and sparse pattern
+        columns.  Dense output is fastest and smallest for small selected widths
+        because LR sees a compact float32 ndarray.  For large selected widths,
+        densifying sparse pattern columns wastes memory; keep the output CSR.
+
+        The threshold is user-configurable via the sklearn parameter
+        ``dense_downstream_max_width``.  Set it to 0 to keep hybrid matrices CSR
+        except for the empty-width degenerate case.  Older loaded models that
+        lack the public parameter can still fall back to the private compatibility
+        attribute or the historical default of 200.
+        """
+        try:
+            value = getattr(
+                self,
+                "dense_downstream_max_width",
+                getattr(self, "_dense_downstream_max_width_", 200),
+            )
+            if isinstance(value, bool):
+                return 200
+            return max(0, int(value))
+        except Exception:
+            return 200
+
+    def _should_use_dense_downstream(self, total_width: int) -> bool:
+        mode = getattr(self, "feature_mode", "patterns_only")
+        if mode == "patterns_only":
+            return False
+        threshold = self._dense_downstream_width_threshold()
+        return int(total_width) <= int(threshold)
+
+    def _combine_downstream_blocks(self, blocks: list[Any], n_rows: int):
+        """Combine downstream blocks using a memory-aware output format.
+
+        * patterns_only is handled earlier and remains CSR.
+        * hybrid modes use dense float32 for small/moderate widths, avoiding
+          sparse->dense churn before LR.
+        * hybrid modes use CSR once width is large enough that densifying sparse
+          pattern/augmented blocks would dominate memory.
+        """
+        live_blocks = [
+            block
+            for block in blocks
+            if block is not None and int(getattr(block, "shape", (n_rows, 0))[1]) > 0
+        ]
+        total_width = sum(int(block.shape[1]) for block in live_blocks)
+        if total_width == 0:
+            return (
+                self._empty_dense_block(n_rows)
+                if self._should_use_dense_downstream(0)
+                else csr_matrix((int(n_rows), 0), dtype=np.float32)
+            )
+        if self._should_use_dense_downstream(total_width):
+            return self._combine_dense_blocks(live_blocks, n_rows)
+        sparse_blocks = []
+        for block in live_blocks:
+            if issparse(block):
+                sparse_blocks.append(block.astype(np.float32, copy=False).tocsr())
+            else:
+                sparse_blocks.append(csr_matrix(np.asarray(block, dtype=np.float32)))
+        if len(sparse_blocks) == 1:
+            return sparse_blocks[0]
+        return hstack(sparse_blocks, format="csr", dtype=np.float32)
+
+    def _select_strict_topk_from_blocks_fit(
+        self,
+        blocks: list[tuple[str, Any, list[str]]],
+        y: Any,
+    ) -> tuple[list[Any], list[str]]:
+        """Apply strict global TopK before concatenating downstream feature blocks.
+
+        This keeps strict mode as a compute budget: dense original columns are
+        scored directly, sparse pattern columns are scored in sparse form, and
+        only selected columns are materialized for the downstream estimator.
+        The persisted full mask and scores retain the same public/serialization
+        contract as the prior post-concatenation implementation.
+        """
+        full_names: list[str] = []
+        full_scores_parts: list[np.ndarray] = []
+        selected_blocks: list[Any] = []
+
+        for _, block, names in blocks:
+            full_names.extend(list(names))
+        n_cols = len(full_names)
+        self._downstream_feature_names_full_ = list(full_names)
+        self._strict_topk_applied_during_construction_ = False
+        self._strict_topk_feature_scores_ = np.zeros(n_cols, dtype=np.float64)
+        self._strict_topk_feature_mask_ = np.ones(n_cols, dtype=bool)
+        self._strict_topk_selected_feature_names_ = list(full_names)
+
+        if (
+            not bool(getattr(self, "topk_budget_strict", False))
+            or self.topK is None
+            or int(self.topK) < 0
+            or n_cols == 0
+            or int(self.topK) >= n_cols
+        ):
+            return [block for _, block, _ in blocks], list(full_names)
+
+        for kind, block, names in blocks:
+            if len(names) == 0:
+                full_scores_parts.append(np.zeros(0, dtype=np.float64))
+            elif kind == "dense":
+                full_scores_parts.append(
+                    self._strict_topk_dense_column_scores(block, y, names, top_k=-1)[0]
+                )
+            else:
+                full_scores_parts.append(self._strict_topk_column_scores(block, y, names))
+        scores = (
+            np.concatenate(full_scores_parts).astype(np.float64, copy=False)
+            if full_scores_parts
+            else np.zeros(0, dtype=np.float64)
+        )
+        budget = min(max(1, int(self.topK)), n_cols)
+        order = np.lexsort((np.arange(n_cols), -scores))
+        keep_idx = np.sort(order[:budget])
+        mask = np.zeros(n_cols, dtype=bool)
+        mask[keep_idx] = True
+
+        offset = 0
+        selected_names: list[str] = []
+        for kind, block, names in blocks:
+            width = len(names)
+            block_mask = mask[offset : offset + width]
+            if width and bool(np.any(block_mask)):
+                selected_names.extend([name for name, keep in zip(names, block_mask) if keep])
+                selected_blocks.append(block[:, block_mask])
+            offset += width
+
+        self._strict_topk_feature_scores_ = scores
+        self._strict_topk_feature_mask_ = mask
+        self._strict_topk_selected_feature_names_ = list(selected_names)
+        self._strict_topk_applied_during_construction_ = True
+        return selected_blocks, selected_names
+
+    def _select_strict_topk_from_blocks_transform(
+        self, blocks: list[tuple[str, Any, list[str]]]
+    ) -> list[Any]:
+        """Select persisted strict TopK columns from logical blocks before concat."""
+        mask = getattr(self, "_strict_topk_feature_mask_", None)
+        if mask is None:
+            return [block for _, block, _ in blocks]
+        mask_arr = np.asarray(mask, dtype=bool)
+        full_width = sum(len(names) for _, _, names in blocks)
+        if mask_arr.size != full_width or bool(np.all(mask_arr)):
+            return [block for _, block, _ in blocks]
+        selected_blocks: list[Any] = []
+        offset = 0
+        for _, block, names in blocks:
+            width = len(names)
+            block_mask = mask_arr[offset : offset + width]
+            if width and bool(np.any(block_mask)):
+                selected_blocks.append(block[:, block_mask])
+            offset += width
+        return selected_blocks
 
     def _make_downstream_features(self, X_original: Any, Z_patterns: csr_matrix, fit: bool = False):
         """Build the estimator input matrix for the configured feature_mode."""
         mode = getattr(self, "feature_mode", "patterns_only")
         Z = Z_patterns if issparse(Z_patterns) else csr_matrix(Z_patterns)
         Z_aug = self._make_augmented_pair_features(X_original, fit=fit)
+        n_rows = int(Z.shape[0])
         if mode == "patterns_only":
             return hstack([Z, Z_aug], format="csr") if Z_aug.shape[1] else Z
 
-        X_base = self._prepare_original_features_for_downstream(X_original, fit=fit)
+        if not fit:
+            selected_original_names = getattr(
+                self, "_original_selected_feature_names_downstream_", None
+            )
+            full_original_names = [
+                f"orig:{name}" for name in getattr(self, "_original_feature_names_downstream_", [])
+            ]
+            mask = getattr(self, "_original_feature_mask_downstream_", None)
+            use_selected_originals = (
+                selected_original_names is not None
+                and mask is not None
+                and len(selected_original_names) <= len(full_original_names)
+            )
+            if use_selected_originals:
+                X_base, original_names = (
+                    self._prepare_selected_original_features_for_downstream_transform(
+                        X_original, list(selected_original_names)
+                    )
+                )
+            else:
+                X_base = self._prepare_original_features_for_downstream(X_original, fit=False)
+                X_base, original_names = self._select_original_topk_transform(
+                    X_base, full_original_names
+                )
+        else:
+            X_base = self._prepare_original_features_for_downstream(X_original, fit=True)
+            original_names_full = [
+                f"orig:{name}" for name in getattr(self, "_original_feature_names_downstream_", [])
+            ]
+            X_base, original_names = self._select_original_topk_fit(
+                X_base, self._current_y_for_downstream_topk_, original_names_full
+            )
+        pattern_names = [f"pattern:{name}" for name in self.get_hug_features()]
+        aug_names = [
+            f"augmented_pair:{t['name']}" for t in getattr(self, "augmented_pair_transforms_", [])
+        ]
 
         if mode == "original_plus_patterns":
-            blocks = [X_base, Z]
+            blocks = [("dense", X_base, original_names), ("sparse", Z, pattern_names)]
             if Z_aug.shape[1]:
-                blocks.append(Z_aug)
-            return hstack(blocks, format="csr")
+                blocks.append(("sparse", Z_aug, aug_names))
+            if fit and bool(getattr(self, "topk_budget_strict", False)):
+                selected_blocks, _ = self._select_strict_topk_from_blocks_fit(
+                    blocks, self._current_y_for_downstream_topk_
+                )
+                return self._combine_downstream_blocks(selected_blocks, n_rows)
+            if bool(getattr(self, "topk_budget_strict", False)):
+                selected_blocks = self._select_strict_topk_from_blocks_transform(blocks)
+                return self._combine_downstream_blocks(selected_blocks, n_rows)
+            return self._combine_downstream_blocks([X_base, Z, Z_aug], n_rows)
 
         if mode == "original_plus_interactions":
             mask = getattr(self, "_interaction_pattern_mask_", None)
             if mask is None:
                 self._setup_feature_mode_metadata()
                 mask = self._interaction_pattern_mask_
-            blocks = [X_base, Z[:, mask]]
+            Z_sel = Z[:, mask]
+            selected_pattern_names = [name for name, keep in zip(pattern_names, mask) if keep]
+            blocks = [("dense", X_base, original_names), ("sparse", Z_sel, selected_pattern_names)]
             if Z_aug.shape[1]:
-                blocks.append(Z_aug)
-            return hstack(blocks, format="csr")
+                blocks.append(("sparse", Z_aug, aug_names))
+            if fit and bool(getattr(self, "topk_budget_strict", False)):
+                selected_blocks, _ = self._select_strict_topk_from_blocks_fit(
+                    blocks, self._current_y_for_downstream_topk_
+                )
+                return self._combine_downstream_blocks(selected_blocks, n_rows)
+            if bool(getattr(self, "topk_budget_strict", False)):
+                selected_blocks = self._select_strict_topk_from_blocks_transform(blocks)
+                return self._combine_downstream_blocks(selected_blocks, n_rows)
+            return self._combine_downstream_blocks([X_base, Z_sel, Z_aug], n_rows)
 
         raise HUGIMLParamError(f"Unknown feature_mode={mode!r}.")
 
@@ -3177,9 +3927,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         ]
         if mode == "patterns_only":
             return [f"pattern:{name}" for name in pattern_names] + aug_names
-        original_names = [
-            f"orig:{name}" for name in getattr(self, "_original_feature_names_downstream_", [])
-        ]
+        original_names = self._selected_original_downstream_names()
         if mode == "original_plus_patterns":
             return original_names + [f"pattern:{name}" for name in pattern_names] + aug_names
         if mode == "original_plus_interactions":
@@ -3257,6 +4005,18 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         """Optionally apply a single native global IG topK budget over all downstream features."""
         n_cols = int(X.shape[1])
         names = self._get_downstream_feature_names_full()
+        existing_mask = getattr(self, "_strict_topk_feature_mask_", None)
+        if bool(getattr(self, "_strict_topk_applied_during_construction_", False)):
+            return X
+        if (
+            bool(getattr(self, "topk_budget_strict", False))
+            and existing_mask is not None
+            and len(existing_mask) != n_cols
+        ):
+            # Strict TopK was already applied during block-wise downstream
+            # construction.  Preserve the full-length persisted mask/scores and
+            # return the selected estimator matrix unchanged.
+            return X
         self._downstream_feature_names_full_ = list(names)
         self._strict_topk_feature_scores_ = np.zeros(n_cols, dtype=np.float64)
         self._strict_topk_feature_mask_ = np.ones(n_cols, dtype=bool)
@@ -3265,9 +4025,9 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             not bool(getattr(self, "topk_budget_strict", False))
             or self.topK is None
             or int(self.topK) < 0
+            or n_cols == 0
+            or int(self.topK) >= n_cols
         ):
-            return X
-        if n_cols == 0:
             return X
         budget = min(max(1, int(self.topK)), n_cols)
         y_codes, _ = pd.factorize(np.asarray(y), sort=True)
@@ -3307,6 +4067,8 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         return X[:, mask]
 
     def _apply_strict_topk_budget_transform(self, X: csr_matrix) -> csr_matrix:
+        if bool(getattr(self, "_strict_topk_applied_during_construction_", False)):
+            return X
         mask = getattr(self, "_strict_topk_feature_mask_", None)
         if mask is None:
             return X
@@ -3780,10 +4542,21 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         n = X_num.shape[0]
         X_cat_arg = X_cat_raw if any(v is not None for v in X_cat_raw) else None
 
-        # Single-pass path
+        # Single-pass path. Prefer native CSR output to avoid copying COO
+        # row/column arrays into Python and then asking scipy to sort/compress
+        # them again. build_test_matrix remains a compatibility fallback.
         n_pats = len(self.patterns_)
         if getattr(self, "_native_available_", True):
             try:
+                if hasattr(_core, "build_test_matrix_csr"):
+                    indptr, indices = _core.build_test_matrix_csr(
+                        X_num,
+                        self.td_,
+                        X_cat_arg,
+                        self.patterns_,
+                    )
+                    data = np.ones(len(indices), dtype=np.float32)
+                    return csr_matrix((data, indices, indptr), shape=(n, n_pats), dtype=np.float32)
                 rows, cols = _core.build_test_matrix(
                     X_num,
                     self.td_,
@@ -4059,6 +4832,16 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         Uses PSI + KL divergence.  When ``y_test`` is provided, also checks
         label distribution drift.
 
+        Notes
+        -----
+        Drift metrics are computed on the numeric array retained by the mining
+        path.  Fixed-B numeric columns that contained NaN/Inf during training are
+        converted to the categorical bin-label path so missingness is handled
+        consistently at fit/predict time; those columns are therefore not
+        represented as continuous numeric drift baselines.  PSI/KL alerts for
+        such columns should be interpreted through pattern/feature-importance
+        diagnostics rather than through ``detect_drift()``.
+
         Parameters
         ----------
         X_test : array-like or DataFrame
@@ -4071,6 +4854,8 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         """
         check_is_fitted(self)
         if getattr(self, "_drift_det", None) is None:
+            if self._is_production_mode():
+                raise RuntimeError(self._audit_artifact_message("Drift-detection baseline"))
             return "Drift detection unavailable (no baseline stored)."
         cat_mask = getattr(self, "cat_cols_mask_", np.zeros(0, dtype=bool))
         X_num, _ = self._to_float_array(X_test, cat_mask)
@@ -4079,9 +4864,16 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         return str(report)
 
     def get_drift_psi(self, X_test: Any) -> dict:
-        """Return per-feature PSI values as a dict."""
+        """Return per-feature PSI values as a dict.
+
+        See ``detect_drift()`` for the fixed-B missing-numeric limitation: columns
+        that were routed to categorical bin labels because they contained
+        NaN/Inf during training do not have meaningful continuous PSI baselines.
+        """
         check_is_fitted(self)
         if getattr(self, "_drift_det", None) is None:
+            if self._is_production_mode():
+                raise RuntimeError(self._audit_artifact_message("Drift PSI baseline"))
             return {}
         cat_mask = getattr(self, "cat_cols_mask_", np.zeros(0, dtype=bool))
         X_num, _ = self._to_float_array(X_test, cat_mask)
@@ -4197,6 +4989,13 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         via ``_adaptive_code_label_map_`` so that the output is identical in
         appearance to the string-path output.
 
+        Production mode
+        ---------------
+        This method remains available in ``execution_mode='production'`` because
+        it only needs retained pattern labels.  ``get_pattern_info()`` is
+        intentionally audit-only because it additionally needs the retained
+        training pattern matrix to compute support.
+
         Returns
         -------
         list of str
@@ -4214,17 +5013,31 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         return [", ".join(_resolve_item(it) for it in pe.items) for pe in self.patterns_]
 
     def get_transformed_shape(self) -> tuple[int, int]:
-        """Return (n_samples, n_patterns) of the training pattern matrix."""
+        """Return (n_samples, n_patterns) for the training pattern matrix.
+
+        In production mode the matrix itself is not retained, but its shape is
+        persisted as lightweight diagnostic metadata.
+        """
         check_is_fitted(self)
-        shape = self.x_train_hup_.shape
-        return int(shape[0]), int(shape[1])
+        if hasattr(self, "x_train_hup_"):
+            shape = self.x_train_hup_.shape
+            return int(shape[0]), int(shape[1])
+        cached = getattr(self, "_training_pattern_matrix_shape_", None)
+        if cached is not None:
+            return int(cached[0]), int(cached[1])
+        raise RuntimeError(self._audit_artifact_message("Training pattern matrix shape"))
 
     def get_pattern_info(self) -> pd.DataFrame:
         """Summary DataFrame with one row per mined HUG pattern.
 
         Columns: pattern, utility, information_gain, support.
+
+        This is an audit/governance table.  Unlike ``get_hug_features()``, it
+        requires the retained training pattern matrix to compute support and
+        therefore raises a clear error in ``execution_mode='production'``.
         """
         check_is_fitted(self)
+        self._require_audit_artifact("Pattern support and pattern-info audit table", "x_train_hup_")
         n_train = self.x_train_hup_.shape[0]
         features = self.get_hug_features()
         records: list[dict[str, object]] = []
@@ -4256,8 +5069,16 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         return "pattern"
 
     def _pattern_support_lookup(self) -> dict[str, float]:
-        """Return training support by both raw and namespaced pattern label."""
-        n_train = int(getattr(self, "x_train_hup_", np.empty((0, 0))).shape[0])
+        """Return training support by both raw and namespaced pattern label.
+
+        Production-mode models intentionally drop the training HUG matrix.
+        ``feature_importances()`` should prefer cached support metadata when it
+        exists; this lookup is only a best-effort recomputation path for audit
+        models or legacy objects that still retain ``x_train_hup_``.
+        """
+        if not hasattr(self, "x_train_hup_"):
+            return {}
+        n_train = int(self.x_train_hup_.shape[0])
         if n_train <= 0:
             return {}
         labels = self.get_hug_features()
@@ -4319,12 +5140,23 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         }
 
     def _cache_downstream_feature_metadata(self) -> None:
-        """Cache metadata aligned with the fitted downstream feature matrix."""
+        """Cache metadata aligned with the fitted downstream feature matrix.
+
+        This method must run before production retention because production
+        mode drops the training matrices.  It is intentionally best-effort:
+        pattern support can be unavailable for cached/tuned candidates, but
+        non-missing-rate and variance can still be computed from the fitted
+        downstream matrix before it is discarded.
+        """
         features = self._get_downstream_feature_names()
         self._downstream_feature_names_ = list(features)
         n_features = len(features)
+
         self._downstream_pattern_support_ = np.full(n_features, np.nan, dtype=np.float64)
-        support_lookup = self._pattern_support_lookup()
+        try:
+            support_lookup = self._pattern_support_lookup()
+        except Exception:
+            support_lookup = {}
         for idx, feat in enumerate(features):
             if self._downstream_feature_type(feat) == "pattern":
                 display_name = self._downstream_feature_display_name(feat)
@@ -4362,6 +5194,20 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             (e.g. non-linear models).
         """
         check_is_fitted(self)
+        production_without_training_artifacts = self._is_production_mode() and not hasattr(
+            self, "x_train_downstream_"
+        )
+        audit_note = (
+            self._audit_artifact_message("Training matrices and drift-baseline audit artifacts")
+            if production_without_training_artifacts
+            else ""
+        )
+        if production_without_training_artifacts:
+            warnings.warn(
+                audit_note,
+                HUGIMLWarning,
+                stacklevel=2,
+            )
         clf_step = self.model_.named_steps.get("clf")
         if not hasattr(clf_step, "coef_"):
             raise AttributeError(
@@ -4531,10 +5377,17 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                     "raw_interpretation": raw_interpretation,
                     "source_observed_medians_description": source_observed_medians_description,
                     "pair_missing_policy_description": pair_missing_policy_description,
+                    "audit_note": (audit_note if production_without_training_artifacts else ""),
                 }
             )
-        result = pd.DataFrame(rows).sort_values("abs_coefficient", ascending=False)
-        return pd.DataFrame(result.reset_index(drop=True))
+        result = (
+            pd.DataFrame(rows)
+            .sort_values("abs_coefficient", ascending=False)
+            .reset_index(drop=True)
+        )
+        if production_without_training_artifacts:
+            result.attrs["audit_note"] = audit_note
+        return pd.DataFrame(result)
 
     # ── v1.1.0  Adaptive-binning diagnostic plots ─────────────────────────────
     # These methods are available on any fitted HUGIMLClassifierNative instance
@@ -4652,7 +5505,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         if not getattr(self, "adaptive_binning", False):
             raise RuntimeError(
                 f"{method_name}() is only available when adaptive_binning=True.  "
-                f"Re-fit with HUGIMLClassifierNative(adaptive_binning=True, ...) "
+                f"Re-fit with HUGIMLClassifier(adaptive_binning=True, ...) "
                 f"or use HUGIMLAdaptive."
             )
         if not getattr(self, "per_feature_b_", None):
@@ -4672,13 +5525,27 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
 
     # ── End v1.1.0 adaptive-binning diagnostic plots ──────────────────────────
 
+    def _summary_shape_text(self, matrix_attr: str, cached_shape_attr: str) -> str:
+        """Return a stable summary shape for audit or production-retained models."""
+        matrix = getattr(self, matrix_attr, None)
+        if matrix is not None and hasattr(matrix, "shape"):
+            return str(tuple(int(v) for v in matrix.shape))
+        cached = getattr(self, cached_shape_attr, None)
+        if cached is not None:
+            return (
+                f"{tuple(int(v) for v in cached)} (training matrix not retained in production mode)"
+            )
+        if self._is_production_mode():
+            return "not retained in production mode"
+        return "unavailable"
+
     def model_summary(self) -> str:
         """Human-readable model summary including top patterns."""
         check_is_fitted(self)
         composition = self.get_model_composition()
         counts = composition.get("downstream_feature_counts", {})
         lines = [
-            "HUGIMLClassifierNative — Model Summary",
+            "HUGIMLClassifier — Model Summary",
             "=" * 50,
             f"Config:       B={self.B}, L={self.L}, G={self.G}",
             f"Feature mode: {getattr(self, 'feature_mode', 'patterns_only')}",
@@ -4692,9 +5559,9 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             f"patterns={counts.get('pattern', 0)}, "
             f"augmented_pair={counts.get('augmented_pair', 0)}, "
             f"total={counts.get('total', 0)}",
-            f"Matrix:       {self.x_train_hup_.shape} "
+            f"Matrix:       {self._summary_shape_text('x_train_hup_', '_training_pattern_matrix_shape_')} "
             f"(density={self.fit_metadata_.matrix_density:.4f})",
-            f"Downstream:   {getattr(self, 'x_train_downstream_', self.x_train_hup_).shape}",
+            f"Downstream:   {self._summary_shape_text('x_train_downstream_', '_training_downstream_matrix_shape_')}",
             f"Fit time:     {self.fit_metadata_.total_fit_ms:.0f} ms",
             "",
             "Stage breakdown (ms):",
@@ -4749,9 +5616,11 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
 
         return "\n".join(lines)
 
+
 # =============================================================================
 # Exact cached grid tuning helper
 # =============================================================================
+
 
 def _hugiml_auc_score_for_fast_grid(y_true: Any, proba: np.ndarray, classes: np.ndarray) -> float:
     """Internal validation AUC scorer used by fast_grid_tune()."""
@@ -4769,7 +5638,7 @@ def _hugiml_expand_grid_for_fast_tune(param_grid: dict[str, list] | None) -> lis
     """Expand a compact sklearn-style parameter grid for fast HUGIML tuning."""
     from itertools import product
 
-    grid = HUGIMLClassifierNative.default_param_grid() if param_grid is None else param_grid
+    grid = HUGIMLClassifier.default_param_grid() if param_grid is None else param_grid
     if not isinstance(grid, dict) or not grid:
         raise HUGIMLParamError("param_grid must be a non-empty dict of parameter lists.")
     keys = list(grid.keys())
@@ -4820,7 +5689,9 @@ def _hugiml_validate_fast_tune_grid(candidates: list[dict[str, Any]]) -> dict[st
     topk_values = sorted({int(c.get("topK", 30)) for c in candidates})
     feature_modes = sorted({str(c.get("feature_mode", "patterns_only")) for c in candidates})
     if any(k <= 0 for k in topk_values):
-        raise HUGIMLParamError("fast_grid_tune currently supports positive integer topK values only.")
+        raise HUGIMLParamError(
+            "fast_grid_tune currently supports positive integer topK values only."
+        )
     if any(L < 1 for L in L_values):
         raise HUGIMLParamError("fast_grid_tune currently supports L >= 1 only.")
 
@@ -4871,19 +5742,28 @@ def _hugiml_prepare_candidate_from_cached_base(
     L_value: int,
     topK_value: int,
     feature_mode: str,
+    execution_mode: str = "audit",
 ) -> HUGIMLClassifierNative:
     """Build and fit one exact candidate from a max-topK cached base model."""
     cand = _hugiml_shallow_candidate_from_base(base)
     cand.L = int(L_value)
     cand.topK = int(topK_value)
     cand.feature_mode = str(feature_mode)
+    cand.execution_mode = str(execution_mode)
 
     raw_patterns = list(getattr(base, "raw_patterns_", []))[: int(topK_value)]
     n_train = len(y_train)
+    base_hup = getattr(base, "x_train_hup_", None)
+    if base_hup is None:
+        raise RuntimeError(
+            "fast_grid_tune requires cached training pattern matrices. "
+            "The cache model was created in production mode or otherwise does not retain "
+            "x_train_hup_; run tuning with execution_mode='audit'."
+        )
     if int(L_value) == 1:
         cand.patterns_ = raw_patterns
         # Fused L=1 path returns columns in raw_patterns_ order; slicing is exact.
-        cand.x_train_hup_ = getattr(base, "x_train_hup_")[:, : len(cand.patterns_)]
+        cand.x_train_hup_ = base_hup[:, : len(cand.patterns_)]
     else:
         native_td = getattr(getattr(base, "td_", None), "_td", getattr(base, "td_", None))
         old_td = getattr(cand, "td_", None)
@@ -4909,11 +5789,18 @@ def _hugiml_prepare_candidate_from_cached_base(
 
     cand._setup_feature_mode_metadata()
     cand._setup_augmented_pair_transforms(X_train_original, y_train, fit=True)
-    X_down = cand._make_downstream_features(X_train_original, cand.x_train_hup_, fit=True)
+    cand._current_y_for_downstream_topk_ = y_train
+    try:
+        X_down = cand._make_downstream_features(X_train_original, cand.x_train_hup_, fit=True)
+    finally:
+        if hasattr(cand, "_current_y_for_downstream_topk_"):
+            delattr(cand, "_current_y_for_downstream_topk_")
     X_down = cand._apply_strict_topk_budget_fit(X_down, y_train)
     cand.x_train_downstream_ = X_down
+    cand._cache_downstream_feature_metadata()
     cand.model_ = Pipeline([("clf", cand._make_estimator(len(cand.classes_)))])
     cand.model_.fit(X_down, y_train)
+    cand._apply_execution_mode_retention()
     # Intentionally avoid drift baseline and rich metadata during tuning. The
     # returned best_model is immediately usable for prediction; call fit() on the
     # selected params if full production metadata/drift baseline is required.
@@ -4966,6 +5853,12 @@ def _hugiml_fast_grid_tune(
             "fast_grid_tune requires max_fit_seconds=None for exact equivalence."
         )
 
+    requested_execution_mode = str(params0.get("execution_mode", "audit"))
+    if requested_execution_mode not in {"audit", "production"}:
+        raise HUGIMLParamError(
+            "execution_mode must be either 'audit' or 'production'. "
+            f"Got {requested_execution_mode!r}."
+        )
     y_train_arr = cls._safe_cast_y(y_train)
     y_val_arr = np.asarray(y_val)
     X_train_original = cls(**params0)._copy_input_for_downstream(X_train)
@@ -5001,6 +5894,10 @@ def _hugiml_fast_grid_tune(
                 # empty-pattern fallbacks do not fail while building the cache.
                 "feature_mode": "original_plus_patterns",
                 "G": float(G_value),
+                # Cached tuning needs training matrices.  Even if callers pass
+                # production in base_params, the internal cache must retain audit
+                # artifacts; final refit below can still use caller params.
+                "execution_mode": "audit",
             }
         )
         # B may be present in the original grid, but it is intentionally ignored
@@ -5010,9 +5907,9 @@ def _hugiml_fast_grid_tune(
         base._fast_tune_cache_only = True
         base.fit(X_train, y_train_arr)
         base.__dict__.pop("_fast_tune_cache_only", None)
-        cache_fit_seconds[
-            f"G={float(G_value):.12g},L={int(L_value)},topK={int(topK_value)}"
-        ] = time.perf_counter() - t_fit
+        cache_fit_seconds[f"G={float(G_value):.12g},L={int(L_value)},topK={int(topK_value)}"] = (
+            time.perf_counter() - t_fit
+        )
         base_by_G_L_topK[(float(G_value), int(L_value), int(topK_value))] = base
 
     rows: list[dict[str, Any]] = []
@@ -5038,6 +5935,7 @@ def _hugiml_fast_grid_tune(
                 L_value,
                 topK_value,
                 feature_mode,
+                requested_execution_mode,
             )
             score = _hugiml_score_model_for_tune(model, X_val, y_val_arr, scoring)
             if np.isfinite(score) and score > best_score:
@@ -5046,7 +5944,10 @@ def _hugiml_fast_grid_tune(
                 best_params = dict(candidate_params)
                 best_params["adaptive_binning"] = True
                 best_params["G"] = G_value
-        except Exception as exc:  # keep failed candidates visible like GridSearchCV error_score=np.nan
+                best_params.setdefault("execution_mode", requested_execution_mode)
+        except (
+            Exception
+        ) as exc:  # keep failed candidates visible like GridSearchCV error_score=np.nan
             status = "failed"
             err = f"{type(exc).__name__}: {exc}"
         rows.append(
@@ -5088,7 +5989,7 @@ def _hugiml_fast_grid_tune(
 
 @dataclasses.dataclass
 class HUGIMLTuneResult:
-    """Result object returned by HUGIMLClassifierNative.tune().
+    """Result object returned by HUGIMLClassifier.tune().
 
     Attributes mirror the small subset of GridSearchCV-style fields users need
     for quick HUGIML tuning while keeping the API lightweight.
@@ -5139,7 +6040,7 @@ def _hugiml_score_model_for_tune(
     y_val: Any,
     scoring: str,
 ) -> float:
-    """Score one fitted model for HUGIMLClassifierNative.tune()."""
+    """Score one fitted model for HUGIMLClassifier.tune()."""
     from sklearn.metrics import accuracy_score, balanced_accuracy_score, f1_score
 
     scoring_norm = str(scoring).lower()
@@ -5253,7 +6154,7 @@ def _hugiml_tune(
     scoring : {'roc_auc', 'accuracy', 'balanced_accuracy', 'f1', 'f1_macro', 'f1_weighted'}
         Validation metric. 'roc_auc' supports binary and multiclass OVR macro AUC.
     param_grid : dict or None
-        sklearn-style grid. None uses HUGIMLClassifierNative.default_param_grid().
+        sklearn-style grid. None uses HUGIMLClassifier.default_param_grid().
     refit : bool, default=True
         If True, refit the best configuration on the full X, y with normal fit().
     base_params : dict or None
@@ -5265,18 +6166,18 @@ def _hugiml_tune(
     cv_splits : list of (train_idx, val_idx) or None, default=None
         Exact fold indices to use. When supplied, cv, shuffle, and random_state
         are ignored for split generation, and the same indices are returned in
-        result.cv_splits_ for reuse by other models.
+        ``result.cv_splits_`` for reuse by other models.
     use_fast_path : bool, default=True
         Use exact cached fast-grid evaluation when the grid qualifies; otherwise
         fall back to ordinary per-candidate evaluation.
     return_dataframe : bool, default=True
-        Return results_ as a pandas DataFrame when pandas is available.
+        Return ``results_`` as a pandas DataFrame when pandas is available.
 
     Returns
     -------
     HUGIMLTuneResult
-        GridSearchCV-like result object with best_estimator_, best_params_,
-        best_score_, results_, fast_path_used_, elapsed_seconds_, and n_splits_.
+        GridSearchCV-like result object with ``best_estimator_``, ``best_params_``, ``best_score_``, ``results_``,
+        ``fast_path_used_``, ``elapsed_seconds_``, and ``n_splits_``.
     """
     from sklearn.model_selection import StratifiedKFold
 
@@ -5292,21 +6193,42 @@ def _hugiml_tune(
             tr = np.asarray(train_idx, dtype=np.int64)
             va = np.asarray(val_idx, dtype=np.int64)
             if tr.ndim != 1 or va.ndim != 1:
-                raise HUGIMLParamError("Each cv_splits entry must contain 1D train and validation indices.")
+                raise HUGIMLParamError(
+                    "Each cv_splits entry must contain 1D train and validation indices."
+                )
             if tr.size == 0 or va.size == 0:
-                raise HUGIMLParamError(f"cv_splits entry {split_idx} has an empty train or validation index.")
-            if np.any(tr < 0) or np.any(va < 0) or np.any(tr >= n_samples) or np.any(va >= n_samples):
-                raise HUGIMLParamError(f"cv_splits entry {split_idx} contains indices outside [0, n_samples).")
+                raise HUGIMLParamError(
+                    f"cv_splits entry {split_idx} has an empty train or validation index."
+                )
+            if (
+                np.any(tr < 0)
+                or np.any(va < 0)
+                or np.any(tr >= n_samples)
+                or np.any(va >= n_samples)
+            ):
+                raise HUGIMLParamError(
+                    f"cv_splits entry {split_idx} contains indices outside [0, n_samples)."
+                )
             if np.intersect1d(tr, va).size > 0:
-                raise HUGIMLParamError(f"cv_splits entry {split_idx} has overlapping train and validation indices.")
+                raise HUGIMLParamError(
+                    f"cv_splits entry {split_idx} has overlapping train and validation indices."
+                )
             splits.append((tr.copy(), va.copy()))
     elif isinstance(cv, int):
         if cv < 2:
             raise HUGIMLParamError("cv must be >= 2 when provided as an integer.")
-        splitter = StratifiedKFold(n_splits=int(cv), shuffle=bool(shuffle), random_state=random_state)
-        splits = [(np.asarray(tr, dtype=np.int64), np.asarray(va, dtype=np.int64)) for tr, va in splitter.split(X, y_arr)]
+        splitter = StratifiedKFold(
+            n_splits=int(cv), shuffle=bool(shuffle), random_state=random_state
+        )
+        splits = [
+            (np.asarray(tr, dtype=np.int64), np.asarray(va, dtype=np.int64))
+            for tr, va in splitter.split(X, y_arr)
+        ]
     else:
-        splits = [(np.asarray(tr, dtype=np.int64), np.asarray(va, dtype=np.int64)) for tr, va in cv.split(X, y_arr)]
+        splits = [
+            (np.asarray(tr, dtype=np.int64), np.asarray(va, dtype=np.int64))
+            for tr, va in cv.split(X, y_arr)
+        ]
     if not splits:
         raise HUGIMLParamError("cv produced no splits.")
 
@@ -5324,7 +6246,10 @@ def _hugiml_tune(
             # set adaptive_binning=False are rejected above; this additional
             # guard covers the common case where adaptive_binning or
             # max_fit_seconds is supplied only through base_params.
-            if bool(base_params0.get("adaptive_binning", True)) and base_params0.get("max_fit_seconds", None) is None:
+            if (
+                bool(base_params0.get("adaptive_binning", True))
+                and base_params0.get("max_fit_seconds", None) is None
+            ):
                 fast_path_allowed = True
         except Exception:
             fast_path_allowed = False
@@ -5415,7 +6340,9 @@ def _hugiml_tune(
                 "std_test_score": float(np.std(finite, ddof=0)) if finite.size else np.nan,
                 "n_successful_splits": int(finite.size),
                 "n_splits": int(len(splits)),
-                "mean_elapsed_seconds": float(np.nanmean([r["elapsed_seconds"] for r in rows_for_key])),
+                "mean_elapsed_seconds": float(
+                    np.nanmean([r["elapsed_seconds"] for r in rows_for_key])
+                ),
                 "status": "ok" if finite.size == len(splits) else "partial_or_failed",
             }
         )
@@ -5455,7 +6382,9 @@ def _hugiml_tune(
         best_params_=best_params,
         best_score_=best_score,
         results_=results_obj,
-        fast_path_used_=bool(fast_path_allowed and all(m == "exact_cached_adaptive_grid" for m in fold_methods)),
+        fast_path_used_=bool(
+            fast_path_allowed and all(m == "exact_cached_adaptive_grid" for m in fold_methods)
+        ),
         elapsed_seconds_=time.perf_counter() - t_start,
         n_splits_=int(len(splits)),
         scoring=str(scoring),
@@ -5467,3 +6396,17 @@ def _hugiml_tune(
 
 HUGIMLClassifierNative.fast_grid_tune = classmethod(_hugiml_fast_grid_tune)
 HUGIMLClassifierNative.tune = classmethod(_hugiml_tune)
+
+
+# Backward-compatible public class name. HUGIMLClassifierNative remains
+# available for existing code; HUGIMLClassifier is the cleaner end-user entry
+# point and intentionally shares the exact implementation and serialization
+# contract.
+HUGIMLClassifier = HUGIMLClassifierNative
+
+__all__ = [
+    "HUGIMLClassifier",
+    "HUGIMLClassifierNative",
+    "FitMetadata",
+    "HUGIMLTuneResult",
+]

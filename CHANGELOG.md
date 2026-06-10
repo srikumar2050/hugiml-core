@@ -4,6 +4,28 @@ All notable changes to hugiml-core are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
+## [1.1.9] - 2026-06-10
+
+### Added
+
+- Added `HUGIMLClassifier` as the primary public class name. `HUGIMLClassifierNative` remains available for existing code.
+- Added `execution_mode="audit"|"production"`. Audit mode keeps full traceability data by default; production mode keeps prediction and save/load state while omitting large training-review artifacts.
+- Added clearer production-mode guidance for audit, governance, drift, and pattern-support methods when full traceability data is not retained.
+
+### Changed
+
+- Reduced strict and hybrid memory use by selecting original features earlier and applying strict `topK` during downstream matrix construction.
+- Moved original-feature scoring into native and fused construction paths so `patterns_only` remains pattern-focused and avoids retaining original-feature scoring state.
+- Improved fixed-B numeric handling so finite numeric columns stay numeric, while only training columns with missing or infinite values use missing-aware bin labels.
+- Reduced native memory pressure with compact integer code storage, CSR-returning matrix paths, and a conditional dense/CSR downstream policy.
+- Optimized hybrid prediction so only selected original columns are prepared at prediction time.
+
+### Compatibility
+
+- Default behavior remains `execution_mode="audit"`, preserving the v1.1.8 audit and explanation workflow unless production mode is explicitly selected.
+- Existing imports of `HUGIMLClassifierNative` continue to work. New examples use `HUGIMLClassifier`.
+
+---
 ## [1.1.8] - 2026-06-08
 
 ### Added

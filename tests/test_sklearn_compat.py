@@ -169,7 +169,7 @@ class TestBasicContract:
     def test_repr_does_not_crash(self):
         clf = HUGIMLClassifierNative(B=4, L=1)
         r = repr(clf)
-        assert "HUGIMLClassifierNative" in r
+        assert "HUGIMLClassifier(" in r
 
     def test_clone_preserves_params(self):
         clf = HUGIMLClassifierNative(B=6, L=2, G=5e-4, topK=80)

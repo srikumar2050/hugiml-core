@@ -29,7 +29,7 @@ Use ``topk_budget_strict=True`` when a single global ``topK`` budget should appl
 
 .. code-block:: python
 
-   clf = HUGIMLClassifierNative(
+   clf = HUGIMLClassifier(
        B=-1,
        adaptive_binning=True,
        L=2,
@@ -48,9 +48,9 @@ Examples
 
 .. code-block:: python
 
-   from hugiml import HUGIMLClassifierNative
+   from hugiml import HUGIMLClassifier
 
-   clf = HUGIMLClassifierNative(
+   clf = HUGIMLClassifier(
        B=10,
        L=2,
        G=1e-3,
@@ -59,7 +59,7 @@ Examples
        feature_mode="patterns_only",
    )
 
-   clf_hybrid = HUGIMLClassifierNative(
+   clf_hybrid = HUGIMLClassifier(
        B=10,
        L=2,
        G=1e-3,
@@ -68,7 +68,7 @@ Examples
        feature_mode="original_plus_patterns",
    )
 
-   clf_interactions = HUGIMLClassifierNative(
+   clf_interactions = HUGIMLClassifier(
        B=10,
        L=2,
        G=1e-3,
@@ -76,6 +76,12 @@ Examples
        adaptive_binning=True,
        feature_mode="original_plus_interactions",
    )
+
+Downstream matrix policy
+------------------------
+
+In v1.1.9, ``patterns_only`` keeps the downstream representation sparse. Hybrid modes choose dense representation for small or moderate selected widths and CSR representation for larger selected widths. This keeps ordinary sklearn workflows convenient while reducing memory pressure for wider selected feature spaces.
+
 
 Interpretation notes
 --------------------

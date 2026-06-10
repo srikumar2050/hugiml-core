@@ -1,11 +1,11 @@
 Fast hyperparameter tuning
 ==========================
 
-``HUGIMLClassifierNative.tune`` provides a GridSearchCV-like interface. Eligible adaptive-binning grids can reuse cached mining work for faster validation. Unsupported grids automatically use ordinary per-candidate evaluation.
+``HUGIMLClassifier.tune`` provides a GridSearchCV-like interface. Eligible adaptive-binning grids can reuse cached mining work for faster validation. Unsupported grids automatically use ordinary per-candidate evaluation.
 
 .. code-block:: python
 
-   result = HUGIMLClassifierNative.tune(
+   result = HUGIMLClassifier.tune(
        X_train,
        y_train,
        cv=5,

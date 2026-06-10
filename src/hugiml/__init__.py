@@ -25,9 +25,9 @@ Public API
 ----------
 Core classifier::
 
-    from hugiml import HUGIMLClassifierNative
+    from hugiml import HUGIMLClassifier
 
-    clf = HUGIMLClassifierNative(B=7, L=1, G=5e-3)
+    clf = HUGIMLClassifier(B=7, L=1, G=5e-3)
     X, y = clf.prepareXy(X_df, y_series)   # schema/type prep — no fitting
     clf.fit(X_train, y_train)               # discretisation + mining + downstream fit
     proba = clf.predict_proba(X_test)
@@ -35,7 +35,7 @@ Core classifier::
 
 Adaptive binning (v1.1.0)::
 
-    clf = HUGIMLClassifierNative(
+    clf = HUGIMLClassifier(
         adaptive_binning=True,
         b_candidates=[2, 3, 5, 7, 10, 15],
         min_marginal_gain_ratio=0.02,
@@ -81,7 +81,7 @@ Benchmark runner (CLI)::
 
 from __future__ import annotations
 
-__version__ = "1.1.8"
+__version__ = "1.1.9"
 __author__ = "Srikumar Krishnamoorthy"
 __license__ = "Apache-2.0"
 __paper__ = (
@@ -90,7 +90,7 @@ __paper__ = (
     "IEEE Access, 12, 126088-126107. DOI: 10.1109/ACCESS.2024.3455563"
 )
 
-from hugiml.classifier import FitMetadata, HUGIMLClassifierNative
+from hugiml.classifier import FitMetadata, HUGIMLClassifier, HUGIMLClassifierNative
 from hugiml.exceptions import (
     HUGIMLConvergenceWarning,
     HUGIMLDegradedWarning,
@@ -135,6 +135,7 @@ def __getattr__(name: str):
 
 
 __all__ = [
+    "HUGIMLClassifier",
     "HUGIMLClassifierNative",
     "FitMetadata",
     "PredictionMonitor",

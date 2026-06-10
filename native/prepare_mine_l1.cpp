@@ -71,6 +71,59 @@ static double l1_ig(const std::vector<int>& cnt_global,
     return base - ce;
 }
 
+static double l1_ig_multicodes(const std::vector<int>& codes,
+                               const std::vector<int>& y_vec,
+                               const std::vector<int>& cnt_global,
+                               int n_valid, int n_cls) {
+    if (n_valid <= 0 || n_cls <= 1) return 0.0;
+    int max_code = -1;
+    for (int c : codes) if (c >= 0 && c > max_code) max_code = c;
+    if (max_code < 0) return 0.0;
+    const int n_codes = max_code + 1;
+    std::vector<int> code_counts(n_codes, 0);
+    std::vector<std::vector<int>> code_cls(n_codes, std::vector<int>(n_cls, 0));
+    for (int r = 0; r < static_cast<int>(codes.size()); r++) {
+        int c = codes[r];
+        if (c < 0) continue;
+        int cls = y_vec[r];
+        if (cls < 0 || cls >= n_cls) continue;
+        code_counts[c]++;
+        code_cls[c][cls]++;
+    }
+    double base = l1_entropy_ln(cnt_global, n_valid);
+    double cond = 0.0;
+    for (int c = 0; c < n_codes; c++) {
+        if (code_counts[c] > 0) {
+            cond += (static_cast<double>(code_counts[c]) / static_cast<double>(n_valid)) *
+                    l1_entropy_ln(code_cls[c], code_counts[c]);
+        }
+    }
+    return std::max(0.0, base - cond);
+}
+
+static double l1_ig_binary_indicator(const std::vector<int>& y_vec,
+                                     const std::vector<int>& cnt_global,
+                                     int n_cls,
+                                     const std::vector<uint8_t>& present) {
+    const int n = static_cast<int>(y_vec.size());
+    if (n <= 0 || n_cls <= 1) return 0.0;
+    std::vector<int> cnt_in(n_cls, 0);
+    int n_in = 0;
+    for (int r = 0; r < n; r++) {
+        if (!present[r]) continue;
+        int cls = y_vec[r];
+        if (cls < 0 || cls >= n_cls) continue;
+        cnt_in[cls]++;
+        n_in++;
+    }
+    if (n_in <= 0 || n_in >= n) return 0.0;
+    return std::max(0.0, l1_ig(cnt_global, cnt_in.data(), n_in, n, n_cls));
+}
+
+static std::string l1_dummy_name(const std::string& col, const std::string& value) {
+    return col + "_" + value;
+}
+
 /// Min-heap save — identical to THUIsl::save / l1_save in mining_l1.cpp.
 static void l1_save(std::vector<PatternEntry>& heap, double& minU,
                     int K, int iid, double utility, double ig) {
@@ -195,14 +248,16 @@ AdaptiveBinResult select_adaptive_bins_cpp(
 
     if (first_error) std::rethrow_exception(first_error);
 
-    // Build X_codes_flat: (n × n_num_cols) row-major float64.  The allocation
-    // itself can dominate memory at large n*p, so guard before resize to return
-    // a clean Python MemoryError instead of risking an OS kill.
+    // Build X_codes_flat: (n × n_num_cols) row-major int32 codes.  Codes are
+    // small bin ids; storing them as float64 doubled memory and forced another
+    // Python float64 matrix in get_X_codes().  Use -1 as the missing/non-finite
+    // sentinel and only cast one selected column to float in Python when a
+    // legacy pre-binned DataFrame must be materialized.
     ensure_native_memory_available(
-        static_cast<uint64_t>(n) * static_cast<uint64_t>(std::max(n_num, 0)) * sizeof(double),
-        "select_adaptive_bins_cpp X_codes_flat(n=" + std::to_string(n) +
+        static_cast<uint64_t>(n) * static_cast<uint64_t>(std::max(n_num, 0)) * sizeof(int32_t),
+        "select_adaptive_bins_cpp X_codes_flat_int32(n=" + std::to_string(n) +
         ", n_num_cols=" + std::to_string(n_num) + ")");
-    result.X_codes_flat.resize(static_cast<size_t>(n) * static_cast<size_t>(n_num), 0.0);
+    result.X_codes_flat.resize(static_cast<size_t>(n) * static_cast<size_t>(n_num), int32_t{-1});
 
     // Apply the selected edges row-wise.  The previous column-wise loop wrote
     // into row-major output with a stride of n_num_cols; this row-wise loop
@@ -222,14 +277,12 @@ AdaptiveBinResult select_adaptive_bins_cpp(
                 const double* inner_begin = edges.data() + 1;
 
                 double raw = Xb(r, j);
-                double code;
-                if (!std::isfinite(raw)) {
-                    code = std::numeric_limits<double>::quiet_NaN();
-                } else {
+                int32_t code = -1;
+                if (std::isfinite(raw)) {
                     int pos = static_cast<int>(
                         std::upper_bound(inner_begin, inner_begin + n_inner, raw)
                         - inner_begin);
-                    code = static_cast<double>(std::max(0, std::min(pos, nb - 1)));
+                    code = static_cast<int32_t>(std::max(0, std::min(pos, nb - 1)));
                 }
                 result.X_codes_flat[out_base + static_cast<size_t>(ci)] = code;
             }
@@ -259,6 +312,7 @@ static L1FitResult prepare_and_mine_l1_cpp_impl(
     std::vector<std::vector<std::string>>  cat_raw_strs,
     std::vector<std::vector<bool>>         cat_raw_valid,
     int K, double G, double timeout_s,
+    bool compute_original_scores,
     const std::vector<int>*                adaptive_num_indices,
     const std::vector<ColAdaptResult>*     adaptive_cols_meta)
 {
@@ -378,6 +432,20 @@ static L1FitResult prepare_and_mine_l1_cpp_impl(
 
     int ic = 0;  // item counter
 
+    // Downstream original-feature prefilter scores are computed while the
+    // native preparation pass already has per-column bins/categories in hand.
+    // Numeric originals are represented by their raw column name; categorical
+    // originals are represented by pandas get_dummies-compatible names
+    // (<col>_<value> plus <col>_<NA> when missing values were observed).
+    std::vector<std::string> original_numeric_names;
+    std::vector<double>      original_numeric_scores;
+    std::vector<std::string> original_dummy_names;
+    std::vector<double>      original_dummy_scores;
+    if (compute_original_scores) {
+        original_numeric_names.reserve(p);
+        original_numeric_scores.reserve(p);
+    }
+
     for (int j = 0; j < p; j++) {
         if (has_deadline && ((j & (CHECK - 1)) == 0))
             check_timeout_deadline(has_deadline, deadline_tp, "prepare_and_mine_l1 column preparation");
@@ -412,6 +480,33 @@ static L1FitResult prepare_and_mine_l1_cpp_impl(
                     if (it != label2code.end())
                         col_codes[r] = static_cast<int32_t>(it->second);
                 }
+
+            // Score downstream dummy originals only when original features can
+            // participate downstream. patterns_only must not pay this cost.
+            if (compute_original_scores) {
+                for (int idx = 0; idx < C; idx++) {
+                    std::vector<uint8_t> present(static_cast<size_t>(n), 0);
+                    for (int r = 0; r < n; r++)
+                        if (col_codes[r] == static_cast<int32_t>(idx)) present[static_cast<size_t>(r)] = 1;
+                    original_dummy_names.push_back(l1_dummy_name(col_names[j], uniq[idx]));
+                    original_dummy_scores.push_back(
+                        l1_ig_binary_indicator(y_vec, cnt_global, n_cls, present));
+                }
+                bool any_missing_for_dummy = false;
+                if (have_cat && have_valid) {
+                    for (int r = 0; r < n; r++) {
+                        if (!cat_raw_valid[j][r]) { any_missing_for_dummy = true; break; }
+                    }
+                }
+                if (any_missing_for_dummy) {
+                    std::vector<uint8_t> present(static_cast<size_t>(n), 0);
+                    for (int r = 0; r < n; r++)
+                        if (!cat_raw_valid[j][r]) present[static_cast<size_t>(r)] = 1;
+                    original_dummy_names.push_back(l1_dummy_name(col_names[j], "<NA>"));
+                    original_dummy_scores.push_back(
+                        l1_ig_binary_indicator(y_vec, cnt_global, n_cls, present));
+                }
+            }
 
             // Pearson sign for iu_t
             std::vector<int>    n_c(C, 0);
@@ -513,10 +608,17 @@ static L1FitResult prepare_and_mine_l1_cpp_impl(
             };
 
             std::vector<double> df(n), yf(n);
+            std::vector<int> original_codes(n, -1);
             for (int r = 0; r < n; r++) {
                 int code = raw_to_code(Xb(r, j));
+                original_codes[r] = code;
                 df[r] = (code >= 0) ? static_cast<double>(code) : 0.0;
                 yf[r] = y_vec[r];
+            }
+            if (compute_original_scores) {
+                original_numeric_names.push_back(col_names[j]);
+                original_numeric_scores.push_back(
+                    l1_ig_multicodes(original_codes, y_vec, cnt_global, n, n_cls));
             }
             double cv_j = pearson_cpp(df, yf);
             td.cv.push_back(cv_j);
@@ -582,9 +684,20 @@ static L1FitResult prepare_and_mine_l1_cpp_impl(
 
             // Pearson of codes vs y
             std::vector<double> df(n), yf(n);
+            std::vector<int> original_codes(n, -1);
             for (int r = 0; r < n; r++) {
-                df[r] = std::isfinite(Xb(r, j)) ? Xb(r, j) : 0.0;
+                if (std::isfinite(Xb(r, j))) {
+                    original_codes[r] = std::max(0, std::min(static_cast<int>(Xb(r, j)), nb_act - 1));
+                    df[r] = Xb(r, j);
+                } else {
+                    df[r] = 0.0;
+                }
                 yf[r] = y_vec[r];
+            }
+            if (compute_original_scores) {
+                original_numeric_names.push_back(col_names[j]);
+                original_numeric_scores.push_back(
+                    l1_ig_multicodes(original_codes, y_vec, cnt_global, n, n_cls));
             }
             double cv_j = pearson_cpp(df, yf);
             td.cv.push_back(cv_j);
@@ -653,6 +766,15 @@ static L1FitResult prepare_and_mine_l1_cpp_impl(
             int nb_use   = choose_nb_cpp(col_sc, y_vec, n_cls, B, distinct);
 
             auto [binned, edges] = kbins_cpp(col_sc, nb_use);
+            std::vector<int> original_codes(n, -1);
+            for (int r = 0; r < n; r++) {
+                if (std::isfinite(col_sc[r])) original_codes[r] = static_cast<int>(binned[r]);
+            }
+            if (compute_original_scores) {
+                original_numeric_names.push_back(col_names[j]);
+                original_numeric_scores.push_back(
+                    l1_ig_multicodes(original_codes, y_vec, cnt_global, n, n_cls));
+            }
             int nb_act = static_cast<int>(edges.size()) - 1;
             td.nb_col.push_back(nb_act);
             td.all_edges.push_back(edges);
@@ -707,6 +829,23 @@ static L1FitResult prepare_and_mine_l1_cpp_impl(
 
             if (any_item) active_cols.push_back(std::move(cd));
         }
+    }
+
+    // Preserve downstream original-feature ordering used by Python:
+    // numeric original columns first, then categorical dummy columns.
+    std::vector<std::string> original_feature_names;
+    std::vector<double> original_feature_scores;
+    if (compute_original_scores) {
+        original_feature_names.reserve(original_numeric_names.size() + original_dummy_names.size());
+        original_feature_scores.reserve(original_numeric_scores.size() + original_dummy_scores.size());
+        original_feature_names.insert(original_feature_names.end(),
+                                      original_numeric_names.begin(), original_numeric_names.end());
+        original_feature_scores.insert(original_feature_scores.end(),
+                                       original_numeric_scores.begin(), original_numeric_scores.end());
+        original_feature_names.insert(original_feature_names.end(),
+                                      original_dummy_names.begin(), original_dummy_names.end());
+        original_feature_scores.insert(original_feature_scores.end(),
+                                       original_dummy_scores.begin(), original_dummy_scores.end());
     }
 
     // ── Normalise bin_iu across all columns ──────────────────────────────────
@@ -870,6 +1009,8 @@ static L1FitResult prepare_and_mine_l1_cpp_impl(
     result.patterns = std::move(sorted_heap);
     result.coo_rows = std::move(coo_rows);
     result.coo_cols = std::move(coo_cols_out);
+    result.original_feature_names = std::move(original_feature_names);
+    result.original_feature_scores = std::move(original_feature_scores);
     return result;
 }
 
@@ -949,12 +1090,12 @@ L1FitResult prepare_and_mine_l1_cpp(
     std::vector<bool>                      is_precoded,
     std::vector<std::vector<std::string>>  cat_raw_strs,
     std::vector<std::vector<bool>>         cat_raw_valid,
-    int K, double G, double timeout_s)
+    int K, double G, double timeout_s, bool compute_original_scores)
 {
     return prepare_and_mine_l1_cpp_impl(
         X_num_arr, y_arr, B, std::move(col_names), is_cat_arr, is_int_arr,
         std::move(is_precoded), std::move(cat_raw_strs), std::move(cat_raw_valid),
-        K, G, timeout_s, nullptr, nullptr);
+        K, G, timeout_s, compute_original_scores, nullptr, nullptr);
 }
 
 L1FitResult prepare_and_mine_l1_adaptive_cpp(
@@ -967,7 +1108,7 @@ L1FitResult prepare_and_mine_l1_adaptive_cpp(
     std::vector<std::vector<bool>>         cat_raw_valid,
     const std::vector<int>&                candidates,
     double                                 ratio,
-    int K, double G, double timeout_s)
+    int K, double G, double timeout_s, bool compute_original_scores)
 {
     auto yb = y_arr.unchecked<1>();
     int n = static_cast<int>(yb.shape(0));
@@ -981,7 +1122,7 @@ L1FitResult prepare_and_mine_l1_adaptive_cpp(
     L1FitResult out = prepare_and_mine_l1_cpp_impl(
         X_num_arr, y_arr, 2, std::move(col_names), is_cat_arr, is_int_arr,
         std::vector<bool>{}, std::move(cat_raw_strs), std::move(cat_raw_valid),
-        K, G, timeout_s, &meta.num_col_indices, &meta.cols);
+        K, G, timeout_s, compute_original_scores, &meta.num_col_indices, &meta.cols);
     out.adaptive_cols = std::move(meta.cols);
     out.adaptive_num_col_indices = std::move(meta.num_col_indices);
     return out;
@@ -1004,6 +1145,7 @@ struct FixedNumColDesc {
     double cv = 0.0;
     std::vector<double> raw_eiu;
     std::vector<int> bin_iid;
+    double original_score = 0.0;
 };
 
 static std::vector<double> percentile_edges_from_sorted_unique(std::vector<double>& sorted_vals, int nb) {
@@ -1042,7 +1184,7 @@ L1FitResult prepare_and_mine_l1_fixed_numeric_cpp(
     int B,
     std::vector<std::string> col_names,
     const py::array_t<uint8_t, py::array::forcecast>& is_int_arr,
-    int K, double G, double timeout_s)
+    int K, double G, double timeout_s, bool compute_original_scores)
 {
     using Clock = std::chrono::steady_clock;
     bool has_deadline = timeout_s > 0.0;
@@ -1111,6 +1253,14 @@ L1FitResult prepare_and_mine_l1_fixed_numeric_cpp(
             int nb_use = choose_nb_cpp(col_sc, y_vec, n_cls, B, distinct);
             auto kb = kbins_cpp(col_sc, nb_use);
             std::vector<int>& binned = kb.first;
+            if (compute_original_scores) {
+                std::vector<int> original_codes(static_cast<size_t>(n), -1);
+                for (int r = 0; r < n; ++r) {
+                    if (std::isfinite(col_sc[static_cast<size_t>(r)]))
+                        original_codes[static_cast<size_t>(r)] = binned[static_cast<size_t>(r)];
+                }
+                cd.original_score = l1_ig_multicodes(original_codes, y_vec, cnt_global, n, n_cls);
+            }
             cd.edges = std::move(kb.second);
             cd.nb = static_cast<int>(cd.edges.size()) - 1;
             if (cd.nb <= 0) { descs[j] = std::move(cd); continue; }
@@ -1169,6 +1319,12 @@ L1FitResult prepare_and_mine_l1_fixed_numeric_cpp(
     int ic = 0;
     std::vector<int> active_js;
     active_js.reserve(p);
+    std::vector<std::string> original_feature_names;
+    std::vector<double> original_feature_scores;
+    if (compute_original_scores) {
+        original_feature_names.reserve(static_cast<size_t>(p));
+        original_feature_scores.reserve(static_cast<size_t>(p));
+    }
     for (int j = 0; j < p; ++j) {
         auto& cd = descs[j];
         td.is_int_v[j] = cd.is_int_col;
@@ -1179,6 +1335,10 @@ L1FitResult prepare_and_mine_l1_fixed_numeric_cpp(
         td.col_min[j] = cd.col_min_v;
         td.col_range[j] = cd.col_range_v;
         if (!cd.valid || cd.nb <= 0) continue;
+        if (compute_original_scores) {
+            original_feature_names.push_back(col_names[j]);
+            original_feature_scores.push_back(cd.original_score);
+        }
         bool any = false;
         for (int bi = 1; bi <= cd.nb; ++bi) {
             double raw_eiu = cd.raw_eiu[bi-1];
@@ -1308,6 +1468,10 @@ L1FitResult prepare_and_mine_l1_fixed_numeric_cpp(
 
     L1FitResult result;
     result.td = std::move(td);
+    if (compute_original_scores) {
+        result.original_feature_names = std::move(original_feature_names);
+        result.original_feature_scores = std::move(original_feature_scores);
+    }
     result.patterns = std::move(sorted_heap);
     result.coo_rows = std::move(coo_rows);
     result.coo_cols = std::move(coo_cols);

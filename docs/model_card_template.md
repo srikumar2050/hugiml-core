@@ -28,7 +28,7 @@
 |---------------------|-------|
 | **Model name**      | {{ model_name }} |
 | **Version**         | {{ model_version }} |
-| **Algorithm**       | HUGIMLClassifierNative (HUG-IML, IEEE Access 2024) |
+| **Algorithm**       | HUGIMLClassifier (HUG-IML, IEEE Access 2024) |
 | **License**         | Apache 2.0 |
 | **Owner**           | {{ owner }} |
 | **Date**            | {{ date }} |

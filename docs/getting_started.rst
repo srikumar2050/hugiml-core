@@ -40,9 +40,9 @@ Minimal classifier workflow
    import pandas as pd
    from sklearn.model_selection import train_test_split
    from sklearn.metrics import roc_auc_score
-   from hugiml import HUGIMLClassifierNative
+   from hugiml import HUGIMLClassifier
 
-   clf = HUGIMLClassifierNative(B=7, L=1, G=5e-3)
+   clf = HUGIMLClassifier(B=7, L=1, G=5e-3)
 
    X_enc, y_enc = clf.prepareXy(X_df, y)
    X_train, X_test, y_train, y_test = train_test_split(
@@ -67,7 +67,7 @@ When you already know the feature schema, pass ``allCols`` and ``origColumns`` e
 
 .. code-block:: python
 
-   clf = HUGIMLClassifierNative(
+   clf = HUGIMLClassifier(
        allCols=[integer_columns, float_columns, categorical_columns],
        origColumns=X_train.columns.tolist(),
        B=15,
@@ -103,7 +103,7 @@ For the current implementation, start with the native ``L=1`` hot path, a bounde
 
 .. code-block:: python
 
-   clf = HUGIMLClassifierNative(
+   clf = HUGIMLClassifier(
        B=7,
        L=1,
        G=5e-3,

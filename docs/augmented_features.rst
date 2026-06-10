@@ -31,9 +31,9 @@ Example
 
 .. code-block:: python
 
-   from hugiml import HUGIMLClassifierNative
+   from hugiml import HUGIMLClassifier
 
-   clf = HUGIMLClassifierNative(
+   clf = HUGIMLClassifier(
        B=-1,
        adaptive_binning=True,
        L=2,
