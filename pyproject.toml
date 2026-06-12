@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hugiml-core"
-version = "1.1.9"
+version = "1.1.10"
 description = "High-performance interpretable rule-based ML — HUG-IML classifier, adaptive binning, EBM-style plots, pattern pruning, and benchmark runner (IEEE Access 2024)."
 readme = "README.md"
 license = { text = "Apache-2.0" }
@@ -61,6 +61,11 @@ dashboard = [
     "markdown>=3.5",
     "openpyxl>=3.1",
 	"pyarrow>=15",
+	"xgboost>=1.7",
+    "interpret>=0.4",
+    "imodels>=2.0",
+    "rulefit>=0.3",
+	"lightgbm>=4.0",
 ]
 
 # Benchmark comparison suite (HUG vs EBM / XGBoost / RF / LR / RuleFit / GAM)
@@ -145,8 +150,13 @@ test-requires = ["numpy", "scipy", "scikit-learn>=1.0,<1.8", "pandas", "pytest",
 [tool.cibuildwheel.linux]
 before-build = "pip install pybind11"
 environment = { CC = "gcc", CXX = "g++" }
-manylinux-x86_64-image = "manylinux_2_28"
-archs = ["x86_64"]
+# manylinux_2_17 (glibc >= 2.17) covers CentOS/RHEL 7, Amazon Linux 2,
+# Ubuntu 18.04, and every newer distro — much broader than manylinux_2_28.
+# The produced binary still installs and runs correctly on modern systems;
+# pip always selects the most specific compatible tag available.
+manylinux-x86_64-image = "manylinux_2_17"
+manylinux-aarch64-image = "manylinux_2_17"
+archs = ["x86_64", "aarch64"]
 
 [tool.cibuildwheel.macos]
 before-build = "pip install pybind11 && brew install libomp || true"

@@ -1,0 +1,51 @@
+# docker/Dockerfile.scan
+#
+# Lean single-stage image used exclusively by the container-scan CI job.
+# It installs the pre-built wheel (copied in via --build-arg WHEEL_DIR)
+# instead of rebuilding the C++ extension from source, so the image
+# does NOT need pybind11, gcc, or g++ — and the build never fails with
+# "ModuleNotFoundError: No module named pybind11.setup_helpers".
+#
+# Usage (from repo root):
+#   docker build --build-arg WHEEL_DIR=dist -f docker/Dockerfile.scan -t hugiml-core:scan .
+#
+# The production inference image is docker/Dockerfile.
+
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+# Runtime dependency only — no build toolchain needed.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Non-root user matches the production image.
+RUN useradd --create-home --shell /bin/bash --uid 1001 hugiml
+
+WORKDIR /app
+
+# Upgrade pip/setuptools/wheel so base-image vendored packages include current security updates.
+RUN pip install --no-cache-dir --upgrade "pip>=26.1" "setuptools>=78.0" "wheel>=0.46.2"
+
+# ARG lets the CI workflow inject the wheel directory path.
+ARG WHEEL_DIR=dist
+COPY ${WHEEL_DIR}/ /staging/
+
+# Fail loudly if no wheel is found rather than silently installing nothing.
+RUN whl=$(find /staging -name "*.whl" | head -1) \
+    && [ -n "$whl" ] || { echo "ERROR: no wheel found in /staging — pass --build-arg WHEEL_DIR=<path>"; exit 1; } \
+    && pip install --no-cache-dir "${whl}" \
+    && rm -rf /staging
+
+# Verify the install is sane before Trivy scans the image.
+RUN python -c "\
+from hugiml import HUGIMLClassifier; \
+import hugiml; \
+assert hugiml.check_native(), 'native extension missing'; \
+print('hugiml', hugiml.__version__, 'scan image OK')"
+
+USER hugiml

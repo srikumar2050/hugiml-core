@@ -81,7 +81,7 @@ Benchmark runner (CLI)::
 
 from __future__ import annotations
 
-__version__ = "1.1.9"
+__version__ = "1.1.10"
 __author__ = "Srikumar Krishnamoorthy"
 __license__ = "Apache-2.0"
 __paper__ = (
@@ -134,6 +134,29 @@ def __getattr__(name: str):
     raise AttributeError(f"module 'hugiml' has no attribute {name!r}")
 
 
+def check_native() -> bool:
+    """Return True if the C++ extension loaded successfully, False otherwise.
+
+    Use this to verify the native backend after install::
+
+        python -c "import hugiml; assert hugiml.check_native(), 'native extension missing'"
+
+    In CI smoke tests::
+
+        python -c "import hugiml; hugiml.check_native() or exit(1)"
+
+    Returns
+    -------
+    bool
+        True when ``_hugiml_core`` was imported successfully at package load time.
+        False when the extension is absent or failed to import (a ``RuntimeWarning``
+        will already have been emitted at import time explaining why).
+    """
+    from hugiml.classifier import _CORE_AVAILABLE
+
+    return _CORE_AVAILABLE
+
+
 __all__ = [
     "HUGIMLClassifier",
     "HUGIMLClassifierNative",
@@ -167,6 +190,7 @@ __all__ = [
     "make_imbalanced_pipeline",
     "encode_high_cardinality",
     "apply_encoding",
+    "check_native",
     "__version__",
     "__paper__",
 ]

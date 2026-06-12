@@ -6,6 +6,12 @@ The canonical release notes live in ``CHANGELOG.md`` at the repository root. Kee
 Recent releases
 ---------------
 
+1.1.10 — 2026-06-12
+~~~~~~~~~~~~~~~~~~~
+
+* Strengthened build and import reliability for the native backend with clearer install diagnostics, a public ``check_native()`` verification helper, cleaned package exports, and preserved classifier naming compatibility.
+* Upgraded Governance Studio into a richer workbench experience for dataset setup, candidate model comparison, drill-down review, workflow guidance, demo data, and complete governance evidence views.
+
 1.1.9 — 2026-06-10
 ~~~~~~~~~~~~~~~~~~
 

@@ -291,49 +291,60 @@ print(f"Validation score: {tune_result['best_score']:.4f}")
 
 ## Governance Studio Dashboard
 
-The **HUGIML Governance Studio** is a multi-view Streamlit application that provides audit-ready evidence for interpretable model review.
-
-### Launch
-
-```bash
-# Installed console script (recommended)
-hugiml-dashboard
-
-# Direct Streamlit invocation
-streamlit run src/hugiml/dashboard/app.py
-
-# With custom CV folds and random seed
-hugiml-dashboard -- --cv 5 --random-state 42
-```
-
-### Evidence views
-
-| View | What it shows |
-|---|---|
-| **Overview** | Dataset summary, best CV score, feature mode, top patterns |
-| **Validation** | Per-fold performance metrics and calibration |
-| **Representation Audit** | Complexity budget, feature-family provenance, original vs pattern vs augmented |
-| **Pattern Inventory** | Full pattern table with coefficients, support, utility, and information gain |
-| **Case Review** | Per-row predictions, probability, and active pattern explanations |
-| **Data Quality & Policy** | Feature-level missingness rates and sensitive/proxy column review |
-| **Configuration Comparison** | Side-by-side CV performance across `feature_mode` variants |
-| **Representation Pruning** | Remove original features or downstream representation columns and re-evaluate |
-| **Monitoring** | PSI and KL-divergence drift signals across features |
-
-### Data sources
-
-- **Demo dataset** — built-in credit-risk dataset; no upload required.
-- **Upload** — CSV, TSV, Excel (.xlsx/.xls), or Parquet. Define target column, ID column, excluded columns, sensitive columns, and positive label from the sidebar.
-
-### Demo preview
-
-- [Open the HUGIML Governance Studio Demo](https://srikumar2050.github.io/hugiml-core/hugiml_governance_studio_demo.html)
+The **HUGIML Governance Studio** is an interactive Streamlit dashboard for preparing experiments, comparing candidate models, reviewing model evidence, and producing governance-ready summaries. The revised dashboard keeps the existing audit views and adds a guided Workbench/Governance layout for end-to-end review.
 
 ### Installation
 
 ```bash
 pip install "hugiml-core[dashboard]"
 ```
+
+The dashboard extra includes the UI and plotting dependencies used by the revised dashboard experience.
+
+### Launch
+
+```bash
+# Installed console script
+hugiml-dashboard
+
+# Pass Streamlit or dashboard arguments after the separator
+hugiml-dashboard -- --cv 5 --random-state 42
+
+# Source-tree development
+python -m streamlit run src/hugiml/dashboard/app.py
+```
+
+When installed, `hugiml-dashboard` starts the packaged Streamlit app automatically, so you do not need to know the source file location.
+
+### What is included
+
+| Area | What it supports |
+|---|---|
+| **Workbench** | Demo data or uploaded tabular data, target and column-role setup, candidate run configuration, model comparison, and drill-down review |
+| **Governance** | Evidence summaries, validation results, representation review, case-level explanations, data quality checks, policy review, monitoring signals, and model-card-oriented outputs |
+
+### Evidence views
+
+| View | What it shows |
+|---|---|
+| **Overview** | Dataset summary, active configuration, validation score, feature mode, and top evidence |
+| **Validation** | Cross-validation metrics, fold-level results, and calibration-oriented review |
+| **Representation Audit** | Original features, HUG patterns, augmented pairs, feature-family provenance, and complexity budget |
+| **Pattern Inventory** | Pattern table with coefficients, support, utility, information gain, and review filters |
+| **Case Review** | Row-level predictions, probabilities, active pattern evidence, and explanation details |
+| **Data Quality & Policy** | Missingness review, sensitive/proxy column checks, and policy-oriented notes |
+| **Configuration Comparison** | Side-by-side comparison across HUGIML settings and optional baseline models |
+| **Representation Pruning** | Interactive removal of original features or representation columns with re-evaluation |
+| **Monitoring** | PSI and KL-divergence drift signals across fitted training baselines and review data |
+
+### Data sources
+
+- **Demo datasets** — built-in examples for dashboard exploration without uploading data.
+- **Upload** — CSV, TSV, Excel (`.xlsx`/`.xls`), or Parquet files. The sidebar lets you choose the target, ID, protected/sensitive, date, numeric, categorical, and excluded columns before fitting.
+
+### Demo preview
+
+- [Open the HUGIML Governance Studio Demo](https://srikumar2050.github.io/hugiml-core/hugiml_governance_studio_demo.html)
 
 ---
 

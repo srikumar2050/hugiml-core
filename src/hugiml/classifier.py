@@ -139,9 +139,25 @@ try:
     import _hugiml_core as _core
 
     _CORE_AVAILABLE: bool = True
-except ImportError:
+    _CORE_IMPORT_ERROR: ImportError | None = None
+except ImportError as _e:
     _core = None
     _CORE_AVAILABLE = False
+    _CORE_IMPORT_ERROR: ImportError | None = _e
+    import warnings as _w
+
+    _w.warn(
+        f"hugiml-core: the compiled C++ extension '_hugiml_core' could not be imported "
+        f"({_e}). "
+        f"All classifier fit/transform operations will raise ImportError. "
+        f"On Linux x86_64 with glibc >= 2.17, a pre-built wheel should have been installed "
+        f"automatically — verify your platform matches a published wheel at "
+        f"https://pypi.org/project/hugiml-core/#files. "
+        f"To build from source: pip install . --no-build-isolation",
+        RuntimeWarning,
+        stacklevel=2,
+    )
+    del _w
 
 
 DEFAULT_AUGMENTED_PAIR_MAX_FEATURES = 10
@@ -2297,14 +2313,37 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
     # ── End v1.1.0 adaptive binning methods ──────────────────────────────────
 
     def _require_core(self) -> None:
-        """Raise a clear ImportError if the native extension is absent."""
+        """Raise a diagnostic ImportError if the native extension is absent."""
         if not _CORE_AVAILABLE:
+            import platform
+            import sys
+
+            cause = (
+                f"\n  Original error: {_CORE_IMPORT_ERROR}" if _CORE_IMPORT_ERROR else ""
+            )
             raise ImportError(
-                "HUGIMLClassifierNative requires the compiled C++ extension "
-                "'_hugiml_core'.\n"
-                "Build it with:  pip install . --no-build-isolation\n"
-                "Or for development:  HUGIML_FAST_BUILD=1 python setup.py "
-                "build_ext --inplace"
+                "HUGIMLClassifier requires the compiled C++ extension '_hugiml_core', "
+                "which was not importable at package load time."
+                f"{cause}\n\n"
+                f"  Platform : {platform.system()} {platform.machine()}\n"
+                f"  Python   : {sys.version.split()[0]}\n"
+                f"  sys.path : {sys.path}\n\n"
+                "Likely causes and fixes:\n"
+                "  1. No pre-built wheel for your platform (most common).\n"
+                "     Check https://pypi.org/project/hugiml-core/#files for available wheels.\n"
+                "     Linux x86_64 wheels require glibc >= 2.17. "
+                "Run 'ldd --version' to check yours.\n"
+                "  2. pip fell back to the sdist and the C++ build failed.\n"
+                "     Look for gcc/g++ errors above in the pip install output.\n"
+                "  3. The .so was installed but is not on sys.path (rare; "
+                "check for a broken venv).\n\n"
+                "To build from source (requires gcc/g++ and pybind11):\n"
+                "  pip install . --no-build-isolation\n"
+                "Fast development build:\n"
+                "  HUGIML_FAST_BUILD=1 python setup.py build_ext --inplace\n"
+                "Verify after install:\n"
+                "  python -c \"import hugiml; assert hugiml.check_native(), "
+                "'native missing'\""
             )
 
     def fit(self, X: Any, y: Any) -> HUGIMLClassifierNative:

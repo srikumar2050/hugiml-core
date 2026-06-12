@@ -1,0 +1,1842 @@
+"""Experiment Workbench UI for HUGIML Studio.
+
+The workbench is intentionally separated from Governance. It is the place to
+configure HUGIML and optional comparison models, run experiments, compare
+metrics/plots, and promote a fitted HUGIML run into the governance workspace.
+"""
+
+from __future__ import annotations
+
+import copy
+import itertools
+import json
+import time
+from dataclasses import dataclass
+from importlib.util import find_spec
+from typing import Any
+
+import numpy as np
+
+# Compatibility for older dependencies under NumPy 2.x.
+if not hasattr(np, "float"):
+    np.float = float  # type: ignore[attr-defined]
+if not hasattr(np, "int"):
+    np.int = int  # type: ignore[attr-defined]
+if not hasattr(np, "bool"):
+    np.bool = bool  # type: ignore[attr-defined]
+import pandas as pd
+import streamlit as st
+import streamlit.components.v1 as _st_components
+from sklearn.base import clone
+from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import (
+    accuracy_score,
+    confusion_matrix,
+    f1_score,
+    precision_recall_curve,
+    precision_score,
+    recall_score,
+    roc_auc_score,
+    roc_curve,
+)
+from sklearn.model_selection import StratifiedKFold
+from sklearn.preprocessing import OneHotEncoder
+from sklearn.tree import DecisionTreeClassifier, export_text
+
+from hugiml.dashboard.display import dataframe_for_display
+from hugiml.dashboard.runner import _default_params, fit_hugiml_config, score_cases
+
+
+@dataclass(frozen=True)
+class ModelSpec:
+    name: str
+    category: str
+    description: str
+    optional_dependency: str | None = None
+
+
+MODEL_CATALOG: dict[str, list[ModelSpec]] = {
+    "Baselines": [
+        ModelSpec("Logistic Regression", "Baselines", "Linear baseline with calibrated probability output."),
+        ModelSpec("Decision Tree", "Baselines", "Simple tree baseline with transparent splits."),
+    ],
+    "Ensembles": [
+        ModelSpec("Random Forest", "Ensembles", "Bagged decision-tree ensemble."),
+        ModelSpec("XGBoost", "Ensembles", "Gradient-boosted trees.", optional_dependency="xgboost"),
+        ModelSpec("LightGBM", "Ensembles", "Fast gradient-boosted trees.", optional_dependency="lightgbm"),
+    ],
+    "Interpretable Models": [
+        ModelSpec("HUGIML", "Interpretable Models", "Native high-utility pattern model."),
+        ModelSpec("EBM", "Interpretable Models", "Explainable Boosting Machine.", optional_dependency="interpret"),
+        ModelSpec(
+            "RuleFit",
+            "Interpretable Models",
+            "Official imodels RuleFit when installed; otherwise a clearly labelled sklearn RuleFit-style fallback.",
+        ),
+    ],
+}
+
+PARAM_HINTS = {
+    "B": "Number of bins. Use -1 for HUGIML adaptive/default behavior.",
+    "L": "Maximum HUG pattern length / interaction depth.",
+    "topK": "Maximum selected HUG patterns.",
+    "G": "Minimum gain/utility threshold for pattern mining.",
+    "feature_mode": "How original and mined features are combined.",
+    "topk_budget_strict": "Whether the top-K budget is enforced strictly.",
+}
+
+MODEL_SHORT_NAMES = {
+    "Logistic Regression": "LR",
+    "Decision Tree": "DT",
+    "Random Forest": "RF",
+    "XGBoost": "XGB",
+    "LightGBM": "LGBM",
+    "Explainable Boosting Machine": "EBM",
+    "EBM": "EBM",
+    "RuleFit": "RuleFit",
+    "HUGIML": "HUGIML",
+}
+
+
+def _model_short(model_name: str) -> str:
+    return MODEL_SHORT_NAMES.get(str(model_name), str(model_name))
+
+
+def _model_caption(spec: ModelSpec) -> str:
+    short = _model_short(spec.name)
+    if spec.name == "RuleFit":
+        return f"{short}: imodels RuleFit if installed; otherwise RuleFit-style fallback"
+    return f"{short}: {spec.name}"
+
+
+def _run_display_name(run: dict[str, Any]) -> str:
+    model = str(run.get("model", ""))
+    artifact = run.get("artifact") if isinstance(run.get("artifact"), dict) else {}
+    implementation = str((artifact or {}).get("implementation", ""))
+    if model == "RuleFit" and implementation == "sklearn-rulefit-style":
+        return "RuleFit-style"
+    return _model_short(model)
+
+
+# ---------------------------------------------------------------------------
+# Experiment helpers. Kept in this module so the governance runner remains
+# HUGIML-centric and backwards-compatible.
+# ---------------------------------------------------------------------------
+
+
+def _is_available(spec: ModelSpec) -> bool:
+    return spec.optional_dependency is None or find_spec(spec.optional_dependency) is not None
+
+
+def _parse_grid(value: str, cast: type) -> list[Any]:
+    items = [x.strip() for x in str(value).split(",") if x.strip()]
+    if not items:
+        return []
+    if cast is bool:
+        return [x.lower() in {"1", "true", "yes", "y"} for x in items]
+    return [cast(x) for x in items]
+
+
+def _expand_param_grid(base: dict[str, Any], grid: dict[str, list[Any]]) -> list[dict[str, Any]]:
+    active = {k: v for k, v in grid.items() if v}
+    if not active:
+        return [dict(base)]
+    keys = list(active)
+    rows = []
+    for combo in itertools.product(*(active[k] for k in keys)):
+        params = dict(base)
+        params.update(dict(zip(keys, combo)))
+        rows.append(params)
+    return rows
+
+
+
+class RuleFitClassifierAdapter:
+    """RuleFit classifier adapter with explicit implementation labelling.
+
+    Preferred backend: `imodels.RuleFitClassifier`.
+    Compatibility backend: legacy standalone `rulefit.RuleFit` when present.
+    Fallback backend: sklearn-generated tree-leaf rules + logistic regression.
+
+    The fallback is intentionally labelled as "RuleFit-style fallback" in the UI
+    so users do not confuse it with the official imodels implementation.
+    """
+
+    def __init__(self, tree_size: int = 4, max_rules: int = 100, random_state: int = 2026):
+        self.tree_size = tree_size
+        self.max_rules = max_rules
+        self.random_state = random_state
+
+    def get_params(self, deep: bool = True) -> dict[str, Any]:
+        return {"tree_size": self.tree_size, "max_rules": self.max_rules, "random_state": self.random_state}
+
+    def set_params(self, **params: Any) -> RuleFitClassifierAdapter:
+        for key, value in params.items():
+            setattr(self, key, value)
+        return self
+
+    def _fit_imodels_rulefit(self, X_df: pd.DataFrame, y: np.ndarray) -> bool:
+        if find_spec("imodels") is None:
+            return False
+        try:
+            from imodels import RuleFitClassifier
+        except Exception:
+            return False
+
+        self.feature_names_ = [str(c) for c in X_df.columns]
+        ctor_attempts = [
+            {"tree_size": int(self.tree_size), "max_rules": int(self.max_rules), "random_state": int(self.random_state)},
+            {"tree_size": int(self.tree_size), "max_rules": int(self.max_rules)},
+            {},
+        ]
+        for kwargs in ctor_attempts:
+            try:
+                model = RuleFitClassifier(**kwargs)
+                model.fit(X_df, y)
+                self.model_ = model
+                self.backend_ = "imodels-rulefit"
+                return True
+            except Exception:
+                continue
+        return False
+
+    def _fit_external_rulefit(self, X_df: pd.DataFrame, y: np.ndarray) -> bool:
+        if find_spec("rulefit") is None:
+            return False
+        try:
+            from rulefit import RuleFit
+        except Exception:
+            return False
+
+        self.feature_names_ = [str(c) for c in X_df.columns]
+        X_values = X_df.to_numpy(dtype=float)
+        ctor_attempts = [
+            {"tree_size": int(self.tree_size), "max_rules": int(self.max_rules), "random_state": int(self.random_state), "model_type": "c"},
+            {"tree_size": int(self.tree_size), "max_rules": int(self.max_rules), "model_type": "c"},
+            {"tree_size": int(self.tree_size), "max_rules": int(self.max_rules)},
+        ]
+        for kwargs in ctor_attempts:
+            try:
+                model = RuleFit(**kwargs)
+                for fit_call in (
+                    lambda: model.fit(X_values, y, feature_names=self.feature_names_),
+                    lambda: model.fit(X_values, y),
+                    lambda: model.fit(X_df, y),
+                ):
+                    try:
+                        fit_call()
+                        self.model_ = model
+                        self.backend_ = "legacy-rulefit"
+                        return True
+                    except Exception:
+                        continue
+            except Exception:
+                continue
+        return False
+
+    @staticmethod
+    def _new_one_hot_encoder() -> OneHotEncoder:
+        try:
+            return OneHotEncoder(handle_unknown="ignore", sparse_output=False)
+        except TypeError:  # sklearn < 1.2
+            return OneHotEncoder(handle_unknown="ignore", sparse=False)
+
+    def _fit_internal_rulefit(self, X_df: pd.DataFrame, y: np.ndarray) -> None:
+        n_estimators = max(20, min(300, int(self.max_rules) // max(1, int(self.tree_size))))
+        max_leaf_nodes = max(2, int(self.tree_size))
+        self.tree_model_ = GradientBoostingClassifier(
+            n_estimators=n_estimators,
+            max_leaf_nodes=max_leaf_nodes,
+            learning_rate=0.05,
+            subsample=0.9,
+            random_state=int(self.random_state),
+        )
+        X_values = X_df.to_numpy(dtype=float)
+        self.tree_model_.fit(X_values, y)
+        leaves = self.tree_model_.apply(X_values)
+        if leaves.ndim == 3:
+            leaves = leaves[:, :, 0]
+        leaves = leaves.astype(str)
+        self.rule_encoder_ = self._new_one_hot_encoder()
+        rule_matrix = np.asarray(self.rule_encoder_.fit_transform(leaves), dtype=float)
+        design = np.hstack([X_values, rule_matrix])
+        self.linear_model_ = LogisticRegression(C=1.0, solver="lbfgs", max_iter=2000)
+        self.linear_model_.fit(design, y)
+        coef = np.asarray(getattr(self.linear_model_, "coef_", [[0.0]]), dtype=float)
+        base_coef = np.abs(coef[0, : X_values.shape[1]]) if coef.ndim == 2 else np.zeros(X_values.shape[1])
+        tree_imp = np.asarray(getattr(self.tree_model_, "feature_importances_", np.zeros(X_values.shape[1])), dtype=float)
+        self.feature_importances_ = base_coef + tree_imp
+        self.backend_ = "sklearn-rulefit-style"
+
+    def fit(self, X: pd.DataFrame, y: np.ndarray) -> RuleFitClassifierAdapter:
+        X_df = pd.DataFrame(X).astype(float)
+        self.feature_names_ = [str(c) for c in X_df.columns]
+        if self._fit_imodels_rulefit(X_df, y):
+            return self
+        if self._fit_external_rulefit(X_df, y):
+            return self
+        self._fit_internal_rulefit(X_df, y)
+        return self
+
+    def _internal_design(self, X: pd.DataFrame) -> np.ndarray:
+        X_values = pd.DataFrame(X).astype(float).to_numpy(dtype=float)
+        leaves = self.tree_model_.apply(X_values)
+        if leaves.ndim == 3:
+            leaves = leaves[:, :, 0]
+        rule_matrix = np.asarray(self.rule_encoder_.transform(leaves.astype(str)), dtype=float)
+        return np.hstack([X_values, rule_matrix])
+
+    def _raw_score(self, X: pd.DataFrame) -> np.ndarray:
+        X_values = pd.DataFrame(X).astype(float).to_numpy(dtype=float)
+        if getattr(self, "backend_", "") == "sklearn-rulefit-style":
+            proba = np.asarray(self.linear_model_.predict_proba(self._internal_design(X)), dtype=float)
+            return proba[:, 1] if proba.ndim == 2 and proba.shape[1] > 1 else proba.ravel()
+        if hasattr(self.model_, "predict_proba"):
+            proba = np.asarray(self.model_.predict_proba(X_values), dtype=float)
+            if proba.ndim == 2 and proba.shape[1] > 1:
+                return proba[:, 1]
+            return proba.ravel()
+        score = np.asarray(self.model_.predict(X_values), dtype=float).ravel()
+        if np.nanmin(score) >= 0 and np.nanmax(score) <= 1:
+            return score
+        return 1.0 / (1.0 + np.exp(-score))
+
+    def predict_proba(self, X: pd.DataFrame) -> np.ndarray:
+        p1 = np.clip(self._raw_score(X), 0.0, 1.0)
+        return np.column_stack([1.0 - p1, p1])
+
+    def predict(self, X: pd.DataFrame) -> np.ndarray:
+        return (self.predict_proba(X)[:, 1] >= 0.5).astype(int)
+
+
+def _build_estimator(model_name: str, params: dict[str, Any], random_state: int):
+    if model_name == "Logistic Regression":
+        # `penalty` is deprecated in scikit-learn 1.8; C controls regularization strength.
+        return LogisticRegression(
+            C=float(params.get("C", 1.0)),
+            solver="lbfgs",
+            class_weight=params.get("class_weight"),
+            max_iter=int(params.get("max_iter", 1000)),
+            random_state=None,
+        )
+    if model_name == "Decision Tree":
+        return DecisionTreeClassifier(
+            max_depth=params.get("max_depth"),
+            min_samples_leaf=int(params.get("min_samples_leaf", 1)),
+            class_weight=params.get("class_weight"),
+            random_state=random_state,
+        )
+    if model_name == "Random Forest":
+        return RandomForestClassifier(
+            n_estimators=int(params.get("n_estimators", 200)),
+            max_depth=params.get("max_depth"),
+            min_samples_leaf=int(params.get("min_samples_leaf", 1)),
+            class_weight=params.get("class_weight"),
+            n_jobs=-1,
+            random_state=random_state,
+        )
+    if model_name == "XGBoost":
+        from xgboost import XGBClassifier
+
+        return XGBClassifier(
+            n_estimators=int(params.get("n_estimators", 200)),
+            max_depth=int(params.get("max_depth", 4)),
+            learning_rate=float(params.get("learning_rate", 0.05)),
+            subsample=float(params.get("subsample", 0.9)),
+            colsample_bytree=float(params.get("colsample_bytree", 0.9)),
+            eval_metric="logloss",
+            tree_method="hist",
+            random_state=random_state,
+            n_jobs=1,
+        )
+    if model_name == "LightGBM":
+        from lightgbm import LGBMClassifier
+
+        return LGBMClassifier(
+            n_estimators=int(params.get("n_estimators", 200)),
+            max_depth=int(params.get("max_depth", -1)),
+            learning_rate=float(params.get("learning_rate", 0.05)),
+            num_leaves=int(params.get("num_leaves", 31)),
+            random_state=random_state,
+            n_jobs=1,
+            verbose=-1,
+        )
+    if model_name == "EBM":
+        from interpret.glassbox import ExplainableBoostingClassifier
+
+        return ExplainableBoostingClassifier(
+            max_bins=int(params.get("max_bins", 32)),
+            interactions=int(params.get("interactions", 5)),
+            random_state=random_state,
+        )
+    if model_name == "RuleFit":
+        return RuleFitClassifierAdapter(
+            tree_size=int(params.get("tree_size", 4)),
+            max_rules=int(params.get("max_rules", 100)),
+            random_state=random_state,
+        )
+    raise ValueError(f"Unsupported model: {model_name}")
+
+
+def _default_model_params(model_name: str) -> dict[str, Any]:
+    if model_name == "HUGIML":
+        return _default_params()
+    if model_name == "Logistic Regression":
+        return {"C": 1.0, "max_iter": 1000, "class_weight": None}
+    if model_name == "Decision Tree":
+        return {"max_depth": None, "min_samples_leaf": 1, "class_weight": None}
+    if model_name == "Random Forest":
+        return {"n_estimators": 200, "max_depth": None, "min_samples_leaf": 1, "class_weight": None}
+    if model_name in {"XGBoost", "LightGBM"}:
+        return {"n_estimators": 200, "max_depth": 4, "learning_rate": 0.05}
+    if model_name == "EBM":
+        return {"max_bins": 32, "interactions": 5}
+    if model_name == "RuleFit":
+        return {"tree_size": 4, "max_rules": 100}
+    return {}
+
+
+
+
+def _safe_numeric_frame(X: pd.DataFrame) -> pd.DataFrame:
+    """Return a dense numeric feature matrix suitable for sklearn/xgboost/lightgbm.
+
+    HUGIML can consume the dashboard frame directly, but standard estimators
+    frequently fail on object/category/datetime columns. This helper performs a
+    deterministic, UI-friendly encoding step for the Workbench comparisons.
+    """
+    if X.empty:
+        raise ValueError("No feature columns are available for modeling.")
+
+    frame = X.copy()
+    frame.columns = [str(c) for c in frame.columns]
+
+    numeric_parts: list[pd.Series] = []
+    categorical_parts: list[pd.Series] = []
+    for col in frame.columns:
+        series = frame[col]
+        if pd.api.types.is_bool_dtype(series):
+            numeric_parts.append(series.astype(float).rename(col))
+        elif pd.api.types.is_numeric_dtype(series):
+            numeric_parts.append(pd.to_numeric(series, errors="coerce").rename(col))
+        elif pd.api.types.is_datetime64_any_dtype(series):
+            numeric_parts.append(pd.to_datetime(series, errors="coerce").astype("int64").replace(-9223372036854775808, np.nan).rename(col))
+        else:
+            categorical_parts.append(series.astype("string").fillna("__missing__").rename(col))
+
+    pieces: list[pd.DataFrame] = []
+    if numeric_parts:
+        numeric = pd.concat(numeric_parts, axis=1)
+        for col in numeric.columns:
+            if numeric[col].isna().all():
+                numeric[col] = 0.0
+            else:
+                numeric[col] = numeric[col].fillna(float(numeric[col].median()))
+        pieces.append(numeric.astype(float))
+
+    if categorical_parts:
+        categorical = pd.concat(categorical_parts, axis=1)
+        pieces.append(pd.get_dummies(categorical, dummy_na=False, dtype=float))
+
+    encoded = pd.concat(pieces, axis=1) if pieces else pd.DataFrame(index=frame.index)
+    if encoded.empty:
+        raise ValueError("Encoding produced no usable feature columns.")
+
+    # XGBoost rejects feature names containing [, ] or <; deduplicate after encoding.
+    seen: dict[str, int] = {}
+    clean_cols: list[str] = []
+    for raw in encoded.columns:
+        name = str(raw).replace("[", "(").replace("]", ")").replace("<", "lt").replace(">", "gt")
+        name = name.replace("\n", " ").strip() or "feature"
+        count = seen.get(name, 0)
+        seen[name] = count + 1
+        clean_cols.append(name if count == 0 else f"{name}_{count}")
+    encoded.columns = clean_cols
+    return encoded.astype(float)
+
+
+def _fresh_estimator(estimator: Any) -> Any:
+    try:
+        return clone(estimator)
+    except Exception:
+        return copy.deepcopy(estimator)
+
+
+def _cv_predictions(estimator: Any, X: pd.DataFrame, y: np.ndarray, cv: int, random_state: int) -> tuple[np.ndarray, np.ndarray, float | None]:
+    """Manual CV loop that works across sklearn, xgboost, lightgbm, and small datasets."""
+    counts = np.bincount(np.asarray(y, dtype=int))
+    positive_counts = counts[counts > 0]
+    max_splits = int(positive_counts.min()) if len(positive_counts) else 0
+    n_splits = max(2, min(int(cv), max_splits))
+    if n_splits < 2:
+        raise ValueError("Cross-validation needs at least two rows in each target class.")
+
+    folds = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
+    y_proba = np.zeros(len(y), dtype=float)
+    y_pred = np.zeros(len(y), dtype=int)
+    aucs: list[float] = []
+    for train_idx, test_idx in folds.split(X, y):
+        fitted = _fresh_estimator(estimator)
+        fitted.fit(X.iloc[train_idx], y[train_idx])
+        fold_proba = _predict_proba_1(fitted, X.iloc[test_idx])
+        y_proba[test_idx] = fold_proba
+        y_pred[test_idx] = np.asarray(fitted.predict(X.iloc[test_idx]), dtype=int)
+        try:
+            aucs.append(float(roc_auc_score(y[test_idx], fold_proba)))
+        except Exception:
+            pass
+    return y_pred, y_proba, float(np.mean(aucs)) if aucs else None
+
+def _predict_proba_1(model: Any, X: pd.DataFrame) -> np.ndarray:
+    if hasattr(model, "predict_proba"):
+        proba = model.predict_proba(X)
+        arr = np.asarray(proba)
+        return arr[:, 1] if arr.ndim == 2 and arr.shape[1] > 1 else arr.ravel()
+    if hasattr(model, "decision_function"):
+        score = np.asarray(model.decision_function(X), dtype=float).ravel()
+        return 1.0 / (1.0 + np.exp(-score))
+    pred = np.asarray(model.predict(X), dtype=float).ravel()
+    return pred
+
+
+
+def _scalar_metric(value: Any) -> float | None:
+    """Convert metric-like objects to a sortable/displayable scalar.
+
+    HUGIML tuning artifacts and some third-party estimators may expose scores as
+    NumPy arrays, pandas objects, or short sequences. Returns the nanmean of
+    finite numeric values for arrays/sequences, and None when no scalar can be
+    derived.
+    """
+    if value is None:
+        return None
+    if isinstance(value, (str, bytes, dict)):
+        return None
+    try:
+        arr = np.asarray(value, dtype=float)
+        if arr.size == 0:
+            return None
+        arr = arr.reshape(-1)
+        arr = arr[np.isfinite(arr)]
+        if arr.size == 0:
+            return None
+        return float(np.nanmean(arr))
+    except Exception:
+        try:
+            scalar = float(value)
+            return scalar if np.isfinite(scalar) else None
+        except Exception:
+            return None
+
+def _metric_row(y_true, y_pred, y_proba) -> dict[str, float | int | None]:
+    row: dict[str, float | int | None] = {
+        "accuracy": float(accuracy_score(y_true, y_pred)),
+        "precision": float(precision_score(y_true, y_pred, zero_division=0)),
+        "recall": float(recall_score(y_true, y_pred, zero_division=0)),
+        "f1": float(f1_score(y_true, y_pred, zero_division=0)),
+    }
+    try:
+        row["roc_auc"] = float(roc_auc_score(y_true, y_proba))
+    except Exception:
+        row["roc_auc"] = None
+    return row
+
+
+def _feature_importance(model: Any, X: pd.DataFrame, max_rows: int = 80) -> pd.DataFrame:
+    """Return a normalized, descending feature-importance table.
+
+    HUGIML exposes a rich ``feature_importances()`` DataFrame with original,
+    pattern, and augmented-pair feature families. Standard sklearn-like models
+    expose either ``feature_importances_`` or ``coef_``. The Workbench keeps the
+    richer columns when available and always provides ``feature`` +
+    ``importance`` for plotting.
+    """
+    if hasattr(model, "feature_importances") and callable(getattr(model, "feature_importances")):
+        try:
+            rich = model.feature_importances()
+            if isinstance(rich, pd.DataFrame) and not rich.empty:
+                df = rich.copy()
+                if "importance" not in df.columns:
+                    if "abs_coefficient" in df.columns:
+                        df["importance"] = pd.to_numeric(df["abs_coefficient"], errors="coerce")
+                    elif "coefficient" in df.columns:
+                        df["importance"] = pd.to_numeric(df["coefficient"], errors="coerce").abs()
+                if "feature" not in df.columns:
+                    if "display_name" in df.columns:
+                        df["feature"] = df["display_name"].astype(str)
+                    elif "pattern" in df.columns:
+                        df["feature"] = df["pattern"].astype(str)
+                    elif df.index.name:
+                        df["feature"] = df.index.astype(str)
+                if "feature" in df.columns and "importance" in df.columns:
+                    df["importance"] = pd.to_numeric(df["importance"], errors="coerce").fillna(0.0)
+                    return df.sort_values("importance", ascending=False).head(max_rows).reset_index(drop=True)
+        except Exception:
+            pass
+
+    cols = [str(c) for c in X.columns]
+    values = None
+    if hasattr(model, "feature_importances_"):
+        values = np.asarray(getattr(model, "feature_importances_"), dtype=float)
+    elif hasattr(model, "coef_"):
+        coef = np.asarray(getattr(model, "coef_"), dtype=float)
+        values = np.abs(coef[0] if coef.ndim > 1 else coef)
+    elif hasattr(model, "term_importances"):
+        try:
+            values = np.asarray(model.term_importances(), dtype=float)
+            cols = [str(x) for x in getattr(model, "term_names_", cols)]
+        except Exception:
+            values = None
+
+    if values is None or len(values) == 0:
+        return pd.DataFrame()
+    n = min(len(values), len(cols))
+    df = pd.DataFrame({"feature": cols[:n], "importance": values[:n]})
+    return df.sort_values("importance", ascending=False).head(max_rows).reset_index(drop=True)
+
+
+def _run_single_model(
+    model_name: str,
+    category: str,
+    params: dict[str, Any],
+    X: pd.DataFrame,
+    y: np.ndarray,
+    cv: int,
+    random_state: int,
+) -> dict[str, Any]:
+    started = time.perf_counter()
+    if model_name == "HUGIML":
+        result = fit_hugiml_config(X, y, params=params, cv=cv, scoring="roc_auc", random_state=random_state)
+        model = getattr(result, "best_estimator_", None)
+        if model is None:
+            return {
+                "model": model_name,
+                "category": category,
+                "status": getattr(result, "status_", "failed"),
+                "params": params,
+                "diagnostic": getattr(result, "error_", None),
+                "fit_time_sec": round(time.perf_counter() - started, 4),
+                "artifact": result,
+            }
+        y_proba = _predict_proba_1(model, X)
+        y_pred = np.asarray(model.predict(X))
+        metrics = _metric_row(y, y_pred, y_proba)
+        cv_score = getattr(result, "best_score_", None)
+    else:
+        estimator = _build_estimator(model_name, params, random_state)
+        X_model = _safe_numeric_frame(X)
+        y_pred, y_proba, cv_score = _cv_predictions(estimator, X_model, y, cv, random_state)
+        model = _fresh_estimator(estimator)
+        model.fit(X_model, y)
+        metrics = _metric_row(y, y_pred, y_proba)
+        X = X_model
+
+    metrics["cv_roc_auc"] = _scalar_metric(cv_score)
+    artifact = {
+        "model": model,
+        "params": params,
+        "y_pred": y_pred,
+        "y_proba": y_proba,
+        "feature_importance": _feature_importance(model, X),
+        "feature_frame": X,
+        "confusion_matrix": confusion_matrix(y, y_pred),
+        "implementation": getattr(model, "backend_", "native"),
+    }
+    return {
+        "model": model_name,
+        "category": category,
+        "status": "ok",
+        "params": params,
+        **metrics,
+        "fit_time_sec": round(time.perf_counter() - started, 4),
+        "artifact": artifact,
+    }
+
+
+def run_experiments(
+    selected: dict[str, list[str]],
+    param_map: dict[str, list[dict[str, Any]]],
+    X: pd.DataFrame,
+    y: np.ndarray,
+    cv: int,
+    random_state: int,
+) -> list[dict[str, Any]]:
+    runs: list[dict[str, Any]] = []
+    for category, names in selected.items():
+        for model_name in names:
+            configs = param_map.get(model_name, [_default_model_params(model_name)])
+            multi = len(configs) > 1  # only suffix when there are multiple configs
+            for idx, params in enumerate(configs, start=1):
+                label_params = dict(params)
+                try:
+                    row = _run_single_model(model_name, category, label_params, X, y, cv, random_state)
+                except Exception as exc:
+                    row = {
+                        "model": model_name,
+                        "category": category,
+                        "status": "failed",
+                        "params": label_params,
+                        "diagnostic": repr(exc),
+                        "fit_time_sec": None,
+                        "artifact": None,
+                    }
+                base_id = model_name.replace(' ', '_').lower()
+                row["run_id"] = f"{base_id}_{idx}" if multi else base_id
+                row["config_index"] = idx if multi else None
+                runs.append(row)
+    return runs
+
+
+# ---------------------------------------------------------------------------
+# UI rendering
+# ---------------------------------------------------------------------------
+
+
+def _render_intro(ctx: dict[str, Any]) -> None:
+    st.markdown(
+        f"""
+        <div class="hugiml-hero hugiml-workbench-hero">
+          <span class="hugiml-eyebrow">Experiment Workbench</span>
+          <h1>Model Comparison &amp; Benchmarking</h1>
+          <p>Configure HUGIML, benchmark it against baseline, ensemble, and interpretable models,
+          inspect metrics and plots, then promote a fitted HUGIML run into Governance.</p>
+          <div class="hugiml-chip-row">
+            <span class="hugiml-chip">Data: {ctx['mode']}</span>
+            <span class="hugiml-chip">Rows: {ctx['meta']['n_rows']:,}</span>
+            <span class="hugiml-chip">Features: {ctx['meta']['n_features']:,}</span>
+            <span class="hugiml-chip">Governance: HUGIML only</span>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _render_workbench_workflow() -> None:
+    st.markdown(
+        """
+        <div class="hugiml-workflow">
+          <div class="hugiml-step">
+            <span class="hugiml-step-num">1</span>
+            <b>Select models</b>
+            <span>Choose baselines, ensembles, HUGIML, EBM, or RuleFit-style runs.</span>
+          </div>
+          <div class="hugiml-step">
+            <span class="hugiml-step-num">2</span>
+            <b>Configure candidates</b>
+            <span>Use Auto, Guided, or Advanced grid settings for tuning.</span>
+          </div>
+          <div class="hugiml-step">
+            <span class="hugiml-step-num">3</span>
+            <b>Compare evidence</b>
+            <span>Review leaderboard winners, ROC curves, PR curves, and feature importance.</span>
+          </div>
+          <div class="hugiml-step">
+            <span class="hugiml-step-num">4</span>
+            <b>Promote to Governance</b>
+            <span>Send a fitted HUGIML run to the evidence dashboard for audits.</span>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _render_model_picker() -> dict[str, list[str]]:
+    st.markdown("### 1. Select models")
+    st.caption("Compact names are used to conserve space; hover or read the helper text for full names.")
+    selected: dict[str, list[str]] = {}
+    cols = st.columns(3)
+    defaults = {
+        "Baselines": ["Logistic Regression", "Decision Tree"],
+        "Ensembles": ["Random Forest"],
+        "Interpretable Models": ["HUGIML"],
+    }
+    for i, (category, specs) in enumerate(MODEL_CATALOG.items()):
+        with cols[i]:
+            available_specs = [spec for spec in specs if _is_available(spec)]
+            unavailable_specs = [spec for spec in specs if not _is_available(spec)]
+            options = [spec.name for spec in available_specs]
+            chosen = st.multiselect(
+                category,
+                options=options,
+                default=[m for m in defaults.get(category, []) if m in options],
+                format_func=_model_short,
+                help="Select one or more models in this family.",
+                key=f"wb_models_{category}",
+            )
+            selected[category] = list(chosen)
+            if available_specs:
+                st.caption(" · ".join(_model_caption(spec) for spec in available_specs))
+            if unavailable_specs:
+                st.caption("Unavailable: " + " · ".join(f"{_model_short(spec.name)} needs {spec.optional_dependency}" for spec in unavailable_specs))
+    return selected
+
+def _render_hugiml_config() -> list[dict[str, Any]]:
+    st.markdown("#### HUGIML")
+    mode = st.radio("Configuration mode", ["Auto", "Guided", "Advanced grid"], horizontal=True, key="wb_hugiml_mode")
+    params = _default_params()
+    if mode == "Auto":
+        st.caption("Uses stable HUGIML defaults. Switch to Guided or Advanced grid for manual control.")
+        with st.expander("View auto parameters", expanded=False):
+            st.json(params, expanded=False)
+        return [params]
+
+    c1, c2, c3, c4 = st.columns(4)
+    params["B"] = int(c1.number_input("B", value=int(params["B"]), min_value=-1, step=1, help=PARAM_HINTS["B"]))
+    params["L"] = int(c2.number_input("L", value=int(params["L"]), min_value=1, max_value=5, step=1, help=PARAM_HINTS["L"]))
+    params["topK"] = int(c3.number_input("topK", value=int(params["topK"]), min_value=1, step=1, help=PARAM_HINTS["topK"]))
+    params["G"] = float(c4.number_input("G", value=float(params["G"]), min_value=0.0, step=0.001, format="%.5f", help=PARAM_HINTS["G"]))
+    params["feature_mode"] = st.selectbox(
+        "Feature mode",
+        ["original_plus_patterns", "patterns_only", "original_plus_interactions"],
+        index=0,
+        help=PARAM_HINTS["feature_mode"],
+    )
+    params["adaptive_binning"] = st.toggle("Adaptive binning", value=True)
+    params["topk_budget_strict"] = st.toggle("Strict top-K budget", value=False, help=PARAM_HINTS["topk_budget_strict"])
+
+    if mode == "Guided":
+        return [params]
+
+    with st.expander("Advanced grid values", expanded=True):
+        st.caption("Comma-separated values create multiple candidate HUGIML runs. Blank fields keep the guided value.")
+        g1, g2, g3, g4 = st.columns(4)
+        grid = {
+            "L": _parse_grid(g1.text_input("L values", value=str(params["L"])), int),
+            "topK": _parse_grid(g2.text_input("topK values", value=str(params["topK"])), int),
+            "G": _parse_grid(g3.text_input("G values", value=str(params["G"])), float),
+            "B": _parse_grid(g4.text_input("B values", value=str(params["B"])), int),
+        }
+    return _expand_param_grid(params, grid)
+
+
+def _render_generic_config(model_name: str) -> list[dict[str, Any]]:
+    st.markdown(f"#### {_model_short(model_name)}")
+    st.caption(model_name)
+    params = _default_model_params(model_name)
+
+    key = model_name.replace(" ", "_").lower()
+    mode = st.radio(
+        "Configuration mode",
+        ["Single", "Hyperparameter grid"],
+        horizontal=True,
+        key=f"wb_{key}_mode",
+        help="Single runs one fixed configuration. Hyperparameter grid sweeps comma-separated values and selects the best on validation CV ROC-AUC.",
+    )
+
+    if model_name == "Logistic Regression":
+        c1, c2 = st.columns(2)
+        params["C"] = float(c1.number_input("Regularization strength C", value=1.0, min_value=0.0001, step=0.1, key="wb_lr_c"))
+        params["max_iter"] = int(c2.number_input("Max iterations", value=1000, min_value=100, step=100, key="wb_lr_max_iter"))
+        st.caption("Uses the stable lbfgs solver. Newer scikit-learn versions deprecate the explicit penalty argument, so C controls regularization.")
+        if mode == "Hyperparameter grid":
+            with st.expander("Grid values", expanded=True):
+                st.caption("Comma-separated values sweep multiple candidates. Blank keeps the single value above.")
+                g1, g2 = st.columns(2)
+                grid = {
+                    "C": _parse_grid(g1.text_input("C values", value=str(params["C"]), key="wb_lr_c_grid"), float),
+                    "max_iter": _parse_grid(g2.text_input("max_iter values", value=str(params["max_iter"]), key="wb_lr_max_iter_grid"), int),
+                }
+            return _expand_param_grid(params, grid)
+
+    elif model_name == "Decision Tree":
+        c1, c2 = st.columns(2)
+        depth = c1.number_input("Max depth (0 = none)", value=4, min_value=0, step=1, key="wb_dt_depth")
+        params["max_depth"] = None if depth == 0 else int(depth)
+        params["min_samples_leaf"] = int(c2.number_input("Min samples leaf", value=1, min_value=1, step=1, key="wb_dt_leaf"))
+        if mode == "Hyperparameter grid":
+            with st.expander("Grid values", expanded=True):
+                st.caption("Comma-separated values. Use 0 for no depth limit. Blank keeps the value above.")
+                g1, g2 = st.columns(2)
+                raw_depths = _parse_grid(g1.text_input("max_depth values (0=none)", value=str(depth), key="wb_dt_depth_grid"), int)
+                grid: dict[str, list[Any]] = {
+                    "max_depth": [None if d == 0 else d for d in raw_depths],
+                    "min_samples_leaf": _parse_grid(g2.text_input("min_samples_leaf values", value=str(params["min_samples_leaf"]), key="wb_dt_leaf_grid"), int),
+                }
+            return _expand_param_grid(params, grid)
+
+    elif model_name == "Random Forest":
+        c1, c2, c3 = st.columns(3)
+        params["n_estimators"] = int(c1.number_input("Trees", value=200, min_value=10, step=10, key="wb_rf_trees"))
+        depth = c2.number_input("Max depth (0 = none)", value=0, min_value=0, step=1, key="wb_rf_depth")
+        params["max_depth"] = None if depth == 0 else int(depth)
+        params["min_samples_leaf"] = int(c3.number_input("Min samples leaf", value=1, min_value=1, step=1, key="wb_rf_leaf"))
+        if mode == "Hyperparameter grid":
+            with st.expander("Grid values", expanded=True):
+                st.caption("Comma-separated values. Use 0 for no depth limit.")
+                g1, g2, g3 = st.columns(3)
+                raw_depths = _parse_grid(g2.text_input("max_depth values (0=none)", value=str(depth), key="wb_rf_depth_grid"), int)
+                grid = {
+                    "n_estimators": _parse_grid(g1.text_input("n_estimators values", value=str(params["n_estimators"]), key="wb_rf_trees_grid"), int),
+                    "max_depth": [None if d == 0 else d for d in raw_depths],
+                    "min_samples_leaf": _parse_grid(g3.text_input("min_samples_leaf values", value=str(params["min_samples_leaf"]), key="wb_rf_leaf_grid"), int),
+                }
+            return _expand_param_grid(params, grid)
+
+    elif model_name in {"XGBoost", "LightGBM"}:
+        c1, c2, c3 = st.columns(3)
+        params["n_estimators"] = int(c1.number_input("Estimators", value=200, min_value=10, step=10, key=f"wb_{key}_n"))
+        params["max_depth"] = int(c2.number_input("Max depth", value=4, min_value=-1, step=1, key=f"wb_{key}_depth"))
+        params["learning_rate"] = float(c3.number_input("Learning rate", value=0.05, min_value=0.001, step=0.01, format="%.3f", key=f"wb_{key}_lr"))
+        if mode == "Hyperparameter grid":
+            with st.expander("Grid values", expanded=True):
+                st.caption("Comma-separated values sweep multiple candidates.")
+                g1, g2, g3 = st.columns(3)
+                grid = {
+                    "n_estimators": _parse_grid(g1.text_input("n_estimators values", value=str(params["n_estimators"]), key=f"wb_{key}_n_grid"), int),
+                    "max_depth": _parse_grid(g2.text_input("max_depth values", value=str(params["max_depth"]), key=f"wb_{key}_depth_grid"), int),
+                    "learning_rate": _parse_grid(g3.text_input("learning_rate values", value=str(params["learning_rate"]), key=f"wb_{key}_lr_grid"), float),
+                }
+            return _expand_param_grid(params, grid)
+
+    elif model_name == "EBM":
+        c1, c2 = st.columns(2)
+        params["max_bins"] = int(c1.number_input("Max bins", value=32, min_value=16, step=16, key="wb_ebm_bins"))
+        params["interactions"] = int(c2.number_input("Interactions", value=5, min_value=0, step=1, key="wb_ebm_interactions"))
+        if mode == "Hyperparameter grid":
+            with st.expander("Grid values", expanded=True):
+                st.caption("Comma-separated values sweep multiple candidates.")
+                g1, g2 = st.columns(2)
+                grid = {
+                    "max_bins": _parse_grid(g1.text_input("max_bins values", value=str(params["max_bins"]), key="wb_ebm_bins_grid"), int),
+                    "interactions": _parse_grid(g2.text_input("interactions values", value=str(params["interactions"]), key="wb_ebm_interactions_grid"), int),
+                }
+            return _expand_param_grid(params, grid)
+
+    elif model_name == "RuleFit":
+        c1, c2 = st.columns(2)
+        params["tree_size"] = int(c1.number_input("Tree size", value=4, min_value=2, step=1, key="wb_rulefit_tree"))
+        params["max_rules"] = int(c2.number_input("Max rules", value=100, min_value=100, step=100, key="wb_rulefit_rules"))
+        if find_spec("imodels") is None:
+            st.caption("imodels is not installed; this run will be labelled RuleFit-style fallback.")
+        else:
+            st.caption("Uses imodels.RuleFitClassifier when compatible.")
+        if mode == "Hyperparameter grid":
+            with st.expander("Grid values", expanded=True):
+                st.caption("Comma-separated values sweep multiple candidates.")
+                g1, g2 = st.columns(2)
+                grid = {
+                    "tree_size": _parse_grid(g1.text_input("tree_size values", value=str(params["tree_size"]), key="wb_rulefit_tree_grid"), int),
+                    "max_rules": _parse_grid(g2.text_input("max_rules values", value=str(params["max_rules"]), key="wb_rulefit_rules_grid"), int),
+                }
+            return _expand_param_grid(params, grid)
+
+    return [params]
+
+
+def _render_configs(selected: dict[str, list[str]]) -> dict[str, list[dict[str, Any]]]:
+    st.markdown("### 2. Configure parameters")
+    all_models = [m for models in selected.values() for m in models]
+    if not all_models:
+        st.info("Select at least one available model to configure.")
+        return {}
+    param_map: dict[str, list[dict[str, Any]]] = {}
+    tabs = st.tabs([_model_short(m) for m in all_models])
+    for tab, model_name in zip(tabs, all_models):
+        with tab:
+            if model_name == "HUGIML":
+                param_map[model_name] = _render_hugiml_config()
+            else:
+                param_map[model_name] = _render_generic_config(model_name)
+    total = sum(len(v) for v in param_map.values())
+    tuning_models = [m for m, configs in param_map.items() if len(configs) > 1]
+    if tuning_models:
+        st.caption(
+            f"Prepared {total:,} candidate configuration(s) across {len(param_map)} model(s). "
+            f"Hyperparameter grid active for: {', '.join(_model_short(m) for m in tuning_models)}. "
+            f"Best config per model will be selected by CV ROC-AUC on held-out validation folds."
+        )
+    else:
+        st.caption(f"Prepared {total:,} candidate configuration(s).")
+    return param_map
+
+
+def _leaderboard_frame(runs: list[dict[str, Any]]) -> pd.DataFrame:
+    # Determine best run_id per model for tuning annotation
+    best_per_model = _best_run_per_model(runs)
+    best_run_ids = {r.get("run_id") for r in best_per_model.values()}
+
+    rows = []
+    for r in runs:
+        params = r.get("params", {}) or {}
+        run_id = r.get("run_id")
+        rows.append({
+            "run_id": run_id,
+            "category": r.get("category"),
+            "model": r.get("model"),
+            "display": _run_display_name(r),
+            "status": r.get("status"),
+            "best_config": "✓" if run_id in best_run_ids else "",
+            "cv_roc_auc": _scalar_metric(r.get("cv_roc_auc")),
+            "roc_auc": _scalar_metric(r.get("roc_auc")),
+            "f1": _scalar_metric(r.get("f1")),
+            "precision": _scalar_metric(r.get("precision")),
+            "recall": _scalar_metric(r.get("recall")),
+            "accuracy": _scalar_metric(r.get("accuracy")),
+            "fit_time_sec": _scalar_metric(r.get("fit_time_sec")),
+            "params": params,
+            "diagnostic": r.get("diagnostic"),
+        })
+    df = pd.DataFrame(rows)
+    if not df.empty:
+        sort_col = "cv_roc_auc" if "cv_roc_auc" in df.columns else "roc_auc"
+        df = df.sort_values(sort_col, ascending=False, na_position="last").reset_index(drop=True)
+    return df
+
+
+
+def _best_run_per_model(runs: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Return the best successful run per model, selected by cv_roc_auc on validation data.
+
+    When a model was run with multiple hyperparameter configurations the candidate
+    with the highest mean CV ROC-AUC (out-of-fold validation score) is selected as
+    the winner. Single-config runs are returned as-is. Only successful runs
+    (status == 'ok') are considered.
+    """
+    best: dict[str, dict[str, Any]] = {}
+    for run in runs:
+        if run.get("status") != "ok":
+            continue
+        model = str(run.get("model", ""))
+        score = _scalar_metric(run.get("cv_roc_auc"))
+        prev = best.get(model)
+        prev_score = _scalar_metric(prev.get("cv_roc_auc")) if prev else None
+        if prev is None or (score is not None and (prev_score is None or score > prev_score)):
+            best[model] = run
+    return best
+
+
+def _run_label(row: dict[str, Any]) -> str:
+    model = _run_display_name(row)
+    idx = row.get("config_index")
+    # config_index is None for single-config runs (no suffix), an int for multi-config
+    return f"{model} #{idx}" if idx is not None else model
+
+
+def _successful_runs(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [r for r in runs if r.get("status") == "ok" and isinstance(r.get("artifact"), dict)]
+
+
+def _render_curve_comparison(runs: list[dict[str, Any]], y: np.ndarray) -> None:
+    ok_runs = _successful_runs(runs)
+    if not ok_runs:
+        st.info("Curves are available after at least one successful run.")
+        return
+
+    plot_runs = ok_runs
+    st.caption("Each curve uses out-of-fold predictions produced during the Workbench run.")
+
+    roc_grid = np.linspace(0.0, 1.0, 101)
+    pr_grid = np.linspace(0.0, 1.0, 101)
+    roc_data: dict[str, np.ndarray] = {"FPR": roc_grid}
+    pr_data: dict[str, np.ndarray] = {"Recall": pr_grid}
+
+    for run in plot_runs:
+        artifact = run.get("artifact") or {}
+        y_proba = artifact.get("y_proba")
+        if y_proba is None:
+            continue
+        # Use the clean model name (not run_id) for the legend
+        label = _model_short(str(run.get("model", "unknown")))
+        try:
+            fpr, tpr, _ = roc_curve(y, y_proba)
+            roc_data[label] = np.interp(roc_grid, fpr, tpr)
+        except Exception:
+            pass
+        try:
+            precision, recall, _ = precision_recall_curve(y, y_proba)
+            order = np.argsort(recall)
+            pr_data[label] = np.interp(pr_grid, recall[order], precision[order])
+        except Exception:
+            pass
+
+    left, right = st.columns(2)
+    with left:
+        st.markdown("##### ROC comparison")
+        roc_df = pd.DataFrame(roc_data).set_index("FPR")
+        if roc_df.shape[1] > 0:
+            st.line_chart(roc_df, width="stretch")
+        else:
+            st.info("No ROC curves could be drawn for the successful runs.")
+    with right:
+        st.markdown("##### Precision-recall comparison")
+        pr_df = pd.DataFrame(pr_data).set_index("Recall")
+        if pr_df.shape[1] > 0:
+            st.line_chart(pr_df, width="stretch")
+        else:
+            st.info("No precision-recall curves could be drawn for the successful runs.")
+
+
+
+def _render_ordered_feature_importance(fi: Any, limit: int = 20) -> None:
+    if not isinstance(fi, pd.DataFrame) or fi.empty:
+        st.info("No feature-importance artifact was exposed by this model.")
+        return
+    plot_df = fi.copy()
+    plot_df["importance"] = pd.to_numeric(plot_df["importance"], errors="coerce").fillna(0.0)
+    # Sort descending and take top-N
+    plot_df = plot_df.sort_values("importance", ascending=False).head(limit).reset_index(drop=True)
+    st.caption("Ordered by descending importance for quick scanning.")
+
+    # Horizontal bar chart via matplotlib for a deterministically sorted plot.
+    try:
+        import matplotlib
+        import matplotlib.pyplot as plt
+        matplotlib.rcParams.update({"figure.dpi": 120})
+
+        # barh renders row 0 at the bottom and the last row at the top.
+        # Sort ascending so the most important feature ends up at the top.
+        display_df = plot_df.sort_values("importance", ascending=True).reset_index(drop=True)
+        feature_col = "display_name" if "display_name" in display_df.columns else "feature"
+
+        fig, ax = plt.subplots(figsize=(7, max(2.5, len(display_df) * 0.32)))
+        ax.set_facecolor("none")
+        ax.barh(
+            display_df[feature_col].astype(str),
+            display_df["importance"],
+            color="#2563eb",
+            height=0.65,
+        )
+        ax.set_xlabel("Importance", fontsize=8)
+        ax.tick_params(axis="y", labelsize=7)
+        ax.tick_params(axis="x", labelsize=7)
+        ax.spines[["top", "right"]].set_visible(False)
+        ax.spines[["left", "bottom"]].set_color((0.5, 0.5, 0.5, 0.3))  # valid RGBA tuple
+        ax.xaxis.grid(True, alpha=0.2, linestyle="--", linewidth=0.6)
+        ax.set_axisbelow(True)
+        plt.tight_layout(pad=0.4)
+        st.pyplot(fig, width="stretch")
+        plt.close(fig)
+    except Exception:
+        # Fallback: use st.bar_chart with reversed-sorted index
+        chart_df = plot_df.set_index("feature" if "feature" in plot_df.columns else plot_df.columns[0])["importance"]
+        st.bar_chart(chart_df, width="stretch")
+
+    with st.expander("Feature importance table", expanded=False):
+        st.dataframe(dataframe_for_display(_safe_stringify_objects(plot_df)), width="stretch", hide_index=True)
+
+
+def _coefficient_frame(model: Any, X: pd.DataFrame | None) -> pd.DataFrame:
+    if not hasattr(model, "coef_") or X is None:
+        return pd.DataFrame()
+    coef = np.asarray(getattr(model, "coef_"), dtype=float)
+    values = coef[0] if coef.ndim > 1 else coef
+    cols = [str(c) for c in X.columns]
+    n = min(len(cols), len(values))
+    df = pd.DataFrame({"feature": cols[:n], "coefficient": values[:n]})
+    df["abs_coefficient"] = df["coefficient"].abs()
+    return df.sort_values("abs_coefficient", ascending=False).reset_index(drop=True)
+
+
+def _safe_df(value: Any) -> pd.DataFrame:
+    if isinstance(value, pd.DataFrame):
+        return value.copy()
+    if value is None:
+        return pd.DataFrame()
+    try:
+        return pd.DataFrame(value)
+    except Exception:
+        return pd.DataFrame({"value": [str(value)]})
+
+
+def _has_items(value: Any) -> bool:
+    """Type-safe non-empty check for lists, arrays, Series, DataFrames, and dicts."""
+    if value is None:
+        return False
+    if isinstance(value, pd.DataFrame):
+        return not value.empty
+    if isinstance(value, pd.Series):
+        return not value.empty
+    if isinstance(value, np.ndarray):
+        return value.size > 0
+    try:
+        return len(value) > 0  # type: ignore[arg-type]
+    except Exception:
+        return bool(value)
+
+
+def _safe_mapping(value: Any) -> dict[str, Any]:
+    """Return a dict only when the object is safely mapping-like."""
+    if isinstance(value, dict):
+        return value
+    try:
+        if hasattr(value, "items"):
+            return dict(value.items())
+    except Exception:
+        pass
+    return {}
+
+
+def _safe_int(value: Any, default: int = 0) -> int:
+    try:
+        arr = np.asarray(value)
+        if arr.size != 1:
+            return default
+        return int(arr.item())
+    except Exception:
+        try:
+            return int(value)
+        except Exception:
+            return default
+
+
+def _hugiml_patterns_frame(model: Any) -> pd.DataFrame:
+    try:
+        value = model.get_pattern_info()
+        df = _safe_df(value)
+        if not df.empty:
+            return df
+    except Exception:
+        pass
+    try:
+        features = model.get_hug_features()
+        if _has_items(features):
+            return pd.DataFrame({"pattern": [str(x) for x in list(features)]})
+    except Exception:
+        pass
+    for attr in ("pattern_labels_", "_pattern_labels_", "raw_patterns_", "patterns_"):
+        try:
+            labels = getattr(model, attr, None)
+            if labels is not None:
+                return pd.DataFrame({"pattern": [str(x) for x in list(labels)]})
+        except Exception:
+            continue
+    return pd.DataFrame()
+
+
+def _hugiml_features_frame(model: Any) -> pd.DataFrame:
+    try:
+        df = model.feature_importances()
+        df = _safe_df(df)
+        if not df.empty:
+            if "importance" not in df.columns:
+                if "abs_coefficient" in df.columns:
+                    df["importance"] = pd.to_numeric(df["abs_coefficient"], errors="coerce")
+                elif "coefficient" in df.columns:
+                    df["importance"] = pd.to_numeric(df["coefficient"], errors="coerce").abs()
+            if "feature_type" not in df.columns:
+                feature_col = "feature" if "feature" in df.columns else "pattern" if "pattern" in df.columns else None
+                if feature_col:
+                    def _kind(x: Any) -> str:
+                        text = str(x)
+                        if text.startswith("orig:"):
+                            return "original"
+                        if text.startswith("augmented_pair:"):
+                            return "augmented_pair"
+                        if text.startswith("pattern:"):
+                            return "pattern"
+                        return "feature"
+                    df["feature_type"] = df[feature_col].map(_kind)
+            if "display_name" not in df.columns:
+                if "feature" in df.columns:
+                    df["display_name"] = df["feature"].astype(str).str.replace(r"^(orig:|pattern:|augmented_pair:)", "", regex=True)
+                elif "pattern" in df.columns:
+                    df["display_name"] = df["pattern"].astype(str)
+            if "importance" in df.columns:
+                df["importance"] = pd.to_numeric(df["importance"], errors="coerce").fillna(0.0)
+                df = df.sort_values("importance", ascending=False).reset_index(drop=True)
+            return df
+    except Exception:
+        pass
+
+    try:
+        names = model.get_downstream_features()
+        if _has_items(names):
+            rows = []
+            for name in list(names):
+                text = str(name)
+                if text.startswith("orig:"):
+                    kind = "original"
+                    display = text[len("orig:"):]
+                elif text.startswith("augmented_pair:"):
+                    kind = "augmented_pair"
+                    display = text[len("augmented_pair:"):]
+                elif text.startswith("pattern:"):
+                    kind = "pattern"
+                    display = text[len("pattern:"):]
+                else:
+                    kind = "feature"
+                    display = text
+                rows.append({"feature": text, "display_name": display, "feature_type": kind})
+            return pd.DataFrame(rows)
+    except Exception:
+        pass
+    return pd.DataFrame()
+
+
+def _safe_stringify_objects(df: pd.DataFrame) -> pd.DataFrame:
+    """Convert list/dict/ndarray cells to strings before display.
+
+    Only object-dtype columns are touched; numeric/bool/datetime columns are
+    left intact.
+    """
+    df = df.copy()
+    for col in df.columns:
+        if df[col].dtype == object:
+            df[col] = df[col].map(
+                lambda v: str(v) if isinstance(v, (list, dict, np.ndarray)) else v
+            )
+    return df
+
+
+def _filter_text_table(label: str, df: pd.DataFrame, key: str, *, columns: list[str] | None = None, limit: int = 300) -> None:
+    if df.empty:
+        st.info(f"No {label.lower()} artifact is available for this HUGIML run.")
+        return
+    query = st.text_input(f"Search {label.lower()}", value="", key=key, placeholder="Type to filter...")
+    show_df = df.copy()
+    if query:
+        mask = show_df.astype(str).apply(lambda col: col.str.contains(query, case=False, na=False)).any(axis=1)
+        show_df = show_df.loc[mask]
+    if columns:
+        existing = [c for c in columns if c in show_df.columns]
+        if existing:
+            show_df = show_df[existing]
+    st.caption(f"Showing {len(show_df):,} of {len(df):,} rows.")
+    st.dataframe(dataframe_for_display(_safe_stringify_objects(show_df.head(limit))), width="stretch", hide_index=True)
+
+
+def _render_hugiml_artifacts(model: Any, run_id: str = "hugiml", key_prefix: str = "") -> None:
+    """Render HUGIML interpretability artifacts.
+
+    ``key_prefix`` scopes all Streamlit widget keys to avoid collisions when
+    the same run appears in multiple tabs simultaneously.
+    """
+    patterns = _hugiml_patterns_frame(model)
+    features = _hugiml_features_frame(model)
+
+    composition: dict[str, Any] = {}
+    try:
+        composition = _safe_mapping(model.get_model_composition())
+    except Exception:
+        composition = {}
+
+    counts = _safe_mapping(composition.get("downstream_feature_counts"))
+    has_counts = _has_items(counts)
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Patterns", f"{len(patterns):,}" if not patterns.empty else "—")
+    c2.metric("Original features", f"{_safe_int(counts.get('original')):,}" if has_counts else "—")
+    c3.metric("Augmented features", f"{_safe_int(counts.get('augmented_pair')):,}" if has_counts else "—")
+    downstream_total = _safe_int(counts.get("total"), len(features)) if has_counts or not features.empty else None
+    c4.metric("Downstream total", f"{downstream_total:,}" if downstream_total is not None else "—")
+
+    # Unique key namespace per call site: prefix + run_id.
+    ns = f"{key_prefix}{run_id}" if key_prefix else run_id
+
+    pat_tab, orig_tab, aug_tab, all_tab = st.tabs(
+        ["Patterns", "Original features", "Augmented features", "All downstream features"],
+        key=f"{ns}_hugiml_inner_tabs",
+    )
+    with pat_tab:
+        _filter_text_table(
+            "Patterns",
+            patterns,
+            key=f"{ns}_hugiml_pattern_search",
+            columns=["pattern", "utility", "information_gain", "support"],
+        )
+    with orig_tab:
+        orig = features[features.get("feature_type", pd.Series(dtype=str)).astype(str).eq("original")] if not features.empty and "feature_type" in features.columns else pd.DataFrame()
+        _filter_text_table(
+            "Original features",
+            orig,
+            key=f"{ns}_hugiml_orig_search",
+            columns=["display_name", "feature", "importance", "coefficient", "abs_coefficient", "non_missing_rate", "variance"],
+        )
+    with aug_tab:
+        aug = features[features.get("feature_type", pd.Series(dtype=str)).astype(str).eq("augmented_pair")] if not features.empty and "feature_type" in features.columns else pd.DataFrame()
+        _filter_text_table(
+            "Augmented features",
+            aug,
+            key=f"{ns}_hugiml_aug_search",
+            columns=["display_name", "feature", "importance", "coefficient", "abs_coefficient", "raw_formula", "operation", "inputs", "risk_increases_when", "raw_interpretation"],
+        )
+    with all_tab:
+        _filter_text_table(
+            "Downstream features",
+            features,
+            key=f"{ns}_hugiml_all_search",
+            columns=["feature_type", "display_name", "feature", "importance", "coefficient", "abs_coefficient", "support", "non_missing_rate", "variance"],
+        )
+        if _has_items(composition):
+            with st.expander("Model composition", expanded=False, key=f"{ns}_model_composition_exp"):
+                st.json(composition)
+
+
+def _render_lr_artifacts(model: Any, X: pd.DataFrame | None, key_prefix: str = "") -> None:
+    coef_df = _coefficient_frame(model, X)
+    if coef_df.empty:
+        st.info("No coefficient artifact is available for this LR run.")
+        return
+    st.markdown("#### LR coefficients")
+    st.caption("Signed coefficients show direction; absolute values are used for ranking.")
+    st.dataframe(dataframe_for_display(coef_df.head(30)), width="stretch", hide_index=True)
+
+
+def _render_dt_artifacts(model: Any, X: pd.DataFrame | None, key_prefix: str = "") -> None:
+    if X is None:
+        st.info("No feature frame is available for tree inspection.")
+        return
+    try:
+        text_tree = export_text(model, feature_names=[str(c) for c in X.columns], max_depth=4)
+    except Exception as exc:
+        st.info(f"Could not export the tree text: {exc}")
+        return
+    st.markdown("#### Decision tree excerpt")
+    st.caption("Top levels only; increase max depth in configuration if needed, then rerun.")
+    st.code(text_tree, language="text")
+
+
+def _ebm_terms_frame(model: Any) -> pd.DataFrame:
+    names = list(map(str, getattr(model, "term_names_", [])))
+    values: list[float] = []
+    try:
+        values = list(map(float, model.term_importances()))
+    except Exception:
+        values = []
+    n = min(len(names), len(values))
+    if n == 0:
+        return pd.DataFrame()
+    df = pd.DataFrame({"term": names[:n], "importance": values[:n]})
+    return df.sort_values("importance", ascending=False).reset_index(drop=True)
+
+
+def _render_ebm_artifacts(model: Any, key_prefix: str = "") -> None:
+    terms = _ebm_terms_frame(model)
+    if terms.empty:
+        st.info("No EBM term artifact is available from this package/version.")
+        return
+    st.markdown("#### EBM terms")
+    st.bar_chart(terms.head(20).set_index("term")["importance"], width="stretch")
+    with st.expander("EBM term table", expanded=False, key=f"{key_prefix}ebm_term_table_exp"):
+        st.dataframe(dataframe_for_display(terms), width="stretch", hide_index=True)
+
+
+def _rulefit_rules_frame(model: Any) -> pd.DataFrame:
+    # imodels exposes rules through different attributes across versions.
+    for attr in ("rules_", "rule_ensemble", "rule_ensemble_"):
+        obj = getattr(model, attr, None)
+        if obj is None:
+            continue
+        try:
+            if isinstance(obj, pd.DataFrame):
+                return obj.head(50)
+            if hasattr(obj, "rules"):
+                rules = getattr(obj, "rules")
+                return pd.DataFrame({"rule": [str(r) for r in list(rules)[:50]]})
+            if isinstance(obj, (list, tuple)):
+                return pd.DataFrame({"rule": [str(r) for r in obj[:50]]})
+        except Exception:
+            continue
+    wrapped = getattr(model, "model_", None)
+    if wrapped is not None and wrapped is not model:
+        return _rulefit_rules_frame(wrapped)
+    if getattr(model, "backend_", "") == "sklearn-rulefit-style":
+        return pd.DataFrame({
+            "artifact": ["Rule indicators generated from boosted-tree leaves"],
+            "count": [int(getattr(getattr(model, "rule_encoder_", None), "categories_", [[]])[0].size) if hasattr(getattr(model, "rule_encoder_", None), "categories_") else None],
+        })
+    return pd.DataFrame()
+
+
+def _render_rulefit_artifacts(model: Any, implementation: str | None, key_prefix: str = "") -> None:
+    if implementation == "sklearn-rulefit-style":
+        st.info("This is labelled as RuleFit-style fallback, not official imodels.RuleFitClassifier.")
+    elif implementation == "imodels-rulefit":
+        st.caption("Implementation: imodels.RuleFitClassifier")
+    rules = _rulefit_rules_frame(model)
+    if rules.empty:
+        st.info("No rule table was exposed by this RuleFit implementation.")
+        return
+    st.markdown("#### RuleFit rules / rule artifacts")
+    st.dataframe(dataframe_for_display(rules), width="stretch", hide_index=True)
+
+
+def _render_interpretable_artifacts(selected_run: dict[str, Any], key_prefix: str = "") -> None:
+    """Render model-specific interpretability artifacts.
+
+    ``key_prefix`` scopes all Streamlit widget keys within this call so that
+    multiple tabs can render the same run without widget ID conflicts.
+    """
+    artifact = selected_run.get("artifact") if isinstance(selected_run.get("artifact"), dict) else {}
+    model = artifact.get("model") if isinstance(artifact, dict) else None
+    X_model = artifact.get("feature_frame") if isinstance(artifact, dict) else None
+    model_name = selected_run.get("model")
+    implementation = artifact.get("implementation") if isinstance(artifact, dict) else None
+
+    if model is None:
+        st.info("No fitted model artifact is available for this run.")
+        return
+    if model_name == "HUGIML":
+        st.markdown("#### HUGIML interpretability artifacts")
+        _render_hugiml_artifacts(model, run_id=str(selected_run.get("run_id", "hugiml")), key_prefix=key_prefix)
+    elif model_name == "Logistic Regression":
+        _render_lr_artifacts(model, X_model, key_prefix=key_prefix)
+    elif model_name == "Decision Tree":
+        _render_dt_artifacts(model, X_model, key_prefix=key_prefix)
+    elif model_name == "EBM":
+        _render_ebm_artifacts(model, key_prefix=key_prefix)
+    elif model_name == "RuleFit":
+        _render_rulefit_artifacts(model, implementation, key_prefix=key_prefix)
+    else:
+        st.info("This model exposes generic feature-importance artifacts only in the Workbench.")
+
+
+def _render_interpretability_comparison(runs: list[dict[str, Any]]) -> None:
+    ok_runs = _successful_runs(runs)
+    interpretable = [r for r in ok_runs if r.get("model") in {"HUGIML", "Logistic Regression", "Decision Tree", "EBM", "RuleFit"}]
+    if not interpretable:
+        st.info("No interpretable artifacts are available yet. Run HUGIML, LR, DT, EBM, or RuleFit.")
+        return
+
+    rows = []
+    for run in interpretable:
+        artifact = run.get("artifact") if isinstance(run.get("artifact"), dict) else {}
+        fi = artifact.get("feature_importance") if isinstance(artifact, dict) else None
+        model_name = run.get("model")
+        impl = artifact.get("implementation") if isinstance(artifact, dict) else ""
+        if model_name == "RuleFit" and impl == "sklearn-rulefit-style":
+            artifact_type = "RuleFit-style fallback rules"
+        elif model_name == "RuleFit":
+            artifact_type = "RuleFit rules"
+        elif model_name == "EBM":
+            artifact_type = "EBM terms"
+        elif model_name == "HUGIML":
+            artifact_type = "Patterns, original features, augmented features"
+        elif model_name == "Logistic Regression":
+            artifact_type = "LR coefficients"
+        elif model_name == "Decision Tree":
+            artifact_type = "Tree excerpt"
+        else:
+            artifact_type = "Feature importance"
+        rows.append({
+            "run_id": run.get("run_id"),
+            "model": _run_display_name(run),
+            "artifact": artifact_type,
+            "top_features_available": bool(isinstance(fi, pd.DataFrame) and not fi.empty),
+            "cv_roc_auc": run.get("cv_roc_auc"),
+        })
+
+    st.dataframe(dataframe_for_display(pd.DataFrame(rows)), width="stretch", hide_index=True)
+
+    # Each model's artifacts in a collapsible expander; first open by default.
+    for run in interpretable:
+        label = f"{_run_display_name(run)} — {run.get('run_id', '')}"
+        # First model open by default, rest collapsed
+        expanded = (run is interpretable[0])
+        with st.expander(label, expanded=expanded):
+            _render_interpretable_artifacts(run, key_prefix=f"interp_{run.get('run_id', '')}_")
+
+def _render_selected_run_details(selected_run: dict[str, Any], y: np.ndarray) -> None:
+    artifact = selected_run.get("artifact") or {}
+    y_proba = artifact.get("y_proba") if isinstance(artifact, dict) else None
+    y_pred = artifact.get("y_pred") if isinstance(artifact, dict) else None
+    if y_proba is None or y_pred is None:
+        st.info("Run details are available after a successful fitted run.")
+        return
+
+    implementation = artifact.get("implementation")
+    if selected_run.get("model") == "RuleFit" and implementation == "sklearn-rulefit-style":
+        st.info("This run used the sklearn RuleFit-style fallback, not imodels.RuleFitClassifier.")
+    elif selected_run.get("model") == "RuleFit" and implementation == "imodels-rulefit":
+        st.caption("Implementation: imodels.RuleFitClassifier")
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("CV ROC AUC", _fmt(selected_run.get("cv_roc_auc")))
+    c2.metric("F1", _fmt(selected_run.get("f1")))
+    c3.metric("Precision", _fmt(selected_run.get("precision")))
+    c4.metric("Recall", _fmt(selected_run.get("recall")))
+
+    left, right = st.columns([1, 1])
+    with left:
+        cm = artifact.get("confusion_matrix")
+        if cm is not None:
+            st.markdown("#### Confusion matrix")
+            st.dataframe(pd.DataFrame(cm, index=["Actual 0", "Actual 1"], columns=["Pred 0", "Pred 1"]), width="stretch")
+    with right:
+        with st.expander("Parameters", expanded=False):
+            st.json(selected_run.get("params", {}))
+
+    fi = artifact.get("feature_importance")
+    st.markdown("#### Feature importance")
+    _render_ordered_feature_importance(fi)
+
+    st.divider()
+    st.markdown("#### Model artifact")
+    _render_interpretable_artifacts(selected_run, key_prefix="inspect_")
+
+
+def _render_promotion(selected_run: dict[str, Any], ctx: dict[str, Any]) -> None:
+    # Only HUGIML runs can be promoted to Governance.
+    if selected_run.get("model") != "HUGIML":
+        return
+    if not st.button("Promote this HUGIML run to Governance", type="primary", width="stretch"):
+        return
+
+    artifact = selected_run.get("artifact")
+    if isinstance(artifact, dict):
+        model = artifact.get("model")
+        pseudo_result = type("WorkbenchHUGIMLResult", (), {})()
+        pseudo_result.best_estimator_ = model
+        pseudo_result.best_params_ = selected_run.get("params", {})
+        pseudo_result.best_score_ = selected_run.get("cv_roc_auc")
+        pseudo_result.results_ = [{"status": "ok", "score": selected_run.get("cv_roc_auc"), **(selected_run.get("params", {}) or {})}]
+        pseudo_result.status_ = "ok"
+        pseudo_result.error_ = None
+        try:
+            predictions = score_cases(model, ctx["X"])
+        except Exception:
+            predictions = pd.DataFrame()
+        st.session_state["hugiml_promoted_governance_ctx"] = {
+            **ctx,
+            "cache_key": f"workbench:{selected_run.get('run_id')}",
+            "result": pseudo_result,
+            "model": model,
+            "predictions": predictions,
+            "cv": ctx.get("cv"),
+            "random_state": ctx.get("random_state"),
+        }
+        st.session_state["hugiml_governance_requested"] = True
+        st.success("Promoted. Opening Governance now.")
+        st.rerun()
+
+
+
+def _request_results_drilldown_tab() -> None:
+    """Ask the next render to keep the UI on Results → Model drill-down.
+
+    Streamlit tabs are presentation containers and reset to the first tab after
+    a widget-triggered rerun. The model drill-down selectbox triggers such a
+    rerun, so we restore the user's intended tab with the same small JS bridge
+    already used by the Workbench to open Results after a run.
+    """
+    st.session_state["hugiml_jump_to_results_tab"] = True
+    st.session_state["hugiml_jump_to_results_inner_tab"] = "Model drill-down"
+
+
+def _restore_results_inner_tab_if_requested() -> None:
+    target = st.session_state.pop("hugiml_jump_to_results_inner_tab", None)
+    if not target:
+        return
+    target_js = json.dumps(str(target).lower())
+    _st_components.html(
+        f"""
+        <script>
+        (function tryClick(attempts) {{
+            if (attempts <= 0) return;
+            var tabs = window.parent.document.querySelectorAll('[data-baseweb="tab"]');
+            var target = {target_js};
+            for (var i = 0; i < tabs.length; i++) {{
+                var txt = (tabs[i].innerText || tabs[i].textContent || "").trim().toLowerCase();
+                if (txt.indexOf(target) !== -1) {{
+                    tabs[i].click();
+                    return;
+                }}
+            }}
+            setTimeout(function(){{ tryClick(attempts - 1); }}, 150);
+        }})(20);
+        </script>
+        """,
+        height=0,
+    )
+
+
+def _render_results(ctx: dict[str, Any]) -> None:
+    runs = st.session_state.get("hugiml_workbench_runs", [])
+    if not runs:
+        st.info("Run experiments to populate the leaderboard and comparison plots.")
+        return
+
+    leaderboard = _leaderboard_frame(runs)
+    ok_df = leaderboard[leaderboard["status"] == "ok"] if not leaderboard.empty else pd.DataFrame()
+    failed_df = leaderboard[leaderboard["status"] != "ok"] if not leaderboard.empty else pd.DataFrame()
+
+    # Best run per model (by CV ROC-AUC on held-out validation folds).
+    # Curves, interpretability, and drill-down always show only these winners;
+    # the leaderboard alone shows all runs with a ✓ marker on the winners.
+    best_per_model = _best_run_per_model(runs)
+    best_runs = list(best_per_model.values())
+    summary_tab, curves_tab, interpret_tab, inspect_tab = st.tabs(
+        [
+            "Leaderboard",
+            "Compare curves",
+            "Interpretability",
+            "Model drill-down",
+        ],
+        key="wb_results_tabs",
+    )
+    _restore_results_inner_tab_if_requested()
+
+    with summary_tab:
+        st.markdown("### Leaderboard")
+        compact_cols = ["run_id", "category", "display", "status", "best_config", "cv_roc_auc", "f1", "precision", "recall", "accuracy", "fit_time_sec"]
+        st.dataframe(dataframe_for_display(leaderboard[[c for c in compact_cols if c in leaderboard.columns]]), width="stretch", hide_index=True)
+        st.caption("**best_config ✓** marks the highest CV ROC-AUC configuration per model — the winner selected on held-out validation data.")
+
+        # Tuning summary: show best-per-model table when any model ran multiple configs
+        tuned_models = {
+            str(r.get("model"))
+            for r in runs
+            if sum(1 for rr in runs if rr.get("model") == r.get("model") and rr.get("status") == "ok") > 1
+        }
+        best_per_model = _best_run_per_model(runs)
+        if tuned_models and best_per_model:
+            st.markdown("#### Hyperparameter tuning — best configuration per model")
+            st.caption(
+                "For models run with multiple hyperparameter candidates, the row below shows the "
+                "winner selected by highest mean CV ROC-AUC on held-out validation folds. "
+                "Use **Model drill-down** to inspect any specific configuration."
+            )
+            winner_rows = []
+            for model_name, best_run in best_per_model.items():
+                n_candidates = sum(1 for r in runs if r.get("model") == model_name and r.get("status") == "ok")
+                winner_rows.append({
+                    "model": _model_short(model_name),
+                    "best_run_id": best_run.get("run_id"),
+                    "candidates_evaluated": n_candidates,
+                    "best_cv_roc_auc": _fmt(best_run.get("cv_roc_auc")),
+                    "best_f1": _fmt(best_run.get("f1")),
+                    "best_params": str(best_run.get("params", {})),
+                })
+            st.dataframe(
+                dataframe_for_display(pd.DataFrame(winner_rows)),
+                width="stretch",
+                hide_index=True,
+            )
+
+        if not ok_df.empty:
+            best = ok_df.iloc[0]
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Best model", _model_short(str(best.get("model", "N/A"))))
+            c2.metric("Best CV ROC AUC", _fmt(best.get("cv_roc_auc")))
+            c3.metric("Successful runs", f"{len(ok_df):,}/{len(leaderboard):,}")
+        if not failed_df.empty:
+            st.markdown("#### Failed runs")
+            st.dataframe(dataframe_for_display(failed_df[["run_id", "category", "display", "status", "diagnostic"]]), width="stretch", hide_index=True)
+            st.caption("Optional models can fail due to missing packages, unsupported versions, or data constraints. Successful runs are unaffected.")
+
+    with curves_tab:
+        _render_curve_comparison(best_runs, ctx["y"])
+
+    with interpret_tab:
+        _render_interpretability_comparison(best_runs)
+
+    with inspect_tab:
+        if not best_runs:
+            st.warning("No successful runs to inspect.")
+        else:
+            st.markdown(
+                """
+                <div class="hugiml-section-note">
+                  <p><b>Model drill-down</b> shows the best configuration per model, selected by CV ROC-AUC
+                  on held-out validation folds. Metrics (CV ROC-AUC, F1, Precision, Recall) are computed
+                  from <em>stitched out-of-fold predictions</em>. Each sample is predicted exactly once on
+                  its held-out CV fold, so no data leaks into the score. The confusion matrix and feature
+                  importance come from a final refit on the complete dataset after cross-validation.</p>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            best_run_ids_ordered = [r.get("run_id") for r in best_runs if r.get("status") == "ok"]
+            previous_selected = st.session_state.get("hugiml_model_drilldown_selected_id")
+            selected_index = best_run_ids_ordered.index(previous_selected) if previous_selected in best_run_ids_ordered else 0
+            selected_id = st.selectbox(
+                "Select model",
+                best_run_ids_ordered,
+                index=selected_index,
+                key="hugiml_model_drilldown_selected_id",
+                on_change=_request_results_drilldown_tab,
+            )
+            selected_run = next(r for r in best_runs if r.get("run_id") == selected_id)
+            _render_selected_run_details(selected_run, ctx["y"])
+            _render_promotion(selected_run, ctx)
+
+
+def _fmt(value: Any) -> str:
+    scalar = _scalar_metric(value)
+    return "N/A" if scalar is None else f"{scalar:.4f}"
+
+
+
+def render_workbench(ctx: dict[str, Any], section: str = "Setup") -> None:
+    message = st.session_state.pop("hugiml_workbench_last_message", None)
+    if message:
+        st.success(message)
+
+    _render_intro(ctx)
+    _render_workbench_workflow()
+
+    current_context_key = f"{ctx.get('cache_key')}:{ctx.get('cv')}:{ctx.get('random_state')}"
+    previous_context_key = st.session_state.get("hugiml_workbench_context_key")
+    has_previous_runs = bool(st.session_state.get("hugiml_workbench_runs"))
+    if previous_context_key and previous_context_key != current_context_key and has_previous_runs:
+        st.info(
+            "Dataset or run settings changed. Existing Workbench results are preserved; "
+            "switch to Results to compare, or re-run Setup to replace them."
+        )
+
+    # Auto-switch to Results tab after a run completes; executes via iframe JS.
+    jump_to_results = st.session_state.pop("hugiml_jump_to_results_tab", False)
+    if jump_to_results:
+        _st_components.html(
+            """
+            <script>
+            (function tryClick(attempts) {
+                if (attempts <= 0) return;
+                var tabs = window.parent.document.querySelectorAll('[data-baseweb="tab"]');
+                for (var i = 0; i < tabs.length; i++) {
+                    var txt = (tabs[i].innerText || tabs[i].textContent || "").trim().toLowerCase();
+                    if (txt.indexOf("results") !== -1) {
+                        tabs[i].click();
+                        return;
+                    }
+                }
+                setTimeout(function(){ tryClick(attempts - 1); }, 150);
+            })(20);
+            </script>
+            """,
+            height=0,
+        )
+
+    # Setup/Results tabs.
+    setup_tab, results_tab = st.tabs(["\u2699  Setup", "\U0001f4ca  Results"])
+
+    with setup_tab:
+        selected = _render_model_picker()
+        param_map = _render_configs(selected)
+
+        st.markdown("### 3. Run experiments")
+        total_runs = sum(len(param_map.get(m, [])) for models in selected.values() for m in models)
+        tuning_models = [m for m, configs in param_map.items() if len(configs) > 1]
+        run_disabled = total_runs == 0
+        if total_runs == 0:
+            run_label = "Select models to run experiments"
+        elif tuning_models:
+            run_label = f"Run {total_runs:,} candidate(s) — tuning {', '.join(_model_short(m) for m in tuning_models)}"
+        else:
+            run_label = f"Run {total_runs:,} candidate experiment(s)"
+        run_clicked = st.button(
+            run_label,
+            type="primary",
+            disabled=run_disabled,
+            width="stretch",
+        )
+        if run_clicked:
+            with st.spinner("Running selected model configurations..."):
+                st.session_state["hugiml_workbench_runs"] = run_experiments(
+                    selected,
+                    param_map,
+                    ctx["X"],
+                    ctx["y"],
+                    int(ctx.get("cv", 3)),
+                    int(ctx.get("random_state", 2026)),
+                )
+            st.session_state["hugiml_workbench_context_key"] = current_context_key
+            # Flag triggers auto-navigation to Results tab on next render.
+            st.session_state["hugiml_jump_to_results_tab"] = True
+            st.session_state["hugiml_nav_section"] = "Results"
+            st.rerun()
+
+    with results_tab:
+        _render_results(ctx)

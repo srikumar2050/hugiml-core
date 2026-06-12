@@ -14,18 +14,17 @@ Why HUGIML?
 
 * **Intrinsic interpretability:** learned HUG patterns are the model representation, not an after-the-fact explanation.
 * **Regulated-domain fit:** model cards, audit artifacts, pruning trails, calibration, drift monitoring, and deployment helpers are included.
-* **Native performance:** computationally intensive mining, transaction construction, and matrix-building stages are C++ accelerated with optional OpenMP support. Version 1.1.8 adds fast tuning for eligible adaptive-binning hyperparameter searches, improves higher-order interaction selection for ``feature_mode="original_plus_interactions"``, and introduces a Streamlit Governance Studio dashboard for validation and audit workflows. Earlier 1.1.x capabilities remain available, including the native ``L=2`` hot path, augmented-pair operations, strict global ``topK`` budgeting, compact native transaction memory, and fused adaptive ``L=1`` execution.
+* **Native performance:** computationally intensive mining, transaction construction, and matrix-building stages are C++ accelerated with optional OpenMP support. Version 1.1.10 adds clearer native-backend install diagnostics and expands Governance Studio into a richer dashboard/workbench for validation, comparison, and governance review. Earlier 1.1.x capabilities remain available, including production/audit execution modes, fast adaptive-binning tuning, higher-order interaction selection, the native ``L=2`` hot path, augmented-pair operations, strict global ``topK`` budgeting, compact native transaction memory, and fused adaptive ``L=1`` execution.
 * **Python ergonomics:** the estimator follows the scikit-learn API and works with pandas DataFrames or NumPy arrays.
 
 
 Current release focus
 ---------------------
 
-The 1.1.9 release keeps the v1.1.8 modeling workflow stable while adding deployment-oriented controls and memory improvements:
+The 1.1.10 release builds on v1.1.9 with two practical upgrades for installation confidence and review workflows:
 
-* ``HUGIMLClassifier`` is now the cleaner primary class name; ``HUGIMLClassifierNative`` remains backward-compatible.
-* ``execution_mode="audit"`` keeps full traceability by default, while ``execution_mode="production"`` retains prediction and save/load state with a smaller memory footprint.
-* Strict and hybrid feature modes use earlier feature selection, compact native storage, CSR-returning paths, and improved fixed-B numeric handling.
+* Build and import reliability is clearer, with native-backend diagnostics, a public ``check_native()`` helper, cleaned package exports, and backward-compatible classifier names.
+* Governance Studio now offers a fuller workbench experience for setting up datasets, comparing candidate models, drilling into results, using demo data, following workflow guidance, and reviewing governance evidence.
 
 Installation
 ------------

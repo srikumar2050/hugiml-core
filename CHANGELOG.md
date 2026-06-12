@@ -4,6 +4,19 @@ All notable changes to hugiml-core are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
+## [1.1.10] - 2026-06-12
+
+### Changed
+
+- Strengthened build and import reliability for the native backend with clearer install diagnostics, a public `check_native()` verification helper, cleaned package exports, and backward-compatible classifier names.
+- Expanded Governance Studio into a richer Workbench/Governance dashboard for dataset setup, candidate model comparison, result drill-downs, demo datasets, workflow guidance, and complete governance evidence views.
+
+### Compatibility
+
+- Existing v1.1.9 APIs and classifier import paths remain available.
+- The installed `hugiml-dashboard` command launches the packaged Streamlit dashboard entry point.
+
+---
 ## [1.1.9] - 2026-06-10
 
 ### Added

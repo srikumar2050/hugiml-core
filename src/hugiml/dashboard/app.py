@@ -16,6 +16,14 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+
+# Compatibility for older dependencies under NumPy 2.x.
+if not hasattr(np, "float"):
+    np.float = float  # type: ignore[attr-defined]
+if not hasattr(np, "int"):
+    np.int = int  # type: ignore[attr-defined]
+if not hasattr(np, "bool"):
+    np.bool = bool  # type: ignore[attr-defined]
 import pandas as pd
 
 if __package__ is None or __package__ == "":
@@ -37,9 +45,22 @@ from hugiml.dashboard.components.performance import render_performance
 from hugiml.dashboard.components.prediction import render_prediction
 from hugiml.dashboard.components.pruning import render_pruning_analysis
 from hugiml.dashboard.data import prepare_model_frame
-from hugiml.dashboard.demo import demo_roles, load_demo_credit_risk
 from hugiml.dashboard.display import dataframe_for_display
 from hugiml.dashboard.runner import score_cases, train_hugiml
+
+try:
+    # Prefer the local workbench.py sitting alongside this file (user-provided).
+    import importlib.util as _ilu
+    _wb_path = Path(__file__).resolve().parent / "workbench.py"
+    if _wb_path.exists():
+        _wb_spec = _ilu.spec_from_file_location("workbench", _wb_path)
+        _wb_mod = _ilu.module_from_spec(_wb_spec)  # type: ignore[arg-type]
+        _wb_spec.loader.exec_module(_wb_mod)  # type: ignore[union-attr]
+        render_workbench = _wb_mod.render_workbench
+    else:
+        from hugiml.dashboard.workbench import render_workbench  # type: ignore[assignment]
+except Exception:
+    from hugiml.dashboard.workbench import render_workbench  # type: ignore[assignment]
 
 SECTION_LABELS = [
     "Overview",
@@ -100,203 +121,338 @@ def _theme_tokens(theme: str) -> dict[str, str]:
 
 
 def _apply_css(theme: str) -> None:
-    """Apply only dashboard-owned CSS.
-
-    Important:
-    - hide deploy/menu controls only;
-    - do not hide the sidebar collapse/expand control;
-    - do not globally override Streamlit widget/dataframe text colors.
-    """
+    """Apply dashboard CSS. Hides deploy chrome only; does not override Streamlit widget colors."""
     t = _theme_tokens(theme)
+
     dark_extra = ""
     if t["dark"]:
         dark_extra = """
-        .hugiml-hero,
+        .hugiml-hero, .hugiml-workbench-hero {
+            background: linear-gradient(135deg, #0f172a 0%, #1e293b 60%, #0f172a 100%) !important;
+            border-color: rgba(96,165,250,0.25) !important;
+        }
+        .hugiml-hero::after {
+            background: linear-gradient(90deg, #60a5fa, #a78bfa, #60a5fa) !important;
+        }
+        .hugiml-hero h1, .hugiml-hero p { color: #f1f5f9 !important; }
+        .hugiml-eyebrow { color: #93c5fd !important; }
+        .hugiml-chip {
+            background: rgba(15,23,42,0.85) !important;
+            border-color: rgba(96,165,250,0.30) !important;
+            color: #cbd5e1 !important;
+        }
         .hugiml-section-note {
-            background:
-                radial-gradient(circle at 6% 5%, rgba(96, 165, 250, 0.18), transparent 34%),
-                radial-gradient(circle at 92% 12%, rgba(167, 139, 250, 0.15), transparent 30%),
-                #111827 !important;
-            color: #f8fafc !important;
-            border-color: rgba(147, 197, 253, 0.42) !important;
+            background: rgba(15,23,42,0.55) !important;
+            border-left-color: #60a5fa !important;
         }
-
-        .hugiml-hero h1,
-        .hugiml-hero p,
-        .hugiml-section-note p,
-        .hugiml-chip {
-            color: #f8fafc !important;
-        }
-
-        .hugiml-chip {
-            background: rgba(30, 41, 59, 0.92) !important;
-            border-color: rgba(147, 197, 253, 0.44) !important;
-        }
-
         div[data-testid="stMetric"] {
-            background:
-                linear-gradient(180deg, rgba(30, 41, 59, 0.92), rgba(15, 23, 42, 0.88)),
-                #111827 !important;
-            color: #f8fafc !important;
-            border-color: rgba(147, 197, 253, 0.34) !important;
+            background: linear-gradient(160deg, rgba(30,41,59,0.92), rgba(15,23,42,0.88)) !important;
             border-top-color: #60a5fa !important;
         }
-
-        div[data-testid="stMetric"] * {
-            color: #f8fafc !important;
-        }
-
+        div[data-testid="stMetric"] * { color: #f1f5f9 !important; }
         .hugiml-fit-complete {
-            color: #f8fafc !important;
-            background: rgba(30, 41, 59, 0.92) !important;
-            border-color: rgba(147, 197, 253, 0.44) !important;
+            background: rgba(15,23,42,0.80) !important;
+            border-color: rgba(96,165,250,0.28) !important;
+            color: #cbd5e1 !important;
         }
         """
 
     st.markdown(
         f"""
         <style>
-        /* Hide only the app menu/deploy/status affordances. Do not hide the
-           header itself or header buttons, because that can break sidebar
-           collapse/expand behavior. */
-        #MainMenu,
-        div[data-testid="stDeployButton"],
-        div[data-testid="stStatusWidget"],
-        .stDeployButton {{
-            display: none !important;
-            visibility: hidden !important;
-        }}
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&family=JetBrains+Mono:wght@400;600&display=swap');
 
+        /* ── Chrome ───────────────────────────────────── */
+        #MainMenu, div[data-testid="stDeployButton"],
+        div[data-testid="stStatusWidget"], .stDeployButton {{ display: none !important; }}
+
+        /* ── Base ─────────────────────────────────────── */
+        html, body, [class*="css"] {{
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif !important;
+        }}
         .block-container {{
-            padding-top: 1.1rem;
-            padding-bottom: 2.25rem;
-            max-width: 1480px;
+            padding-top: 0.75rem;
+            padding-bottom: 3rem;
+            max-width: 1540px;
         }}
 
+        /* ── Hero ─────────────────────────────────────── */
         .hugiml-hero {{
+            position: relative;
             background:
-                radial-gradient(circle at 5% 5%, {t["hero_a"]}, transparent 34%),
-                radial-gradient(circle at 92% 12%, {t["hero_b"]}, transparent 30%),
+                radial-gradient(ellipse 55% 45% at 0% 0%, {t["hero_a"]}, transparent),
+                radial-gradient(ellipse 38% 30% at 102% 0%, {t["hero_b"]}, transparent),
                 var(--secondary-background-color);
             border: 1px solid {t["border"]};
-            border-radius: 20px;
-            padding: 24px 26px;
-            margin-bottom: 18px;
+            border-radius: 14px;
+            padding: 20px 28px 18px;
+            margin-bottom: 14px;
             box-shadow: {t["shadow"]};
+            overflow: hidden;
         }}
-
+        .hugiml-hero::after {{
+            content: "";
+            position: absolute;
+            top: 0; left: 0; right: 0;
+            height: 3px;
+            background: linear-gradient(90deg, {t["accent"]}, {t["accent_2"]});
+            border-radius: 14px 14px 0 0;
+        }}
+        .hugiml-hero::before {{
+            content: "";
+            position: absolute;
+            top: -55px; right: -55px;
+            width: 190px; height: 190px;
+            border-radius: 50%;
+            background: radial-gradient(circle, {t["hero_b"]}, transparent 68%);
+            pointer-events: none;
+        }}
+        .hugiml-eyebrow {{
+            display: inline-block;
+            font-size: 0.64rem;
+            font-weight: 700;
+            letter-spacing: 0.15em;
+            text-transform: uppercase;
+            color: {t["accent"]};
+            margin-bottom: 8px;
+        }}
         .hugiml-hero h1 {{
-            margin: 0 0 8px 0;
-            font-size: clamp(1.7rem, 2.8vw, 2.35rem);
-            letter-spacing: -0.035em;
-            line-height: 1.06;
-            font-weight: 850;
+            font-family: 'Inter', sans-serif !important;
+            margin: 0 0 10px 0;
+            font-size: clamp(1.55rem, 2.3vw, 2.15rem);
+            font-weight: 900;
+            letter-spacing: -0.045em;
+            line-height: 1.04;
         }}
-
         .hugiml-hero p {{
             margin: 0;
-            opacity: 0.82;
-            line-height: 1.52;
-            max-width: 1080px;
+            opacity: 0.72;
+            line-height: 1.62;
+            font-size: 0.91rem;
+            max-width: 820px;
         }}
 
-        .hugiml-chip-row {{
-            display: flex;
-            flex-wrap: wrap;
-            gap: 8px;
-            margin-top: 14px;
-        }}
-
+        /* ── Chips ────────────────────────────────────── */
+        .hugiml-chip-row {{ display: flex; flex-wrap: wrap; gap: 5px; margin-top: 18px; }}
         .hugiml-chip {{
             display: inline-flex;
             align-items: center;
-            border: 1px solid {t["border"]};
             background: {t["chip_bg"]};
-            border-radius: 999px;
-            padding: 5px 10px;
-            font-size: 0.78rem;
-            font-weight: 700;
-            line-height: 1.2;
+            border: 1px solid {t["border"]};
+            border-radius: 4px;
+            padding: 3px 8px;
+            font-size: 0.67rem;
+            font-weight: 600;
+            letter-spacing: 0.04em;
+            font-family: 'JetBrains Mono', 'Courier New', monospace;
         }}
 
+        /* ── Metric cards ─────────────────────────────── */
+        div[data-testid="stMetric"] {{
+            background: var(--secondary-background-color);
+            border: 1px solid rgba(128,128,128,0.14);
+            border-top: 3px solid {t["accent"]};
+            border-radius: 10px;
+            padding: 16px 18px 14px;
+            min-height: 90px;
+        }}
+        div[data-testid="stMetricValue"] {{
+            font-family: 'Inter', sans-serif !important;
+            font-size: clamp(1.2rem, 1.65vw, 1.80rem) !important;
+            font-weight: 900 !important;
+            letter-spacing: -0.03em !important;
+            line-height: 1.07 !important;
+            white-space: normal !important;
+            overflow-wrap: anywhere !important;
+        }}
+        div[data-testid="stMetricLabel"] > div {{
+            font-size: 0.68rem !important;
+            font-weight: 700 !important;
+            letter-spacing: 0.11em !important;
+            text-transform: uppercase !important;
+            opacity: 0.52 !important;
+        }}
+
+        /* ── Section callout ──────────────────────────── */
         .hugiml-section-note {{
-            border: 1px solid rgba(128, 128, 128, 0.20);
-            border-left: 5px solid {t["accent"]};
-            background:
-                linear-gradient(90deg, {t["hero_a"]}, transparent),
-                var(--secondary-background-color);
-            border-radius: 12px;
-            padding: 12px 14px;
-            margin: 8px 0 16px 0;
+            border: 1px solid rgba(128,128,128,0.12);
+            border-left: 3px solid {t["accent"]};
+            background: {t["chip_bg"]};
+            border-radius: 0 8px 8px 0;
+            padding: 10px 16px;
+            margin: 4px 0 18px 0;
         }}
-
         .hugiml-section-note p {{
             margin: 0;
-            opacity: 0.84;
+            font-size: 0.87rem;
+            line-height: 1.54;
+            opacity: 0.80;
+        }}
+
+        /* ── Tabs ─────────────────────────────────────── */
+        .stTabs [data-baseweb="tab-list"] {{
+            gap: 1px;
+            border-bottom: 1px solid rgba(128,128,128,0.13);
+        }}
+        .stTabs [data-baseweb="tab"] {{
+            font-family: 'Inter', sans-serif !important;
+            font-size: 0.81rem !important;
+            font-weight: 600 !important;
+            padding: 8px 16px !important;
+            border-radius: 7px 7px 0 0;
+            border-bottom: 2px solid transparent;
+        }}
+        .stTabs [aria-selected="true"] {{
+            border-bottom-color: {t["accent"]} !important;
+            color: {t["accent"]} !important;
+        }}
+
+        /* ── DataFrames ───────────────────────────────── */
+        div[data-testid="stDataFrame"] {{
+            border-radius: 8px;
+            overflow: hidden;
+            border: 1px solid rgba(128,128,128,0.11);
+        }}
+
+        /* ── Sidebar ──────────────────────────────────── */
+        div[data-testid="stSidebarContent"] {{
+            padding-top: 0.75rem !important;
+        }}
+        /* Brand strip */
+        .hugiml-brand {{
+            padding-bottom: 8px;
+            margin-bottom: 6px;
+            border-bottom: 1px solid rgba(128,128,128,0.15);
+        }}
+        .hugiml-brand-name {{
+            font-size: 0.88rem;
+            font-weight: 800;
+            letter-spacing: -0.02em;
+            line-height: 1.2;
+        }}
+        .hugiml-brand-tag {{
+            font-size: 0.59rem;
+            font-weight: 600;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            opacity: 0.42;
+            margin-top: 2px;
+        }}
+        /* Workspace button pair — secondary buttons styled as boxed tabs */
+        div[data-testid="stSidebarContent"] div[data-testid="stHorizontalBlock"] {{
+            gap: 4px !important;
+            margin-bottom: 0 !important;
+        }}
+        div[data-testid="stSidebarContent"] div[data-testid="stHorizontalBlock"] button[kind="secondary"] {{
+            font-size: 0.78rem !important;
+            font-weight: 600 !important;
+            padding: 4px 6px !important;
+            border-radius: 6px !important;
+            border: 1px solid rgba(128,128,128,0.22) !important;
+            background: rgba(128,128,128,0.05) !important;
+            color: inherit !important;
+            transition: background 0.12s !important;
+        }}
+        div[data-testid="stSidebarContent"] div[data-testid="stHorizontalBlock"] button[kind="secondary"]:hover {{
+            background: rgba(128,128,128,0.12) !important;
+        }}
+        /* Section label */
+        .hugiml-sidebar-section {{
+            font-size: 0.62rem;
+            font-weight: 700;
+            letter-spacing: 0.12em;
+            text-transform: uppercase;
+            opacity: 0.45;
+            margin-top: 8px;
+            margin-bottom: 2px;
+        }}
+        .hugiml-fit-complete {{
+            background: {t["chip_bg"]};
+            border: 1px solid {t["border"]};
+            border-radius: 7px;
+            padding: 8px 11px;
+            margin-top: 8px;
+            font-size: 0.80rem;
+            line-height: 1.42;
+        }}
+
+        /* ── Buttons ──────────────────────────────────── */
+        div[data-testid="stButton"] > button[kind="primary"] {{
+            font-family: 'Inter', sans-serif !important;
+            font-weight: 700 !important;
+            border-radius: 8px !important;
+        }}
+
+        /* ── Form labels ──────────────────────────────── */
+        div[data-testid="stMultiSelect"] label p,
+        div[data-testid="stRadio"] label p,
+        div[data-testid="stSelectbox"] label p,
+        div[data-testid="stNumberInput"] label p {{
+            font-family: 'Inter', sans-serif !important;
+            font-weight: 600 !important;
+            font-size: 0.83rem !important;
+        }}
+
+        /* ── Headings ─────────────────────────────────── */
+        h3 {{ font-family: 'Inter', sans-serif !important; font-weight: 800 !important; letter-spacing: -0.025em !important; }}
+        h4 {{ font-family: 'Inter', sans-serif !important; font-weight: 700 !important; letter-spacing: -0.015em !important; }}
+
+        /* ── Workbench hero variant ───────────────────── */
+        .hugiml-workbench-hero .hugiml-eyebrow {{ color: {t["accent_2"]} !important; }}
+        .hugiml-workbench-hero::after {{
+            background: linear-gradient(90deg, {t["accent_2"]}, {t["accent"]}) !important;
+        }}
+
+
+        /* ── Workflow guide cards ─────────────────────── */
+        .hugiml-workflow {{
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+            gap: 10px;
+            margin: 0 0 18px 0;
+        }}
+        .hugiml-step {{
+            background: var(--secondary-background-color);
+            border: 1px solid rgba(128,128,128,0.13);
+            border-radius: 10px;
+            padding: 12px 14px;
+        }}
+        .hugiml-step-num {{
+            display: inline-flex;
+            width: 22px;
+            height: 22px;
+            align-items: center;
+            justify-content: center;
+            border-radius: 999px;
+            background: {t["chip_bg"]};
+            border: 1px solid {t["border"]};
+            color: {t["accent"]};
+            font-weight: 900;
+            font-size: 0.72rem;
+            margin-bottom: 7px;
+        }}
+        .hugiml-step b {{
+            display: block;
+            margin-bottom: 4px;
+            font-size: 0.86rem;
+        }}
+        .hugiml-step span:not(.hugiml-step-num) {{
+            display: block;
+            font-size: 0.76rem;
+            opacity: 0.66;
             line-height: 1.45;
         }}
 
-        div[data-testid="stMetric"] {{
-            border: 1px solid rgba(128, 128, 128, 0.20);
-            border-top: 3px solid {t["accent"]};
-            border-radius: 14px;
-            padding: 14px 14px 12px 14px;
-            background: var(--secondary-background-color);
-            min-height: 104px;
-        }}
-
-        div[data-testid="stMetricValue"] {{
-            white-space: normal !important;
-            overflow-wrap: anywhere !important;
-            line-height: 1.12 !important;
-            font-size: clamp(1.05rem, 1.45vw, 1.65rem) !important;
-        }}
-
-        .hugiml-sidebar-title {{
-            font-size: 1.08rem;
-            font-weight: 850;
-            line-height: 1.15;
-            letter-spacing: -0.01em;
-            margin-bottom: 0.15rem;
-        }}
-
-        .hugiml-sidebar-subtitle {{
-            opacity: 0.72;
-            font-size: 0.82rem;
-            margin-bottom: 0.75rem;
-        }}
-
-        .hugiml-fit-complete {{
-            border: 1px solid {t["border"]};
-            background: {t["chip_bg"]};
-            border-radius: 12px;
-            padding: 9px 11px;
-            margin-top: 8px;
-            font-size: 0.86rem;
-            line-height: 1.35;
-        }}
-
-        .stTabs [data-baseweb="tab-list"] {{
-            gap: 8px;
-            flex-wrap: wrap;
-        }}
-
-        .stTabs [data-baseweb="tab"] {{
-            border-radius: 999px;
-            padding: 8px 14px;
-        }}
-
-        div[data-testid="stDataFrame"] {{
-            border-radius: 12px;
-            overflow: hidden;
-        }}
+        /* ── Misc ─────────────────────────────────────── */
+        /* Don't override hr globally — specific margins set inline where needed */
+        .hugiml-hero hr, .hugiml-section hr {{ border-color: rgba(128,128,128,0.11) !important; }}
+        .hugiml-compact-note {{ font-size: 0.78rem; opacity: 0.62; margin-top: -0.3rem; }}
 
         {dark_extra}
 
         @media (max-width: 900px) {{
-            .hugiml-hero {{
-                padding: 18px;
-            }}
+            .hugiml-hero {{ padding: 20px 18px 18px; }}
+            .hugiml-hero h1 {{ font-size: 1.42rem; }}
         }}
         </style>
         """,
@@ -354,18 +510,197 @@ def _config_key(
     return hashlib.sha256(raw).hexdigest()
 
 
+DEMO_DATASETS: dict[str, dict[str, Any]] = {
+    "credit": {
+        "label": "Credit risk",
+        "mode": "Demo: credit risk",
+        "target": "default_risk",
+        "id_column": "customer_id",
+        "excluded_columns": ["date_issued"],
+        "sensitive_columns": ["age", "gender", "region"],
+    },
+    "churn": {
+        "label": "Customer churn",
+        "mode": "Demo: customer churn",
+        "target": "churned",
+        "id_column": "account_id",
+        "excluded_columns": ["signup_date"],
+        "sensitive_columns": ["region", "age_band", "service_tier"],
+    },
+    "claims": {
+        "label": "Claims review",
+        "mode": "Demo: claims review",
+        "target": "manual_review",
+        "id_column": "claim_id",
+        "excluded_columns": ["received_date"],
+        "sensitive_columns": ["region", "provider_type", "claimant_age"],
+    },
+}
+
+
+def _sigmoid(x: np.ndarray) -> np.ndarray:
+    return 1.0 / (1.0 + np.exp(-np.clip(x, -30, 30)))
+
+
+def _make_credit_demo(seed: int = 2026, n: int = 800) -> tuple[pd.DataFrame, np.ndarray]:
+    rng = np.random.default_rng(seed)
+    credit_score = np.clip(rng.normal(670, 85, n), 420, 850)
+    dti = np.clip(rng.beta(2.4, 5.2, n), 0.02, 0.78)
+    annual_inc = np.clip(rng.lognormal(np.log(62000), 0.45, n), 18000, 210000)
+    loan_amnt = np.clip(rng.normal(15500, 6500, n), 1000, 42000)
+    delinq_2yr = rng.poisson(0.45, n)
+    credit_util = np.clip(rng.beta(2.8, 3.3, n), 0.02, 0.98)
+    term_60 = rng.binomial(1, 0.38, n)
+    home_ownership = rng.choice(["RENT", "MORTGAGE", "OWN"], n, p=[0.42, 0.44, 0.14])
+    gender = rng.choice(["F", "M", "X"], n, p=[0.49, 0.49, 0.02])
+    region = rng.choice(["R1", "R2", "R3", "R4"], n, p=[0.30, 0.25, 0.25, 0.20])
+    age = np.clip(rng.normal(41, 12, n).round(), 21, 74).astype(int)
+    score = (
+        -2.0
+        + 2.8 * (credit_score < 620)
+        + 2.0 * (dti > 0.35)
+        + 0.75 * (loan_amnt > 22000)
+        + 0.70 * term_60
+        + 0.65 * (delinq_2yr >= 2)
+        + 0.70 * (credit_util > 0.70)
+        + 0.45 * (home_ownership == "RENT")
+        - 0.55 * (annual_inc > 85000)
+    )
+    y = rng.binomial(1, _sigmoid(score))
+    raw = pd.DataFrame(
+        {
+            "customer_id": [f"C-{i:05d}" for i in range(1, n + 1)],
+            "date_issued": pd.date_range("2025-01-01", periods=n, freq="D").astype(str),
+            "credit_score": credit_score.round(0).astype(int),
+            "dti": dti.round(3),
+            "annual_inc": annual_inc.round(0).astype(int),
+            "loan_amnt": loan_amnt.round(0).astype(int),
+            "delinq_2yr": delinq_2yr.astype(int),
+            "credit_util": credit_util.round(3),
+            "loan_term": np.where(term_60 == 1, "60", "36"),
+            "home_ownership": home_ownership,
+            "age": age,
+            "gender": gender,
+            "region": region,
+            "default_risk": y.astype(int),
+        }
+    )
+    return raw, y.astype(int)
+
+
+def _make_churn_demo(seed: int = 2027, n: int = 900) -> tuple[pd.DataFrame, np.ndarray]:
+    rng = np.random.default_rng(seed)
+    tenure_months = rng.integers(1, 72, n)
+    support_tickets = rng.poisson(1.2, n)
+    monthly_charge = np.clip(rng.normal(72, 24, n), 20, 150)
+    usage_drop_pct = np.clip(rng.normal(12, 18, n), 0, 80)
+    late_payment = rng.binomial(1, 0.20, n)
+    contract_type = rng.choice(["month-to-month", "annual", "two-year"], n, p=[0.55, 0.32, 0.13])
+    service_tier = rng.choice(["basic", "plus", "premium"], n, p=[0.42, 0.38, 0.20])
+    no_addon = rng.binomial(1, 0.48, n)
+    region = rng.choice(["North", "South", "East", "West"], n)
+    age_band = rng.choice(["18-29", "30-44", "45-64", "65+"], n, p=[0.22, 0.38, 0.30, 0.10])
+    score = (
+        -2.25
+        + 1.15 * (tenure_months < 6)
+        + 0.55 * (support_tickets >= 3)
+        + 0.80 * (monthly_charge > 90)
+        + 1.00 * (usage_drop_pct > 30)
+        + 0.70 * late_payment
+        + 0.95 * (contract_type == "month-to-month")
+        + 0.50 * ((service_tier == "basic") & (no_addon == 1))
+    )
+    y = rng.binomial(1, _sigmoid(score))
+    raw = pd.DataFrame(
+        {
+            "account_id": [f"A-{i:05d}" for i in range(1, n + 1)],
+            "signup_date": pd.date_range("2024-01-01", periods=n, freq="D").astype(str),
+            "tenure_months": tenure_months,
+            "support_tickets": support_tickets,
+            "monthly_charge": monthly_charge.round(2),
+            "usage_drop_pct": usage_drop_pct.round(1),
+            "late_payment": np.where(late_payment == 1, "yes", "no"),
+            "contract_type": contract_type,
+            "service_tier": service_tier,
+            "no_addon": np.where(no_addon == 1, "true", "false"),
+            "region": region,
+            "age_band": age_band,
+            "churned": y.astype(int),
+        }
+    )
+    return raw, y.astype(int)
+
+
+def _make_claims_demo(seed: int = 2028, n: int = 720) -> tuple[pd.DataFrame, np.ndarray]:
+    rng = np.random.default_rng(seed)
+    claim_amount = np.clip(rng.lognormal(np.log(5200), 0.65, n), 250, 35000)
+    prior_claims = rng.poisson(1.1, n)
+    provider_score = np.clip(rng.beta(4.0, 2.2, n), 0.05, 0.98)
+    days_to_file = rng.integers(0, 45, n)
+    manual_adjustment = np.clip(rng.normal(0.08, 0.10, n), 0, 0.55)
+    diagnosis_group = rng.choice(["routine", "complex", "injury", "chronic"], n, p=[0.42, 0.20, 0.22, 0.16])
+    provider_type = rng.choice(["hospital", "clinic", "specialist", "new_provider"], n, p=[0.36, 0.34, 0.20, 0.10])
+    region = rng.choice(["Urban", "Suburban", "Rural"], n, p=[0.48, 0.34, 0.18])
+    claimant_age = np.clip(rng.normal(48, 17, n).round(), 1, 92).astype(int)
+    score = (
+        -2.10
+        + 1.45 * (claim_amount > 12000)
+        + 0.75 * (prior_claims >= 3)
+        + 1.25 * (provider_score < 0.40)
+        + 0.70 * (days_to_file < 2)
+        + 0.80 * ((diagnosis_group == "complex") & (claim_amount > 8000))
+        + 0.65 * (provider_type == "new_provider")
+        + 0.80 * (manual_adjustment > 0.20)
+    )
+    y = rng.binomial(1, _sigmoid(score))
+    raw = pd.DataFrame(
+        {
+            "claim_id": [f"CL-{i:05d}" for i in range(1, n + 1)],
+            "received_date": pd.date_range("2025-06-01", periods=n, freq="D").astype(str),
+            "claim_amount": claim_amount.round(2),
+            "prior_claims": prior_claims,
+            "provider_score": provider_score.round(3),
+            "diagnosis_group": diagnosis_group,
+            "days_to_file": days_to_file,
+            "manual_adjustment": manual_adjustment.round(3),
+            "provider_type": provider_type,
+            "region": region,
+            "claimant_age": claimant_age,
+            "manual_review": y.astype(int),
+        }
+    )
+    return raw, y.astype(int)
+
+
+def _demo_raw(dataset_key: str) -> tuple[pd.DataFrame, np.ndarray, dict[str, Any]]:
+    key = dataset_key if dataset_key in DEMO_DATASETS else "credit"
+    if key == "churn":
+        raw, y = _make_churn_demo()
+    elif key == "claims":
+        raw, y = _make_claims_demo()
+    else:
+        raw, y = _make_credit_demo()
+    return raw, y, DEMO_DATASETS[key]
+
+
 @st.cache_data(show_spinner=False)
-def _load_demo_context_cached() -> dict[str, Any]:
-    X_raw, y = load_demo_credit_risk()
-    roles = demo_roles()
+def _load_demo_context_cached(dataset_key: str = "credit") -> dict[str, Any]:
+    raw, y, spec = _demo_raw(dataset_key)
+    roles = {
+        "target": spec["target"],
+        "id_column": spec["id_column"],
+        "excluded_columns": list(spec["excluded_columns"]),
+        "sensitive_columns": list(spec["sensitive_columns"]),
+    }
     X, y, case_ids, meta = prepare_model_frame(
-        X_raw.assign(default_risk=y),
-        target="default_risk",
+        raw,
+        target=roles["target"],
         id_column=roles["id_column"],
         excluded_columns=roles["excluded_columns"],
     )
     return {
-        "mode": "Demo dataset",
+        "mode": spec["mode"],
+        "demo_dataset": spec["label"],
         "X": X,
         "y": np.asarray(y, dtype=int),
         "case_ids": case_ids,
@@ -442,17 +777,14 @@ def _read_persisted_upload() -> tuple[pd.DataFrame, str] | None:
     return _read_uploaded_table(stored), stored.name
 
 
-def _sidebar_dataset_controls(args: argparse.Namespace) -> tuple[dict[str, Any] | None, str | None, int, int, str]:
-    st.sidebar.markdown('<div class="hugiml-sidebar-title">HUGIML Governance Studio</div>', unsafe_allow_html=True)
-    st.sidebar.markdown('<div class="hugiml-sidebar-subtitle">Audit evidence workspace</div>', unsafe_allow_html=True)
+def _sidebar_dataset_controls(args: argparse.Namespace, *, require_fit_action: bool = True) -> tuple[dict[str, Any] | None, str | None, int, int, str]:
+    theme = st.session_state.get("hugiml_theme", "Ocean")
 
-    theme = st.sidebar.radio(
-        "Theme",
-        ["Ocean", "Forest", "Dark"],
-        index=["Ocean", "Forest", "Dark"].index(st.session_state.get("hugiml_theme", "Ocean")),
-        horizontal=True,
-        key="hugiml_theme",
+    st.sidebar.markdown(
+        '<hr style="margin:2px 0 4px 0;border:none;border-top:1px solid rgba(128,128,128,0.12)"/>',
+        unsafe_allow_html=True,
     )
+    st.sidebar.markdown('<div class="hugiml-sidebar-section">Data &amp; Run Setup</div>', unsafe_allow_html=True)
 
     source = st.sidebar.radio(
         "Data source",
@@ -466,7 +798,23 @@ def _sidebar_dataset_controls(args: argparse.Namespace) -> tuple[dict[str, Any] 
         random_state = st.number_input("Random seed", min_value=0, max_value=999999, value=int(args.random_state), step=1)
 
     if source == "Demo dataset":
-        return _load_demo_context_cached(), _config_key("demo", int(cv), int(random_state)), int(cv), int(random_state), theme
+        demo_labels = [spec["label"] for spec in DEMO_DATASETS.values()]
+        demo_keys = list(DEMO_DATASETS.keys())
+        selected_label = st.sidebar.selectbox(
+            "Demo dataset",
+            demo_labels,
+            index=0,
+            help="Use the same demo scenarios shown in the static HTML preview.",
+            key="hugiml_demo_dataset",
+        )
+        demo_key = demo_keys[demo_labels.index(selected_label)]
+        return (
+            _load_demo_context_cached(demo_key),
+            _config_key(f"demo:{demo_key}", int(cv), int(random_state)),
+            int(cv),
+            int(random_state),
+            theme,
+        )
 
     st.sidebar.markdown("### Upload dataset")
     uploaded = st.sidebar.file_uploader(
@@ -487,8 +835,9 @@ def _sidebar_dataset_controls(args: argparse.Namespace) -> tuple[dict[str, Any] 
                 st.markdown(
                     """
                     <div class="hugiml-hero">
-                      <h1>Upload a dataset to start</h1>
-                      <p>Choose a CSV/TSV/Excel/Parquet file, then define target and review columns.</p>
+                      <span class="hugiml-eyebrow">Upload Dataset</span>
+                      <h1>Choose a file to begin</h1>
+                      <p>Upload a CSV, TSV, Excel, or Parquet file, define your target column and review column roles, then fit the model.</p>
                       <div class="hugiml-chip-row">
                         <span class="hugiml-chip">CSV</span>
                         <span class="hugiml-chip">TSV</span>
@@ -557,6 +906,54 @@ def _sidebar_dataset_controls(args: argparse.Namespace) -> tuple[dict[str, Any] 
     upload_key = _dataframe_fingerprint(raw)
     fit_key = f"{upload_key}:{role_key}:{int(cv)}:{int(random_state)}"
 
+    if not require_fit_action:
+        # Gate preparation on explicit role confirmation for the current upload.
+        upload_fingerprint_now = _dataframe_fingerprint(raw)
+        roles_confirmed_key = f"hugiml_roles_confirmed:{upload_fingerprint_now}"
+        if not st.session_state.get(roles_confirmed_key, False):
+            # Show a data preview until the user confirms column roles.
+            st.markdown(
+                f"""
+                <div class="hugiml-hero">
+                  <span class="hugiml-eyebrow">Dataset Uploaded</span>
+                  <h1>Confirm column roles to continue</h1>
+                  <p><b>{upload_name}</b> loaded. Select the target column and any other roles in the
+                  sidebar, then click <b>Confirm roles</b> to proceed.</p>
+                  <div class="hugiml-chip-row">
+                    <span class="hugiml-chip">{raw.shape[0]:,} rows</span>
+                    <span class="hugiml-chip">{raw.shape[1]:,} columns</span>
+                    <span class="hugiml-chip">Target (auto): {target}</span>
+                  </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+            with st.container(border=True):
+                st.markdown("#### Data preview")
+                st.dataframe(dataframe_for_display(raw.head(30)), width="stretch", hide_index=True)
+            if st.sidebar.button("Confirm roles and continue", type="primary", width="stretch"):
+                st.session_state[roles_confirmed_key] = True
+                st.rerun()
+            return None, None, int(cv), int(random_state), theme
+
+        try:
+            data_ctx = _prepare_uploaded_context(
+                raw,
+                target=target,
+                id_column=id_column,
+                excluded_columns=excluded_columns,
+                sensitive_columns=sensitive_columns,
+                positive_label=positive_label,
+            )
+            return data_ctx, _config_key("upload", int(cv), int(random_state), upload_key, role_config), int(cv), int(random_state), theme
+        except Exception as exc:
+            st.error(f"Could not prepare uploaded dataset: {exc}")
+            with st.expander("Dataset preview", expanded=True):
+                st.dataframe(dataframe_for_display(raw.head(30)), width="stretch", hide_index=True)
+            # Clear confirmation so roles can be adjusted before retrying.
+            st.session_state[roles_confirmed_key] = False
+            return None, None, int(cv), int(random_state), theme
+
     if st.session_state.get("hugiml_last_fit_key") != fit_key:
         st.session_state["hugiml_upload_fit_requested"] = False
 
@@ -589,6 +986,7 @@ def _sidebar_dataset_controls(args: argparse.Namespace) -> tuple[dict[str, Any] 
         st.markdown(
             f"""
             <div class="hugiml-hero">
+              <span class="hugiml-eyebrow">Dataset Preview</span>
               <h1>Review uploaded dataset</h1>
               <p><b>{upload_name}</b> loaded successfully. Confirm the target and column roles in the sidebar,
               then click <b>Fit model and open evidence views</b>.</p>
@@ -623,10 +1021,26 @@ def _sidebar_dataset_controls(args: argparse.Namespace) -> tuple[dict[str, Any] 
         return None, None, int(cv), int(random_state), theme
 
 
-def _load_context(args: argparse.Namespace) -> tuple[dict[str, Any] | None, str]:
-    data_ctx, cache_key, cv, random_state, theme = _sidebar_dataset_controls(args)
+def _load_context(args: argparse.Namespace, workspace: str) -> tuple[dict[str, Any] | None, str]:
+    has_promoted_context = isinstance(st.session_state.get("hugiml_promoted_governance_ctx"), dict)
+    data_ctx, cache_key, cv, random_state, theme = _sidebar_dataset_controls(
+        args,
+        require_fit_action=(workspace == "Governance" and not has_promoted_context),
+    )
     if data_ctx is None:
         return None, theme
+
+    if workspace == "Workbench":
+        return {
+            **data_ctx,
+            "cache_key": cache_key,
+            "cv": int(cv),
+            "random_state": int(random_state),
+        }, theme
+
+    promoted = st.session_state.get("hugiml_promoted_governance_ctx")
+    if isinstance(promoted, dict):
+        return promoted, theme
 
     result = _train_model_cached(
         cache_key or "default",
@@ -661,16 +1075,41 @@ def _render_hero(ctx: dict[str, Any]) -> None:
     st.markdown(
         f"""
         <div class="hugiml-hero">
-          <h1>HUGIML Governance Studio</h1>
-          <p>Audit-ready evidence view for validation performance, model complexity,
-          feature-family provenance, HUG pattern inventory, case explanations, data quality,
-          representation pruning, configuration comparison, and monitoring signals.</p>
+          <span class="hugiml-eyebrow">HUGIML Governance Studio</span>
+          <h1>Audit &amp; Evidence Dashboard</h1>
+          <p>Validation performance, model complexity, feature-family provenance, HUG pattern inventory,
+          case explanations, data quality, representation pruning, configuration comparison, and monitoring signals.</p>
           <div class="hugiml-chip-row">
             <span class="hugiml-chip">Data: {ctx['mode']}</span>
             <span class="hugiml-chip">Rows: {ctx['meta']['n_rows']:,}</span>
             <span class="hugiml-chip">Features: {ctx['meta']['n_features']:,}</span>
-            <span class="hugiml-chip">Best CV: {score_text}</span>
-            <span class="hugiml-chip">Mode: {getattr(model, 'feature_mode', 'N/A')}</span>
+            <span class="hugiml-chip">Best CV ROC-AUC: {score_text}</span>
+            <span class="hugiml-chip">Feature mode: {getattr(model, 'feature_mode', 'N/A')}</span>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def _render_governance_workflow() -> None:
+    st.markdown(
+        """
+        <div class="hugiml-workflow">
+          <div class="hugiml-step">
+            <span class="hugiml-step-num">1</span>
+            <b>Model overview</b>
+            <span>Confirm roles, selected parameters, final score, and data shape.</span>
+          </div>
+          <div class="hugiml-step">
+            <span class="hugiml-step-num">2</span>
+            <b>Evidence inspection</b>
+            <span>Open validation, representation, patterns, cases, and quality views.</span>
+          </div>
+          <div class="hugiml-step">
+            <span class="hugiml-step-num">3</span>
+            <b>Governance actions</b>
+            <span>Review sensitive/proxy columns, prune features, compare configs, and monitor drift.</span>
           </div>
         </div>
         """,
@@ -752,29 +1191,131 @@ def _render_page(page: str, ctx: dict[str, Any]) -> None:
         st.warning(f"Unknown page: {page}")
 
 
+def _render_top_nav() -> tuple[str, str]:
+    """Header row (title + theme selectbox) and sidebar workspace buttons.
+
+    Returns (section, workspace). Navigation state lives in
+    ``hugiml_nav_section`` (never a widget key) to avoid StreamlitAPIException.
+    """
+    # Consume deferred navigation flags before any widget is created.
+    if st.session_state.pop("hugiml_governance_requested", False):
+        st.session_state["hugiml_nav_section"] = "Governance"
+    if st.session_state.pop("hugiml_workbench_open_results", False):
+        st.session_state["hugiml_nav_section"] = "Results"
+
+    current_theme = st.session_state.get("hugiml_theme", "Ocean")
+    _THEMES = ["Ocean", "Forest", "Dark"]
+
+    # ── Main panel: title left, theme right ──────────────────────────────
+    t = _theme_tokens(current_theme)
+    hdr_left, hdr_right = st.columns([3, 1], vertical_alignment="center")
+
+    st.markdown('<div style="height:10px;"></div>', unsafe_allow_html=True)
+    hdr_left, hdr_right = st.columns([0.78, 0.22], vertical_alignment="center")
+    with hdr_left:
+        st.markdown(
+            f'<div style="font-size:1.05rem;font-weight:900;letter-spacing:-0.03em;'
+            f'color:{t["accent"]};line-height:1.2;margin:14px 0 0 0;">'
+            f'HUGIML Governance Studio</div>',
+            unsafe_allow_html=True,
+        )
+
+    with hdr_right:
+        st.selectbox(
+            "Theme",
+            _THEMES,
+            index=_THEMES.index(current_theme),
+            key="hugiml_theme",
+            label_visibility="collapsed",
+        )
+
+    st.markdown(
+        '<hr style="margin:12px 0 8px 0;border:none;border-top:1px solid rgba(128,128,128,0.15);"/>',
+        unsafe_allow_html=True,
+    )
+
+    # ── Sidebar: brand strip + two boxed workspace buttons ───────────────
+    current_section = st.session_state.get("hugiml_nav_section", "Setup")
+    current_ws = "Governance" if current_section == "Governance" else "Workbench"
+
+    st.sidebar.markdown(
+        '''<div class="hugiml-brand">
+          <div class="hugiml-brand-name">HUGIML Studio</div>
+          <div class="hugiml-brand-tag">Governance &amp; Workbench</div>
+        </div>''',
+        unsafe_allow_html=True,
+    )
+
+    wb_is_active = (current_ws == "Workbench")
+    gov_is_active = (current_ws == "Governance")
+
+    sb_col1, sb_col2 = st.sidebar.columns(2, gap="small")
+    with sb_col1:
+        wb_clicked = st.button(
+            "Workbench",
+            key="hugiml_ws_wb",
+            width="stretch",
+            type="primary" if wb_is_active else "secondary",
+        )
+    with sb_col2:
+        gov_clicked = st.button(
+            "Governance",
+            key="hugiml_ws_gov",
+            width="stretch",
+            type="primary" if gov_is_active else "secondary",
+        )
+
+    if wb_clicked:
+        st.session_state["hugiml_nav_section"] = (
+            current_section if current_section in ("Setup", "Results") else "Setup"
+        )
+        st.rerun()
+    if gov_clicked:
+        st.session_state["hugiml_nav_section"] = "Governance"
+        st.rerun()
+
+    workspace = current_ws
+    if workspace == "Governance":
+        chosen_section = "Governance"
+    else:
+        chosen_section = current_section if current_section in ("Setup", "Results") else "Setup"
+    st.session_state["hugiml_nav_section"] = chosen_section
+    return chosen_section, workspace
+
+
 def run_app() -> None:
     st.set_page_config(page_title="HUGIML Governance Studio", page_icon="H", layout="wide")
 
     args = _parse_args()
 
-    ctx, theme = _load_context(args)
+    theme = st.session_state.get("hugiml_theme", "Ocean")
     _apply_css(theme)
+
+    section, workspace = _render_top_nav()
+    ctx, theme = _load_context(args, workspace)
 
     if ctx is None:
         return
 
-    st.sidebar.markdown("---")
+    st.sidebar.markdown('<div class="hugiml-sidebar-section">Column Roles</div>', unsafe_allow_html=True)
+    with st.sidebar.expander("View roles", expanded=False):
+        st.json(ctx["roles"])
+
+    if workspace == "Workbench":
+        render_workbench(ctx, section=section)
+        return
+
+    st.sidebar.markdown('<div class="hugiml-sidebar-section">Views</div>', unsafe_allow_html=True)
     page = st.sidebar.radio(
-        "Evidence views",
+        "Governance views",
         SECTION_LABELS,
         index=0,
         key="hugiml_dashboard_page",
+        label_visibility="collapsed",
     )
 
-    with st.sidebar.expander("Column roles", expanded=False):
-        st.json(ctx["roles"])
-
     _render_hero(ctx)
+    _render_governance_workflow()
     _render_page(page, ctx)
 
 
