@@ -127,3 +127,5 @@ jobs:
           pip install plotly
           python -c "from hugiml.plots import HUGPlotter; print('plots OK')"
           echo "Version: $(python -c 'import hugiml; print(hugiml.__version__)')"
+          # Assert the native extension loaded — fails the job if .so is missing from the wheel
+          python -c "import hugiml; assert hugiml.check_native(), 'native extension missing from wheel'; print('native OK')"
