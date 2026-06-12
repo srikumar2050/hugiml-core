@@ -150,10 +150,8 @@ test-requires = ["numpy", "scipy", "scikit-learn>=1.0,<1.8", "pandas", "pytest",
 [tool.cibuildwheel.linux]
 before-build = "pip install pybind11"
 environment = { CC = "gcc", CXX = "g++" }
-# manylinux2014 maps to the manylinux_2_17 compatibility baseline.
 manylinux-x86_64-image = "manylinux2014"
-manylinux-aarch64-image = "manylinux2014"
-archs = ["x86_64", "aarch64"]
+archs = ["x86_64"]
 
 [tool.cibuildwheel.macos]
 before-build = "pip install pybind11 && brew install libomp || true"
