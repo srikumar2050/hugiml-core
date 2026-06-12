@@ -140,13 +140,13 @@ where = ["src"]
 build = "cp39-* cp310-* cp311-* cp312-* cp313-*"
 skip = "*-musllinux*"
 test-command = "python {project}/scripts/wheel_smoke_test.py"
-test-requires = ["numpy", "scipy", "scikit-learn", "pandas", "pytest", "packaging"]
+test-requires = ["numpy>=1.22,<2.3", "scipy>=1.9,<1.16", "scikit-learn>=1.0,<1.8", "pandas>=1.4,<2.4", "pytest", "packaging"]
 build-verbosity = 1
 
 
 [[tool.cibuildwheel.overrides]]
 select = "cp313-manylinux*"
-test-requires = ["numpy", "scipy", "scikit-learn>=1.0,<1.8", "pandas", "pytest", "packaging"]
+test-requires = ["numpy>=1.22,<2.3", "scipy>=1.9,<1.16", "scikit-learn>=1.0,<1.8", "pandas>=1.4,<2.4", "pytest", "packaging"]
 
 [tool.cibuildwheel.linux]
 before-build = "pip install pybind11"
