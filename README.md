@@ -1,6 +1,6 @@
 # hugiml-core
 
-> **High-performance interpretable rule-based ML infrastructure** built on the
+> **Governance-oriented, high-performance interpretable tabular ML infrastructure** built on the
 > HUG-IML algorithm published in IEEE Access (2024).
 
 [![CI](https://github.com/srikumar2050/hugiml-core/actions/workflows/ci.yml/badge.svg)](https://github.com/srikumar2050/hugiml-core/actions/workflows/ci.yml)
@@ -23,6 +23,8 @@ duration=[24,48)                     coef= +0.84     support=0.28
 checking_status=no_checking          coef= +1.12     support=0.39
 ```
 
+HUGIML is best viewed as a **pattern-evidence model** for tabular decision support: it aims to provide competitive predictive performance while preserving auditable subgroup-level evidence that can support validation, case review, pruning, monitoring, and governance workflows.
+
 <p align="left">
   <img src="docs/images/positioning-mosaic.png" alt="Where HUGIML fits" width="800" height="500">
 </p>
@@ -37,25 +39,27 @@ checking_status=no_checking          coef= +1.12     support=0.39
 4. [Feature Modes](#feature-modes)
 5. [Execution Modes](#execution-modes)
 6. [Hyperparameter Search](#hyperparameter-search)
-7. [Governance Studio Dashboard](#governance-studio-dashboard)
-8. [Augmented Pair Features](#augmented-pair-features)
-9. [Adaptive Binning](#adaptive-binning)
-10. [Missing Value Handling](#missing-value-handling)
-11. [Model Explanation and Visualisations](#model-explanation-and-visualisations)
-12. [Pattern Pruning](#pattern-pruning)
-13. [Interpretability Metrics](#interpretability-metrics)
-14. [Multiclass, Imbalanced Data, High-Cardinality](#multiclass-imbalanced-data-high-cardinality)
-15. [Drift Detection & Monitoring](#drift-detection--monitoring)
-16. [Calibration](#calibration)
-17. [Serialisation](#serialisation)
-18. [Governance & Model Cards](#governance--model-cards)
-19. [Benchmark Suite](#benchmark-suite)
-20. [Validation Highlights](#validation-highlights)
-21. [Inference Server](#inference-server)
-22. [CI / CD](#ci--cd)
-23. [Repository Structure](#repository-structure)
-24. [License](#license)
-25. [Citation](#citation)
+7. [Recommended Tuning Configuration](#recommended-tuning-configuration)
+8. [Governance Studio Dashboard](#governance-studio-dashboard)
+9. [How to Read the Dashboards](#how-to-read-the-dashboards)
+10. [Augmented Pair Features](#augmented-pair-features)
+11. [Adaptive Binning](#adaptive-binning)
+12. [Missing Value Handling](#missing-value-handling)
+13. [Model Explanation and Visualisations](#model-explanation-and-visualisations)
+14. [Pattern Pruning](#pattern-pruning)
+15. [Interpretability Metrics](#interpretability-metrics)
+16. [Multiclass, Imbalanced Data, High-Cardinality](#multiclass-imbalanced-data-high-cardinality)
+17. [Drift Detection & Monitoring](#drift-detection--monitoring)
+18. [Calibration](#calibration)
+19. [Serialisation](#serialisation)
+20. [Governance & Model Cards](#governance--model-cards)
+21. [Benchmark Suite](#benchmark-suite)
+22. [Validation Highlights](#validation-highlights)
+23. [Inference Server](#inference-server)
+24. [CI / CD](#ci--cd)
+25. [Repository Structure](#repository-structure)
+26. [License](#license)
+27. [Citation](#citation)
 
 ---
 
@@ -63,13 +67,19 @@ checking_status=no_checking          coef= +1.12     support=0.39
 
 The **High Utility Gain Interpretable Machine Learning (HUG-IML)** framework extracts *High Utility Gain patterns* from labelled tabular data, transforms the input into a binary pattern-presence matrix, and fits an interpretable downstream classifier (logistic regression by default) on that matrix.
 
-The resulting patterns are human-readable and serve as the primary source of model explanations, making the system suitable for regulated domains such as credit scoring, healthcare, and risk management.
+The resulting patterns are human-readable and serve as the primary source of model explanations, making the system suitable for regulated domains such as credit scoring, fraud, insurance, healthcare, and risk management.
 
-**Key reference:**
+HUGIML is not intended to be only a post-hoc explanation layer. Its learned representation is itself interpretable: patterns are mined, retained, scored, and exposed as first-class evidence objects. This makes HUGIML useful both as a classifier and as a governance-supporting diagnostic tool for surfacing subgroup-level and interaction-driven risk structures that may be missed by purely additive or opaque models.
+
+**Key references:**
 
 > Krishnamoorthy, S. (2024). Interpretable Classifier Models for Decision
 > Support Using High Utility Gain Patterns. *IEEE Access*, 12, 126088–126107.
 > DOI: [10.1109/ACCESS.2024.3455563](https://doi.org/10.1109/ACCESS.2024.3455563)
+>
+> Krishnamoorthy, S. (2026). Interpretability Myopia: Governance Fitness in
+> Financial Risk Models. *SSRN Electronic Journal*.
+> DOI: [10.2139/ssrn.6821418](https://dx.doi.org/10.2139/ssrn.6821418)
 
 ---
 
@@ -289,9 +299,56 @@ print(f"Validation score: {tune_result['best_score']:.4f}")
 
 ---
 
+## Recommended Tuning Configuration
+
+For fair predictive comparison against strong tabular baselines such as Random Forest, XGBoost, LightGBM, and EBM, use the package default tuning grid rather than the single-estimator constructor defaults.
+
+```python
+from hugiml import HUGIMLClassifier
+
+HUGIMLClassifier.default_param_grid()
+```
+
+Default tuning grid:
+
+```python
+{
+    "B": [-1],
+    "adaptive_binning": [True],
+    "L": [1, 2],
+    "feature_mode": ["patterns_only", "original_plus_patterns"],
+    "topK": [30, 50, 100],
+    "G": [0.01],
+}
+```
+
+Configuration notes:
+
+- `patterns_only` emphasizes a pure pattern-evidence representation.
+- `original_plus_patterns` combines original features with mined HUG patterns and is usually the stronger predictive configuration.
+- `B=-1` with `adaptive_binning=True` is the recommended adaptive-binning setup.
+- Fixed-bin or pattern-only runs are useful ablations, but should not be treated as the main predictive benchmark configuration.
+- Scalability experiments may use a fixed control configuration, for example largely `L=1`, to isolate runtime and memory behavior.
+
+A practical benchmark pattern is:
+
+```python
+result = HUGIMLClassifier.tune(
+    X,
+    y,
+    param_grid=HUGIMLClassifier.default_param_grid(),
+    cv=5,
+    scoring="roc_auc",
+    refit=True,
+    random_state=42,
+)
+```
+
+---
+
 ## Governance Studio Dashboard
 
-The **HUGIML Governance Studio** is an interactive Streamlit dashboard for preparing experiments, comparing candidate models, reviewing model evidence, and producing governance-ready summaries. The revised dashboard keeps the existing audit views and adds a guided Workbench/Governance layout for end-to-end review.
+The **HUGIML Governance Studio** is an interactive Streamlit dashboard for preparing experiments, comparing candidate models, reviewing model evidence, and producing governance-supporting summaries. The revised dashboard keeps the existing audit views and adds a guided Workbench/Governance layout for end-to-end review.
 
 ### Installation
 
@@ -345,6 +402,30 @@ When installed, `hugiml-dashboard` starts the packaged Streamlit app automatical
 ### Demo preview
 
 - [Open the HUGIML Governance Studio Demo](https://srikumar2050.github.io/hugiml-core/hugiml_governance_studio_demo.html)
+
+---
+
+## How to Read the Dashboards
+
+The project dashboards serve different purposes:
+
+| Dashboard | Purpose |
+|---|---|
+| **Benchmark dashboard** | Predictive comparison against related baselines using the main HUGIML tuning setup |
+| **Governance Studio** | Validation, representation audit, pattern inventory, case review, policy checks, pruning, and monitoring |
+| **Scalability dashboard** | Runtime, memory, latency, and scaling behavior under a fixed control configuration |
+
+The benchmark dashboard should be read as the primary predictive-comparison view. The governance dashboard should be read as the model-risk and audit workflow. The scalability dashboard is not intended to represent full predictive tuning; it uses controlled settings to make runtime and memory behavior easier to compare.
+
+In short:
+
+| Configuration/view | Interpretation |
+|---|---|
+| `HUGIMLClassifier.default_param_grid()` | Main predictive tuning grid |
+| Constructor defaults | Simple quickstart / backward-compatible starting point |
+| `patterns_only` | Pattern-purity and interpretability-oriented configuration |
+| `original_plus_patterns` | Hybrid predictive-governance configuration |
+| Scalability control config | Fixed runtime/memory profiling setup, often largely `L=1` |
 
 ---
 
@@ -674,6 +755,14 @@ The **Governance Studio dashboard** provides interactive governance evidence vie
 
 ## Benchmark Suite
 
+For fair predictive benchmarking against RF, XGBoost, LightGBM, EBM, or other tabular baselines, use the package default tuning grid:
+
+```python
+HUGIMLClassifier.default_param_grid()
+```
+
+Fixed-bin, low-`G`, or `patterns_only` configurations are useful ablations unless explicitly chosen as the main benchmark design.
+
 Reproduce paper claims or benchmark on your own datasets:
 
 ```bash
@@ -699,7 +788,7 @@ For runtime and memory scaling evidence, see the static scalability dashboard:
 
 - [Open the HUGIML Scalability Dashboard](https://srikumar2050.github.io/hugiml-core/hugiml_scalability_dashboard.html)
 
-The dashboard summarizes measured fit time, prediction latency, memory delta, pattern counts, and test AUC against XGBoost and LightGBM. It covers sample-size scaling, feature-count scaling, and parameter sweeps over `B`, `G`, `topK`, `L`, and adaptive binning. HUGIML retains many training and test artifacts to support governance and audit requirements. 
+The dashboard summarizes measured fit time, prediction latency, memory delta, pattern counts, and test AUC against XGBoost and LightGBM. It covers sample-size scaling, feature-count scaling, and parameter sweeps over `B`, `G`, `topK`, `L`, and adaptive binning. The scalability dashboard uses controlled runtime/memory settings rather than the full predictive tuning grid. HUGIML retains many training and test artifacts to support governance and audit requirements. 
 
 Worked notebooks in [`notebooks/`](notebooks/) are organized as 12 self-contained folders:
 
@@ -721,6 +810,8 @@ Worked notebooks in [`notebooks/`](notebooks/) are organized as 12 self-containe
 ---
 
 ## Validation Highlights
+
+HUGIML validation should be read across predictive performance, interpretability, scalability, and governance support. Default-grid benchmark results are the main predictive comparison; fixed-bin, pattern-only, and scalability-control runs are ablation or profiling views.
 
 > The finance panels use German Credit / HELOC-style risk features such as loan duration, credit amount, checking status, and repayment-risk signals. The healthcare panels use Pima diabetes-style features such as glucose, BMI, pregnancies, pedigree, and age.
 
@@ -769,10 +860,10 @@ Adaptive binning is a safe default when you do not want to tune `B`; fixed `B=5`
   <img src="docs/images/pattern-explanations-real-datasets.png" alt="HUGIML pattern explanations on finance and healthcare datasets" width="760">
 </p>
 
-### Model-card-ready artifacts
+### Model-card-supporting artifacts
 
 <p align="left">
-  <img src="docs/images/model-card-governance.png" alt="Model-card-ready HUGIML explanations" width="760">
+  <img src="docs/images/model-card-governance.png" alt="Model-card-supporting HUGIML explanations" width="760">
 </p>
 
 ### Observed benchmark results
