@@ -57,6 +57,7 @@ dashboard = [
     "streamlit>=1.32",
     "plotly>=5.18",
     "altair>=5.0",
+    "matplotlib>=3.5",
     "jinja2>=3.1",
     "markdown>=3.5",
     "openpyxl>=3.1",
@@ -115,7 +116,7 @@ mlflow = [
     "mlflow>=2.10",
 ]
 all = [
-    "hugiml-core[dev,plots,benchmarks,imbalanced,telemetry,server,explainability,mlflow]",
+    "hugiml-core[dev,plots,dashboard,benchmarks,imbalanced,telemetry,server,explainability,mlflow]",
 ]
 
 [project.urls]
@@ -150,12 +151,11 @@ test-requires = ["numpy", "scipy", "scikit-learn>=1.0,<1.8", "pandas", "pytest",
 [tool.cibuildwheel.linux]
 before-build = "pip install pybind11"
 environment = { CC = "gcc", CXX = "g++" }
-# manylinux_2_17 (glibc >= 2.17) covers CentOS/RHEL 7, Amazon Linux 2,
-# Ubuntu 18.04, and every newer distro — much broader than manylinux_2_28.
-# The produced binary still installs and runs correctly on modern systems;
-# pip always selects the most specific compatible tag available.
-manylinux-x86_64-image = "manylinux_2_17"
-manylinux-aarch64-image = "manylinux_2_17"
+# manylinux2014 corresponds to the manylinux_2_17 compatibility baseline.
+# Use the cibuildwheel-recognized image selector so Docker resolves the
+# official PyPA build image for both x86_64 and aarch64 builds.
+manylinux-x86_64-image = "manylinux2014"
+manylinux-aarch64-image = "manylinux2014"
 archs = ["x86_64", "aarch64"]
 
 [tool.cibuildwheel.macos]
