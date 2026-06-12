@@ -40,7 +40,7 @@ classifiers = [
 ]
 dependencies = [
     "numpy>=1.22",
-    "scipy>=1.9",
+    "scipy>=1.9,<1.17",
     "scikit-learn>=1.2",
     "pandas>=1.5",
     "packaging>=21.0",
@@ -148,9 +148,11 @@ select = "cp313-manylinux*"
 test-requires = ["numpy", "scipy", "scikit-learn>=1.0,<1.8", "pandas", "pytest", "packaging"]
 
 [tool.cibuildwheel.linux]
+# manylinux_2_28 (AlmaLinux 8-based) ships OpenBLAS, fixing scipy source-build failures.
+# manylinux2014 (CentOS 7) did not include OpenBLAS and is effectively end-of-life.
 before-build = "pip install pybind11"
 environment = { CC = "gcc", CXX = "g++" }
-manylinux-x86_64-image = "manylinux2014"
+manylinux-x86_64-image = "manylinux_2_28"
 archs = ["x86_64"]
 
 [tool.cibuildwheel.macos]
