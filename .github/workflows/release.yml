@@ -41,8 +41,6 @@ jobs:
         include:
           - os: ubuntu-latest
             cibw_archs: x86_64
-          - os: ubuntu-latest
-            cibw_archs: aarch64
           - os: macos-15-intel
             cibw_archs: x86_64
           - os: macos-latest
@@ -54,12 +52,6 @@ jobs:
 
       - uses: actions/setup-python@v5
         with: { python-version: "3.11" }
-
-      - name: Set up QEMU for Linux ARM64 wheel builds
-        if: runner.os == 'Linux' && matrix.cibw_archs == 'aarch64'
-        uses: docker/setup-qemu-action@v3
-        with:
-          platforms: arm64
 
       - run: pip install cibuildwheel==2.20.0
 
