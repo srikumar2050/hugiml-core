@@ -57,7 +57,6 @@ dashboard = [
     "streamlit>=1.32",
     "plotly>=5.18",
     "altair>=5.0",
-    "matplotlib>=3.5",
     "jinja2>=3.1",
     "markdown>=3.5",
     "openpyxl>=3.1",
@@ -116,7 +115,7 @@ mlflow = [
     "mlflow>=2.10",
 ]
 all = [
-    "hugiml-core[dev,plots,dashboard,benchmarks,imbalanced,telemetry,server,explainability,mlflow]",
+    "hugiml-core[dev,plots,benchmarks,imbalanced,telemetry,server,explainability,mlflow]",
 ]
 
 [project.urls]
@@ -140,20 +139,18 @@ where = ["src"]
 build = "cp39-* cp310-* cp311-* cp312-* cp313-*"
 skip = "*-musllinux*"
 test-command = "python {project}/scripts/wheel_smoke_test.py"
-test-requires = ["numpy>=1.22,<2.3", "scipy>=1.9,<1.16", "scikit-learn>=1.0,<1.8", "pandas>=1.4,<2.4", "pytest", "packaging"]
+test-requires = ["numpy", "scipy", "scikit-learn", "pandas", "pytest", "packaging"]
 build-verbosity = 1
 
 
 [[tool.cibuildwheel.overrides]]
 select = "cp313-manylinux*"
-test-requires = ["numpy>=1.22,<2.3", "scipy>=1.9,<1.16", "scikit-learn>=1.0,<1.8", "pandas>=1.4,<2.4", "pytest", "packaging"]
+test-requires = ["numpy", "scipy", "scikit-learn>=1.0,<1.8", "pandas", "pytest", "packaging"]
 
 [tool.cibuildwheel.linux]
 before-build = "pip install pybind11"
 environment = { CC = "gcc", CXX = "g++" }
-# manylinux2014 corresponds to the manylinux_2_17 compatibility baseline.
-# Use the cibuildwheel-recognized image selector so Docker resolves the
-# official PyPA build image for both x86_64 and aarch64 builds.
+# manylinux2014 maps to the manylinux_2_17 compatibility baseline.
 manylinux-x86_64-image = "manylinux2014"
 manylinux-aarch64-image = "manylinux2014"
 archs = ["x86_64", "aarch64"]
