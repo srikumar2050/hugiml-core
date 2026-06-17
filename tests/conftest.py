@@ -29,11 +29,42 @@ session-scoped fixtures.
 
 from __future__ import annotations
 
+import os
+import sys
 from pathlib import Path
 
-import numpy as np
-import pandas as pd
-import pytest
+# ---------------------------------------------------------------------------
+# Native test runtime
+# ---------------------------------------------------------------------------
+
+
+def _stabilize_native_test_threads() -> None:
+    """Use deterministic native-worker settings on macOS test runners.
+
+    The v1.1.10 native test suite exercises the OpenMP-backed extension heavily.
+    macOS CI runners can load the coverage tracer and native threaded libraries
+    in the same process; keeping native worker counts to one preserves test
+    semantics while avoiding runner-specific thread runtime instability.
+    """
+    if os.environ.get("RUNNER_OS") == "macOS" or sys.platform == "darwin":
+        thread_env = {
+            "OMP_NUM_THREADS": "1",
+            "OMP_DYNAMIC": "FALSE",
+            "OPENBLAS_NUM_THREADS": "1",
+            "MKL_NUM_THREADS": "1",
+            "VECLIB_MAXIMUM_THREADS": "1",
+            "NUMEXPR_NUM_THREADS": "1",
+            "KMP_INIT_AT_FORK": "FALSE",
+        }
+        for name, value in thread_env.items():
+            os.environ.setdefault(name, value)
+
+
+_stabilize_native_test_threads()
+
+import numpy as np  # noqa: E402
+import pandas as pd  # noqa: E402
+import pytest  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -240,8 +271,10 @@ def tmp_path_model(tmp_path) -> Path:
 def _core_available() -> bool:
     """Return True when the _hugiml_core native extension is importable."""
     try:
-        import _hugiml_core  # noqa: F401
+        import _hugiml_core
 
+        if os.environ.get("OMP_NUM_THREADS") == "1" and hasattr(_hugiml_core, "openmp_set_num_threads"):
+            _hugiml_core.openmp_set_num_threads(1)
         return True
     except ImportError:
         return False
