@@ -467,6 +467,7 @@ def save_model(clf: Any, path: str | os.PathLike) -> None:
         "n_features_in_": int(clf.n_features_in_),
         "classes_list": clf.classes_.tolist(),
         "feature_names_in_": list(clf.feature_names_in_) if clf.feature_names_in_ else None,
+        "binary_categorical_cols": list(getattr(clf, "binary_categorical_cols_", []) or []),
         "_native_available_": bool(getattr(clf, "_native_available_", True)),
         "_degraded_reason": getattr(clf, "_degraded_reason", None),
         "n_categories_": getattr(clf, "n_categories_", None),
@@ -856,6 +857,7 @@ def _load_v3(path: str | os.PathLike) -> Any:
     else:
         clf.is_int_mask_ = None  # type: ignore[assignment]
     clf.feature_names_in_ = clf_fit.get("feature_names_in_")
+    clf.binary_categorical_cols_ = list(clf_fit.get("binary_categorical_cols", []) or [])
     clf._native_available_ = clf_fit.get("_native_available_", False)
     if clf_fit.get("_degraded_reason"):
         clf._degraded_reason = clf_fit["_degraded_reason"]

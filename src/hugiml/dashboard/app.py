@@ -38,6 +38,10 @@ from hugiml.dashboard.components.config_compare import render_config_comparison
 from hugiml.dashboard.components.drift import render_drift
 from hugiml.dashboard.components.fairness import render_fairness
 from hugiml.dashboard.components.feature_family import render_feature_family_audit
+from hugiml.dashboard.components.governance_evidence import (
+    render_adaptive_binning_evidence,
+    render_augmented_pair_traceability,
+)
 from hugiml.dashboard.components.missingness import render_missingness
 from hugiml.dashboard.components.overview import render_overview
 from hugiml.dashboard.components.patterns import render_patterns
@@ -777,6 +781,56 @@ def _read_persisted_upload() -> tuple[pd.DataFrame, str] | None:
     return _read_uploaded_table(stored), stored.name
 
 
+def _reset_run_state_for_dataset_change(new_dataset_key: str) -> bool:
+    """Clear stale run/governance state when the selected demo dataset changes.
+
+    Returns ``True`` only when the dataset actually changed. The caller should
+    immediately rerun after a reset so the already-computed top-level workspace
+    state cannot continue rendering stale Governance/Results panes during the
+    same Streamlit pass.
+    """
+    previous_dataset_key = st.session_state.get("hugiml_active_demo_dataset_key")
+    st.session_state["hugiml_active_demo_dataset_key"] = new_dataset_key
+    if previous_dataset_key is None or previous_dataset_key == new_dataset_key:
+        return False
+
+    keys_to_clear = [
+        "hugiml_workbench_runs",
+        "hugiml_workbench_context_key",
+        "hugiml_workbench_last_message",
+        "hugiml_promoted_governance_ctx",
+        "hugiml_cv_monitoring_cache",
+        "hugiml_cv_monitoring_cache_key",
+        "hugiml_jump_to_results_tab",
+        "hugiml_workbench_open_results",
+        "hugiml_governance_requested",
+    ]
+    for key in keys_to_clear:
+        st.session_state.pop(key, None)
+
+    st.session_state["hugiml_nav_section"] = "Setup"
+    st.session_state["hugiml_workbench_section"] = "Setup"
+    st.session_state["hugiml_workbench_section_token"] = int(st.session_state.get("hugiml_workbench_section_token", 0)) + 1
+    return True
+
+
+def _pop_session_flag(key: str) -> bool:
+    """Pop a navigation flag without evaluating arbitrary objects as bool.
+
+    Streamlit session state can contain DataFrames and other array-like objects.
+    Accidentally using one in an ``if`` condition raises Pandas' ambiguous truth
+    value error. Only explicit scalar truthy values count as flags here.
+    """
+    value = st.session_state.pop(key, False)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, np.integer)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+    return False
+
+
 def _sidebar_dataset_controls(args: argparse.Namespace, *, require_fit_action: bool = True) -> tuple[dict[str, Any] | None, str | None, int, int, str]:
     theme = st.session_state.get("hugiml_theme", "Ocean")
 
@@ -808,6 +862,8 @@ def _sidebar_dataset_controls(args: argparse.Namespace, *, require_fit_action: b
             key="hugiml_demo_dataset",
         )
         demo_key = demo_keys[demo_labels.index(selected_label)]
+        if _reset_run_state_for_dataset_change(demo_key):
+            st.rerun()
         return (
             _load_demo_context_cached(demo_key),
             _config_key(f"demo:{demo_key}", int(cv), int(random_state)),
@@ -1134,13 +1190,23 @@ def _render_representation_page(ctx: dict[str, Any]) -> None:
 
     st.divider()
 
-    render_feature_family_audit(
-        ctx["model"],
-        ctx["X"],
-        sensitive_columns=ctx["roles"]["sensitive_columns"],
-        excluded_columns=ctx["roles"]["excluded_columns"],
-        id_column=ctx["roles"]["id_column"],
-    )
+    tab1, tab2, tab3 = st.tabs([
+        "Feature families",
+        "Adaptive binning evidence",
+        "Augmented pair traceability",
+    ])
+    with tab1:
+        render_feature_family_audit(
+            ctx["model"],
+            ctx["X"],
+            sensitive_columns=ctx["roles"]["sensitive_columns"],
+            excluded_columns=ctx["roles"]["excluded_columns"],
+            id_column=ctx["roles"]["id_column"],
+        )
+    with tab2:
+        render_adaptive_binning_evidence(ctx["model"], ctx.get("X"))
+    with tab3:
+        render_augmented_pair_traceability(ctx["model"])
 
 
 def _render_data_quality_policy_page(ctx: dict[str, Any]) -> None:
@@ -1157,9 +1223,14 @@ def _render_data_quality_policy_page(ctx: dict[str, Any]) -> None:
 
     tab1, tab2 = st.tabs(["Missingness", "Sensitive / Proxy Review"])
     with tab1:
-        render_missingness(ctx["X"])
+        render_missingness(ctx["X"], model=ctx["model"])
     with tab2:
-        render_fairness(ctx["roles"]["sensitive_columns"])
+        render_fairness(
+            ctx["roles"]["sensitive_columns"],
+            model=ctx["model"],
+            X=ctx["X"],
+            y=ctx.get("y"),
+        )
 
 
 def _render_page(page: str, ctx: dict[str, Any]) -> None:
@@ -1169,10 +1240,12 @@ def _render_page(page: str, ctx: dict[str, Any]) -> None:
             result=ctx["result"],
             roles=ctx["roles"],
             meta=ctx["meta"],
+            X=ctx.get("X"),
+            y=ctx.get("y"),
         )
     elif page == "Validation":
         cv_results = pd.DataFrame(getattr(ctx["result"], "results_", []))
-        render_performance(cv_results)
+        render_performance(cv_results, model=ctx["model"], X=ctx["X"], y=ctx.get("y"))
     elif page == "Representation Audit":
         _render_representation_page(ctx)
     elif page == "Pattern Inventory":
@@ -1186,7 +1259,7 @@ def _render_page(page: str, ctx: dict[str, Any]) -> None:
     elif page == "Representation Pruning":
         render_pruning_analysis(ctx)
     elif page == "Monitoring":
-        render_drift(ctx["model"], ctx["X"])
+        render_drift(ctx["model"], ctx["X"], ctx.get("y"))
     else:
         st.warning(f"Unknown page: {page}")
 
@@ -1198,9 +1271,9 @@ def _render_top_nav() -> tuple[str, str]:
     ``hugiml_nav_section`` (never a widget key) to avoid StreamlitAPIException.
     """
     # Consume deferred navigation flags before any widget is created.
-    if st.session_state.pop("hugiml_governance_requested", False):
+    if _pop_session_flag("hugiml_governance_requested"):
         st.session_state["hugiml_nav_section"] = "Governance"
-    if st.session_state.pop("hugiml_workbench_open_results", False):
+    if _pop_session_flag("hugiml_workbench_open_results"):
         st.session_state["hugiml_nav_section"] = "Results"
 
     current_theme = st.session_state.get("hugiml_theme", "Ocean")

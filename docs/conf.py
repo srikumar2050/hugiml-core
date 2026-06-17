@@ -49,6 +49,13 @@ autodoc_mock_imports = [
     "interpret",
     "pygam",
     "rulefit",
+    "streamlit",
+    "altair",
+    "jinja2",
+    "markdown",
+    "openpyxl",
+    "lightgbm",
+    "imodels",
 ]
 
 napoleon_google_docstring = True

@@ -14,17 +14,19 @@ Why HUGIML?
 
 * **Intrinsic interpretability:** learned HUG patterns are the model representation, not an after-the-fact explanation.
 * **Regulated-domain fit:** model cards, audit artifacts, pruning trails, calibration, drift monitoring, and deployment helpers are included.
-* **Native performance:** computationally intensive mining, transaction construction, and matrix-building stages are C++ accelerated with optional OpenMP support. Version 1.1.10 adds clearer native-backend install diagnostics and expands Governance Studio into a richer dashboard/workbench for validation, comparison, and governance review. Earlier 1.1.x capabilities remain available, including production/audit execution modes, fast adaptive-binning tuning, higher-order interaction selection, the native ``L=2`` hot path, augmented-pair operations, strict global ``topK`` budgeting, compact native transaction memory, and fused adaptive ``L=1`` execution.
+* **Native performance:** computationally intensive mining, transaction construction, and matrix-building stages are C++ accelerated with optional OpenMP support. Version 1.1.11 builds on the v1.1.10 dashboard/workbench release with expanded governance evidence views and binary feature conversion for two-value numeric columns. Earlier 1.1.x capabilities remain available, including production/audit execution modes, fast adaptive-binning tuning, higher-order interaction selection, the native ``L=2`` hot path, augmented-pair operations, strict global ``topK`` budgeting, compact native transaction memory, and fused adaptive ``L=1`` execution.
 * **Python ergonomics:** the estimator follows the scikit-learn API and works with pandas DataFrames or NumPy arrays.
 
 
 Current release focus
 ---------------------
 
-The 1.1.10 release builds on v1.1.9 with two practical upgrades for installation confidence and review workflows:
+The 1.1.11 release builds on v1.1.10 with two practical upgrades for review workflows and feature preparation:
 
-* Build and import reliability is clearer, with native-backend diagnostics, a public ``check_native()`` helper, cleaned package exports, and backward-compatible classifier names.
-* Governance Studio now offers a fuller workbench experience for setting up datasets, comparing candidate models, drilling into results, using demo data, following workflow guidance, and reviewing governance evidence.
+* Governance Studio adds richer evidence panels for adaptive binning, augmented pairs, feature families, pattern coverage, validation, monitoring, and governance summaries.
+* Numeric two-value columns are converted into categorical indicator features during preparation so binary inputs are represented as explicit presence/absence evidence instead of numeric intervals.
+
+The broader v1.1.10 workbench, native-backend diagnostics, public ``check_native()`` helper, cleaned package exports, and backward-compatible classifier names remain available.
 
 Installation
 ------------

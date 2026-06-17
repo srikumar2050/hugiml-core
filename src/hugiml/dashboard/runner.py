@@ -46,7 +46,7 @@ def _default_params() -> dict:
         "adaptive_binning": True,
         "B": -1,
         "L": 2,
-        "topK": 50,
+        "topK": 100,
         "G": 1e-2,
         "feature_mode": "original_plus_patterns",
         "topk_budget_strict": False,

@@ -4,6 +4,14 @@ All notable changes to hugiml-core are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
+## [1.1.11] - 2026-06-17
+
+### Added
+
+- Added Governance Studio dashboard evidence views for adaptive binning, augmented-pair traceability, feature-family review, pattern coverage, cross-validation monitoring, and export-ready governance summaries.
+- Added binary feature conversion: two-value numeric columns are treated as categorical indicators before HUG pattern mining and downstream feature preparation.
+
+---
 ## [1.1.10] - 2026-06-12
 
 ### Changed

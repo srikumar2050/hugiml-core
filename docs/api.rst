@@ -95,3 +95,27 @@ Exceptions
 .. automodule:: hugiml.exceptions
    :members:
    :show-inheritance:
+
+
+Dashboard modules
+-----------------
+
+.. automodule:: hugiml.dashboard.app
+   :members:
+   :show-inheritance:
+
+.. automodule:: hugiml.dashboard.runner
+   :members:
+   :show-inheritance:
+
+.. automodule:: hugiml.dashboard.workbench
+   :members:
+   :show-inheritance:
+
+.. automodule:: hugiml.dashboard.display
+   :members:
+   :show-inheritance:
+
+.. automodule:: hugiml.dashboard.components.governance_evidence
+   :members:
+   :show-inheritance:

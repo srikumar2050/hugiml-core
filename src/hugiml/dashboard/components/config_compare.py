@@ -27,6 +27,23 @@ def _family_counts(model: Any, X: pd.DataFrame | None = None) -> dict[str, int]:
     return {"original": original, "pattern": pattern, "augmented": augmented, "total": total}
 
 
+
+
+def _fit_time_ms(model: Any, result: Any = None) -> Any:
+    """Return total fit time in milliseconds when fitted metadata exposes it."""
+    for obj in (getattr(model, "fit_metadata_", None), getattr(result, "fit_metadata_", None), result):
+        if obj is None:
+            continue
+        if isinstance(obj, dict):
+            value = obj.get("total_fit_ms") or obj.get("fit_time_ms")
+        else:
+            value = getattr(obj, "total_fit_ms", None)
+            if value is None:
+                value = getattr(obj, "fit_time_ms", None)
+        if value is not None:
+            return value
+    return None
+
 def _result_row(label: str, result: Any, X: pd.DataFrame | None = None) -> dict:
     model = getattr(result, "best_estimator_", None)
     counts = _family_counts(model, X)
@@ -34,7 +51,7 @@ def _result_row(label: str, result: Any, X: pd.DataFrame | None = None) -> dict:
     return {
         "run": label,
         "status": getattr(result, "status_", "ok"),
-        "cv_score": getattr(result, "best_score_", None),
+        "validation_roc_auc": getattr(result, "best_score_", None),
         "L": params.get("L", getattr(model, "L", None) if model is not None else None),
         "topK": params.get("topK", getattr(model, "topK", None) if model is not None else None),
         "G": params.get("G", getattr(model, "G", None) if model is not None else None),
@@ -44,6 +61,7 @@ def _result_row(label: str, result: Any, X: pd.DataFrame | None = None) -> dict:
         "pattern_features": counts["pattern"],
         "augmented_features": counts["augmented"],
         "displayed_total": counts["total"],
+        "total_fit_ms": _fit_time_ms(model, result),
         "diagnostic": getattr(result, "error_", None),
     }
 
@@ -142,10 +160,10 @@ def render_config_comparison(ctx: dict, *args, **kwargs) -> None:
     ]
     df = pd.DataFrame(rows)
 
-    if df["cv_score"].notna().all():
-        base_score = float(df.loc[0, "cv_score"])
-        cand_score = float(df.loc[1, "cv_score"])
-        df["score_delta_vs_current"] = [0.0, cand_score - base_score]
+    if "validation_roc_auc" in df.columns and df["validation_roc_auc"].notna().all():
+        base_score = float(df.loc[0, "validation_roc_auc"])
+        cand_score = float(df.loc[1, "validation_roc_auc"])
+        df["validation_roc_auc_delta_vs_current"] = [0.0, cand_score - base_score]
 
     st.markdown("#### Comparison")
     st.dataframe(dataframe_for_display(df), width="stretch", hide_index=True)

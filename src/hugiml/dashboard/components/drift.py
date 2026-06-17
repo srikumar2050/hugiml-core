@@ -254,7 +254,7 @@ def _pattern_activation_summary(model: Any, X: pd.DataFrame | None) -> pd.DataFr
     return pd.DataFrame()
 
 
-def render_drift(model: Any = None, X: pd.DataFrame | None = None, *args, **kwargs) -> None:
+def render_drift(model: Any = None, X: pd.DataFrame | None = None, y: Any = None, *args, **kwargs) -> None:
     st.subheader("Monitoring")
     st.markdown(
         """
@@ -290,11 +290,12 @@ def render_drift(model: Any = None, X: pd.DataFrame | None = None, *args, **kwar
     else:
         c4.metric("Max missingness", "N/A")
 
-    tab1, tab2, tab3, tab4 = st.tabs([
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
         "Prediction distribution",
         "Missingness",
         "Distribution review",
         "Pattern activation",
+        "CV Monitoring",
     ])
 
     with tab1:
@@ -322,6 +323,28 @@ def render_drift(model: Any = None, X: pd.DataFrame | None = None, *args, **kwar
         if dist.empty:
             st.info("Distribution review is not available.")
         else:
+            numeric_dist = dist.loc[dist["review_type"].astype(str).str.contains("numeric", case=False, na=False)].copy()
+            if not numeric_dist.empty and "value" in numeric_dist.columns:
+                psi_df = numeric_dist[["feature", "value"]].copy()
+                psi_df["value"] = pd.to_numeric(psi_df["value"], errors="coerce")
+                psi_df = psi_df.dropna(subset=["value"]).sort_values("value", ascending=False).reset_index(drop=True)
+                if not psi_df.empty:
+                    st.markdown("#### PSI by feature")
+                    st.caption("Green < 0.10 (stable) · Amber 0.10–0.25 (minor shift) · Red > 0.25 (major shift)")
+                    import matplotlib
+                    matplotlib.use("Agg")
+                    import matplotlib.pyplot as _plt
+                    _fig, _ax = _plt.subplots(figsize=(7, max(2.5, len(psi_df) * 0.38)))
+                    _colors = ["#E24B4A" if v > 0.25 else "#EF9F27" if v > 0.10 else "#1D9E75" for v in psi_df["value"]]
+                    _ax.barh(psi_df["feature"].astype(str), psi_df["value"], color=_colors)
+                    _ax.axvline(0.10, linestyle="--", linewidth=0.8, color="#EF9F27", alpha=0.7)
+                    _ax.axvline(0.25, linestyle="--", linewidth=0.8, color="#E24B4A", alpha=0.7)
+                    _ax.set_xlabel("PSI")
+                    _ax.set_title("Population Stability Index per feature")
+                    _ax.invert_yaxis()
+                    _fig.tight_layout()
+                    st.pyplot(_fig)
+                    _plt.close(_fig)
             st.dataframe(dataframe_for_display(dist), width="stretch", hide_index=True)
 
     with tab4:
@@ -333,3 +356,158 @@ def render_drift(model: Any = None, X: pd.DataFrame | None = None, *args, **kwar
             )
         else:
             st.dataframe(dataframe_for_display(pattern_summary), width="stretch", hide_index=True)
+
+
+    with tab5:
+        render_cv_monitoring(model, X, y, cv=5)
+
+
+def _cv_monitoring_cache_key(model: Any, X: pd.DataFrame | None, y: Any, cv: int) -> str:
+    n_rows = len(X) if X is not None else 0
+    n_targets = len(y) if y is not None and hasattr(y, "__len__") else 0
+    return f"cv_monitoring::{id(model)}::{n_rows}::{n_targets}::{cv}"
+
+
+def _safe_cv_monitoring_report(model: Any, X: pd.DataFrame | None, y: Any, cv: int = 5) -> tuple[dict[str, Any] | None, str | None]:
+    if model is None or X is None or y is None:
+        return None, "A fitted model, X, and y are required for cross-validation monitoring."
+    method = getattr(model, "cross_validate_monitored", None)
+    if not callable(method):
+        return None, "cross_validate_monitored() is not available on this model/version."
+    try:
+        report = method(X, y, cv=cv)
+    except Exception as exc:
+        return None, f"cross_validate_monitored() could not be computed: {exc}"
+    if not isinstance(report, dict):
+        return None, "cross_validate_monitored() returned an unsupported report shape."
+    return report, None
+
+
+def _cv_scores_frame(report: dict[str, Any]) -> pd.DataFrame:
+    scores = report.get("test_scores", [])
+    rows: list[dict[str, Any]] = []
+    for i, item in enumerate(scores, start=1):
+        if isinstance(item, dict):
+            auc = item.get("auc", item.get("roc_auc", item.get("score", np.nan)))
+            row = {"fold": i, **item, "auc": auc}
+        else:
+            row = {"fold": i, "auc": item}
+        rows.append(row)
+    return pd.DataFrame(rows)
+
+
+def _cv_drift_frame(report: dict[str, Any]) -> pd.DataFrame:
+    drift = report.get("fold_drift", [])
+    rows: list[dict[str, Any]] = []
+    if isinstance(drift, dict):
+        iterator = drift.items()
+    else:
+        iterator = enumerate(drift, start=1)
+    for fold_key, fold_value in iterator:
+        fold = int(fold_key) if isinstance(fold_key, (int, np.integer)) else fold_key
+        if isinstance(fold_value, pd.DataFrame):
+            df = fold_value.copy()
+            if "feature" not in df.columns:
+                df = df.reset_index().rename(columns={"index": "feature"})
+            for _, row in df.iterrows():
+                psi = row.get("psi", row.get("PSI", np.nan))
+                rows.append({"fold": fold, "feature": row.get("feature"), "psi": psi})
+        elif isinstance(fold_value, dict):
+            for feature, value in fold_value.items():
+                psi = value.get("psi", value.get("PSI", np.nan)) if isinstance(value, dict) else value
+                rows.append({"fold": fold, "feature": feature, "psi": psi})
+    return pd.DataFrame(rows)
+
+
+def _cv_metadata_frame(report: dict[str, Any]) -> pd.DataFrame:
+    metadata = report.get("fold_metadata", [])
+    rows: list[dict[str, Any]] = []
+    if isinstance(metadata, dict):
+        iterator = metadata.items()
+    else:
+        iterator = enumerate(metadata, start=1)
+    fit_times = report.get("fit_times_ms", [])
+    for fold_key, value in iterator:
+        fold = int(fold_key) if isinstance(fold_key, (int, np.integer)) else fold_key
+        row = {"fold": fold}
+        if isinstance(value, dict):
+            row.update(value)
+        else:
+            row["metadata"] = value
+        idx = int(fold) - 1 if isinstance(fold, int) else None
+        if idx is not None and idx < len(fit_times) and "fit_time_ms" not in row:
+            row["fit_time_ms"] = fit_times[idx]
+        rows.append(row)
+    if not rows and fit_times:
+        rows = [{"fold": i + 1, "fit_time_ms": t} for i, t in enumerate(fit_times)]
+    return pd.DataFrame(rows)
+
+
+def render_cv_monitoring(model: Any = None, X: pd.DataFrame | None = None, y: Any = None, cv: int = 5) -> dict[str, Any] | None:
+    """Render cross-validated monitoring stability evidence."""
+    st.markdown("#### Cross-Validation Monitoring")
+    st.caption(
+        "Evaluates whether prediction behaviour, fold-level PSI, fit timing, and pattern counts remain stable across CV folds."
+    )
+
+    cache_key = _cv_monitoring_cache_key(model, X, y, cv)
+    if cache_key not in st.session_state:
+        report, error = _safe_cv_monitoring_report(model, X, y, cv=cv)
+        st.session_state[cache_key] = {"report": report, "error": error}
+    cached = st.session_state.get(cache_key, {})
+    report = cached.get("report")
+    error = cached.get("error")
+    if error:
+        st.info(error)
+        return None
+    if not isinstance(report, dict):
+        st.info("Cross-validation monitoring report is not available.")
+        return None
+
+    scores = _cv_scores_frame(report)
+    drift = _cv_drift_frame(report)
+    metadata = _cv_metadata_frame(report)
+
+    c1, c2, c3 = st.columns(3)
+    if not scores.empty and "auc" in scores.columns:
+        auc = pd.to_numeric(scores["auc"], errors="coerce")
+        c1.metric("Mean CV AUC", f"{auc.mean():.4f}" if auc.notna().any() else "N/A")
+    else:
+        c1.metric("Mean CV AUC", "N/A")
+    if not drift.empty and "psi" in drift.columns:
+        psi = pd.to_numeric(drift["psi"], errors="coerce")
+        c2.metric("Max fold PSI", f"{psi.max():.4f}" if psi.notna().any() else "N/A")
+    else:
+        c2.metric("Max fold PSI", "N/A")
+    pattern_col = next((c for c in ("pattern_count", "n_patterns", "patterns") if c in metadata.columns), None)
+    if pattern_col:
+        pc = pd.to_numeric(metadata[pattern_col], errors="coerce")
+        c3.metric("Pattern count range", f"{int(pc.min())}–{int(pc.max())}" if pc.notna().any() else "N/A")
+    else:
+        c3.metric("Pattern count range", "N/A")
+
+    tab1, tab2, tab3 = st.tabs(["Fold AUC", "Fold PSI", "Fit / pattern stability"])
+    with tab1:
+        if scores.empty:
+            st.info("Fold test scores are not available in the CV monitoring report.")
+        else:
+            chart_df = scores[["fold", "auc"]].copy() if "auc" in scores.columns else scores.copy()
+            if "auc" in chart_df.columns:
+                st.bar_chart(chart_df.set_index("fold")["auc"])
+            st.dataframe(dataframe_for_display(scores), width="stretch", hide_index=True)
+    with tab2:
+        if drift.empty:
+            st.info("Fold PSI drift output is not available in the CV monitoring report.")
+        else:
+            heat = drift.pivot_table(index="feature", columns="fold", values="psi", aggfunc="mean")
+            st.dataframe(dataframe_for_display(heat.reset_index()), width="stretch", hide_index=True)
+            with st.expander("Long-form fold PSI table", expanded=False):
+                st.dataframe(dataframe_for_display(drift), width="stretch", hide_index=True)
+    with tab3:
+        if metadata.empty:
+            st.info("Fold metadata is not available in the CV monitoring report.")
+        else:
+            if pattern_col:
+                st.line_chart(metadata.set_index("fold")[[pattern_col]])
+            st.dataframe(dataframe_for_display(metadata), width="stretch", hide_index=True)
+    return report

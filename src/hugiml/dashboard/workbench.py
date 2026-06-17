@@ -9,8 +9,8 @@ from __future__ import annotations
 
 import copy
 import itertools
-import json
 import time
+import warnings
 from dataclasses import dataclass
 from importlib.util import find_spec
 from typing import Any
@@ -26,7 +26,6 @@ if not hasattr(np, "bool"):
     np.bool = bool  # type: ignore[attr-defined]
 import pandas as pd
 import streamlit as st
-import streamlit.components.v1 as _st_components
 from sklearn.base import clone
 from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
@@ -83,8 +82,82 @@ PARAM_HINTS = {
     "topK": "Maximum selected HUG patterns.",
     "G": "Minimum gain/utility threshold for pattern mining.",
     "feature_mode": "How original and mined features are combined.",
-    "topk_budget_strict": "Whether the top-K budget is enforced strictly.",
+    "topk_budget_strict": "Whether strict top-K budget is applied.",
 }
+
+
+def _hugiml_core_default_grid() -> dict[str, list[Any]]:
+    """Return the HUGIML core default tuning grid with dashboard safeguards."""
+    try:
+        from hugiml import HUGIMLClassifierNative
+
+        grid = copy.deepcopy(HUGIMLClassifierNative.default_param_grid())
+    except Exception:
+        grid = {
+            "B": [-1],
+            "adaptive_binning": [True],
+            "L": [1, 2],
+            "feature_mode": ["patterns_only", "original_plus_patterns", "original_plus_interactions"],
+            "topK": [30, 50, 100],
+            "G": [0.01],
+        }
+    grid["adaptive_binning"] = [True]
+    return grid
+
+
+
+
+def _hugiml_valid_feature_modes() -> list[str]:
+    """Return feature modes for the Advanced UI, preserving a stable Workbench order.
+
+    The core default tuning grid may intentionally omit slower/non-default modes,
+    but Advanced should still expose known valid modes such as
+    original_plus_interactions for explicit user-driven tuning.
+    """
+    fallback = ["original_plus_patterns", "patterns_only", "original_plus_interactions"]
+    try:
+        grid = _hugiml_core_default_grid()
+        modes = list(grid.get("feature_mode") or [])
+    except Exception:
+        modes = []
+    valid = []
+    for mode in [*fallback, *modes]:
+        if mode and mode not in valid:
+            valid.append(mode)
+    return valid or fallback
+
+def _hugiml_auto_params() -> dict[str, Any]:
+    """Best single-run Workbench default aligned with the core fast-tune grid."""
+    params = _default_params()
+    params.update({
+        "adaptive_binning": True,
+        "B": -1,
+        "L": 2,
+        "topK": 100,
+        "G": 0.01,
+        "feature_mode": "original_plus_patterns",
+        "topk_budget_strict": False,
+    })
+    return params
+
+
+def _hugiml_guided_fast_tune_params() -> dict[str, Any]:
+    """Sentinel configuration consumed by _run_single_model for fast core tuning."""
+    return {
+        "__hugiml_tune__": True,
+        "__label__": "guided_fast_tune",
+        "__display_name__": "Guided fast tune",
+        "param_grid": _hugiml_core_default_grid(),
+        "base_params": {"adaptive_binning": True},
+        "use_fast_path": True,
+    }
+
+
+def _hugiml_grid_count(grid: dict[str, list[Any]]) -> int:
+    total = 1
+    for values in (grid or {}).values():
+        total *= max(1, len(values or []))
+    return total
 
 MODEL_SHORT_NAMES = {
     "Logistic Regression": "LR",
@@ -193,7 +266,13 @@ class RuleFitClassifierAdapter:
         for kwargs in ctor_attempts:
             try:
                 model = RuleFitClassifier(**kwargs)
-                model.fit(X_df, y)
+                with warnings.catch_warnings():
+                    warnings.filterwarnings(
+                        "ignore",
+                        message=r".*Inconsistent values: penalty=.*l1_ratio=.*penalty is deprecated.*",
+                        category=UserWarning,
+                    )
+                    model.fit(X_df, y)
                 self.model_ = model
                 self.backend_ = "imodels-rulefit"
                 return True
@@ -225,7 +304,13 @@ class RuleFitClassifierAdapter:
                     lambda: model.fit(X_df, y),
                 ):
                     try:
-                        fit_call()
+                        with warnings.catch_warnings():
+                            warnings.filterwarnings(
+                                "ignore",
+                                message=r".*Inconsistent values: penalty=.*l1_ratio=.*penalty is deprecated.*",
+                                category=UserWarning,
+                            )
+                            fit_call()
                         self.model_ = model
                         self.backend_ = "legacy-rulefit"
                         return True
@@ -607,8 +692,46 @@ def _run_single_model(
 ) -> dict[str, Any]:
     started = time.perf_counter()
     if model_name == "HUGIML":
-        result = fit_hugiml_config(X, y, params=params, cv=cv, scoring="roc_auc", random_state=random_state)
-        model = getattr(result, "best_estimator_", None)
+        raw_params = dict(params)
+        if raw_params.pop("__hugiml_tune__", False):
+            from hugiml import HUGIMLClassifierNative
+
+            param_grid = raw_params.pop("param_grid", None) or _hugiml_core_default_grid()
+            param_grid["adaptive_binning"] = [True]
+            base_params = raw_params.pop("base_params", {}) or {}
+            base_params["adaptive_binning"] = True
+            use_fast_path = bool(raw_params.pop("use_fast_path", True))
+            display_name = raw_params.pop("__display_name__", "Guided fast tune")
+            raw_params.pop("__label__", None)
+            result = HUGIMLClassifierNative.tune(
+                X,
+                y,
+                cv=cv,
+                scoring="roc_auc",
+                param_grid=param_grid,
+                refit=True,
+                base_params=base_params,
+                random_state=random_state,
+                shuffle=True,
+                use_fast_path=use_fast_path,
+                return_dataframe=True,
+            )
+            model = getattr(result, "best_estimator_", None)
+            selected_params = dict(getattr(result, "best_params_", {}) or {})
+            selected_params["adaptive_binning"] = True
+            params = {
+                "mode": "guided_fast_tune",
+                "selected_params": selected_params,
+                "candidate_count": _hugiml_grid_count(param_grid),
+                "fast_path_used": bool(getattr(result, "fast_path_used_", False)),
+                "param_grid": param_grid,
+                "display_name": display_name,
+            }
+        else:
+            params = dict(raw_params)
+            result = fit_hugiml_config(X, y, params=params, cv=cv, scoring="roc_auc", random_state=random_state)
+            model = getattr(result, "best_estimator_", None)
+            selected_params = dict(params)
         if model is None:
             return {
                 "model": model_name,
@@ -642,6 +765,7 @@ def _run_single_model(
         "feature_frame": X,
         "confusion_matrix": confusion_matrix(y, y_pred),
         "implementation": getattr(model, "backend_", "native"),
+        "tuning_result": result if model_name == "HUGIML" else None,
     }
     return {
         "model": model_name,
@@ -682,6 +806,8 @@ def run_experiments(
                         "artifact": None,
                     }
                 base_id = model_name.replace(' ', '_').lower()
+                if model_name == "HUGIML" and isinstance(label_params, dict) and label_params.get("__label__"):
+                    base_id = f"{base_id}_{label_params.get('__label__')}"
                 row["run_id"] = f"{base_id}_{idx}" if multi else base_id
                 row["config_index"] = idx if multi else None
                 runs.append(row)
@@ -775,42 +901,100 @@ def _render_model_picker() -> dict[str, list[str]]:
 
 def _render_hugiml_config() -> list[dict[str, Any]]:
     st.markdown("#### HUGIML")
-    mode = st.radio("Configuration mode", ["Auto", "Guided", "Advanced grid"], horizontal=True, key="wb_hugiml_mode")
-    params = _default_params()
+    mode = st.radio(
+        "Configuration mode",
+        ["Auto", "Guided", "Advanced"],
+        horizontal=True,
+        key="wb_hugiml_mode",
+        help=(
+            "Auto runs one strong default. Guided uses the HUGIML core default hyperparameter "
+            "grid through the fast tuning path. Advanced lets you edit a custom grid."
+        ),
+    )
+
+    params = _hugiml_auto_params()
+    params["adaptive_binning"] = True
+
     if mode == "Auto":
-        st.caption("Uses stable HUGIML defaults. Switch to Guided or Advanced grid for manual control.")
+        st.caption("Runs one best-default HUGIML configuration. Adaptive binning is always enabled.")
         with st.expander("View auto parameters", expanded=False):
             st.json(params, expanded=False)
         return [params]
 
+    if mode == "Guided":
+        guided = _hugiml_guided_fast_tune_params()
+        grid = guided["param_grid"]
+        st.caption(
+            "Uses HUGIML core's default hyperparameter grid with `use_fast_path=True`; "
+            "adaptive binning is enabled for every candidate."
+        )
+        c1, c2 = st.columns([1, 3])
+        c1.metric("Candidates", f"{_hugiml_grid_count(grid):,}")
+        c2.caption("The Workbench records the selected best configuration after CV tuning.")
+        with st.expander("View guided default grid", expanded=False):
+            st.json(grid, expanded=False)
+        return [guided]
+
+    params["adaptive_binning"] = st.toggle(
+        "Adaptive binning",
+        value=True,
+        help="Default is on. When enabled, HUGIML uses adaptive/default binning and B is kept at -1.",
+        key="wb_hugiml_adaptive_binning",
+    )
+    if params["adaptive_binning"]:
+        params["B"] = -1
     c1, c2, c3, c4 = st.columns(4)
-    params["B"] = int(c1.number_input("B", value=int(params["B"]), min_value=-1, step=1, help=PARAM_HINTS["B"]))
+    if params["adaptive_binning"]:
+        c1.number_input("B", value=-1, min_value=-1, max_value=-1, step=1, disabled=True, help="B has no effect while adaptive binning is enabled; it is kept at -1.")
+    else:
+        params["B"] = int(c1.number_input("B", value=2, min_value=2, step=1, help="With adaptive binning disabled, choose a fixed bin count B >= 2."))
     params["L"] = int(c2.number_input("L", value=int(params["L"]), min_value=1, max_value=5, step=1, help=PARAM_HINTS["L"]))
     params["topK"] = int(c3.number_input("topK", value=int(params["topK"]), min_value=1, step=1, help=PARAM_HINTS["topK"]))
     params["G"] = float(c4.number_input("G", value=float(params["G"]), min_value=0.0, step=0.001, format="%.5f", help=PARAM_HINTS["G"]))
-    params["feature_mode"] = st.selectbox(
-        "Feature mode",
-        ["original_plus_patterns", "patterns_only", "original_plus_interactions"],
-        index=0,
-        help=PARAM_HINTS["feature_mode"],
+    feature_modes = _hugiml_valid_feature_modes()
+    default_feature_modes = [m for m in ["original_plus_patterns"] if m in feature_modes]
+    if not default_feature_modes and feature_modes:
+        default_feature_modes = [feature_modes[0]]
+    selected_feature_modes = st.multiselect(
+        "Feature modes",
+        feature_modes,
+        default=default_feature_modes,
+        help=(
+            PARAM_HINTS["feature_mode"]
+            + " Select multiple values to include feature_mode in Advanced hyperparameter tuning."
+        ),
+        key="wb_hugiml_feature_modes",
     )
-    params["adaptive_binning"] = st.toggle("Adaptive binning", value=True)
-    params["topk_budget_strict"] = st.toggle("Strict top-K budget", value=False, help=PARAM_HINTS["topk_budget_strict"])
-
-    if mode == "Guided":
-        return [params]
+    if not selected_feature_modes:
+        st.warning("Select at least one feature mode. Falling back to the first valid mode for this run.")
+        selected_feature_modes = default_feature_modes or feature_modes[:1]
+    params["feature_mode"] = selected_feature_modes[0]
+    params["topk_budget_strict"] = st.toggle("Strict top-K budget", value=False, help=PARAM_HINTS["topk_budget_strict"], key="wb_hugiml_topk_strict")
 
     with st.expander("Advanced grid values", expanded=True):
-        st.caption("Comma-separated values create multiple candidate HUGIML runs. Blank fields keep the guided value.")
+        if params["adaptive_binning"]:
+            st.caption("Comma-separated values create multiple candidate HUGIML runs. Blank fields keep the values above. B is locked at -1 while adaptive binning is enabled.")
+        else:
+            st.caption("Comma-separated values create multiple candidate HUGIML runs. Blank fields keep the values above. With adaptive binning off, every B value must be >= 2.")
         g1, g2, g3, g4 = st.columns(4)
+        b_values = [-1] if params["adaptive_binning"] else _parse_grid(g4.text_input("B values", value=str(params["B"]), key="wb_hugiml_b_grid"), int)
+        if not params["adaptive_binning"] and any(int(v) < 2 for v in b_values):
+            st.error("Advanced validation: when adaptive binning is off, B must be >= 2. Invalid B values were removed.")
+            b_values = [int(v) for v in b_values if int(v) >= 2] or [2]
+        if params["adaptive_binning"]:
+            g4.text_input("B values", value="-1", disabled=True, key="wb_hugiml_b_grid_locked", help="B is fixed at -1 while adaptive binning is enabled.")
         grid = {
-            "L": _parse_grid(g1.text_input("L values", value=str(params["L"])), int),
-            "topK": _parse_grid(g2.text_input("topK values", value=str(params["topK"])), int),
-            "G": _parse_grid(g3.text_input("G values", value=str(params["G"])), float),
-            "B": _parse_grid(g4.text_input("B values", value=str(params["B"])), int),
+            "L": _parse_grid(g1.text_input("L values", value=str(params["L"]), key="wb_hugiml_l_grid"), int),
+            "topK": _parse_grid(g2.text_input("topK values", value=str(params["topK"]), key="wb_hugiml_topk_grid"), int),
+            "G": _parse_grid(g3.text_input("G values", value=str(params["G"]), key="wb_hugiml_g_grid"), float),
+            "B": b_values,
+            "feature_mode": selected_feature_modes,
         }
-    return _expand_param_grid(params, grid)
-
+    configs = _expand_param_grid(params, grid)
+    if params["adaptive_binning"]:
+        for cfg in configs:
+            cfg["B"] = -1
+    return configs
 
 def _render_generic_config(model_name: str) -> list[dict[str, Any]]:
     st.markdown(f"#### {_model_short(model_name)}")
@@ -1413,7 +1597,23 @@ def _render_ebm_artifacts(model: Any, key_prefix: str = "") -> None:
         st.dataframe(dataframe_for_display(terms), width="stretch", hide_index=True)
 
 
-def _rulefit_rules_frame(model: Any) -> pd.DataFrame:
+def _rulefit_rules_frame(model: Any, max_rows: int | None = 50) -> pd.DataFrame:
+    """Best-effort RuleFit rule inventory across imodels, legacy rulefit, and fallback."""
+    def _limit(df: pd.DataFrame) -> pd.DataFrame:
+        if df.empty:
+            return df
+        return df.head(max_rows).reset_index(drop=True) if max_rows is not None else df.reset_index(drop=True)
+
+    # imodels commonly exposes a get_rules() table with rule, coef, support, importance.
+    try:
+        get_rules = getattr(model, "get_rules", None)
+        if callable(get_rules):
+            df = _safe_df(get_rules())
+            if not df.empty:
+                return _limit(df)
+    except Exception:
+        pass
+
     # imodels exposes rules through different attributes across versions.
     for attr in ("rules_", "rule_ensemble", "rule_ensemble_"):
         obj = getattr(model, attr, None)
@@ -1421,18 +1621,26 @@ def _rulefit_rules_frame(model: Any) -> pd.DataFrame:
             continue
         try:
             if isinstance(obj, pd.DataFrame):
-                return obj.head(50)
+                return _limit(obj.copy())
             if hasattr(obj, "rules"):
                 rules = getattr(obj, "rules")
-                return pd.DataFrame({"rule": [str(r) for r in list(rules)[:50]]})
+                return _limit(pd.DataFrame({"rule": [str(r) for r in list(rules)]}))
             if isinstance(obj, (list, tuple)):
-                return pd.DataFrame({"rule": [str(r) for r in obj[:50]]})
+                return _limit(pd.DataFrame({"rule": [str(r) for r in obj]}))
         except Exception:
             continue
     wrapped = getattr(model, "model_", None)
     if wrapped is not None and wrapped is not model:
-        return _rulefit_rules_frame(wrapped)
+        return _rulefit_rules_frame(wrapped, max_rows=max_rows)
     if getattr(model, "backend_", "") == "sklearn-rulefit-style":
+        encoder = getattr(model, "rule_encoder_", None)
+        categories = getattr(encoder, "categories_", None)
+        try:
+            if categories is not None and len(categories):
+                rules = [f"tree_leaf:{x}" for x in list(categories[0])]
+                return _limit(pd.DataFrame({"rule": rules, "artifact": "boosted-tree leaf indicator"}))
+        except Exception:
+            pass
         return pd.DataFrame({
             "artifact": ["Rule indicators generated from boosted-tree leaves"],
             "count": [int(getattr(getattr(model, "rule_encoder_", None), "categories_", [[]])[0].size) if hasattr(getattr(model, "rule_encoder_", None), "categories_") else None],
@@ -1481,6 +1689,377 @@ def _render_interpretable_artifacts(selected_run: dict[str, Any], key_prefix: st
         _render_rulefit_artifacts(model, implementation, key_prefix=key_prefix)
     else:
         st.info("This model exposes generic feature-importance artifacts only in the Workbench.")
+
+
+def _pattern_compare_key(row: pd.Series) -> str:
+    for col in ("pattern", "display_name", "feature", "name"):
+        if col in row and pd.notna(row[col]):
+            return str(row[col])
+    return " | ".join(str(x) for x in row.astype(str).tolist())
+
+
+def _normalised_pattern_inventory(run: dict[str, Any]) -> pd.DataFrame:
+    artifact = run.get("artifact") if isinstance(run.get("artifact"), dict) else {}
+    model = artifact.get("model") if isinstance(artifact, dict) else None
+    if model is None:
+        return pd.DataFrame()
+    df = _hugiml_patterns_frame(model)
+    if df.empty:
+        return pd.DataFrame()
+    out = df.copy()
+    out["pattern_key"] = out.apply(_pattern_compare_key, axis=1)
+    out = out.drop_duplicates("pattern_key").reset_index(drop=True)
+    return out
+
+
+
+def _artifact_run_label(run_id: str, runs_by_id: dict[str, dict[str, Any]]) -> str:
+    run = runs_by_id.get(str(run_id), {})
+    summary = _short_config_summary(run)
+    return f"{run_id} — {summary}" if summary else str(run_id)
+
+
+def _successful_model_runs(runs: list[dict[str, Any]], model_name: str) -> list[dict[str, Any]]:
+    return [r for r in _successful_runs(runs) if r.get("model") == model_name]
+
+
+def _select_base_alt_runs(model_runs: list[dict[str, Any]], *, key_prefix: str, model_label: str) -> tuple[dict[str, Any], dict[str, Any]] | tuple[None, None]:
+    if len(model_runs) < 2:
+        st.info(f"Run at least two successful {model_label} configurations to compare artifacts.")
+        return None, None
+    run_ids = [str(r.get("run_id")) for r in model_runs]
+    runs_by_id = {str(r.get("run_id")): r for r in model_runs}
+    c1, c2 = st.columns(2)
+    base_id = c1.selectbox(
+        f"Base {model_label} run",
+        run_ids,
+        index=0,
+        key=f"{key_prefix}_base",
+        format_func=lambda rid: _artifact_run_label(str(rid), runs_by_id),
+        on_change=_request_results_pattern_delta_tab,
+    )
+    alt_id = c2.selectbox(
+        f"Alternate {model_label} run",
+        run_ids,
+        index=1 if len(run_ids) > 1 else 0,
+        key=f"{key_prefix}_alt",
+        format_func=lambda rid: _artifact_run_label(str(rid), runs_by_id),
+        on_change=_request_results_pattern_delta_tab,
+    )
+    return runs_by_id[str(base_id)], runs_by_id[str(alt_id)]
+
+
+def _render_selected_config_pair(base_run: dict[str, Any], alt_run: dict[str, Any]) -> None:
+    """Show selected configs as field rows with Base/Alternate value columns."""
+    base_df = _run_config_frame(base_run, "Base")
+    alt_df = _run_config_frame(alt_run, "Alternate")
+    cfg_df = pd.concat([base_df, alt_df], ignore_index=True)
+    if cfg_df.empty or not {"selection", "field", "value"}.issubset(cfg_df.columns):
+        return
+    cfg_df = cfg_df.copy()
+    cfg_df["field"] = cfg_df["field"].astype(str)
+    cfg_wide = (
+        cfg_df.pivot_table(
+            index="field",
+            columns="selection",
+            values="value",
+            aggfunc=lambda values: next((v for v in values if pd.notna(v)), ""),
+        )
+        .reset_index()
+    )
+    for col in ("Base", "Alternate"):
+        if col not in cfg_wide.columns:
+            cfg_wide[col] = ""
+    preferred_order = [
+        "run_id", "model", "mode", "cv_roc_auc", "f1", "candidate_count", "fast_path_used",
+        "adaptive_binning", "B", "L", "topK", "G", "feature_mode", "topk_budget_strict",
+        "C", "max_iter", "max_depth", "min_samples_leaf", "tree_size", "max_rules",
+        "n_estimators", "learning_rate", "max_bins", "interactions",
+    ]
+    order_map = {field: idx for idx, field in enumerate(preferred_order)}
+    cfg_wide["__order"] = cfg_wide["field"].map(lambda x: order_map.get(str(x), len(order_map)))
+    cfg_wide = cfg_wide.sort_values(["__order", "field"]).drop(columns="__order")
+    cfg_wide = cfg_wide[["field", "Base", "Alternate"]]
+    with st.expander("Selected run configurations", expanded=True):
+        st.dataframe(dataframe_for_display(_safe_stringify_objects(cfg_wide)), width="stretch", hide_index=True)
+
+
+def _rule_compare_key(row: pd.Series) -> str:
+    for col in ("rule", "term", "feature", "name", "artifact"):
+        if col in row and pd.notna(row[col]):
+            return str(row[col])
+    return " | ".join(str(x) for x in row.astype(str).tolist())
+
+
+def _normalised_rule_inventory(run: dict[str, Any]) -> pd.DataFrame:
+    artifact = run.get("artifact") if isinstance(run.get("artifact"), dict) else {}
+    model = artifact.get("model") if isinstance(artifact, dict) else None
+    if model is None:
+        return pd.DataFrame()
+    df = _rulefit_rules_frame(model, max_rows=None)
+    if df.empty:
+        return pd.DataFrame()
+    out = df.copy()
+    out["rule_key"] = out.apply(_rule_compare_key, axis=1)
+    out = out.drop_duplicates("rule_key").reset_index(drop=True)
+    return out
+
+
+def _render_rulefit_rule_delta(runs: list[dict[str, Any]]) -> None:
+    rule_runs = _successful_model_runs(runs, "RuleFit")
+    base_run, alt_run = _select_base_alt_runs(rule_runs, key_prefix="wb_rulefit_delta", model_label="RuleFit")
+    if base_run is None or alt_run is None:
+        return
+
+    _render_selected_config_pair(base_run, alt_run)
+    base_rules = _normalised_rule_inventory(base_run)
+    alt_rules = _normalised_rule_inventory(alt_run)
+    if base_rules.empty and alt_rules.empty:
+        st.info("Neither selected RuleFit run exposes a rule inventory.")
+        return
+
+    base_keys = set(base_rules.get("rule_key", pd.Series(dtype=str)).astype(str))
+    alt_keys = set(alt_rules.get("rule_key", pd.Series(dtype=str)).astype(str))
+    added = sorted(alt_keys - base_keys)
+    removed = sorted(base_keys - alt_keys)
+    unchanged = len(base_keys & alt_keys)
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Base rules", f"{len(base_keys):,}")
+    m2.metric("Alternate rules", f"{len(alt_keys):,}")
+    m3.metric("+ Added", f"{len(added):,}")
+    m4.metric("− Removed", f"{len(removed):,}")
+    st.caption(f"Unchanged rules: {unchanged:,}. Added means present in alternate but not base; removed means present in base but not alternate.")
+
+    def _rows(keys: list[str], status: str, sign: str, source: pd.DataFrame) -> list[dict[str, Any]]:
+        source = source.set_index("rule_key", drop=False) if not source.empty and "rule_key" in source.columns else pd.DataFrame()
+        rows: list[dict[str, Any]] = []
+        for key in keys:
+            row = {"change": sign, "status": status, "rule": key}
+            if not source.empty and key in source.index:
+                src = source.loc[key]
+                if isinstance(src, pd.DataFrame):
+                    src = src.iloc[0]
+                for col in ("coef", "coefficient", "support", "importance", "type"):
+                    if col in src:
+                        row[col] = src[col]
+            rows.append(row)
+        return rows
+
+    base_inventory = _rows(sorted(base_keys), "base", "", base_rules)
+    delta = pd.DataFrame(_rows(added, "added", "+", alt_rules) + _rows(removed, "removed", "−", base_rules))
+    all_view = pd.DataFrame(base_inventory + _rows(added, "added", "+", alt_rules) + _rows(removed, "removed", "−", base_rules))
+    if delta.empty:
+        st.success("No rule differences: the selected RuleFit runs expose the same rule set. Showing the base run rules below.")
+    change_filter = st.radio("Show", ["All", "+ Added", "− Removed"], horizontal=True, key="wb_rulefit_delta_filter")
+    if change_filter == "+ Added":
+        show_df = delta[delta["status"].eq("added")].copy() if not delta.empty else pd.DataFrame()
+    elif change_filter == "− Removed":
+        show_df = delta[delta["status"].eq("removed")].copy() if not delta.empty else pd.DataFrame()
+    else:
+        show_df = all_view.copy()
+    query = st.text_input("Search RuleFit rule delta", value="", key="wb_rulefit_delta_search", placeholder="Type to filter rule text...")
+    if query:
+        show_df = show_df[show_df.astype(str).apply(lambda col: col.str.contains(query, case=False, na=False)).any(axis=1)]
+    st.dataframe(dataframe_for_display(_safe_stringify_objects(show_df)), width="stretch", hide_index=True)
+
+
+def _run_model_and_frame(run: dict[str, Any]) -> tuple[Any, pd.DataFrame | None]:
+    artifact = run.get("artifact") if isinstance(run.get("artifact"), dict) else {}
+    return artifact.get("model") if isinstance(artifact, dict) else None, artifact.get("feature_frame") if isinstance(artifact, dict) else None
+
+
+def _render_lr_coefficient_comparison(runs: list[dict[str, Any]]) -> None:
+    lr_runs = _successful_model_runs(runs, "Logistic Regression")
+    base_run, alt_run = _select_base_alt_runs(lr_runs, key_prefix="wb_lr_compare", model_label="LR")
+    if base_run is None or alt_run is None:
+        return
+    _render_selected_config_pair(base_run, alt_run)
+
+    base_model, base_X = _run_model_and_frame(base_run)
+    alt_model, alt_X = _run_model_and_frame(alt_run)
+    base_df = _coefficient_frame(base_model, base_X).rename(columns={"coefficient": "base_coefficient", "abs_coefficient": "base_abs_coefficient"})
+    alt_df = _coefficient_frame(alt_model, alt_X).rename(columns={"coefficient": "alternate_coefficient", "abs_coefficient": "alternate_abs_coefficient"})
+    if base_df.empty and alt_df.empty:
+        st.info("Neither selected LR run exposes coefficients.")
+        return
+    keep_base = [c for c in ["feature", "base_coefficient", "base_abs_coefficient"] if c in base_df.columns]
+    keep_alt = [c for c in ["feature", "alternate_coefficient", "alternate_abs_coefficient"] if c in alt_df.columns]
+    merged = pd.merge(base_df[keep_base], alt_df[keep_alt], on="feature", how="outer")
+    if "base_coefficient" in merged.columns and "alternate_coefficient" in merged.columns:
+        merged["coefficient_delta"] = merged["alternate_coefficient"] - merged["base_coefficient"]
+        merged["abs_delta"] = merged["coefficient_delta"].abs()
+        merged = merged.sort_values("abs_delta", ascending=False, na_position="last")
+    query = st.text_input("Search LR coefficients", value="", key="wb_lr_compare_search", placeholder="Type to filter feature names...")
+    show_df = merged
+    if query:
+        show_df = show_df[show_df.astype(str).apply(lambda col: col.str.contains(query, case=False, na=False)).any(axis=1)]
+    st.dataframe(dataframe_for_display(_safe_stringify_objects(show_df)), width="stretch", hide_index=True)
+
+
+def _decision_tree_text(run: dict[str, Any], max_depth: int = 10) -> str:
+    model, X_model = _run_model_and_frame(run)
+    if model is None or X_model is None:
+        return ""
+    try:
+        return export_text(model, feature_names=[str(c) for c in X_model.columns], max_depth=max_depth)
+    except Exception as exc:
+        return f"Could not export tree text: {exc}"
+
+
+def _render_dt_tree_comparison(runs: list[dict[str, Any]]) -> None:
+    dt_runs = _successful_model_runs(runs, "Decision Tree")
+    base_run, alt_run = _select_base_alt_runs(dt_runs, key_prefix="wb_dt_compare", model_label="DT")
+    if base_run is None or alt_run is None:
+        return
+    _render_selected_config_pair(base_run, alt_run)
+    depth = int(st.number_input("Tree text max depth", value=10, min_value=1, max_value=50, step=1, key="wb_dt_compare_text_depth"))
+    base_text = _decision_tree_text(base_run, max_depth=depth)
+    alt_text = _decision_tree_text(alt_run, max_depth=depth)
+    table = pd.DataFrame([
+        {"selection": "Base", "run_id": base_run.get("run_id"), "tree_text": base_text},
+        {"selection": "Alternate", "run_id": alt_run.get("run_id"), "tree_text": alt_text},
+    ])
+    st.dataframe(dataframe_for_display(_safe_stringify_objects(table)), width="stretch", hide_index=True)
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown("#### Base tree")
+        st.code(base_text or "No tree text available.", language="text")
+    with c2:
+        st.markdown("#### Alternate tree")
+        st.code(alt_text or "No tree text available.", language="text")
+
+
+def _render_artifact_comparison(runs: list[dict[str, Any]]) -> None:
+    choices: list[tuple[str, str]] = []
+    model_counts = {name: len(_successful_model_runs(runs, name)) for name in ("HUGIML", "RuleFit", "Logistic Regression", "Decision Tree")}
+    if model_counts.get("HUGIML", 0) >= 2:
+        choices.append(("HUGIML patterns", "HUGIML"))
+    if model_counts.get("RuleFit", 0) >= 2:
+        choices.append(("RuleFit rules", "RuleFit"))
+    if model_counts.get("Logistic Regression", 0) >= 2:
+        choices.append(("LR coefficients", "Logistic Regression"))
+    if model_counts.get("Decision Tree", 0) >= 2:
+        choices.append(("DT text tree", "Decision Tree"))
+
+    if not choices:
+        st.info("Run at least two successful configurations for HUGIML, RuleFit, LR, or DT to compare their interpretable artifacts.")
+        return
+
+    labels = [label for label, _ in choices]
+    selected_label = st.selectbox(
+        "Artifact comparison",
+        labels,
+        index=0,
+        key="wb_artifact_compare_model",
+        on_change=_request_results_pattern_delta_tab,
+    )
+    selected_model = dict(choices)[selected_label]
+    if selected_model == "HUGIML":
+        st.caption("Compare mined pattern inventories. `+` means added in the alternate run; `−` means removed relative to the base run.")
+        _render_hugiml_pattern_delta(runs)
+    elif selected_model == "RuleFit":
+        st.caption("Compare RuleFit rule inventories. `+` means added in the alternate run; `−` means removed relative to the base run.")
+        _render_rulefit_rule_delta(runs)
+    elif selected_model == "Logistic Regression":
+        st.caption("Compare LR coefficients for two configurations. The delta is alternate minus base.")
+        _render_lr_coefficient_comparison(runs)
+    elif selected_model == "Decision Tree":
+        st.caption("Compare exported decision-tree text for two configurations.")
+        _render_dt_tree_comparison(runs)
+
+
+def _render_hugiml_pattern_delta(runs: list[dict[str, Any]]) -> None:
+    hug_runs = [r for r in _successful_runs(runs) if r.get("model") == "HUGIML"]
+    if len(hug_runs) < 2:
+        st.info("Run at least two successful HUGIML configurations to compare pattern additions and removals.")
+        return
+
+    run_ids = [str(r.get("run_id")) for r in hug_runs]
+    runs_by_id = {str(r.get("run_id")): r for r in hug_runs}
+    c1, c2 = st.columns(2)
+    base_id = c1.selectbox(
+        "Base HUGIML run",
+        run_ids,
+        index=0,
+        key="wb_pattern_delta_base",
+        format_func=lambda rid: _pattern_delta_run_label(str(rid), runs_by_id),
+        on_change=_request_results_pattern_delta_tab,
+    )
+    alt_default = 1 if len(run_ids) > 1 else 0
+    alt_id = c2.selectbox(
+        "Alternate HUGIML run",
+        run_ids,
+        index=alt_default,
+        key="wb_pattern_delta_alt",
+        format_func=lambda rid: _pattern_delta_run_label(str(rid), runs_by_id),
+        on_change=_request_results_pattern_delta_tab,
+    )
+
+    base_run = next(r for r in hug_runs if str(r.get("run_id")) == base_id)
+    alt_run = next(r for r in hug_runs if str(r.get("run_id")) == alt_id)
+    _render_selected_config_pair(base_run, alt_run)
+
+    base_patterns = _normalised_pattern_inventory(base_run)
+    alt_patterns = _normalised_pattern_inventory(alt_run)
+
+    if base_patterns.empty and alt_patterns.empty:
+        st.info("Neither selected HUGIML run exposes a pattern inventory.")
+        return
+
+    base_keys = set(base_patterns.get("pattern_key", pd.Series(dtype=str)).astype(str))
+    alt_keys = set(alt_patterns.get("pattern_key", pd.Series(dtype=str)).astype(str))
+    added = sorted(alt_keys - base_keys)
+    removed = sorted(base_keys - alt_keys)
+    unchanged = len(base_keys & alt_keys)
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Base patterns", f"{len(base_keys):,}")
+    m2.metric("Alternate patterns", f"{len(alt_keys):,}")
+    m3.metric("+ Added", f"{len(added):,}")
+    m4.metric("− Removed", f"{len(removed):,}")
+    st.caption(f"Unchanged patterns: {unchanged:,}. Added means present in alternate but not base; removed means present in base but not alternate.")
+
+    def _rows(keys: list[str], status: str, sign: str, source: pd.DataFrame) -> list[dict[str, Any]]:
+        source = source.set_index("pattern_key", drop=False) if not source.empty and "pattern_key" in source.columns else pd.DataFrame()
+        rows: list[dict[str, Any]] = []
+        for key in keys:
+            row = {"change": sign, "status": status, "pattern": key}
+            if not source.empty and key in source.index:
+                src = source.loc[key]
+                if isinstance(src, pd.DataFrame):
+                    src = src.iloc[0]
+                for col in ("utility", "information_gain", "support"):
+                    if col in src:
+                        row[col] = src[col]
+            rows.append(row)
+        return rows
+
+    base_inventory = _rows(sorted(base_keys), "base", "", base_patterns)
+    delta = pd.DataFrame(
+        _rows(added, "added", "+", alt_patterns)
+        + _rows(removed, "removed", "−", base_patterns)
+    )
+    all_view = pd.DataFrame(
+        base_inventory
+        + _rows(added, "added", "+", alt_patterns)
+        + _rows(removed, "removed", "−", base_patterns)
+    )
+    if delta.empty:
+        st.success("No pattern differences: the selected HUGIML runs expose the same pattern set. Showing the base run patterns below.")
+
+    change_filter = st.radio("Show", ["All", "+ Added", "− Removed"], horizontal=True, key="wb_pattern_delta_filter")
+    if change_filter == "+ Added":
+        show_df = delta[delta["status"].eq("added")].copy() if not delta.empty else pd.DataFrame()
+    elif change_filter == "− Removed":
+        show_df = delta[delta["status"].eq("removed")].copy() if not delta.empty else pd.DataFrame()
+    else:
+        show_df = all_view.copy()
+
+    query = st.text_input("Search pattern delta", value="", key="wb_pattern_delta_search", placeholder="Type to filter pattern text...")
+    if query:
+        show_df = show_df[show_df.astype(str).apply(lambda col: col.str.contains(query, case=False, na=False)).any(axis=1)]
+    st.dataframe(dataframe_for_display(_safe_stringify_objects(show_df)), width="stretch", hide_index=True)
 
 
 def _render_interpretability_comparison(runs: list[dict[str, Any]]) -> None:
@@ -1604,42 +2183,73 @@ def _render_promotion(selected_run: dict[str, Any], ctx: dict[str, Any]) -> None
 
 
 def _request_results_drilldown_tab() -> None:
-    """Ask the next render to keep the UI on Results → Model drill-down.
-
-    Streamlit tabs are presentation containers and reset to the first tab after
-    a widget-triggered rerun. The model drill-down selectbox triggers such a
-    rerun, so we restore the user's intended tab with the same small JS bridge
-    already used by the Workbench to open Results after a run.
-    """
+    """Keep the Workbench on Results → Model drill-down after model selection."""
     st.session_state["hugiml_jump_to_results_tab"] = True
-    st.session_state["hugiml_jump_to_results_inner_tab"] = "Model drill-down"
+    st.session_state["hugiml_nav_section"] = "Results"
+    st.session_state["hugiml_results_inner_section"] = "Model drill-down"
 
 
-def _restore_results_inner_tab_if_requested() -> None:
-    target = st.session_state.pop("hugiml_jump_to_results_inner_tab", None)
-    if not target:
-        return
-    target_js = json.dumps(str(target).lower())
-    _st_components.html(
-        f"""
-        <script>
-        (function tryClick(attempts) {{
-            if (attempts <= 0) return;
-            var tabs = window.parent.document.querySelectorAll('[data-baseweb="tab"]');
-            var target = {target_js};
-            for (var i = 0; i < tabs.length; i++) {{
-                var txt = (tabs[i].innerText || tabs[i].textContent || "").trim().toLowerCase();
-                if (txt.indexOf(target) !== -1) {{
-                    tabs[i].click();
-                    return;
-                }}
-            }}
-            setTimeout(function(){{ tryClick(attempts - 1); }}, 150);
-        }})(20);
-        </script>
-        """,
-        height=0,
+def _request_results_pattern_delta_tab() -> None:
+    """Keep the Workbench on Results → Artifact comparison."""
+    st.session_state["hugiml_jump_to_results_tab"] = True
+    st.session_state["hugiml_nav_section"] = "Results"
+    st.session_state["hugiml_results_inner_section"] = "Artifact comparison"
+
+
+def _short_config_summary(run: dict[str, Any]) -> str:
+    params = run.get("params", {}) if isinstance(run.get("params"), dict) else {}
+    if params.get("mode") == "guided_fast_tune":
+        selected = params.get("selected_params", {}) if isinstance(params.get("selected_params"), dict) else {}
+        bits = ["Guided fast tune"]
+        if params.get("candidate_count") is not None:
+            bits.append(f"{int(params.get('candidate_count')):,} candidates")
+        if selected:
+            bits.append(", ".join(f"{k}={selected.get(k)}" for k in ("adaptive_binning", "B", "L", "topK", "G", "feature_mode") if k in selected))
+        return " | ".join(bits)
+    ordered = []
+    preferred = (
+        "adaptive_binning", "B", "L", "topK", "G", "feature_mode", "topk_budget_strict",
+        "C", "max_iter", "max_depth", "min_samples_leaf", "tree_size", "max_rules",
+        "n_estimators", "learning_rate", "max_bins", "interactions",
     )
+    for key in preferred:
+        if key in params:
+            ordered.append(key)
+    for key in sorted(params):
+        if key not in ordered and not str(key).startswith("__"):
+            ordered.append(key)
+    return ", ".join(f"{k}={params.get(k)}" for k in ordered)
+
+
+def _pattern_delta_run_label(run_id: str, runs_by_id: dict[str, dict[str, Any]]) -> str:
+    run = runs_by_id.get(str(run_id), {})
+    summary = _short_config_summary(run)
+    return f"{run_id} — {summary}" if summary else str(run_id)
+
+
+def _run_config_frame(run: dict[str, Any], label: str) -> pd.DataFrame:
+    params = run.get("params", {}) if isinstance(run.get("params"), dict) else {}
+    rows = [
+        {"selection": label, "field": "run_id", "value": run.get("run_id")},
+        {"selection": label, "field": "model", "value": run.get("model")},
+        {"selection": label, "field": "cv_roc_auc", "value": run.get("cv_roc_auc")},
+        {"selection": label, "field": "f1", "value": run.get("f1")},
+    ]
+    if params.get("mode") == "guided_fast_tune":
+        selected = params.get("selected_params", {}) if isinstance(params.get("selected_params"), dict) else {}
+        rows.extend([
+            {"selection": label, "field": "mode", "value": "Guided fast tune"},
+            {"selection": label, "field": "candidate_count", "value": params.get("candidate_count")},
+            {"selection": label, "field": "fast_path_used", "value": params.get("fast_path_used")},
+        ])
+        for key in ("adaptive_binning", "B", "L", "topK", "G", "feature_mode", "topk_budget_strict"):
+            if key in selected:
+                rows.append({"selection": label, "field": key, "value": selected.get(key)})
+        return pd.DataFrame(rows)
+    for key, value in params.items():
+        if not str(key).startswith("__"):
+            rows.append({"selection": label, "field": str(key), "value": value})
+    return pd.DataFrame(rows)
 
 
 def _render_results(ctx: dict[str, Any]) -> None:
@@ -1657,18 +2267,30 @@ def _render_results(ctx: dict[str, Any]) -> None:
     # the leaderboard alone shows all runs with a ✓ marker on the winners.
     best_per_model = _best_run_per_model(runs)
     best_runs = list(best_per_model.values())
-    summary_tab, curves_tab, interpret_tab, inspect_tab = st.tabs(
-        [
-            "Leaderboard",
-            "Compare curves",
-            "Interpretability",
-            "Model drill-down",
-        ],
-        key="wb_results_tabs",
+    result_sections = [
+        "Leaderboard",
+        "Compare curves",
+        "Interpretability",
+        "Artifact comparison",
+        "Model drill-down",
+    ]
+    requested_inner = st.session_state.pop("hugiml_results_inner_section", None)
+    if requested_inner in result_sections:
+        st.session_state["hugiml_results_inner_section_current"] = requested_inner
+    if "hugiml_results_inner_section_current" not in st.session_state:
+        st.session_state["hugiml_results_inner_section_current"] = "Leaderboard"
+    inner_index = result_sections.index(st.session_state["hugiml_results_inner_section_current"])
+    result_section = st.radio(
+        "Results view",
+        result_sections,
+        index=inner_index,
+        horizontal=True,
+        label_visibility="collapsed",
+        key="hugiml_results_inner_section_choice",
     )
-    _restore_results_inner_tab_if_requested()
+    st.session_state["hugiml_results_inner_section_current"] = result_section
 
-    with summary_tab:
+    if result_section == "Leaderboard":
         st.markdown("### Leaderboard")
         compact_cols = ["run_id", "category", "display", "status", "best_config", "cv_roc_auc", "f1", "precision", "recall", "accuracy", "fit_time_sec"]
         st.dataframe(dataframe_for_display(leaderboard[[c for c in compact_cols if c in leaderboard.columns]]), width="stretch", hide_index=True)
@@ -1716,13 +2338,18 @@ def _render_results(ctx: dict[str, Any]) -> None:
             st.dataframe(dataframe_for_display(failed_df[["run_id", "category", "display", "status", "diagnostic"]]), width="stretch", hide_index=True)
             st.caption("Optional models can fail due to missing packages, unsupported versions, or data constraints. Successful runs are unaffected.")
 
-    with curves_tab:
+    elif result_section == "Compare curves":
         _render_curve_comparison(best_runs, ctx["y"])
 
-    with interpret_tab:
+    elif result_section == "Interpretability":
         _render_interpretability_comparison(best_runs)
 
-    with inspect_tab:
+    elif result_section == "Artifact comparison":
+        st.markdown("### Artifact comparison")
+        st.caption("Compare interpretable artifacts across two runs of the same model: HUGIML patterns, RuleFit rules, LR coefficients, or DT text trees.")
+        _render_artifact_comparison(runs)
+
+    elif result_section == "Model drill-down":
         if not best_runs:
             st.warning("No successful runs to inspect.")
         else:
@@ -1776,33 +2403,35 @@ def render_workbench(ctx: dict[str, Any], section: str = "Setup") -> None:
             "switch to Results to compare, or re-run Setup to replace them."
         )
 
-    # Auto-switch to Results tab after a run completes; executes via iframe JS.
+    # Setup/Results navigation.
+    # Streamlit tabs cannot be selected reliably from Python, and iframe/JS-based
+    # tab clicks are brittle across Streamlit releases. A horizontal radio keeps
+    # the same two-section workflow while allowing us to set Results explicitly
+    # after a run or artifact-comparison control rerun.
+    setup_label = "⚙  Setup"
+    results_label = "📊  Results"
+    requested_section = st.session_state.pop("hugiml_nav_section", None)
     jump_to_results = st.session_state.pop("hugiml_jump_to_results_tab", False)
-    if jump_to_results:
-        _st_components.html(
-            """
-            <script>
-            (function tryClick(attempts) {
-                if (attempts <= 0) return;
-                var tabs = window.parent.document.querySelectorAll('[data-baseweb="tab"]');
-                for (var i = 0; i < tabs.length; i++) {
-                    var txt = (tabs[i].innerText || tabs[i].textContent || "").trim().toLowerCase();
-                    if (txt.indexOf("results") !== -1) {
-                        tabs[i].click();
-                        return;
-                    }
-                }
-                setTimeout(function(){ tryClick(attempts - 1); }, 150);
-            })(20);
-            </script>
-            """,
-            height=0,
-        )
+    if "hugiml_workbench_section" not in st.session_state:
+        st.session_state["hugiml_workbench_section"] = "Setup"
+    if "hugiml_workbench_section_token" not in st.session_state:
+        st.session_state["hugiml_workbench_section_token"] = 0
+    if jump_to_results or requested_section == "Results":
+        st.session_state["hugiml_workbench_section"] = "Results"
+        st.session_state["hugiml_workbench_section_token"] += 1
 
-    # Setup/Results tabs.
-    setup_tab, results_tab = st.tabs(["\u2699  Setup", "\U0001f4ca  Results"])
+    section_index = 1 if st.session_state.get("hugiml_workbench_section") == "Results" else 0
+    section_choice = st.radio(
+        "Workbench section",
+        [setup_label, results_label],
+        index=section_index,
+        horizontal=True,
+        label_visibility="collapsed",
+        key=f"hugiml_workbench_section_choice_{st.session_state['hugiml_workbench_section_token']}",
+    )
+    st.session_state["hugiml_workbench_section"] = "Results" if section_choice == results_label else "Setup"
 
-    with setup_tab:
+    if section_choice == setup_label:
         selected = _render_model_picker()
         param_map = _render_configs(selected)
 
@@ -1816,27 +2445,34 @@ def render_workbench(ctx: dict[str, Any], section: str = "Setup") -> None:
             run_label = f"Run {total_runs:,} candidate(s) — tuning {', '.join(_model_short(m) for m in tuning_models)}"
         else:
             run_label = f"Run {total_runs:,} candidate experiment(s)"
-        run_clicked = st.button(
+        def _run_selected_workbench_experiments() -> None:
+            """Run experiments from the button callback, before the next render.
+
+            Streamlit executes button callbacks before the script reruns. Setting
+            the Workbench section here means the section selector is created with
+            Results already selected on the next render, instead of trying to
+            mutate widget state after the selector has been instantiated.
+            """
+            st.session_state["hugiml_workbench_runs"] = run_experiments(
+                selected,
+                param_map,
+                ctx["X"],
+                ctx["y"],
+                int(ctx.get("cv", 3)),
+                int(ctx.get("random_state", 2026)),
+            )
+            st.session_state["hugiml_workbench_context_key"] = current_context_key
+            st.session_state["hugiml_workbench_section"] = "Results"
+            st.session_state["hugiml_workbench_section_token"] = st.session_state.get("hugiml_workbench_section_token", 0) + 1
+            st.session_state["hugiml_workbench_last_message"] = "Experiments complete. Showing Results."
+
+        st.button(
             run_label,
             type="primary",
             disabled=run_disabled,
             width="stretch",
+            on_click=_run_selected_workbench_experiments,
         )
-        if run_clicked:
-            with st.spinner("Running selected model configurations..."):
-                st.session_state["hugiml_workbench_runs"] = run_experiments(
-                    selected,
-                    param_map,
-                    ctx["X"],
-                    ctx["y"],
-                    int(ctx.get("cv", 3)),
-                    int(ctx.get("random_state", 2026)),
-                )
-            st.session_state["hugiml_workbench_context_key"] = current_context_key
-            # Flag triggers auto-navigation to Results tab on next render.
-            st.session_state["hugiml_jump_to_results_tab"] = True
-            st.session_state["hugiml_nav_section"] = "Results"
-            st.rerun()
 
-    with results_tab:
+    else:
         _render_results(ctx)

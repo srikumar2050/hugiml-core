@@ -4,9 +4,14 @@ from __future__ import annotations
 
 from typing import Any
 
+import matplotlib
 import numpy as np
 import pandas as pd
 import streamlit as st
+
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from matplotlib.patches import Patch
 
 
 def _as_list(value: Any) -> list:
@@ -36,8 +41,8 @@ def original_feature_audit(
     excluded_columns: list[str] | None = None,
     id_column: str | None = None,
 ) -> pd.DataFrame:
-    sensitive = set(map(str, sensitive_columns or []))
-    excluded = set(map(str, excluded_columns or []))
+    sensitive = set(map(str, _as_list(sensitive_columns)))
+    excluded = set(map(str, _as_list(excluded_columns)))
     id_col = str(id_column) if id_column else None
     names = _as_list(getattr(model, "feature_names_in_", None)) or _as_list(getattr(model, "origColumns", None))
     if not names and X is not None:
@@ -66,7 +71,7 @@ def original_feature_audit(
 
 
 def pattern_feature_audit(model: Any, sensitive_columns: list[str] | None = None) -> pd.DataFrame:
-    sensitive = set(map(str, sensitive_columns or []))
+    sensitive = set(map(str, _as_list(sensitive_columns)))
     rows = []
 
     try:
@@ -113,7 +118,7 @@ def pattern_feature_audit(model: Any, sensitive_columns: list[str] | None = None
 
 
 def augmented_feature_audit(model: Any, sensitive_columns: list[str] | None = None) -> pd.DataFrame:
-    sensitive = set(map(str, sensitive_columns or []))
+    sensitive = set(map(str, _as_list(sensitive_columns)))
     specs = _as_list(getattr(model, "augmented_pair_transforms_", []))
     rows = []
     for i, spec in enumerate(specs, start=1):
@@ -182,6 +187,84 @@ def render_feature_family_audit(
     cols[3].metric("Review flags", review_flags)
 
     st.dataframe(summary, width="stretch", hide_index=True)
+
+    # Signed coefficient waterfall from feature_importances() when available
+    try:
+        _fi = model.feature_importances() if hasattr(model, "feature_importances") and callable(getattr(model, "feature_importances")) else None
+    except Exception:
+        _fi = None
+    if _fi is not None and not _fi.empty and "coefficient" in _fi.columns:
+        _wf = _fi.copy()
+        _wf["coefficient"] = pd.to_numeric(_wf["coefficient"], errors="coerce")
+        _wf = _wf.dropna(subset=["coefficient"]).head(25).sort_values("coefficient")
+        if not _wf.empty:
+            st.markdown("#### Feature coefficient waterfall (signed)")
+            st.caption(
+                "Positive coefficients (right) increase the model score; negative (left) decrease it. "
+                "Color encodes the feature family: original, HUG pattern, or augmented/generated."
+            )
+            _family_colors = {
+                "original": "#378ADD",
+                "pattern": "#534AB7",
+                "augmented_pair": "#1D9E75",
+                "unknown": "#888780",
+            }
+            _family_labels = {
+                "original": "Original",
+                "pattern": "HUG pattern",
+                "augmented_pair": "Augmented/generated",
+                "unknown": "Unknown",
+            }
+
+            def _normalise_feature_family(value: Any, label: str = "") -> str:
+                raw = str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+                if raw in {"original", "original_feature", "original_features", "raw", "input", "input_feature"}:
+                    return "original"
+                if raw in {"pattern", "patterns", "hug_pattern", "hug_patterns", "pattern_feature", "pattern_features"}:
+                    return "pattern"
+                if raw in {
+                    "augmented",
+                    "augmented_pair",
+                    "augmented_pair_feature",
+                    "augmented_pair_features",
+                    "augmented_generated",
+                    "generated",
+                    "generated_feature",
+                    "interaction",
+                    "interaction_feature",
+                }:
+                    return "augmented_pair"
+                text = str(label or value or "").lower()
+                if "augmented_pair" in text or text.startswith("augmented") or "*" in text or " abs(" in text or text.startswith("abs("):
+                    return "augmented_pair"
+                if "[" in text and "]" in text or "=" in text:
+                    return "pattern"
+                return "unknown"
+
+            _type_col = "feature_type" if "feature_type" in _wf.columns else None
+            _name_col = "display_name" if "display_name" in _wf.columns else "pattern" if "pattern" in _wf.columns else "feature"
+            _wf["_feature_family"] = [
+                _normalise_feature_family(_wf[_type_col].iloc[i] if _type_col else "", str(_wf[_name_col].iloc[i]))
+                for i in range(len(_wf))
+            ]
+            _colors_wf = [_family_colors.get(str(v), _family_colors["unknown"]) for v in _wf["_feature_family"]]
+
+            _fig_wf, _ax_wf = plt.subplots(figsize=(7, max(3.0, len(_wf) * 0.32)))
+            _ax_wf.barh(_wf[_name_col].astype(str), _wf["coefficient"], color=_colors_wf)
+            _ax_wf.axvline(0, color="#888780", linewidth=0.8)
+            _ax_wf.set_xlabel("Coefficient (log-odds)")
+            _ax_wf.set_title("Signed feature coefficients")
+            _ax_wf.invert_yaxis()
+            _present_families = [fam for fam in ("original", "pattern", "augmented_pair", "unknown") if fam in set(_wf["_feature_family"])]
+            if _present_families:
+                _handles = [
+                    Patch(facecolor=_family_colors[fam], edgecolor="none", label=_family_labels[fam])
+                    for fam in _present_families
+                ]
+                _ax_wf.legend(handles=_handles, fontsize=8, loc="lower right", title="Feature family")
+            _fig_wf.tight_layout()
+            st.pyplot(_fig_wf)
+            plt.close(_fig_wf)
 
     tab1, tab2, tab3 = st.tabs(["Originals", "HUG patterns", "Augmented/generated"])
     with tab1:

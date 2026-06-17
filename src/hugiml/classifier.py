@@ -574,6 +574,26 @@ except ImportError:
 logger = logging.getLogger(__name__)
 
 
+def _is_binary_feature_series(s: pd.Series) -> bool:
+    """Return True when a column has exactly two observed values.
+
+    Numeric-looking binary features (for example 0/1 or 1/2 flags) should use
+    HUG-IML's categorical item path instead of fixed-width numeric binning.
+    Missing values are ignored for the inference; constant columns are not
+    considered binary and keep the existing constant-column warning behavior.
+    """
+    try:
+        observed = s.dropna()
+    except AttributeError:
+        observed = pd.Series(s).dropna()
+    if observed.empty:
+        return False
+    try:
+        return int(observed.nunique(dropna=True)) == 2
+    except TypeError:
+        return len(pd.unique(observed.astype(object))) == 2
+
+
 # =============================================================================
 # Configuration presets
 # =============================================================================
@@ -1253,6 +1273,8 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             self._original_feature_mask_downstream_ = None
         if not hasattr(self, "_original_selected_feature_names_downstream_"):
             self._original_selected_feature_names_downstream_ = None
+        if not hasattr(self, "binary_categorical_cols_"):
+            self.binary_categorical_cols_ = []
         if not hasattr(self, "_strict_topk_applied_during_construction_"):
             self._strict_topk_applied_during_construction_ = False
         # v1.1.0 missing value handling — absent in models saved before this version
@@ -1344,15 +1366,30 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                 stacklevel=2,
             )
 
-        catCols = [
+        catCols: list[str] = []
+        binaryCatCols: list[str] = []
+        for idx, c in enumerate(X.columns):
+            col = X.iloc[:, idx]
+            is_explicit_cat = (
+                pd.api.types.is_object_dtype(col)
+                or pd.api.types.is_string_dtype(col)
+                or isinstance(col.dtype, pd.CategoricalDtype)
+            )
+            is_binary_numeric = (
+                not is_explicit_cat
+                and (pd.api.types.is_numeric_dtype(col) or pd.api.types.is_bool_dtype(col))
+                and _is_binary_feature_series(col)
+            )
+            if is_explicit_cat or is_binary_numeric:
+                catCols.append(c)
+            if is_binary_numeric:
+                binaryCatCols.append(c)
+                X[c] = col.astype("category")
+
+        intCols = [
             c
             for idx, c in enumerate(X.columns)
-            if pd.api.types.is_object_dtype(X.iloc[:, idx])
-            or pd.api.types.is_string_dtype(X.iloc[:, idx])
-            or isinstance(X.iloc[:, idx].dtype, pd.CategoricalDtype)
-        ]
-        intCols = [
-            c for idx, c in enumerate(X.columns) if pd.api.types.is_integer_dtype(X.iloc[:, idx])
+            if c not in set(catCols) and pd.api.types.is_integer_dtype(X.iloc[:, idx])
         ]
 
         for idx, c in enumerate(X.columns):
@@ -1367,6 +1404,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         self.feature_names_in_ = X.columns.tolist()
         self.cat_cols_mask_ = np.array([c in set(catCols) for c in X.columns], dtype=bool)
         self.is_int_mask_ = np.array([c in set(intCols) for c in X.columns], dtype=bool)
+        self.binary_categorical_cols_ = list(binaryCatCols)
 
         y = np.asarray(y)
         try:
@@ -1667,24 +1705,36 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             col_list = list(self.origColumns)
             self.cat_cols_mask_ = np.array([c in cat_set for c in col_list], dtype=bool)
             self.is_int_mask_ = np.array([c in int_set for c in col_list], dtype=bool)
+            self.binary_categorical_cols_ = []
             self.feature_names_in_ = col_list
             return self.cat_cols_mask_
 
         if isinstance(X_train, pd.DataFrame):
             col_list = X_train.columns.astype(str).tolist()
-            self.cat_cols_mask_ = np.array(
-                [
-                    pd.api.types.is_object_dtype(X_train[c])
-                    or pd.api.types.is_string_dtype(X_train[c])
-                    or isinstance(X_train[c].dtype, pd.CategoricalDtype)
-                    for c in X_train.columns
-                ],
-                dtype=bool,
-            )
-            self.is_int_mask_ = np.array(
-                [pd.api.types.is_integer_dtype(X_train[c]) for c in X_train.columns],
-                dtype=bool,
-            )
+            cat_mask_values: list[bool] = []
+            int_mask_values: list[bool] = []
+            binary_cat_cols: list[str] = []
+            for c in X_train.columns:
+                col = X_train[c]
+                is_explicit_cat = (
+                    pd.api.types.is_object_dtype(col)
+                    or pd.api.types.is_string_dtype(col)
+                    or isinstance(col.dtype, pd.CategoricalDtype)
+                )
+                is_binary_numeric = (
+                    not is_explicit_cat
+                    and (pd.api.types.is_numeric_dtype(col) or pd.api.types.is_bool_dtype(col))
+                    and _is_binary_feature_series(col)
+                )
+                cat_mask_values.append(bool(is_explicit_cat or is_binary_numeric))
+                int_mask_values.append(
+                    bool((not is_binary_numeric) and pd.api.types.is_integer_dtype(col))
+                )
+                if is_binary_numeric:
+                    binary_cat_cols.append(str(c))
+            self.cat_cols_mask_ = np.array(cat_mask_values, dtype=bool)
+            self.is_int_mask_ = np.array(int_mask_values, dtype=bool)
+            self.binary_categorical_cols_ = list(binary_cat_cols)
             self.feature_names_in_ = col_list
             return self.cat_cols_mask_
 
@@ -1696,6 +1746,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         p = arr.shape[1]
         self.cat_cols_mask_ = np.zeros(p, dtype=bool)
         self.is_int_mask_ = np.zeros(p, dtype=bool)
+        self.binary_categorical_cols_ = []
         # Array inputs have no native column labels, but downstream components
         # (notably augmented-pair transforms) require stable feature names to
         # align IG scores, selected source columns, and transform-time matrices.
@@ -2388,6 +2439,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             "cat_cols_mask_",
             "is_int_mask_",
             "feature_names_in_",
+            "binary_categorical_cols_",
             "_bin_edges_",
             "_missing_col_edges_",
             "_adaptive_code_label_map_",
@@ -2600,7 +2652,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                 K_eff = self._effective_mining_topK()  # rough pre-estimate (no n_items yet)
 
                 if (
-                    os.environ.get("HUGIML_DISABLE_FIXED_NUMERIC_L1_FASTPATH", "0") != "1"
+                    os.environ.get("HUGIML_DISABLE_NUMERIC_L1_FASTPATH", "0") != "1"
                     and (not self.adaptive_binning)
                     and hasattr(_core, "prepare_and_mine_l1_fixed_numeric")
                     and not bool(np.any(is_cat_np))
@@ -3506,9 +3558,16 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                 except Exception:
                     pass
 
-        # Numeric columns are scaled; non-numeric columns are one-hot encoded.
+        # Numeric columns are scaled; categorical columns, including
+        # numeric-looking binary features inferred during fit, are one-hot encoded.
         numeric = X_df.apply(pd.to_numeric, errors="coerce").replace([np.inf, -np.inf], np.nan)
-        numeric_cols = [c for c in X_df.columns if not numeric[c].isna().all()]
+        cat_mask = getattr(self, "cat_cols_mask_", None)
+        cat_by_mask = set()
+        if cat_mask is not None:
+            cat_by_mask = {str(c) for c, is_cat in zip(X_df.columns.astype(str), cat_mask) if bool(is_cat)}
+        numeric_cols = [
+            c for c in X_df.columns if str(c) not in cat_by_mask and not numeric[c].isna().all()
+        ]
         X_num = numeric[numeric_cols] if numeric_cols else pd.DataFrame(index=X_df.index)
         X_cat = X_df.drop(columns=numeric_cols, errors="ignore")
 

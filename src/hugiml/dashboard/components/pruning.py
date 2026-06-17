@@ -375,6 +375,22 @@ def render_pruning_analysis(ctx: dict, *args, **kwargs) -> None:
     ]
 
     st.markdown("#### Pruning comparison")
+    if "cv_score" in df.columns and df["cv_score"].notna().sum() >= 1:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as _plt
+        _score_df = df[["run", "cv_score"]].dropna(subset=["cv_score"]).copy()
+        if len(_score_df) >= 1:
+            _fig_p, _ax_p = _plt.subplots(figsize=(7, max(1.8, len(_score_df) * 0.55)))
+            _colors_p = ["#AFA9EC" if i == 0 else "#534AB7" for i in range(len(_score_df))]
+            _ax_p.barh(_score_df["run"].astype(str), _score_df["cv_score"].astype(float), color=_colors_p)
+            _ax_p.set_xlabel("CV ROC-AUC")
+            _ax_p.set_title("CV score — current vs pruned")
+            _ax_p.set_xlim(max(0, float(_score_df["cv_score"].min()) - 0.05), 1.0)
+            _ax_p.invert_yaxis()
+            _fig_p.tight_layout()
+            st.pyplot(_fig_p)
+            _plt.close(_fig_p)
     st.dataframe(dataframe_for_display(df), width="stretch", hide_index=True)
 
     st.markdown("#### Removed representation items")

@@ -6,6 +6,12 @@ The canonical release notes live in ``CHANGELOG.md`` at the repository root. Kee
 Recent releases
 ---------------
 
+1.1.11 — 2026-06-17
+~~~~~~~~~~~~~~~~~~~
+
+* Added expanded Governance Studio evidence views for dashboard review, including adaptive binning, augmented-pair traceability, feature-family review, pattern coverage, cross-validation monitoring, and export-ready governance summaries.
+* Added binary feature conversion: two-value numeric columns are treated as categorical indicators before HUG pattern mining and downstream feature preparation.
+
 1.1.10 — 2026-06-12
 ~~~~~~~~~~~~~~~~~~~
 
