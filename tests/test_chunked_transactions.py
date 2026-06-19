@@ -412,7 +412,9 @@ class TestNaNHandling:
     def test_nan_adaptive_no_nan_patterns(self, synth_nan):
         """Pattern features must never contain literal 'nan'."""
         X, y = synth_nan
-        clf, _, _ = _fit(X, y, {"B": 5, "L": 2, "G": 1e-4, "topK": 20})
+        clf, _, _ = _fit(
+            X, y, {"B": 5, "L": 2, "G": 1e-4, "topK": 20, "interaction_relaxed_mining": False}
+        )
         nan_feats = [f for f in clf.get_hug_features() if "nan" in f.lower()]
         assert len(nan_feats) == 0, f"nan-string patterns: {nan_feats[:3]}"
 
@@ -421,7 +423,14 @@ class TestNaNHandling:
         clf, Xte, yte = _fit(
             X,
             y,
-            {"B": 5, "L": 2, "G": 1e-4, "topK": 30, "adaptive_binning": True},
+            {
+                "B": 5,
+                "L": 2,
+                "G": 1e-4,
+                "topK": 30,
+                "adaptive_binning": True,
+                "interaction_relaxed_mining": False,
+            },
             seed=7,
         )
         p = clf.predict_proba(Xte)
@@ -478,7 +487,14 @@ class TestDownstreamCorrectness:
         clf, Xte, yte = _fit(
             X,
             y,
-            {"B": 5, "L": 2, "G": 0.0, "topK": 40, "max_fit_seconds": 60},
+            {
+                "B": 5,
+                "L": 2,
+                "G": 0.0,
+                "topK": 40,
+                "max_fit_seconds": 60,
+                "interaction_relaxed_mining": False,
+            },
         )
         auc = roc_auc_score(yte, clf.predict_proba(Xte)[:, 1])
         assert auc > 0.65, f"German L=2 AUC too low: {auc:.4f}"

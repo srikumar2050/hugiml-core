@@ -22,7 +22,8 @@ def test_augmented_pair_state_round_trips_v3_serialization(tmp_path):
         topK=30,
         adaptive_binning=True,
         feature_mode="original_plus_patterns",
-        augmented_pair_max_features=5,
+        aug_feature_size=5,
+        interaction_relaxed_mining=False,
     )
     clf.fit(X, y)
     assert len(clf.augmented_pair_transforms_) > 0

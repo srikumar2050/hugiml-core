@@ -11,7 +11,7 @@ import streamlit as st
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-from matplotlib.patches import Patch
+from matplotlib.lines import Line2D
 
 
 def _as_list(value: Any) -> list:
@@ -32,6 +32,33 @@ def _infer_source_features_from_label(label: str) -> list[str]:
     s = str(label)
     matches = re.findall(r"(?:^|,\s*)([^=,\[\]]+?)\s*=", s)
     return [m.strip() for m in matches if m.strip()]
+
+
+def _string_list(value: Any) -> str:
+    """Render list-like audit values as compact comma-separated text."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (list, tuple, set, np.ndarray, pd.Series)):
+        return ", ".join(str(v) for v in list(value))
+    return str(value)
+
+
+def _safe_bool(value: Any) -> bool:
+    """Coerce scalar or one-element array flags used by model metadata."""
+    if isinstance(value, (bool, np.bool_)):
+        return bool(value)
+    if isinstance(value, np.ndarray):
+        if value.size == 0:
+            return False
+        if value.size == 1:
+            return bool(value.reshape(-1)[0])
+        return bool(np.any(value))
+    try:
+        return bool(value)
+    except Exception:
+        return False
 
 
 def original_feature_audit(
@@ -89,6 +116,13 @@ def pattern_feature_audit(model: Any, sensitive_columns: list[str] | None = None
                             "pattern": label,
                             "source_features": ", ".join(src),
                             "order": len(src) if src else np.nan,
+                            "pattern_origin": row.get("pattern_origin", "standard"),
+                            "survivor_led": _safe_bool(row.get("survivor_led", False)),
+                            "survivor_features": _string_list(row.get("survivor_features", "")),
+                            "survivor_feature_count": row.get("survivor_feature_count", 0),
+                            "survivor_min_marginal_ig": row.get("survivor_min_marginal_ig", np.nan),
+                            "survivor_max_interaction_score": row.get("survivor_max_interaction_score", np.nan),
+                            "survivor_best_partners": _string_list(row.get("survivor_best_partners", "")),
                             "status": "Review" if set(src).intersection(sensitive) else "OK",
                         })
                     return pd.DataFrame(rows)
@@ -258,7 +292,17 @@ def render_feature_family_audit(
             _present_families = [fam for fam in ("original", "pattern", "augmented_pair", "unknown") if fam in set(_wf["_feature_family"])]
             if _present_families:
                 _handles = [
-                    Patch(facecolor=_family_colors[fam], edgecolor="none", label=_family_labels[fam])
+                    Line2D(
+                        [0],
+                        [0],
+                        marker="s",
+                        linestyle="",
+                        color="none",
+                        markerfacecolor=_family_colors[fam],
+                        markeredgecolor="none",
+                        markersize=8,
+                        label=_family_labels[fam],
+                    )
                     for fam in _present_families
                 ]
                 _ax_wf.legend(handles=_handles, fontsize=8, loc="lower right", title="Feature family")

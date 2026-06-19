@@ -1,5 +1,5 @@
 # tests/test_adaptive_native.py
-# Tests for HUGIMLClassifierNative(adaptive_binning=True) — v1.1.0 addition.
+# Tests for HUGIMLClassifierNative(adaptive_binning=True).
 # All other extension tests remain in test_extensions.py.
 """
 Test suite for the adaptive_binning integration in HUGIMLClassifierNative.
@@ -47,6 +47,9 @@ def fitted_adaptive(bc_split):
         adaptive_binning=True,
         b_candidates=[2, 3, 5, 7, 10, 15],
         min_marginal_gain_ratio=0.02,
+        # This fixture exercises ordinary L=2 mining with adaptive bins.
+        # The interaction-relaxed path is disabled to keep this coverage focused.
+        interaction_relaxed_mining=False,
     )
     clf.fit(Xtr, ytr)
     return clf, Xtr, Xte, ytr, yte
@@ -55,7 +58,11 @@ def fitted_adaptive(bc_split):
 @pytest.fixture(scope="module")
 def fitted_non_adaptive(bc_split):
     Xtr, Xte, ytr, yte = bc_split
-    clf = HUGIMLClassifierNative(B=5, L=2, G=1e-4, topK=1000)
+    # Explicit adaptive_binning=False: this fixture exercises the non-adaptive
+    # code path and must remain independent of constructor defaults.
+    clf = HUGIMLClassifierNative(
+        B=5, L=2, G=1e-4, topK=1000, adaptive_binning=False, interaction_relaxed_mining=False
+    )
     clf.fit(Xtr, ytr)
     return clf, Xtr, Xte, ytr, yte
 
@@ -67,8 +74,10 @@ def fitted_non_adaptive(bc_split):
 
 class TestAdaptiveParams:
     def test_defaults_off(self):
+        # This test locks in the constructor's quick-start adaptive-binning
+        # default.
         clf = HUGIMLClassifierNative()
-        assert clf.adaptive_binning is False
+        assert clf.adaptive_binning is True
         assert clf.b_candidates is None
         assert clf.min_marginal_gain_ratio == 0.02
 
@@ -236,8 +245,10 @@ class TestBackwardCompat:
     def test_non_adaptive_model_unchanged(self, fitted_non_adaptive, bc_split):
         """Existing non-adaptive flow is bit-for-bit identical."""
         clf, Xtr, Xte, ytr, yte = fitted_non_adaptive
-        # fit a second time with same seed
-        clf2 = HUGIMLClassifierNative(B=5, L=2, G=1e-4, topK=1000)
+        # Fit a second non-adaptive model with the same seed.
+        clf2 = HUGIMLClassifierNative(
+            B=5, L=2, G=1e-4, topK=1000, adaptive_binning=False, interaction_relaxed_mining=False
+        )
         clf2.fit(Xtr, ytr)
         auc1 = roc_auc_score(yte, clf.predict_proba(Xte)[:, 1])
         auc2 = roc_auc_score(yte, clf2.predict_proba(Xte)[:, 1])
@@ -275,7 +286,9 @@ class TestMulticlassAdaptive:
         Xtr, Xte, ytr, yte = train_test_split(
             X_enc, y_enc, test_size=0.25, stratify=y_enc, random_state=0
         )
-        clf = HUGIMLClassifierNative(B=8, L=2, G=1e-4, topK=1000, adaptive_binning=True)
+        clf = HUGIMLClassifierNative(
+            B=8, L=2, G=1e-4, topK=1000, adaptive_binning=True, interaction_relaxed_mining=False
+        )
         clf.fit(Xtr, ytr)
         proba = clf.predict_proba(Xte)
         assert proba.shape == (len(yte), 3)

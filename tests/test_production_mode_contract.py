@@ -42,6 +42,7 @@ def test_production_save_load_predict_and_summary(feature_mode):
         topk_budget_strict=False,
         execution_mode="production",
         use_hotpath=False,
+        interaction_relaxed_mining=False,
     ).fit(X, y)
 
     assert isinstance(clf, HUGIMLClassifierNative)

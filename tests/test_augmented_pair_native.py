@@ -27,7 +27,13 @@ def _data(n=240, p=6, seed=7):
 def test_native_transform_block_generates_expected_standardized_features():
     X, y = _data()
     ig_scores = {c: 0.05 + i * 0.01 for i, c in enumerate(X.columns)}
-    block = NativeAugmentedPairTransformBlock(max_features=6, budget_topK=10, min_source_ig=0.001)
+    block = NativeAugmentedPairTransformBlock(
+        augmented_pair_mode="marginal_ig",
+        aug_feature_size=6,
+        max_pair_features=6,
+        budget_topK=10,
+        min_source_ig=0.001,
+    )
     block.fit(X, y, ig_scores, {}, list(X.columns))
 
     assert getattr(block, "augmented_pair_native_used_", False) is True
@@ -40,7 +46,7 @@ def test_native_transform_block_generates_expected_standardized_features():
     assert z_native.shape[1] == len(block.kept_specs_)
     assert np.isfinite(z_native).all()
 
-    selected = block.selected_ig_features_
+    selected = block.selected_aug_features_
     X_raw = X[selected].to_numpy(dtype=float, copy=True)
     manual = []
     pos = {c: j for j, c in enumerate(selected)}
@@ -111,6 +117,9 @@ def test_adaptive_l2_uses_native_augmented_pair_fit_path():
         adaptive_binning=True,
         feature_mode="patterns_only",
         n_jobs=1,
+        # This test exercises the augmented-pair fit path, which is mutually
+        # exclusive with interaction-relaxed mining at L >= 2.
+        interaction_relaxed_mining=False,
     )
     clf.fit(X, y)
     assert len(clf.get_augmented_pair_transforms()) <= 12

@@ -6,6 +6,14 @@ The canonical release notes live in ``CHANGELOG.md`` at the repository root. Kee
 Recent releases
 ---------------
 
+1.1.12 — 2026-06-20
+~~~~~~~~~~~~~~~~~~~
+
+* Added interaction-information source selection for augmented-pair features, including ``augmented_pair_mode``, ``aug_feature_size``, and ``ii_partner_size``.
+* Added ``interaction_relaxed_mining`` for survivor-led native mining without pair-operator feature columns.
+* Added pair-aware adaptive-binning metadata and survivor-led audit fields for governance review.
+* Kept ``augmented_pair_max_features`` as a v1.1.11-compatible alias for the new augmented-pair source budgets.
+
 1.1.11 — 2026-06-17
 ~~~~~~~~~~~~~~~~~~~
 

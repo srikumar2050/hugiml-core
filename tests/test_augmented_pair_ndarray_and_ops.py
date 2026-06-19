@@ -54,9 +54,10 @@ def _fit(X, y):
         b_candidates=[2, 3, 5, 7, 10],
         feature_mode="original_plus_patterns",
         augmented_pair_transforms=True,
-        augmented_pair_max_features=8,
+        aug_feature_size=8,
         use_hotpath=True,
         n_jobs=1,
+        interaction_relaxed_mining=False,
     )
     clf.fit(X, y)
     return clf

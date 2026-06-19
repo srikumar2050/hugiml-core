@@ -20,10 +20,42 @@ HUGIML supports three downstream feature representations. The mined pattern matr
      - Original features should capture marginal effects while HUGIML contributes interaction regions.
 
 
+Recommended configurations
+--------------------------
+
+.. list-table::
+   :header-rows: 1
+
+   * - Goal
+     - Key settings
+     - Interpretability
+     - Notes
+   * - Pattern-only with interaction-relaxed mining
+     - ``feature_mode="patterns_only"``, ``L=2``, ``adaptive_binning=True``, ``augmented_pair_transforms=False``, ``interaction_relaxed_mining=True``
+     - Very high
+     - Keeps the downstream model in original HUG pattern space. Interaction-information survivor sources can enter mining even when their marginal signal is weak.
+   * - Pattern-only with augmented pairs
+     - ``feature_mode="patterns_only"``, ``L=2``, ``adaptive_binning=True``, ``augmented_pair_transforms=True``, ``augmented_pair_mode="interaction_information"``
+     - High
+     - Often the faster interaction option because pair evidence is added as selected downstream features rather than widening the mining search.
+   * - Original features plus patterns, relaxed mining
+     - ``feature_mode="original_plus_patterns"``, ``L=2``, ``adaptive_binning=True``, ``augmented_pair_transforms=False``, ``interaction_relaxed_mining=True``
+     - High
+     - Useful when original columns have strong marginal signal and survivor-led HUG patterns add interaction evidence.
+   * - Original features plus patterns, augmented pairs
+     - ``feature_mode="original_plus_patterns"``, ``L=2``, ``adaptive_binning=True``, ``augmented_pair_transforms=True``, ``augmented_pair_mode="interaction_information"``
+     - Moderate
+     - Highest representation capacity among the recommended options; includes selected originals, HUG patterns, and pair features.
+
+``augmented_pair_transforms=True`` and ``interaction_relaxed_mining=True`` are mutually exclusive for ``L >= 2``. Use augmented pairs when runtime is the main constraint. Use interaction-relaxed mining when preserving a pure original-feature pattern representation is the priority.
+
+
 Augmented pair features
 -----------------------
 
-When ``L > 1``, ``adaptive_binning=True``, and ``augmented_pair_transforms=True``, HUGIML can append native augmented-pair transforms to the downstream feature matrix. These are continuous product or absolute-difference features selected from informative numeric source features. They are not fed back into HUG pattern mining.
+When ``L > 1``, ``adaptive_binning=True``, and ``augmented_pair_transforms=True``, HUGIML can append native augmented-pair transforms to the downstream feature matrix. These are continuous product, absolute-difference, sum, or signed-difference features selected from informative numeric source features. They are not fed back into HUG pattern mining.
+
+The default ``augmented_pair_mode="interaction_information"`` uses pair-context evidence for source selection. Set ``augmented_pair_mode="marginal_ig"`` to use the v1.1.11 marginal-information-gain source selection behavior. ``aug_feature_size`` controls the interaction-information source budget, ``ii_partner_size`` optionally bounds partner search, and ``max_pair_features`` controls the marginal-IG source budget.
 
 Use ``topk_budget_strict=True`` when a single global ``topK`` budget should apply to the final downstream feature space across original features, HUG patterns, and augmented-pair features.
 
@@ -36,12 +68,39 @@ Use ``topk_budget_strict=True`` when a single global ``topK`` budget should appl
        topK=50,
        feature_mode="original_plus_patterns",
        augmented_pair_transforms=True,
+       augmented_pair_mode="interaction_information",
+       aug_feature_size=10,
        topk_budget_strict=True,
    )
 
    clf.fit(X_train, y_train)
    print(clf.get_model_composition())
    print(clf.explain_augmented_pair_effects())
+
+
+Interaction-relaxed mining
+--------------------------
+
+``interaction_relaxed_mining=True`` keeps the downstream representation in HUG pattern space but lets interaction-information survivor sources participate in native mining. This is useful when a feature has weak marginal information gain but becomes useful with a partner feature.
+
+.. code-block:: python
+
+   clf = HUGIMLClassifier(
+       B=-1,
+       adaptive_binning=True,
+       L=2,
+       topK=75,
+       feature_mode="patterns_only",
+       augmented_pair_transforms=False,
+       interaction_relaxed_mining=True,
+       interaction_relaxed_feature_size=12,
+   )
+
+   clf.fit(X_train, y_train)
+   print(clf.feature_importances().head())
+
+Survivor-led patterns remain ordinary HUG patterns over original feature bins. Governance and feature-importance outputs add survivor metadata so reviewers can see which pattern rows used the relaxed source admission path.
+
 
 Examples
 --------
@@ -51,7 +110,7 @@ Examples
    from hugiml import HUGIMLClassifier
 
    clf = HUGIMLClassifier(
-       B=10,
+       B=-1,
        L=2,
        G=1e-3,
        topK=150,
@@ -60,7 +119,7 @@ Examples
    )
 
    clf_hybrid = HUGIMLClassifier(
-       B=10,
+       B=-1,
        L=2,
        G=1e-3,
        topK=150,
@@ -69,7 +128,7 @@ Examples
    )
 
    clf_interactions = HUGIMLClassifier(
-       B=10,
+       B=-1,
        L=2,
        G=1e-3,
        topK=150,
@@ -80,14 +139,13 @@ Examples
 Downstream matrix policy
 ------------------------
 
-In v1.1.9, ``patterns_only`` keeps the downstream representation sparse. Hybrid modes choose dense representation for small or moderate selected widths and CSR representation for larger selected widths. This keeps ordinary sklearn workflows convenient while reducing memory pressure for wider selected feature spaces.
+``patterns_only`` keeps the downstream representation sparse. Hybrid modes choose dense representation for small or moderate selected widths and CSR representation for larger selected feature spaces. This keeps ordinary sklearn workflows convenient while reducing memory pressure for wider selected feature spaces.
 
 
 Interpretation notes
 --------------------
 
 ``get_hug_features`` and ``get_pattern_info`` are always pattern-only APIs. In hybrid modes, ``feature_importances`` and ``model_summary`` report the downstream feature representation used by the fitted model, which can include original features, mined patterns, and augmented-pair features. Use ``explain_augmented_pair_effects()`` for raw-scale interpretation of augmented-pair rows.
-
 
 
 Compatibility with transform
@@ -103,4 +161,4 @@ Operational guidance
 * Use ``patterns_only`` as the default for audits, model cards, and compact explanations.
 * Use ``original_plus_patterns`` when original columns contain strong marginal signal that should remain directly available to the downstream classifier.
 * Use ``original_plus_interactions`` when the original columns should carry marginal effects and HUGIML should contribute higher-order regions only.
-* Serialized models preserve the selected feature mode, original-feature preprocessing state, pattern-order masks, and downstream feature names.
+* Serialized models preserve the selected feature mode, original-feature preprocessing state, pattern-order masks, augmented-pair settings, relaxed-mining settings, and downstream feature names.

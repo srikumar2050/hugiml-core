@@ -543,7 +543,12 @@ class TestClassifierPrivateHelpers:
     def test_augmented_pair_empty_selection_and_catalog(self):
         from hugiml.classifier import NativeAugmentedPairTransformBlock
 
-        block = NativeAugmentedPairTransformBlock(max_features=2, budget_topK=-1, unbounded_cap=3)
+        block = NativeAugmentedPairTransformBlock(
+            aug_feature_size=2,
+            budget_topK=-1,
+            unbounded_cap=3,
+            augmented_pair_mode="marginal_ig",
+        )
         X = np.array([[1.0, 2.0], [3.0, 4.0]])
         y = np.array([0, 1])
         block.fit(
@@ -555,12 +560,12 @@ class TestClassifierPrivateHelpers:
             full_feature_names=["a", "b"],
         )
         assert block.budget_topK == 3
-        assert block.selected_ig_features_ == []
+        assert block.selected_aug_features_ == []
         assert block.transform(X).shape == (2, 0)
         assert block.augmented_pair_transforms_ == []
 
-        block.selected_ig_features_ = ["a", "b"]
-        block.selected_ig_scores_ = {"a": 0.5, "b": 0.4}
+        block.selected_aug_features_ = ["a", "b"]
+        block.selected_aug_scores_ = {"a": 0.5, "b": 0.4}
         block.source_observed_medians_ = {"a": 1.0, "b": 2.0}
         block.input_bin_edges_ = {"a": [0.0, 1.0], "b": [1.0, 2.0]}
         block.kept_specs_ = [

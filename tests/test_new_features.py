@@ -6,7 +6,7 @@ Tests for the new features:
   - Transaction data storage: TItem=int, item_iu vector, get_transactions_py()
   - Adaptive binning: non-fused (two-step) path
   - Fused adaptive+L1 hotpath: prepare_and_mine_l1_adaptive
-  - Fixed-B numeric L1 hotpath: prepare_and_mine_l1_fixed_numeric (env-gated)
+  - Constant-B numeric L1 hotpath: prepare_and_mine_l1_fixed_numeric (env-gated)
   - Missing-value handling across all paths (NaN rows skipped, no item generated)
   - Hot vs non-hotpath parity (same patterns, same utilities)
   - Adaptive B selection metadata (per_feature_b_, _bin_edges_, ig_scores_)
@@ -203,7 +203,9 @@ class TestMissingValues:
 
     def test_adaptive_non_fused_nan_no_crash(self):
         X, y = self._make_data()
-        clf = self._make_clf(use_hotpath=True, adaptive_binning=True, L=2)
+        clf = self._make_clf(
+            use_hotpath=True, adaptive_binning=True, L=2, interaction_relaxed_mining=False
+        )
         Xp, yp = clf.prepareXy(X, y)
         clf.fit(Xp, yp)
         preds = clf.predict(X)
@@ -262,7 +264,9 @@ class TestMissingValues:
 
 @requires_extension
 class TestHotpathParity:
-    def _fit(self, X, y, use_hotpath, adaptive_binning=False, L=1, B=5):
+    def _fit(
+        self, X, y, use_hotpath, adaptive_binning=False, L=1, B=5, interaction_relaxed_mining=False
+    ):
         from hugiml import HUGIMLClassifierNative
 
         clf = HUGIMLClassifierNative(
@@ -272,6 +276,7 @@ class TestHotpathParity:
             use_hotpath=use_hotpath,
             adaptive_binning=adaptive_binning,
             topK=50,
+            interaction_relaxed_mining=interaction_relaxed_mining,
         )
         Xp, yp = clf.prepareXy(X.copy(), y.copy())
         clf.fit(Xp, yp)
@@ -346,6 +351,7 @@ class TestAdaptiveBinningNonFused:
             adaptive_binning=True,
             use_hotpath=True,
             topK=30,
+            interaction_relaxed_mining=False,
         )
         Xp, yp = clf.prepareXy(X, y)
         clf.fit(Xp, yp)
@@ -519,6 +525,7 @@ class TestFusedAdaptiveL1:
                 adaptive_binning=True,
                 use_hotpath=use_hotpath,
                 topK=30,
+                interaction_relaxed_mining=False,
             )
             Xp, yp = clf.prepareXy(X.copy(), y.copy())
             clf.fit(Xp, yp)
@@ -559,7 +566,7 @@ class TestFusedAdaptiveL1:
 
 
 # ---------------------------------------------------------------------------
-# 7.  Fixed-B dense numeric L1 hotpath (env-gated)
+# 7.  Constant-B dense numeric L1 hotpath (env-gated)
 # ---------------------------------------------------------------------------
 
 
@@ -618,7 +625,7 @@ class TestFixedNumericL1Fastpath:
         np.testing.assert_allclose(proba.sum(axis=1), 1.0, atol=1e-6)
 
     def test_fixed_numeric_not_activated_with_cats(self):
-        """Fixed-numeric fastpath should NOT activate when categorical columns present."""
+        """Constant-bin numeric fastpath should NOT activate when categorical columns present."""
         from hugiml import HUGIMLClassifierNative
 
         rng = np.random.default_rng(5)
@@ -637,7 +644,7 @@ class TestFixedNumericL1Fastpath:
         assert len(preds) == n
 
     def test_fixed_numeric_parity_with_standard_hotpath(self):
-        """Pattern sets from fixed-numeric fastpath and standard hotpath should agree well."""
+        """Pattern sets from constant-bin numeric fastpath and standard hotpath should agree well."""
         from hugiml import HUGIMLClassifierNative
 
         rng = np.random.default_rng(22)
@@ -645,14 +652,14 @@ class TestFixedNumericL1Fastpath:
         X = pd.DataFrame(rng.standard_normal((n, p)), columns=[f"v{j}" for j in range(p)])
         y = pd.Series((rng.random(n) > 0.45).astype(int))
 
-        # Fixed-numeric fastpath (env already set by autouse fixture)
+        # Constant-bin numeric fastpath (env already set by autouse fixture)
         clf_fixed = HUGIMLClassifierNative(
             B=5, L=1, G=1e-4, adaptive_binning=False, use_hotpath=True, topK=40
         )
         Xp, yp = clf_fixed.prepareXy(X.copy(), y.copy())
         clf_fixed.fit(Xp, yp)
 
-        # Standard hotpath (fixed-numeric off)
+        # Standard hotpath (constant-bin numeric off)
         os.environ.pop("HUGIML_ENABLE_FIXED_NUMERIC_L1_FASTPATH", None)
         clf_std = HUGIMLClassifierNative(
             B=5, L=1, G=1e-4, adaptive_binning=False, use_hotpath=True, topK=40
@@ -664,18 +671,18 @@ class TestFixedNumericL1Fastpath:
         assert len(clf_fixed.patterns_) > 0
         assert len(clf_std.patterns_) > 0
 
-        # Predict agreement (both models use fixed-B so items should largely agree)
+        # Predict agreement (both models use constant-B so items should largely agree)
         pred_fixed = clf_fixed.predict(X)
         pred_std = clf_std.predict(X)
         agreement = np.mean(pred_fixed == pred_std)
         # Allow for minor numeric differences in bin edges between paths
         assert agreement >= 0.75, (
-            f"Fixed-numeric and standard hotpath agree on only {agreement:.1%} of predictions"
+            f"Constant-bin numeric and standard hotpath agree on only {agreement:.1%} of predictions"
         )
 
 
 # ---------------------------------------------------------------------------
-# 8.  Adaptive B selection: fixed vs adaptive B, elbow-stop
+# 8.  Adaptive B selection: constant-B vs adaptive B, elbow-stop
 # ---------------------------------------------------------------------------
 
 

@@ -7,7 +7,7 @@ HUGIML is designed for audit-heavy workflows where model reviewers need to inspe
 Governance Studio evidence
 --------------------------
 
-Version 1.1.11 expands the Governance Studio review surface introduced in v1.1.10. The dashboard now includes evidence panels for adaptive binning, augmented-pair traceability, feature-family composition, pattern support coverage, cross-validation monitoring, validation score labeling, and export-ready governance summaries. These views complement the programmatic model-card and audit-artifact APIs below.
+The Governance Studio review surface includes evidence panels for adaptive binning, augmented-pair traceability, interaction-relaxed mining, survivor-led patterns, feature-family composition, pattern support coverage, cross-validation monitoring, validation score labeling, and export-ready governance summaries. These views complement the programmatic model-card and audit-artifact APIs below.
 
 Binary feature evidence
 -----------------------

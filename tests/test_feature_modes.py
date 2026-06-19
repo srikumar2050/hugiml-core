@@ -37,6 +37,7 @@ def _clf(mode="patterns_only"):
         topK=30,
         adaptive_binning=True,
         feature_mode=mode,
+        interaction_relaxed_mining=False,
     )
 
 
@@ -51,6 +52,7 @@ def _clf_for_frame(X, mode="patterns_only"):
         topK=40,
         adaptive_binning=True,
         feature_mode=mode,
+        interaction_relaxed_mining=False,
     )
 
 

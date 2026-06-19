@@ -11,8 +11,11 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <map>
 #include <numeric>
+#include <random>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace py = pybind11;
@@ -342,6 +345,246 @@ std::vector<int32_t> continuous_to_quantile_codes_fixed(const std::vector<double
 }
 
 
+
+
+struct InteractionSelectionRecord {
+    int64_t index = -1;
+    double score = 0.0;
+    double marginal_ig = 0.0;
+    int64_t best_partner = -1;
+};
+
+double conditional_entropy_from_table(
+    const std::vector<int64_t>& counts,
+    const std::vector<int64_t>& totals,
+    int64_t n_classes,
+    int64_t eligible_count
+) {
+    if (eligible_count <= 0) return 0.0;
+    std::vector<int64_t> cls_counts(static_cast<size_t>(n_classes), 0);
+    double cond = 0.0;
+    for (size_t g = 0; g < totals.size(); ++g) {
+        const int64_t total = totals[g];
+        if (total <= 0) continue;
+        const size_t offset = g * static_cast<size_t>(n_classes);
+        for (int64_t cls = 0; cls < n_classes; ++cls) {
+            cls_counts[static_cast<size_t>(cls)] = counts[offset + static_cast<size_t>(cls)];
+        }
+        cond += (static_cast<double>(total) / static_cast<double>(eligible_count))
+            * entropy_from_counts(cls_counts, total);
+    }
+    return cond;
+}
+
+double marginal_ig_skip_missing(
+    const std::vector<int32_t>& codes,
+    const int64_t* y,
+    py::ssize_t n,
+    int64_t n_classes,
+    int32_t n_bins
+) {
+    if (n <= 0 || n_bins <= 0) return 0.0;
+    std::vector<int64_t> label_counts(static_cast<size_t>(n_classes), 0);
+    std::vector<int64_t> counts(static_cast<size_t>(n_bins) * static_cast<size_t>(n_classes), 0);
+    std::vector<int64_t> totals(static_cast<size_t>(n_bins), 0);
+    int64_t eligible = 0;
+    for (py::ssize_t i = 0; i < n; ++i) {
+        const int32_t c = codes[static_cast<size_t>(i)];
+        const int64_t cls = y[i];
+        if (c < 0 || c >= n_bins || cls < 0 || cls >= n_classes) continue;
+        ++eligible;
+        label_counts[static_cast<size_t>(cls)]++;
+        totals[static_cast<size_t>(c)]++;
+        counts[static_cast<size_t>(c) * static_cast<size_t>(n_classes) + static_cast<size_t>(cls)]++;
+    }
+    if (eligible < 3) return 0.0;
+    const double base = entropy_from_counts(label_counts, eligible);
+    if (base <= 0.0) return 0.0;
+    const double cond = conditional_entropy_from_table(counts, totals, n_classes, eligible);
+    return std::max(0.0, base - cond);
+}
+
+py::list select_interaction_information_features(
+    py::array_t<double, py::array::c_style | py::array::forcecast> X_arr,
+    py::array_t<int64_t, py::array::c_style | py::array::forcecast> y_arr,
+    const std::vector<std::string>& col_names,
+    int64_t aug_feature_size,
+    py::object ii_partner_size_obj
+) {
+    auto X = X_arr.unchecked<2>();
+    auto y = y_arr.unchecked<1>();
+    const py::ssize_t n = X.shape(0);
+    const py::ssize_t p = X.shape(1);
+    if (y.shape(0) != n) throw std::invalid_argument("X and y row counts do not match.");
+    if (static_cast<py::ssize_t>(col_names.size()) != p) throw std::invalid_argument("col_names length does not match X columns.");
+
+    py::list out;
+    if (n <= 0 || p <= 0 || aug_feature_size <= 0) return out;
+
+    int64_t partner_size = -1;
+    if (!ii_partner_size_obj.is_none()) partner_size = py::cast<int64_t>(ii_partner_size_obj);
+
+    std::vector<InteractionSelectionRecord> selected;
+    selected.reserve(static_cast<size_t>(std::min<int64_t>(aug_feature_size, static_cast<int64_t>(p))));
+
+    {
+        py::gil_scoped_release release;
+
+        int64_t n_classes = 0;
+        const int64_t* y_ptr = y_arr.data();
+        for (py::ssize_t i = 0; i < n; ++i) {
+            if (y_ptr[i] >= n_classes) n_classes = y_ptr[i] + 1;
+        }
+        if (n_classes <= 0) n_classes = 1;
+
+        constexpr int fixed_bins = 4;
+        std::vector<std::vector<int32_t>> codes(static_cast<size_t>(p));
+        std::vector<int32_t> n_bins(static_cast<size_t>(p), 1);
+        std::vector<double> marginal_ig(static_cast<size_t>(p), 0.0);
+        std::vector<double> values(static_cast<size_t>(n), 0.0);
+
+        for (py::ssize_t j = 0; j < p; ++j) {
+            for (py::ssize_t i = 0; i < n; ++i) {
+                const double v = X(i, j);
+                values[static_cast<size_t>(i)] = finite_double(v) ? v : std::numeric_limits<double>::quiet_NaN();
+            }
+            codes[static_cast<size_t>(j)] = continuous_to_quantile_codes_fixed(values, fixed_bins);
+            int32_t max_code = -1;
+            for (int32_t c : codes[static_cast<size_t>(j)]) {
+                if (c > max_code) max_code = c;
+            }
+            n_bins[static_cast<size_t>(j)] = std::max<int32_t>(1, max_code + 1);
+            marginal_ig[static_cast<size_t>(j)] = marginal_ig_skip_missing(
+                codes[static_cast<size_t>(j)], y_ptr, n, n_classes, n_bins[static_cast<size_t>(j)]
+            );
+        }
+
+        std::vector<uint8_t> is_partner(static_cast<size_t>(p), 1);
+        if (partner_size > 0 && partner_size < static_cast<int64_t>(p)) {
+            std::fill(is_partner.begin(), is_partner.end(), static_cast<uint8_t>(0));
+            std::vector<int64_t> order(static_cast<size_t>(p));
+            std::iota(order.begin(), order.end(), 0);
+            std::mt19937 rng(0);
+            std::shuffle(order.begin(), order.end(), rng);
+            for (int64_t r = 0; r < partner_size; ++r) {
+                is_partner[static_cast<size_t>(order[static_cast<size_t>(r)])] = 1;
+            }
+        }
+
+        std::vector<double> best_interaction(static_cast<size_t>(p), 0.0);
+        std::vector<int64_t> best_partner(static_cast<size_t>(p), -1);
+        std::vector<int64_t> label_counts;
+        std::vector<int64_t> joint_counts;
+        std::vector<int64_t> joint_totals;
+        std::vector<int64_t> a_counts;
+        std::vector<int64_t> a_totals;
+        std::vector<int64_t> b_counts;
+        std::vector<int64_t> b_totals;
+
+        for (py::ssize_t a = 0; a < p; ++a) {
+            for (py::ssize_t b = a + 1; b < p; ++b) {
+                if (is_partner[static_cast<size_t>(a)] == 0 && is_partner[static_cast<size_t>(b)] == 0) continue;
+                const int32_t nb_a = n_bins[static_cast<size_t>(a)];
+                const int32_t nb_b = n_bins[static_cast<size_t>(b)];
+                if (nb_a <= 0 || nb_b <= 0) continue;
+                const int64_t n_joint = static_cast<int64_t>(nb_a) * static_cast<int64_t>(nb_b);
+
+                label_counts.assign(static_cast<size_t>(n_classes), 0);
+                joint_counts.assign(static_cast<size_t>(n_joint) * static_cast<size_t>(n_classes), 0);
+                joint_totals.assign(static_cast<size_t>(n_joint), 0);
+                a_counts.assign(static_cast<size_t>(nb_a) * static_cast<size_t>(n_classes), 0);
+                a_totals.assign(static_cast<size_t>(nb_a), 0);
+                b_counts.assign(static_cast<size_t>(nb_b) * static_cast<size_t>(n_classes), 0);
+                b_totals.assign(static_cast<size_t>(nb_b), 0);
+
+                int64_t eligible = 0;
+                for (py::ssize_t i = 0; i < n; ++i) {
+                    const int32_t ca = codes[static_cast<size_t>(a)][static_cast<size_t>(i)];
+                    const int32_t cb = codes[static_cast<size_t>(b)][static_cast<size_t>(i)];
+                    const int64_t cls = y_ptr[i];
+                    if (ca < 0 || cb < 0 || ca >= nb_a || cb >= nb_b || cls < 0 || cls >= n_classes) continue;
+
+                    ++eligible;
+                    label_counts[static_cast<size_t>(cls)]++;
+                    a_totals[static_cast<size_t>(ca)]++;
+                    b_totals[static_cast<size_t>(cb)]++;
+                    a_counts[static_cast<size_t>(ca) * static_cast<size_t>(n_classes) + static_cast<size_t>(cls)]++;
+                    b_counts[static_cast<size_t>(cb) * static_cast<size_t>(n_classes) + static_cast<size_t>(cls)]++;
+                    const int64_t joint = static_cast<int64_t>(ca) * static_cast<int64_t>(nb_b) + static_cast<int64_t>(cb);
+                    joint_totals[static_cast<size_t>(joint)]++;
+                    joint_counts[static_cast<size_t>(joint) * static_cast<size_t>(n_classes) + static_cast<size_t>(cls)]++;
+                }
+                if (eligible < 3) continue;
+
+                const double base = entropy_from_counts(label_counts, eligible);
+                if (base <= 0.0) continue;
+                const double cond_joint = conditional_entropy_from_table(joint_counts, joint_totals, n_classes, eligible);
+                const double cond_a = conditional_entropy_from_table(a_counts, a_totals, n_classes, eligible);
+                const double cond_b = conditional_entropy_from_table(b_counts, b_totals, n_classes, eligible);
+                const double joint_ig = std::max(0.0, base - cond_joint);
+                const double ig_a = std::max(0.0, base - cond_a);
+                const double ig_b = std::max(0.0, base - cond_b);
+                const double interaction = joint_ig - ig_a - ig_b;
+
+                if (interaction > best_interaction[static_cast<size_t>(a)]) {
+                    best_interaction[static_cast<size_t>(a)] = interaction;
+                    best_partner[static_cast<size_t>(a)] = b;
+                }
+                if (interaction > best_interaction[static_cast<size_t>(b)]) {
+                    best_interaction[static_cast<size_t>(b)] = interaction;
+                    best_partner[static_cast<size_t>(b)] = a;
+                }
+            }
+        }
+
+        std::vector<int64_t> order(static_cast<size_t>(p));
+        std::iota(order.begin(), order.end(), 0);
+        auto cmp = [&](int64_t lhs, int64_t rhs) {
+            const double li = best_interaction[static_cast<size_t>(lhs)];
+            const double ri = best_interaction[static_cast<size_t>(rhs)];
+            if (li != ri) return li > ri;
+            const double lm = marginal_ig[static_cast<size_t>(lhs)];
+            const double rm = marginal_ig[static_cast<size_t>(rhs)];
+            if (lm != rm) return lm > rm;
+            return col_names[static_cast<size_t>(lhs)] < col_names[static_cast<size_t>(rhs)];
+        };
+        const int64_t keep = std::min<int64_t>(aug_feature_size, static_cast<int64_t>(p));
+        if (keep < static_cast<int64_t>(p)) {
+            std::partial_sort(order.begin(), order.begin() + static_cast<std::ptrdiff_t>(keep), order.end(), cmp);
+        } else {
+            std::sort(order.begin(), order.end(), cmp);
+        }
+
+        for (int64_t r = 0; r < keep; ++r) {
+            const int64_t j = order[static_cast<size_t>(r)];
+            InteractionSelectionRecord rec;
+            rec.index = j;
+            rec.score = best_interaction[static_cast<size_t>(j)];
+            rec.marginal_ig = marginal_ig[static_cast<size_t>(j)];
+            rec.best_partner = best_partner[static_cast<size_t>(j)];
+            selected.push_back(rec);
+        }
+    }
+
+    for (size_t r = 0; r < selected.size(); ++r) {
+        const InteractionSelectionRecord& rec = selected[r];
+        py::dict d;
+        d["name"] = col_names[static_cast<size_t>(rec.index)];
+        d["score"] = rec.score;
+        d["interaction_score"] = rec.score;
+        d["marginal_ig"] = rec.marginal_ig;
+        if (rec.best_partner >= 0) {
+            d["best_partner"] = col_names[static_cast<size_t>(rec.best_partner)];
+        } else {
+            d["best_partner"] = py::none();
+        }
+        d["mode"] = "interaction_information";
+        d["rank"] = static_cast<int64_t>(r + 1);
+        out.append(std::move(d));
+    }
+    return out;
+}
+
 py::tuple strict_topk_filter_dense(
     py::array_t<float, py::array::c_style | py::array::forcecast> X_arr,
     py::array_t<int64_t, py::array::c_style | py::array::forcecast> y_arr,
@@ -509,6 +752,286 @@ py::tuple strict_topk_filter_csc(
     return py::make_tuple(scores_arr, mask_arr);
 }
 
+// ─────────────────────────────────────────────────────────────────────────
+// select_pair_aware_adaptive_bins
+//
+// Chooses a bin count per numeric column for interaction_relaxed_mining,
+// using each survivor column's known best-partner pairing (already
+// computed by select_interaction_information_features) to score candidate
+// bin counts by JOINT information against that partner instead of purely
+// marginal information against the target -- so a column whose value is
+// almost entirely interaction-driven (near-zero marginal IG at any bin
+// count) is not forced toward the finest available resolution by an
+// elbow-stop rule that only ever sees marginal IG.
+//
+// Algorithm:
+//   1. For each numeric column, scan candidate bin counts b (capped to
+//      <= pair_aware_max_bins when the column has at least one partner,
+//      which keeps the criterion well-behaved rather than monotonically
+//      rewarding finer bins regardless of real structure).
+//   2. marginal = IG(quantile_code(col, b); y).
+//   3. For each partner, joint = IG(quantile_code(col,b) combined with
+//      quantile_code(partner, min(b, pair_aware_max_bins)); y), and
+//      pair_score = max(conditional, min(joint, max(left, right))) where
+//      conditional = max(0, joint - right). This caps the pair score
+//      against what either marginal IG alone already explains.
+//   4. score[b] = max(marginal, best_pair_score_over_partners).
+//   5. Elbow-stop: pick the SMALLEST b whose score clears
+//      best_score * pair_aware_threshold_ratio (when partnered) or
+//      best_score * (1 - min_marginal_gain_ratio) (when not) -- i.e.
+//      coarsen by default, only move finer if it buys a real improvement.
+//
+// Every column's candidate codes are computed once and reused for every
+// pairing that needs them within the same scan; IG and joint IG are
+// single-pass count-table accumulations.
+// ─────────────────────────────────────────────────────────────────────────
+py::dict select_pair_aware_adaptive_bins(
+    py::array_t<double, py::array::c_style | py::array::forcecast> X_arr,
+    py::array_t<int64_t, py::array::c_style | py::array::forcecast> y_arr,
+    const std::vector<std::string>& col_names,
+    const std::vector<int64_t>& candidate_bins,
+    const std::vector<std::pair<int64_t, int64_t>>& pair_indices,
+    double min_marginal_gain_ratio,
+    double pair_aware_threshold_ratio,
+    int64_t pair_aware_max_bins
+) {
+    auto X = X_arr.unchecked<2>();
+    const py::ssize_t n = X.shape(0);
+    const py::ssize_t p = X.shape(1);
+    py::dict out;
+    if (n <= 0 || p <= 0 || candidate_bins.empty()) return out;
+    if (static_cast<py::ssize_t>(col_names.size()) != p) {
+        throw std::invalid_argument("col_names length does not match X columns.");
+    }
+
+    std::vector<int64_t> sorted_candidates(candidate_bins.begin(), candidate_bins.end());
+    std::sort(sorted_candidates.begin(), sorted_candidates.end());
+    sorted_candidates.erase(
+        std::unique(sorted_candidates.begin(), sorted_candidates.end()), sorted_candidates.end()
+    );
+
+    // Build, per column, the set of partner column indices (symmetric).
+    std::vector<std::vector<int64_t>> partners(static_cast<size_t>(p));
+    for (const auto& pr : pair_indices) {
+        const int64_t a = pr.first;
+        const int64_t b = pr.second;
+        if (a < 0 || a >= p || b < 0 || b >= p || a == b) continue;
+        partners[static_cast<size_t>(a)].push_back(b);
+        partners[static_cast<size_t>(b)].push_back(a);
+    }
+
+    // Plain C++ accumulator for per-column results computed while the GIL
+    // is released; no py:: objects are touched until after re-acquiring it.
+    struct PairAwareColumnResult {
+        py::ssize_t col = 0;
+        int64_t chosen_b = 0;
+        std::map<int64_t, double> scores;
+        std::map<int64_t, double> marginal_scores;
+        bool has_partner = false;
+        int64_t best_partner_col = -1;
+        int64_t best_partner_bins = -1;
+        double best_score = 0.0;
+    };
+    std::vector<PairAwareColumnResult> column_results;
+    column_results.reserve(static_cast<size_t>(p));
+
+    py::gil_scoped_release release;
+
+    int64_t n_classes = 0;
+    const int64_t* y_ptr = y_arr.data();
+    for (py::ssize_t i = 0; i < n; ++i) {
+        if (y_ptr[i] >= n_classes) n_classes = y_ptr[i] + 1;
+    }
+    if (n_classes <= 0) n_classes = 1;
+
+    std::vector<double> values(static_cast<size_t>(n), 0.0);
+
+    // Cache, per column, codes/n_bins at every candidate bin count actually
+    // needed (every column needs its own scan_candidates; partner columns
+    // additionally need codes at min(b, pair_aware_max_bins) for whichever
+    // b values their partners scan). To keep this simple and still avoid
+    // recomputation within one column's own scan, codes are computed once
+    // per (column, bin_count) the first time they are needed and reused.
+    std::map<std::pair<int64_t, int64_t>, std::vector<int32_t>> code_cache;
+    std::map<std::pair<int64_t, int64_t>, int32_t> nbins_cache;
+
+    auto get_codes = [&](int64_t col, int64_t b) -> const std::vector<int32_t>& {
+        auto key = std::make_pair(col, b);
+        auto it = code_cache.find(key);
+        if (it != code_cache.end()) return it->second;
+        for (py::ssize_t i = 0; i < n; ++i) {
+            const double v = X(i, col);
+            values[static_cast<size_t>(i)] = finite_double(v) ? v : std::numeric_limits<double>::quiet_NaN();
+        }
+        std::vector<int32_t> codes = continuous_to_quantile_codes_fixed(values, static_cast<int>(b));
+        int32_t max_code = -1;
+        for (int32_t c : codes) {
+            if (c > max_code) max_code = c;
+        }
+        nbins_cache[key] = std::max<int32_t>(1, max_code + 1);
+        auto& slot = code_cache[key];
+        slot = std::move(codes);
+        return slot;
+    };
+    auto get_nbins = [&](int64_t col, int64_t b) -> int32_t {
+        get_codes(col, b);
+        return nbins_cache[std::make_pair(col, b)];
+    };
+
+    for (py::ssize_t col = 0; col < p; ++col) {
+        const bool has_partner = !partners[static_cast<size_t>(col)].empty();
+        std::vector<int64_t> scan = sorted_candidates;
+        if (has_partner) {
+            std::vector<int64_t> capped;
+            for (int64_t b : scan) if (b <= pair_aware_max_bins) capped.push_back(b);
+            if (!capped.empty()) scan = capped;
+        }
+
+        std::map<int64_t, double> scores;
+        std::map<int64_t, double> marginal_scores;
+        int64_t best_partner_overall = -1;
+        int64_t best_partner_bins_overall = -1;
+        double best_pair_score_overall = 0.0;
+
+        for (int64_t b : scan) {
+            const auto& codes_x = get_codes(col, b);
+            const int32_t nb_x = get_nbins(col, b);
+            const double marginal = marginal_ig_skip_missing(codes_x, y_ptr, n, n_classes, nb_x);
+            marginal_scores[b] = marginal;
+
+            double best_pair_score = 0.0;
+            int64_t best_partner_name = -1;
+            int64_t best_partner_bins = -1;
+
+            for (int64_t partner_col : partners[static_cast<size_t>(col)]) {
+                const int64_t pb = std::min<int64_t>(b, pair_aware_max_bins);
+                const auto& codes_y = get_codes(partner_col, pb);
+                const int32_t nb_y = get_nbins(partner_col, pb);
+                const double right_score = marginal_ig_skip_missing(codes_y, y_ptr, n, n_classes, nb_y);
+
+                const int64_t n_joint = static_cast<int64_t>(nb_x) * static_cast<int64_t>(nb_y);
+                std::vector<int64_t> label_counts(static_cast<size_t>(n_classes), 0);
+                std::vector<int64_t> joint_counts(static_cast<size_t>(n_joint) * static_cast<size_t>(n_classes), 0);
+                std::vector<int64_t> joint_totals(static_cast<size_t>(n_joint), 0);
+                int64_t eligible = 0;
+                for (py::ssize_t i = 0; i < n; ++i) {
+                    const int32_t cx = codes_x[static_cast<size_t>(i)];
+                    const int32_t cy = codes_y[static_cast<size_t>(i)];
+                    const int64_t cls = y_ptr[i];
+                    if (cx < 0 || cy < 0 || cx >= nb_x || cy >= nb_y || cls < 0 || cls >= n_classes) continue;
+                    ++eligible;
+                    label_counts[static_cast<size_t>(cls)]++;
+                    const int64_t joint = static_cast<int64_t>(cx) * static_cast<int64_t>(nb_y) + static_cast<int64_t>(cy);
+                    joint_totals[static_cast<size_t>(joint)]++;
+                    joint_counts[static_cast<size_t>(joint) * static_cast<size_t>(n_classes) + static_cast<size_t>(cls)]++;
+                }
+                double joint_score = 0.0;
+                if (eligible >= 3) {
+                    const double base = entropy_from_counts(label_counts, eligible);
+                    if (base > 0.0) {
+                        const double cond_joint = conditional_entropy_from_table(
+                            joint_counts, joint_totals, n_classes, eligible
+                        );
+                        joint_score = std::max(0.0, base - cond_joint);
+                    }
+                }
+                const double left_score = marginal;  // IG of col itself at its own b
+                const double conditional = std::max(0.0, joint_score - right_score);
+                const double pair_score = std::max(
+                    conditional, std::min(joint_score, std::max(left_score, right_score))
+                );
+                if (pair_score > best_pair_score) {
+                    best_pair_score = pair_score;
+                    best_partner_name = partner_col;
+                    best_partner_bins = nb_y;
+                }
+            }
+            scores[b] = std::max(marginal, best_pair_score);
+            if (best_pair_score > best_pair_score_overall) {
+                best_pair_score_overall = best_pair_score;
+                best_partner_overall = best_partner_name;
+                best_partner_bins_overall = best_partner_bins;
+            }
+        }
+
+        if (scores.empty()) continue;
+        double best_score = 0.0;
+        for (const auto& kv : scores) best_score = std::max(best_score, kv.second);
+
+        int64_t chosen;
+        if (best_score <= 0.0) {
+            chosen = scores.begin()->first;
+        } else {
+            const double threshold = has_partner
+                ? best_score * pair_aware_threshold_ratio
+                : best_score * std::max(0.0, 1.0 - min_marginal_gain_ratio);
+            chosen = -1;
+            for (const auto& kv : scores) {  // map is sorted ascending by key
+                if (kv.second >= threshold) { chosen = kv.first; break; }
+            }
+            if (chosen < 0) {
+                chosen = scores.begin()->first;
+                double best_val = scores.begin()->second;
+                for (const auto& kv : scores) {
+                    if (kv.second > best_val) { best_val = kv.second; chosen = kv.first; }
+                }
+            }
+        }
+
+        // Stash results in plain C++ containers only -- no py:: object
+        // construction here, since the GIL is released for this entire
+        // outer loop. All py::dict/py::str building happens in a separate
+        // pass below, after the GIL is reacquired.
+        PairAwareColumnResult rec;
+        rec.col = col;
+        rec.chosen_b = chosen;
+        rec.scores = scores;
+        rec.marginal_scores = marginal_scores;
+        rec.has_partner = has_partner;
+        rec.best_partner_col = (has_partner ? best_partner_overall : -1);
+        rec.best_partner_bins = best_partner_bins_overall;
+        rec.best_score = best_score;
+        column_results.push_back(std::move(rec));
+    }
+
+    py::gil_scoped_acquire acquire;
+    py::dict chosen_b_out;
+    py::dict scores_out;
+    py::dict evidence_out;
+    for (const auto& rec : column_results) {
+        const std::string& name = col_names[static_cast<size_t>(rec.col)];
+        chosen_b_out[py::str(name)] = rec.chosen_b;
+
+        py::dict score_dict;
+        for (const auto& kv : rec.scores) score_dict[py::int_(kv.first)] = kv.second;
+        scores_out[py::str(name)] = score_dict;
+
+        py::dict evidence;
+        evidence["mode"] = rec.has_partner ? "pair_aware" : "marginal";
+        evidence["feature"] = name;
+        evidence["chosen_b"] = rec.chosen_b;
+        auto it = rec.scores.find(rec.chosen_b);
+        evidence["score"] = (it != rec.scores.end()) ? it->second : 0.0;
+        evidence["best_score"] = rec.best_score;
+        if (rec.has_partner && rec.best_partner_col >= 0) {
+            evidence["best_partner"] = col_names[static_cast<size_t>(rec.best_partner_col)];
+            evidence["partner_bins"] = rec.best_partner_bins;
+        } else {
+            evidence["best_partner"] = py::none();
+            evidence["partner_bins"] = py::none();
+        }
+        py::dict marginal_dict;
+        for (const auto& kv : rec.marginal_scores) marginal_dict[py::int_(kv.first)] = kv.second;
+        evidence["marginal_scores"] = marginal_dict;
+        evidence_out[py::str(name)] = evidence;
+    }
+
+    out["chosen_b"] = chosen_b_out;
+    out["scores"] = scores_out;
+    out["evidence"] = evidence_out;
+    return out;
+}
+
 } // namespace
 
 void bind_augmented_pair(py::module_& m)
@@ -532,6 +1055,33 @@ void bind_augmented_pair(py::module_& m)
         py::arg("means"),
         py::arg("scales"),
         "Generate standardized augmented pair features natively; unavailable pairs use per-pair reference values."
+    );
+
+    m.def(
+        "select_interaction_information_features",
+        &select_interaction_information_features,
+        py::arg("X"),
+        py::arg("y"),
+        py::arg("col_names"),
+        py::arg("aug_feature_size"),
+        py::arg("ii_partner_size") = py::none(),
+        "Select source features for augmented pair generation using native interaction-information scoring."
+    );
+
+    m.def(
+        "select_pair_aware_adaptive_bins",
+        &select_pair_aware_adaptive_bins,
+        py::arg("X"),
+        py::arg("y"),
+        py::arg("col_names"),
+        py::arg("candidate_bins"),
+        py::arg("pair_indices"),
+        py::arg("min_marginal_gain_ratio"),
+        py::arg("pair_aware_threshold_ratio"),
+        py::arg("pair_aware_max_bins"),
+        "Native pair-aware adaptive bin-count selection for interaction_relaxed_mining: "
+        "scores candidate bin counts per column by joint information against its known "
+        "best-partner column(s) instead of purely marginal information against the target."
     );
 
     m.def(

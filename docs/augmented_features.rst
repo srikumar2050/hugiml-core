@@ -15,6 +15,26 @@ Augmented-pair features are considered when all of the following are true:
 
 The default value of ``augmented_pair_transforms`` is ``True``. If prerequisites are not met, no augmented-pair features are added and the model remains a standard HUG pattern model for the downstream estimator.
 
+Source selection modes
+----------------------
+
+``augmented_pair_mode`` controls how source columns are selected before pair operations are generated.
+
+.. list-table::
+   :header-rows: 1
+
+   * - Mode
+     - Source scoring
+     - Main controls
+   * - ``"interaction_information"``
+     - Scores candidate sources using pair-context information and records the best partner evidence for review.
+     - ``aug_feature_size`` and optional ``ii_partner_size``.
+   * - ``"marginal_ig"``
+     - Uses the v1.1.11 marginal-information-gain source-ranking behavior.
+     - ``max_pair_features``.
+
+``augmented_pair_max_features`` remains accepted as a v1.1.11-compatible alias. When provided with the default new budgets, it maps to both ``aug_feature_size`` and ``max_pair_features``.
+
 Feature families
 ----------------
 
@@ -40,6 +60,9 @@ Example
        topK=50,
        feature_mode="original_plus_patterns",
        augmented_pair_transforms=True,
+       augmented_pair_mode="interaction_information",
+       aug_feature_size=10,
+       ii_partner_size=12,
    )
    clf.fit(X_train, y_train)
 
@@ -50,11 +73,16 @@ Example
 Interpretation
 --------------
 
-Augmented-pair features use product, absolute-difference, sum, and signed-difference transforms. Public metadata reports the raw formula, standardized formula, information-gain provenance, observed-row coverage, and raw-scale coefficient interpretation.
+Augmented-pair features use product, absolute-difference, sum, and signed-difference transforms. Public metadata reports the raw formula, standardized formula, information-gain provenance, observed-row coverage, missing-pair policy, source-selection mode, and raw-scale coefficient interpretation.
 
-For a product feature such as ``glucose * bmi``, the raw-unit effect is on the product scale and depends on the current value of the other source variable. For an absolute-difference feature such as ``abs(age - duration)``, the raw-unit effect is on the distance scale. Sum and signed-difference features expose additive pair effects while preserving the same raw-to-standardized metadata structure introduced in v1.1.6.
+For a product feature such as ``glucose * bmi``, the raw-unit effect is on the product scale and depends on the current value of the other source variable. For an absolute-difference feature such as ``abs(age - duration)``, the raw-unit effect is on the distance scale. Sum and signed-difference features expose additive pair effects while preserving the same raw-to-standardized metadata structure.
 
 Candidate scoring uses rows where both source values are observed. For selected pair features, rows where the pair cannot be computed receive the pair feature's training reference raw value before standardization. This gives a neutral standardized value for that pair term and keeps HUG pattern features on their native missing-value handling path.
+
+Interaction-relaxed alternative
+-------------------------------
+
+Use ``interaction_relaxed_mining=True`` when you want interaction-information evidence to affect pattern discovery without adding augmented-pair operator columns. This path requires ``augmented_pair_transforms=False`` for ``L >= 2`` and keeps the downstream feature families limited to patterns plus any original features selected by ``feature_mode``.
 
 Budgeting
 ---------

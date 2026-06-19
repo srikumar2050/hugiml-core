@@ -41,6 +41,24 @@ def _make_classifier(**params):
     return HUGIMLClassifierNative(**params)
 
 
+_HUGIML_PARAM_KEYS = {
+    "adaptive_binning",
+    "B",
+    "L",
+    "topK",
+    "G",
+    "feature_mode",
+    "topk_budget_strict",
+    "augmented_pair_transforms",
+    "augmented_pair_mode",
+    "aug_feature_size",
+    "max_pair_features",
+    "ii_partner_size",
+    "interaction_relaxed_mining",
+    "interaction_relaxed_feature_size",
+}
+
+
 def _default_params() -> dict:
     return {
         "adaptive_binning": True,
@@ -50,12 +68,19 @@ def _default_params() -> dict:
         "G": 1e-2,
         "feature_mode": "original_plus_patterns",
         "topk_budget_strict": False,
+        "augmented_pair_transforms": True,
+        "augmented_pair_mode": "interaction_information",
+        "aug_feature_size": 10,
+        "max_pair_features": 10,
+        "ii_partner_size": None,
+        "interaction_relaxed_mining": False,
+        "interaction_relaxed_feature_size": 10,
     }
 
 
 def _safe_params(model: Any) -> dict:
     out = {}
-    for k in ("adaptive_binning", "B", "L", "topK", "G", "feature_mode", "topk_budget_strict"):
+    for k in _HUGIML_PARAM_KEYS:
         if hasattr(model, k):
             out[k] = getattr(model, k)
     if not out:
@@ -180,7 +205,7 @@ def fit_feature_pruned_hugiml(
     if params is None:
         params = _safe_params(base_model) if base_model is not None else _default_params()
 
-    params = {k: v for k, v in params.items() if k in {"adaptive_binning", "B", "L", "topK", "G", "feature_mode", "topk_budget_strict"}}
+    params = {k: v for k, v in params.items() if k in _HUGIML_PARAM_KEYS}
     result = fit_hugiml_config(X_pruned, y, params=params, cv=cv, scoring=scoring, random_state=random_state)
     return result, X_pruned
 

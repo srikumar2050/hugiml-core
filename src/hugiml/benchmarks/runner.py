@@ -4,7 +4,7 @@
 
 """Benchmark runner for HUG-IML and baseline classifiers.
 
-This runner extends the original v1.1.7 built-in benchmark workflow with:
+This runner provides a benchmark workflow with:
 
 * LightGBM baseline support when ``lightgbm`` is installed.
 * Custom dataset support via ``--data`` and ``--target``.
@@ -183,7 +183,7 @@ def _prepare_features_for_benchmarks(X: pd.DataFrame) -> pd.DataFrame:
 
     HUG-IML can handle richer feature metadata, but all baselines in this runner
     need numeric matrix input. We use deterministic category codes and simple
-    median/zero fills. This mirrors the original v1.1.7 runner style and keeps
+    median/zero fills. This keeps
     the benchmark dependency-light.
     """
     Xp = X.copy()
@@ -247,8 +247,10 @@ def _build_hugiml(allCols=None, origColumns=None, random_state: int = 42):
     if allCols is not None:
         kw = {"allCols": allCols, "origColumns": origColumns}
 
-    # Keep the original v1.1.7 baseline configuration.
-    return HUGIMLClassifierNative(B=7, L=2, G=5e-3, topK=100, **kw)
+    # Baseline HUG-IML configuration.
+    return HUGIMLClassifierNative(
+        B=7, L=2, G=5e-3, topK=100, interaction_relaxed_mining=False, **kw
+    )
 
 
 def _build_ebm(random_state: int = 42):

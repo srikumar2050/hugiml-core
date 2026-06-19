@@ -33,7 +33,7 @@ Core classifier::
     proba = clf.predict_proba(X_test)
     print(clf.model_summary())
 
-Adaptive binning (v1.1.0)::
+Adaptive binning::
 
     clf = HUGIMLClassifier(
         adaptive_binning=True,
@@ -81,7 +81,7 @@ Benchmark runner (CLI)::
 
 from __future__ import annotations
 
-__version__ = "1.1.11"
+__version__ = "1.1.12"
 __author__ = "Srikumar Krishnamoorthy"
 __license__ = "Apache-2.0"
 __paper__ = (

@@ -163,6 +163,9 @@ except ImportError as _e:
 DEFAULT_AUGMENTED_PAIR_MAX_FEATURES = 10
 DEFAULT_AUGMENTED_PAIR_UNBOUNDED_CAP = 100
 AUGMENTED_PAIR_OPS = ("product", "absolute_difference", "sum", "signed_difference")
+AUGMENTED_PAIR_MODES = ("interaction_information", "marginal_ig")
+_II_N_BINS = 4
+
 
 
 def _best_ig_score(score_obj: Any) -> float:
@@ -252,24 +255,95 @@ def _continuous_to_quantile_codes(values: np.ndarray, max_bins: int = 16) -> np.
     return codes
 
 
-class NativeAugmentedPairTransformBlock:
-    """Native-backed L>1 pair augmentation state and transform wrapper.
+def _codes_from_edges(values: np.ndarray, edges: np.ndarray) -> np.ndarray:
+    arr = np.asarray(values, dtype=np.float64)
+    edges = np.asarray(edges, dtype=np.float64)
+    codes = np.full(arr.shape[0], -1, dtype=np.int64)
+    finite = np.isfinite(arr)
+    if not np.any(finite) or len(edges) < 2:
+        return codes
+    n_bins = max(1, len(edges) - 1)
+    if len(edges) == 2:
+        codes[finite] = 0
+    else:
+        codes[finite] = np.clip(
+            np.digitize(arr[finite], edges[1:-1]), 0, n_bins - 1
+        ).astype(np.int64, copy=False)
+    return codes
 
-    Candidate scoring and feature generation are fully delegated to the native
-    ``_hugiml_core`` extension.  Python only selects source columns from already
-    fitted adaptive-binning IG metadata, stores audit metadata, and prepares the
-    compact numeric arrays needed by the native routines.
+
+def _edge_information_gain(
+    values: np.ndarray,
+    y_codes: np.ndarray,
+    n_classes: int,
+    n_bins: int,
+) -> tuple[float, np.ndarray, np.ndarray]:
+    arr = np.asarray(values, dtype=np.float64)
+    finite = np.isfinite(arr)
+    if int(finite.sum()) < 10:
+        edges = _adap_quantile_edges(arr[finite], max(2, int(n_bins))) if np.any(finite) else np.array([0.0, 1.0])
+        return 0.0, edges, _codes_from_edges(arr, edges)
+    edges = _adap_quantile_edges(arr[finite], max(2, int(n_bins)))
+    codes = _codes_from_edges(arr, edges)
+    return _information_gain_from_codes(codes, y_codes, n_classes), edges, codes
+
+
+def _joint_information_gain_from_binned_columns(
+    left_values: np.ndarray,
+    right_values: np.ndarray,
+    y_codes: np.ndarray,
+    n_classes: int,
+    left_bins: int,
+    right_bins: int,
+) -> tuple[float, float, float]:
+    left_score, left_edges, left_codes = _edge_information_gain(
+        left_values, y_codes, n_classes, left_bins
+    )
+    right_score, right_edges, right_codes = _edge_information_gain(
+        right_values, y_codes, n_classes, right_bins
+    )
+    valid = (left_codes >= 0) & (right_codes >= 0)
+    if int(valid.sum()) < 10:
+        return 0.0, left_score, right_score
+    right_width = max(1, len(right_edges) - 1)
+    joint_codes = np.full(left_codes.shape[0], -1, dtype=np.int64)
+    joint_codes[valid] = left_codes[valid] * right_width + right_codes[valid]
+    joint_score = _information_gain_from_codes(joint_codes, y_codes, n_classes)
+    return float(joint_score), float(left_score), float(right_score)
+
+
+class NativeAugmentedPairTransformBlock:
+    """Native-backed augmented-pair source selection and feature generation.
+
+    The default source-selection mode uses native interaction-information
+    scoring over observed values. Missing values are skipped while source
+    features and pair candidates are scored. Reference-value substitution is
+    applied only when retained augmented-pair features are materialized.
+
+    ``augmented_pair_mode='interaction_information'`` selects source columns
+    using native interaction evidence. ``ii_partner_size`` optionally bounds
+    the raw interaction search by sampling partner anchors. ``aug_feature_size``
+    is the number of source columns retained for native pair generation.
+
+    ``augmented_pair_mode='marginal_ig'`` uses the established marginal-IG
+    source-selection path where ``max_pair_features`` controls the number of
+    selected source columns.
     """
 
     def __init__(
         self,
-        max_features: int = DEFAULT_AUGMENTED_PAIR_MAX_FEATURES,
+        augmented_pair_mode: str = "interaction_information",
+        aug_feature_size: int = DEFAULT_AUGMENTED_PAIR_MAX_FEATURES,
+        max_pair_features: int = DEFAULT_AUGMENTED_PAIR_MAX_FEATURES,
+        ii_partner_size: int | None = None,
         budget_topK: int | None = None,
         min_source_ig: float | None = None,
         unbounded_cap: int = DEFAULT_AUGMENTED_PAIR_UNBOUNDED_CAP,
     ) -> None:
-        self.max_features = int(max_features)
-        self.top_ig = self.max_features
+        self.augmented_pair_mode = str(augmented_pair_mode)
+        self.aug_feature_size = int(aug_feature_size)
+        self.max_pair_features = int(max_pair_features)
+        self.ii_partner_size = None if ii_partner_size is None else int(ii_partner_size)
         self.budget_topK = None if budget_topK is None else int(budget_topK)
         self.min_source_ig = None if min_source_ig is None else float(min_source_ig)
         self.unbounded_cap = int(unbounded_cap)
@@ -297,7 +371,7 @@ class NativeAugmentedPairTransformBlock:
         return X_df
 
     def _selected_numeric_matrix(self, X: Any, cols: list[str] | None = None) -> np.ndarray:
-        selected = list(cols or getattr(self, "selected_ig_features_", []))
+        selected = list(cols or getattr(self, "selected_aug_features_", []))
         n_rows = len(X) if hasattr(X, "__len__") else 0
         if not selected:
             return np.zeros((n_rows, 0), dtype=np.float64)
@@ -314,7 +388,7 @@ class NativeAugmentedPairTransformBlock:
         return np.ascontiguousarray(mat, dtype=np.float64)
 
     def _pair_index_arrays(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        pos = {col: idx for idx, col in enumerate(getattr(self, "selected_ig_features_", []))}
+        pos = {col: idx for idx, col in enumerate(getattr(self, "selected_aug_features_", []))}
         left: list[int] = []
         right: list[int] = []
         ops: list[int] = []
@@ -373,24 +447,63 @@ class NativeAugmentedPairTransformBlock:
 
         min_ig = max(1e-12, float(self.min_source_ig or 0.0))
         self.min_source_ig_ = min_ig
-        scored: list[tuple[float, str]] = []
-        for col in numeric_cols:
-            score = _best_ig_score((ig_scores or {}).get(col, {}))
-            if score >= min_ig:
-                scored.append((score, col))
-        scored.sort(key=lambda item: (-item[0], item[1]))
-        self.selected_ig_features_ = [col for _, col in scored[: min(self.top_ig, len(scored))]]
-        self.selected_ig_scores_ = {col: float(score) for score, col in scored}
+
+        # Augmented-pair source selection supports two transparent scoring
+        # policies. ``marginal_ig`` ranks individual numeric columns by their
+        # best single-feature adaptive-bin IG. ``interaction_information``
+        # ranks source columns by pair-context evidence from the native
+        # interaction-information scorer, retaining the best partner and
+        # marginal IG values for traceability while keeping the generated
+        # product/difference/sum transforms outside HUG pattern mining.
+        if self.augmented_pair_mode == "interaction_information":
+            if not (
+                _CORE_AVAILABLE
+                and hasattr(_core, "select_interaction_information_features")
+            ):
+                raise HUGIMLParamError(
+                    "interaction_information augmented-pair mode requires "
+                    "_hugiml_core.select_interaction_information_features."
+                )
+            X_all_numeric = self._selected_numeric_matrix(X, list(numeric_cols))
+            selected = _core.select_interaction_information_features(
+                X_all_numeric,
+                np.asarray(pd.factorize(np.asarray(y), sort=True)[0], dtype=np.int64),
+                list(numeric_cols),
+                int(self.aug_feature_size),
+                self.ii_partner_size,
+            )
+            scored: list[tuple[float, str]] = [
+                (float(item["score"]), str(item["name"])) for item in selected
+            ]
+            self.selected_aug_features_ = [col for _, col in scored]
+            self.selected_aug_scores_ = {col: float(score) for score, col in scored}
+            self.augmented_pair_source_scores_ = [dict(item) for item in selected]
+        else:
+            scored: list[tuple[float, str]] = []
+            for col in numeric_cols:
+                score = _best_ig_score((ig_scores or {}).get(col, {}))
+                if score >= min_ig:
+                    scored.append((score, col))
+            scored.sort(key=lambda item: (-item[0], item[1]))
+            self.selected_aug_features_ = [
+                col for _, col in scored[: min(self.max_pair_features, len(scored))]
+            ]
+            self.selected_aug_scores_ = {col: float(score) for score, col in scored}
+            self.augmented_pair_source_scores_ = [
+                {"name": col, "score": float(score), "mode": "marginal_ig"}
+                for score, col in scored[: min(self.max_pair_features, len(scored))]
+            ]
+
         self.input_bin_edges_ = {
             col: (
                 np.asarray(bin_edges[col], dtype=float).tolist()
                 if col in (bin_edges or {})
                 else None
             )
-            for col in self.selected_ig_features_
+            for col in self.selected_aug_features_
         }
 
-        X_selected = self._selected_numeric_matrix(X, self.selected_ig_features_)
+        X_selected = self._selected_numeric_matrix(X, self.selected_aug_features_)
         if X_selected.shape[1] == 0:
             self.source_observed_medians_ = {}
             self.source_observed_medians_array_ = np.zeros(0, dtype=np.float64)
@@ -414,10 +527,8 @@ class NativeAugmentedPairTransformBlock:
         )
         self.source_observed_medians_array_ = observed_medians
         self.source_observed_medians_ = {
-            col: float(observed_medians[j]) for j, col in enumerate(self.selected_ig_features_)
+            col: float(observed_medians[j]) for j, col in enumerate(self.selected_aug_features_)
         }
-        # Backward-compatible internal aliases for older saved state readers.
-        # Augmented-pair feature construction does not median-fill source columns.
         self.numeric_medians_array_ = observed_medians
         self.numeric_medians_ = dict(self.source_observed_medians_)
 
@@ -425,7 +536,7 @@ class NativeAugmentedPairTransformBlock:
         native_specs = _core.score_pair_candidates(
             X_selected,
             np.asarray(y_codes, dtype=np.int64),
-            list(self.selected_ig_features_),
+            list(self.selected_aug_features_),
         )
         self.augmented_pair_native_used_ = True
         candidates = list(native_specs)
@@ -479,7 +590,7 @@ class NativeAugmentedPairTransformBlock:
         if not getattr(self, "kept_specs_", []):
             return csr_matrix((n_rows, 0), dtype=np.float32)
         X_selected = self._selected_numeric_matrix(
-            X, list(getattr(self, "selected_ig_features_", []))
+            X, list(getattr(self, "selected_aug_features_", []))
         )
         Z = _core.transform_pair_features(
             X_selected,
@@ -528,10 +639,14 @@ class NativeAugmentedPairTransformBlock:
                     "eligible_count": int(spec.get("eligible_count", 0)),
                     "eligible_rate": float(spec.get("eligible_rate", np.nan)),
                     "missing_pair_rate": float(spec.get("missing_pair_rate", np.nan)),
-                    "selected_by": f"native_hugiml_adaptive_binning_ig_top_{self.max_features}_observed_pair_transform_ig",
+                    "selected_by": (
+                        "interaction_information"
+                        if self.augmented_pair_mode == "interaction_information"
+                        else "marginal_ig"
+                    ),
                     "source_ig": {
-                        left: float(self.selected_ig_scores_.get(left, 0.0)),
-                        right: float(self.selected_ig_scores_.get(right, 0.0)),
+                        left: float(self.selected_aug_scores_.get(left, 0.0)),
+                        right: float(self.selected_aug_scores_.get(right, 0.0)),
                     },
                     "source_bin_edges": {
                         left: self.input_bin_edges_.get(left),
@@ -542,7 +657,9 @@ class NativeAugmentedPairTransformBlock:
                     "rank": rank,
                     "budget_topK": None if self.budget_topK is None else int(self.budget_topK),
                     "candidate_count": candidate_count,
-                    "augmented_pair_max_features": int(self.max_features),
+                    "aug_feature_size": int(self.aug_feature_size),
+                    "max_pair_features": int(self.max_pair_features),
+                    "ii_partner_size": self.ii_partner_size,
                     "used_in_hugiml_mining": False,
                     "eligible_for_L2": False,
                     "integration_point": "before_downstream_lr",
@@ -578,7 +695,7 @@ def _is_binary_feature_series(s: pd.Series) -> bool:
     """Return True when a column has exactly two observed values.
 
     Numeric-looking binary features (for example 0/1 or 1/2 flags) should use
-    HUG-IML's categorical item path instead of fixed-width numeric binning.
+    HUG-IML's categorical item path instead of constant-width numeric binning.
     Missing values are ignored for the inference; constant columns are not
     considered binary and keep the existing constant-column warning behavior.
     """
@@ -832,7 +949,7 @@ class _TransactionDataWrapper:
 
 
 # =============================================================================
-# ── v1.1.0  Per-feature adaptive binning — module-level helpers ──────────────
+# ── Per-feature adaptive binning — module-level helpers ───────────────────────
 #
 # Imported from hugiml._binning — the single source of truth for all
 # adaptive-binning maths.  Local aliases preserve every existing call-site
@@ -857,28 +974,66 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
     origColumns : list of str, optional
         Ordered column names matching the columns of X passed to fit/predict.
     B : int, default 8
-        Number of quantile bins per numerical feature.
-        Use -1 for supervised auto-selection (maximises IG over [2, 20]).
-    L : int, default 2
-        Maximum HUG pattern length.  1 = singletons; 2 = pairs; -1 = unlimited.
-    G : float, default 1e-4
+        Number of quantile bins per numerical feature when
+        ``adaptive_binning=False``. With adaptive binning enabled, per-feature
+        bin counts are selected from ``b_candidates``.
+    L : int, default 1
+        Maximum HUG pattern length. 1 = singletons; 2 = pairs; -1 = unlimited.
+    G : float, default 1e-3
         Minimum information-gain threshold.
-    topK : int, default 200
-        Maximum number of patterns to retain.  -1 computes automatically.
+    topK : int, default 30
+        Maximum number of patterns to retain. -1 computes automatically.
     base_estimator : sklearn estimator, optional
-        Downstream classifier trained on the binary pattern matrix.
+        Downstream classifier trained on the selected representation.
         Defaults to LogisticRegression.
     n_jobs : int, default 1
-        Number of OpenMP threads.  -1 uses all available cores.
+        Number of OpenMP threads. -1 uses all available cores.
     max_predict_ms : float or None
         Prediction latency budget in milliseconds.
     max_fit_seconds : float or None
-        Wall-clock budget for the pattern-mining stage of fit().  Transaction
-        preparation and downstream model fitting (e.g. LogisticRegression) are
-        not bounded — total fit() time may exceed this value.  When the budget
-        is exhausted mid-mine, graceful degradation produces a smaller pattern
-        set; if even the minimal fallback cannot finish in time,
-        ``HUGIMLTimeoutError`` is raised.
+        Wall-clock budget for the pattern-mining stage of fit(). Transaction
+        preparation and downstream model fitting are not bounded by this value.
+    adaptive_binning : bool, default True
+        Select per-feature numeric bin counts using supervised information gain.
+    b_candidates : list of int or None
+        Candidate bin counts evaluated when adaptive binning is enabled.
+    min_marginal_gain_ratio : float, default 0.02
+        Elbow threshold for adaptive-binning marginal gain.
+    feature_mode : {"patterns_only", "original_plus_patterns",
+        "original_plus_interactions"}, default "patterns_only"
+        Downstream representation used by fit/predict APIs. ``transform(X)``
+        always returns the HUG pattern matrix.
+    augmented_pair_transforms : bool, default True
+        Enable downstream augmented-pair operator features for eligible
+        ``L >= 2`` adaptive-binning models.
+    augmented_pair_mode : {"interaction_information", "marginal_ig"},
+        default "interaction_information"
+        Source-column scorer for augmented-pair features.
+    ii_partner_size : int or None
+        Optional partner-search bound for interaction-information scoring.
+    aug_feature_size : int, default 10
+        Number of source columns retained for augmented-pair candidate
+        generation in interaction-information mode.
+    max_pair_features : int, default 10
+        Source-column budget used by the marginal-IG augmented-pair mode.
+    augmented_pair_max_features : int or None
+        v1.1.11-compatible alias for the augmented-pair source budget. When
+        provided with default new budgets, it maps to both ``aug_feature_size``
+        and ``max_pair_features``.
+    topk_budget_strict : bool, default False
+        Apply one global ``topK`` cap across the constructed downstream
+        representation.
+    dense_downstream_max_width : int, default 200
+        Width threshold below which downstream matrices may stay dense.
+    execution_mode : {"audit", "production"}, default "audit"
+        Artifact-retention mode.
+    interaction_relaxed_mining : bool, default False
+        Allow interaction-information survivors to participate in native mining
+        as original-feature bins without creating augmented-pair operator
+        columns. Mutually exclusive with augmented-pair transforms at
+        ``L >= 2``.
+    interaction_relaxed_feature_size : int, default 10
+        Survivor-source budget for interaction-relaxed mining.
     verbose : bool, default False
         Emit INFO-level log messages during fit.
 
@@ -923,23 +1078,56 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         max_predict_ms: float | None = None,
         max_fit_seconds: float | None = None,
         verbose: bool = False,
-        # ── v1.1.0 adaptive binning ───────────────────────────────────────
+        # ── Adaptive binning ──────────────────────────────────────────────
         # When adaptive_binning=True each numerical feature is pre-discretised
         # to B_j quantile bins chosen by elbow-stopping IG search.  The
         # pre-binned columns are declared categorical before the C++ layer
         # (global B is overridden to sentinel 2).  Bin edges are stored in
         # _bin_edges_ and reapplied identically at predict/transform time.
+        #
+        # adaptive_binning=True avoids requiring the user to guess a single
+        # global B: on internal benchmarks, accuracy with a constant B varied
+        # by several points of ROC-AUC depending on the value chosen (e.g.
+        # B=3 vs B=20), with no single constant value best across datasets.
+        # Adaptive binning lands at parity with a well-chosen constant B
+        # without requiring a search for one; head-to-head testing shows it
+        # roughly tied with, not uniformly ahead of, a well-chosen constant B,
+        # so the benefit is removing a sensitive hyperparameter from the
+        # quick-start path rather than a raw accuracy gain. Pass
+        # adaptive_binning=False to use a single constant B instead.
         # ─────────────────────────────────────────────────────────────────
-        adaptive_binning: bool = False,
+        adaptive_binning: bool = True,
         b_candidates: list | None = None,
         min_marginal_gain_ratio: float = 0.02,
         feature_mode: str = "patterns_only",
         use_hotpath: bool = True,
         augmented_pair_transforms: bool = True,
-        augmented_pair_max_features: int = 10,
+        augmented_pair_mode: str = "interaction_information",
+        ii_partner_size: int | None = None,
+        aug_feature_size: int = 10,
+        max_pair_features: int = 10,
+        augmented_pair_max_features: int | None = None,
         topk_budget_strict: bool = False,
         dense_downstream_max_width: int = 200,
         execution_mode: str = "audit",
+        # When True, interaction-information survivors can enter native mining
+        # as ordinary source columns even when their marginal IG is weak.  The
+        # relaxed admission applies at the root (depth-0) position only; see
+        # native/mining.hpp's THUIsl::relaxed_cols comment for the exact scope.
+        # No augmented-pair operator features (sum/product/etc.) are generated
+        # by this path.  The resulting HUG patterns remain conjunctions of
+        # original feature bins and are annotated for audit APIs as
+        # survivor-led patterns when they include a relaxed survivor column.
+        # Mutually exclusive with augmented_pair_transforms at L >= 2
+        # (validated in _validate_params). At L=1 this is a no-op because L=1
+        # uses the fused hotpath, which has no relaxed variant.  Effective for
+        # L in {2, 3, -1}.
+        interaction_relaxed_mining: bool = False,
+        # Number of columns select_interaction_information_features returns
+        # for interaction_relaxed_mining's own column selection. Separate
+        # from aug_feature_size, which controls the unrelated
+        # augmented_pair_mode source-column count.
+        interaction_relaxed_feature_size: int = 10,
     ) -> None:
         self.allCols = allCols
         self.origColumns = origColumns
@@ -958,12 +1146,33 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         self.feature_mode = feature_mode
         self.use_hotpath = use_hotpath
         self.augmented_pair_transforms = augmented_pair_transforms
+        self.augmented_pair_mode = augmented_pair_mode
+        self.ii_partner_size = ii_partner_size
+        if isinstance(augmented_pair_max_features, int) and not isinstance(
+            augmented_pair_max_features, bool
+        ):
+            if (
+                isinstance(aug_feature_size, int)
+                and not isinstance(aug_feature_size, bool)
+                and aug_feature_size == DEFAULT_AUGMENTED_PAIR_MAX_FEATURES
+            ):
+                aug_feature_size = augmented_pair_max_features
+            if (
+                isinstance(max_pair_features, int)
+                and not isinstance(max_pair_features, bool)
+                and max_pair_features == DEFAULT_AUGMENTED_PAIR_MAX_FEATURES
+            ):
+                max_pair_features = augmented_pair_max_features
+        self.aug_feature_size = aug_feature_size
+        self.max_pair_features = max_pair_features
         self.augmented_pair_max_features = augmented_pair_max_features
         self.topk_budget_strict = topk_budget_strict
         self.dense_downstream_max_width = dense_downstream_max_width
         # sklearn estimator compatibility: constructor and set_params must not
         # validate parameter values.  execution_mode is validated in fit/load.
         self.execution_mode = execution_mode
+        self.interaction_relaxed_mining = interaction_relaxed_mining
+        self.interaction_relaxed_feature_size = interaction_relaxed_feature_size
         self._fit_lock = threading.RLock()
 
     # ── Execution-mode retention helpers ─────────────────────────────────────
@@ -1075,11 +1284,12 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
 
         The grid uses adaptive binning (``B=-1``), searches ``L`` in
         ``{1, 2}``, searches ``feature_mode`` in ``{'patterns_only',
-        'original_plus_patterns'}``, keeps ``G`` fixed at 1e-3, and searches ``topK`` in
+        'original_plus_patterns'}``, keeps ``G`` constant at 1e-3, and searches ``topK`` in
         ``{30, 50, 100}``. For ``L > 1`` and
         ``augmented_pair_transforms=True``, native augmented-pair transforms
-        are created internally from the top-10 native-IG numeric features
-        and capped to the same ``topK`` budget by transform IG.
+        use ``augmented_pair_mode='interaction_information'`` by default,
+        retain ``aug_feature_size`` source columns, and apply the same
+        ``topK`` budget to generated pair-pattern features.
         """
         return {k: list(v) for k, v in cls.DEFAULT_PARAM_GRID.items()}
 
@@ -1116,10 +1326,16 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             feature_mode=self.feature_mode,
             use_hotpath=self.use_hotpath,
             augmented_pair_transforms=self.augmented_pair_transforms,
+            augmented_pair_mode=self.augmented_pair_mode,
+            ii_partner_size=self.ii_partner_size,
+            aug_feature_size=self.aug_feature_size,
+            max_pair_features=self.max_pair_features,
             augmented_pair_max_features=self.augmented_pair_max_features,
             topk_budget_strict=self.topk_budget_strict,
             dense_downstream_max_width=self.dense_downstream_max_width,
             execution_mode=self.execution_mode,
+            interaction_relaxed_mining=self.interaction_relaxed_mining,
+            interaction_relaxed_feature_size=self.interaction_relaxed_feature_size,
         )
 
     def set_params(self, **params: Any) -> HUGIMLClassifierNative:
@@ -1245,7 +1461,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             self.__dict__.pop(_attr, None)
         self._fit_lock = threading.RLock()
 
-        # ── v1.1.0 backward compatibility ─────────────────────────────────
+        # ── Backward compatibility ───────────────────────────────────────
         # Models saved with v1.0.0 have no adaptive_binning in their pickle
         # state.  Initialise all adaptive attrs to their off-state defaults
         # so the model behaves identically to a v1.0.0 model after restore.
@@ -1263,8 +1479,16 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             self.dense_downstream_max_width = 200
         if not hasattr(self, "execution_mode"):
             self.execution_mode = "audit"
+        if not hasattr(self, "augmented_pair_mode"):
+            self.augmented_pair_mode = "interaction_information"
+        if not hasattr(self, "ii_partner_size"):
+            self.ii_partner_size = None
+        if not hasattr(self, "aug_feature_size"):
+            self.aug_feature_size = 10
+        if not hasattr(self, "max_pair_features"):
+            self.max_pair_features = 10
         if not hasattr(self, "augmented_pair_max_features"):
-            self.augmented_pair_max_features = 10
+            self.augmented_pair_max_features = None
         if not hasattr(self, "augmented_pair_transforms_"):
             self.augmented_pair_transforms_ = []
         if not hasattr(self, "augmented_pair_selected_features_"):
@@ -1277,10 +1501,8 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             self.binary_categorical_cols_ = []
         if not hasattr(self, "_strict_topk_applied_during_construction_"):
             self._strict_topk_applied_during_construction_ = False
-        # v1.1.0 missing value handling — absent in models saved before this version
         if not hasattr(self, "_missing_col_edges_"):
             self._missing_col_edges_ = {}
-        # v1.1.x integer-code adaptive path — absent in pre-v1.1.x models
         if not hasattr(self, "_adaptive_code_label_map_"):
             self._adaptive_code_label_map_ = {}
         # Rebuild the code→label map from stored bin edges whenever it's absent
@@ -1317,7 +1539,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
 
     @classmethod
     def load_model(cls, path: str | os.PathLike) -> HUGIMLClassifierNative:
-        """Load a model previously saved with :meth:`save_model`.
+        """Load a model saved with :meth:`save_model`.
 
         Parameters
         ----------
@@ -1457,7 +1679,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         - Non-finite cells (NaN/Inf) in numerical columns are pre-converted
           to np.nan string-label bins by _prebin_nan_cols (fit) or
           _handle_test_nan (predict), so they arrive here as categorical.
-          No median imputation is performed (removed in v1.1.0).
+          No median imputation is performed.
         """
         is_df = isinstance(arr, pd.DataFrame)
         n = len(arr)
@@ -1501,7 +1723,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                 X_num[:, j] = 0.0
             else:
                 col = np.array(raw, dtype=np.float64, copy=True)
-                # v1.1.0: non-finite cells (NaN/Inf) are pre-handled by
+                # Non-finite cells (NaN/Inf) are pre-handled by
                 # _prebin_nan_cols (fit) and _handle_test_nan (predict)
                 # before reaching here.  No median imputation.
                 X_num[:, j] = col
@@ -1650,7 +1872,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                 raise HUGIMLParamError("allCols and origColumns must both be supplied together.")
             if not (isinstance(self.allCols, list) and len(self.allCols) == 3):
                 raise HUGIMLParamError("allCols must be [int_cols, float_cols, cat_cols].")
-        # ── v1.1.0 adaptive binning params ────────────────────────────────
+        # ── Adaptive binning params ──────────────────────────────────────
         if not isinstance(self.adaptive_binning, bool):
             raise HUGIMLParamError("adaptive_binning must be bool.")
         if self.b_candidates is not None:
@@ -1685,13 +1907,84 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             raise HUGIMLParamError(
                 f"topk_budget_strict must be bool, got {type(self.topk_budget_strict).__name__}."
             )
-        if not isinstance(self.augmented_pair_max_features, int):
+        if self.augmented_pair_mode not in AUGMENTED_PAIR_MODES:
             raise HUGIMLParamError(
-                f"augmented_pair_max_features must be int, got {type(self.augmented_pair_max_features).__name__}."
+                f"augmented_pair_mode must be one of {list(AUGMENTED_PAIR_MODES)}, "
+                f"got {self.augmented_pair_mode!r}."
             )
-        if self.augmented_pair_max_features < 2:
+        if self.augmented_pair_max_features is not None:
+            if not isinstance(self.augmented_pair_max_features, int):
+                raise HUGIMLParamError(
+                    "augmented_pair_max_features must be int or None, "
+                    f"got {type(self.augmented_pair_max_features).__name__}."
+                )
+            if self.augmented_pair_max_features < 2:
+                raise HUGIMLParamError(
+                    "augmented_pair_max_features must be >= 2 when provided, "
+                    f"got {self.augmented_pair_max_features}."
+                )
+        if not isinstance(self.aug_feature_size, int):
             raise HUGIMLParamError(
-                f"augmented_pair_max_features must be >= 2, got {self.augmented_pair_max_features}."
+                f"aug_feature_size must be int, got {type(self.aug_feature_size).__name__}."
+            )
+        if self.aug_feature_size < 2:
+            raise HUGIMLParamError(f"aug_feature_size must be >= 2, got {self.aug_feature_size}.")
+        if self.ii_partner_size is not None:
+            if not isinstance(self.ii_partner_size, int):
+                raise HUGIMLParamError(
+                    f"ii_partner_size must be int or None, got {type(self.ii_partner_size).__name__}."
+                )
+            if self.ii_partner_size < 2:
+                raise HUGIMLParamError(f"ii_partner_size must be >= 2, got {self.ii_partner_size}.")
+        if self.augmented_pair_mode == "marginal_ig":
+            if not isinstance(self.max_pair_features, int):
+                raise HUGIMLParamError(
+                    f"max_pair_features must be int, got {type(self.max_pair_features).__name__}."
+                )
+            if self.max_pair_features < 2:
+                raise HUGIMLParamError(
+                    f"max_pair_features must be >= 2, got {self.max_pair_features}."
+                )
+        if not isinstance(self.interaction_relaxed_mining, bool):
+            raise HUGIMLParamError(
+                "interaction_relaxed_mining must be bool, "
+                f"got {type(self.interaction_relaxed_mining).__name__}."
+            )
+        if self.interaction_relaxed_mining:
+            # Mutually exclusive with the augmented-pair operator-feature
+            # path at L >= 2.
+            if (
+                bool(self.augmented_pair_transforms)
+                and isinstance(self.L, int)
+                and self.L >= 2
+            ):
+                raise HUGIMLParamError(
+                    "interaction_relaxed_mining=True is mutually exclusive with "
+                    "augmented_pair_transforms=True at L >= 2. Set "
+                    "augmented_pair_transforms=False to use interaction_relaxed_mining, "
+                    "or set interaction_relaxed_mining=False to use the augmented-pair "
+                    "operator-feature path instead."
+                )
+            # L=1 always uses the fused hotpath, which has no relaxed
+            # variant; relaxation is a no-op there. L in {2, 3, -1} route
+            # through mine_patterns_relaxed_cpp's dispatcher.
+            _supported_relaxed_L = (-1, 1, 2, 3)
+            if isinstance(self.L, int) and self.L not in _supported_relaxed_L:
+                raise HUGIMLParamError(
+                    f"interaction_relaxed_mining=True only supports L in "
+                    f"{_supported_relaxed_L}, got L={self.L}. Set "
+                    "interaction_relaxed_mining=False to use this L value with "
+                    "ordinary (unrelaxed) mining instead."
+                )
+        if not isinstance(self.interaction_relaxed_feature_size, int):
+            raise HUGIMLParamError(
+                "interaction_relaxed_feature_size must be int, "
+                f"got {type(self.interaction_relaxed_feature_size).__name__}."
+            )
+        if self.interaction_relaxed_feature_size < 2:
+            raise HUGIMLParamError(
+                "interaction_relaxed_feature_size must be >= 2, "
+                f"got {self.interaction_relaxed_feature_size}."
             )
 
     def _resolve_col_meta(self, X_train: Any) -> np.ndarray:
@@ -1750,9 +2043,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         # Array inputs have no native column labels, but downstream components
         # (notably augmented-pair transforms) require stable feature names to
         # align IG scores, selected source columns, and transform-time matrices.
-        # Use deterministic synthetic names instead of leaving feature_names_in_
-        # as None, which previously caused augmented pairs to be silently skipped
-        # for ndarray inputs.
+        # Use deterministic synthetic names for ndarray inputs.
         self.feature_names_in_ = [f"col{j}" for j in range(p)]
         return self.cat_cols_mask_
 
@@ -1772,7 +2063,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
 
     # ── Core fit ──────────────────────────────────────────────────────────────
 
-    # ── v1.1.0  Adaptive binning methods ─────────────────────────────────────
+    # ── Adaptive binning methods ──────────────────────────────────────────────
 
     def _rebuild_adaptive_code_label_map(self) -> None:
         """Reconstruct ``_adaptive_code_label_map_`` from stored ``_bin_edges_``.
@@ -2089,7 +2380,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                 new_int[j] = True
             # Build C++ label -> original-scale label translation.
             # Key format matches the C++ is_precoded label exactly:
-            # std::fixed << std::setprecision(3) -> "name=[0.000,1.000]"
+            # std::setprecision(3) -> "name=[0.000,1.000]"
             for k in range(n_bins):
                 cpp_label = f"{name}=[{float(k):.3f},{float(k + 1):.3f}]"
                 orig_label = f"{name}=[{edges[k]:.4g},{edges[k + 1]:.4g})"
@@ -2172,7 +2463,52 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         # columns are numeric pre-coded features.  Convert once to NumPy, edit
         # columns in-place, and rebuild one DataFrame instead of assigning one
         # pandas Series per feature.
-        if is_df and all(name in X_df.columns and name in precoded_features for name in bin_edges):
+        #
+        # This path is only taken when every column outside of bin_edges is
+        # non-categorical per the fitted schema. A blanket float64 cast across
+        # the whole DataFrame would otherwise destroy the categorical-ness of
+        # columns that are not in bin_edges at all (e.g. binary-numeric
+        # auto-categorical columns admitted via
+        # interaction_relaxed_mining/select_interaction_information_features)
+        # before _build_test_hup ever saw them, which would prevent the native
+        # build_test_matrix_csr categorical-matching path from recognizing
+        # them -- any mined pattern touching such a column would then evaluate
+        # to 0 for every row at predict/transform time, even though the
+        # training-time pattern matrix (built on correctly-typed training
+        # data) is unaffected.
+        #
+        # The raw input's pandas dtype is NOT a reliable signal here: at
+        # predict time callers normally pass the original int64/object
+        # columns (not a pre-cast 'category' dtype), so checking the input
+        # dtype directly under-detects this case. The source of truth for
+        # which columns are categorical is the fitted model's own
+        # cat_cols_mask_/feature_names_in_ (set during fit's schema
+        # detection). The fast path is therefore only taken when EVERY
+        # column outside of bin_edges is, per the FITTED schema, not
+        # categorical -- i.e. the blanket float64 cast cannot lose
+        # information the native layer needs. Otherwise we always fall
+        # through to the slower column-preserving path below, which only
+        # mutates the specific bin_edges columns and leaves every other
+        # column untouched (so its dtype, and the categorical match against
+        # X_cat_raw downstream, stays correct).
+        _fit_cat_mask = getattr(self, "cat_cols_mask_", None)
+        _fit_feat_names = getattr(self, "feature_names_in_", None)
+        if _fit_cat_mask is not None and _fit_feat_names is not None and len(_fit_feat_names) == len(_fit_cat_mask):
+            _fit_cat_names = {
+                str(name) for name, is_cat in zip(_fit_feat_names, _fit_cat_mask) if is_cat
+            }
+        else:
+            # Unknown schema: be conservative and assume any column could be
+            # categorical, which simply routes to the always-correct slow path.
+            _fit_cat_names = {str(c) for c in X_df.columns}
+        non_bin_edge_cols_all_noncat = not any(
+            str(c) in _fit_cat_names for c in X_df.columns if c not in bin_edges
+        )
+        if (
+            is_df
+            and non_bin_edge_cols_all_noncat
+            and all(name in X_df.columns and name in precoded_features for name in bin_edges)
+        ):
             try:
                 cols = list(X_df.columns)
                 name_to_idx = {str(c): j for j, c in enumerate(cols)}
@@ -2206,7 +2542,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                 X_out[name] = _adap_apply_edges(col, edges)
         return X_out if is_df else X_out
 
-    # ── v1.1.0  Missing value handling methods ──────────────────────────────────
+    # ── Missing value handling methods ───────────────────────────────────────
     #
     # NaN (and Inf) in a numerical feature is treated as "not observed" —
     # no item is generated in the transaction for that (row, feature) pair.
@@ -2227,10 +2563,10 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
     # ────────────────────────────────────────────────────────────────────────────
 
     def _prebin_nan_cols(self, X_train: Any) -> Any:
-        """Pre-bin fixed-B numeric columns that must follow the string path.
+        """Pre-bin constant-B numeric columns that must follow the string path.
 
         Contract for every L value:
-        - Finite numeric columns stay numeric and use the native fixed-B numeric
+        - Finite numeric columns stay numeric and use the native constant-B numeric
           path, including L > 1.
         - Numeric columns with NaN/Inf during training are pre-binned to the
           string/categorical path so the fitted transaction data and later
@@ -2275,7 +2611,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             finite_mask = np.isfinite(col)
             if bool(np.all(finite_mask)):
                 # Consistent fast path for every L: finite numeric columns
-                # remain numeric and are binned by native fixed-B code.
+                # remain numeric and are binned by native constant-B code.
                 continue
             finite = col[finite_mask]
             edges = (
@@ -2298,10 +2634,340 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             X_pre[name] = _adap_apply_edges(col, edges)
         return X_pre if is_df else X_pre.to_numpy()
 
+    def _frame_from_input(self, X: Any, names: list[str] | None = None) -> pd.DataFrame:
+        if isinstance(X, pd.DataFrame):
+            return X
+        arr = np.asarray(X)
+        if arr.ndim == 1:
+            arr = arr.reshape(1, -1)
+        cols = list(names or [])
+        if len(cols) != arr.shape[1]:
+            cols = [f"col{j}" for j in range(arr.shape[1])]
+        return pd.DataFrame(arr, columns=cols)
+
+    def _select_interaction_relaxed_survivors_from_frame(
+        self,
+        X_train: Any,
+        y_arr: np.ndarray,
+        col_names: list[str] | None = None,
+        cat_mask: np.ndarray | None = None,
+    ) -> tuple[list[dict], list[int]]:
+        if not (
+            _CORE_AVAILABLE
+            and hasattr(_core, "select_interaction_information_features")
+            and hasattr(_core, "mine_patterns_relaxed")
+        ):
+            raise HUGIMLParamError(
+                "interaction_relaxed_mining=True requires "
+                "_hugiml_core.select_interaction_information_features and "
+                "_hugiml_core.mine_patterns_relaxed."
+            )
+        X_df = self._frame_from_input(X_train, col_names or getattr(self, "feature_names_in_", None))
+        names = [str(name) for name in list(X_df.columns)]
+        cat = cat_mask if cat_mask is not None else getattr(self, "cat_cols_mask_", np.zeros(len(names), dtype=bool))
+        binary_cat_names = set(getattr(self, "binary_categorical_cols_", []) or [])
+        score_idx: list[int] = []
+        score_cols: list[np.ndarray] = []
+        score_names: list[str] = []
+        for j, name in enumerate(names):
+            is_cat = bool(j < len(cat) and cat[j])
+            if is_cat and name not in binary_cat_names:
+                continue
+            col = pd.to_numeric(X_df.iloc[:, j], errors="coerce").to_numpy(dtype=np.float64)
+            if not np.isfinite(col).any():
+                continue
+            score_idx.append(j)
+            score_names.append(name)
+            score_cols.append(col)
+        if not score_cols:
+            return [], []
+        X_scored = np.ascontiguousarray(np.column_stack(score_cols), dtype=np.float64)
+        selected = _core.select_interaction_information_features(
+            X_scored,
+            np.asarray(y_arr, dtype=np.int64),
+            score_names,
+            int(self.interaction_relaxed_feature_size),
+            self.ii_partner_size,
+        )
+        name_to_idx = {name: score_idx[k] for k, name in enumerate(score_names)}
+        relaxed_cols = [
+            name_to_idx[str(row["name"])]
+            for row in selected
+            if str(row.get("name")) in name_to_idx
+        ]
+        return [dict(row) for row in selected], relaxed_cols
+
+    @staticmethod
+    def _interaction_relaxed_pairs_from_survivors(
+        survivor_rows: list[dict],
+        numeric_names: list[str],
+    ) -> list[tuple[str, str]]:
+        numeric = {str(name) for name in numeric_names}
+        pairs: list[tuple[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+
+        def add_pair(left: str, right: str) -> None:
+            if left == right or left not in numeric or right not in numeric:
+                return
+            key = tuple(sorted((left, right)))
+            if key in seen:
+                return
+            seen.add(key)
+            pairs.append((left, right))
+
+        for row in survivor_rows:
+            left = str(row.get("name")) if row.get("name") is not None else ""
+            right = str(row.get("best_partner")) if row.get("best_partner") is not None else ""
+            add_pair(left, right)
+        return pairs
+
+    def _select_pair_aware_adaptive_b(
+        self,
+        feature_name: str,
+        feature_values: np.ndarray,
+        partner_values: list[tuple[str, np.ndarray]],
+        y_codes: np.ndarray,
+        n_classes: int,
+        candidates: list[int],
+        ratio: float,
+    ) -> tuple[int, dict[int, float], dict]:
+        finite = np.isfinite(feature_values)
+        if int(finite.sum()) < 10:
+            chosen = candidates[len(candidates) // 2]
+            scores = {int(b): 0.0 for b in candidates}
+            return int(chosen), scores, {"mode": "insufficient_finite_values", "best_partner": None}
+
+        scores: dict[int, float] = {}
+        marginal_scores: dict[int, float] = {}
+        best_partner_by_b: dict[int, dict] = {}
+        scan_candidates = sorted({int(v) for v in candidates if int(v) >= 2})
+        if partner_values:
+            scan_candidates = [b for b in scan_candidates if b <= 8] or scan_candidates
+        for b in scan_candidates:
+            partner_bins = [int(b)]
+            marginal, _edges, _codes = _edge_information_gain(feature_values, y_codes, n_classes, b)
+            marginal_scores[b] = float(marginal)
+            best_pair_score = 0.0
+            best_partner_name: str | None = None
+            best_partner_bins = None
+            for partner_name, partner_col in partner_values:
+                if int(np.isfinite(partner_col).sum()) < 10:
+                    continue
+                for pb in partner_bins:
+                    joint, left_score, right_score = _joint_information_gain_from_binned_columns(
+                        feature_values,
+                        partner_col,
+                        y_codes,
+                        n_classes,
+                        b,
+                        pb,
+                    )
+                    conditional = max(0.0, float(joint) - float(right_score))
+                    pair_score = max(conditional, min(float(joint), max(float(left_score), float(right_score))))
+                    if pair_score > best_pair_score:
+                        best_pair_score = float(pair_score)
+                        best_partner_name = partner_name
+                        best_partner_bins = int(pb)
+            scores[b] = float(max(marginal, best_pair_score))
+            best_partner_by_b[b] = {
+                "partner": best_partner_name,
+                "partner_bins": best_partner_bins,
+                "pair_score": float(best_pair_score),
+                "marginal_score": float(marginal),
+            }
+
+        if not scores:
+            chosen = candidates[len(candidates) // 2]
+            return int(chosen), {int(b): 0.0 for b in candidates}, {"mode": "no_scores", "best_partner": None}
+        best_score = max(scores.values())
+        if best_score <= 0.0:
+            chosen = min(scores)
+        elif partner_values:
+            threshold = best_score * 0.85
+            eligible = [b for b in sorted(scores) if scores[b] >= threshold]
+            chosen = eligible[0] if eligible else max(scores, key=scores.get)
+        else:
+            threshold = best_score * max(0.0, 1.0 - float(ratio))
+            eligible = [b for b in sorted(scores) if scores[b] >= threshold]
+            chosen = eligible[0] if eligible else max(scores, key=scores.get)
+        evidence = dict(best_partner_by_b.get(int(chosen), {}))
+        evidence.update(
+            {
+                "mode": "pair_aware" if partner_values else "marginal",
+                "feature": feature_name,
+                "chosen_b": int(chosen),
+                "score": float(scores.get(int(chosen), 0.0)),
+                "best_score": float(best_score),
+                "marginal_scores": {int(k): float(v) for k, v in marginal_scores.items()},
+            }
+        )
+        return int(chosen), {int(k): float(v) for k, v in scores.items()}, evidence
+
+    def _apply_pair_aware_adaptive_binning(self, X_train: Any, y_arr: np.ndarray) -> Any:
+        is_df = isinstance(X_train, pd.DataFrame)
+        X_df = self._frame_from_input(X_train, getattr(self, "feature_names_in_", None))
+        base_candidates = sorted({int(v) for v in (self.b_candidates or [2, 3, 5, 7, 10, 15]) if int(v) >= 2})
+        candidates = sorted(set(base_candidates + [4, 6, 8]))
+        ratio = float(self.min_marginal_gain_ratio)
+        cat_mask = self.cat_cols_mask_
+        col_names = list(X_df.columns)
+        y_codes = np.asarray(pd.factorize(np.asarray(y_arr), sort=True)[0], dtype=np.int64)
+        n_classes = int(len(np.unique(y_codes)))
+
+        survivors, _ = self._select_interaction_relaxed_survivors_from_frame(
+            X_df,
+            y_codes,
+            [str(name) for name in col_names],
+            cat_mask,
+        )
+        self.interaction_relaxed_mining_survivors_ = [dict(row) for row in survivors]
+
+        num_cols = [
+            (j, name)
+            for j, name in enumerate(col_names)
+            if not (j < len(cat_mask) and cat_mask[j])
+        ]
+        num_names = [str(name) for _, name in num_cols]
+        pair_names = self._interaction_relaxed_pairs_from_survivors(survivors, num_names)
+        partners_by_feature: dict[str, list[str]] = {str(name): [] for name in num_names}
+        for left, right in pair_names:
+            partners_by_feature.setdefault(left, []).append(right)
+            partners_by_feature.setdefault(right, []).append(left)
+
+        raw_numeric: dict[str, np.ndarray] = {
+            str(name): pd.to_numeric(X_df.iloc[:, j], errors="coerce").to_numpy(dtype=np.float64)
+            for j, name in num_cols
+        }
+        self._bin_edges_: dict = {}
+        self.per_feature_b_: dict = {}
+        self.ig_scores_: dict = {}
+        self._interaction_relaxed_adaptive_pairs_ = [
+            {"left": left, "right": right} for left, right in pair_names
+        ]
+        self._interaction_relaxed_adaptive_evidence_ = {}
+
+        # One native call computes chosen bin counts for every numeric
+        # column at once: pair-aware scoring for survivor columns with a
+        # known partner, ordinary marginal-IG elbow selection for everything
+        # else. See native/augmented_pair.cpp::select_pair_aware_adaptive_bins
+        # for the full algorithm. A pure-Python column-by-column path
+        # (_select_pair_aware_adaptive_b below) is used when the native
+        # function is unavailable or raises, matching the fallback pattern
+        # used elsewhere in this module for other native/Python pairs.
+        use_native_pair_aware = bool(
+            _CORE_AVAILABLE and hasattr(_core, "select_pair_aware_adaptive_bins")
+        )
+        chosen_b_by_name: dict[str, int] = {}
+        scores_by_name: dict[str, dict[int, float]] = {}
+        evidence_by_name: dict[str, dict] = {}
+        if use_native_pair_aware and num_names:
+            name_to_idx = {name: k for k, name in enumerate(num_names)}
+            pair_idx_list = [
+                (name_to_idx[left], name_to_idx[right])
+                for left, right in pair_names
+                if left in name_to_idx and right in name_to_idx
+            ]
+            X_numeric_mat = np.ascontiguousarray(
+                np.column_stack([raw_numeric[name] for name in num_names])
+                if num_names
+                else np.zeros((len(y_codes), 0)),
+                dtype=np.float64,
+            )
+            try:
+                native_result = _core.select_pair_aware_adaptive_bins(
+                    X_numeric_mat,
+                    y_codes,
+                    num_names,
+                    [int(c) for c in candidates],
+                    pair_idx_list,
+                    float(ratio),
+                    0.85,
+                    8,
+                )
+                chosen_b_by_name = {
+                    str(k): int(v) for k, v in dict(native_result["chosen_b"]).items()
+                }
+                scores_by_name = {
+                    str(k): {int(kk): float(vv) for kk, vv in dict(v).items()}
+                    for k, v in dict(native_result["scores"]).items()
+                }
+                evidence_by_name = {
+                    str(k): dict(v) for k, v in dict(native_result["evidence"]).items()
+                }
+            except Exception:
+                use_native_pair_aware = False
+
+        for _j, name_obj in num_cols:
+            name = str(name_obj)
+            col = raw_numeric[name]
+            if use_native_pair_aware and name in chosen_b_by_name:
+                chosen = chosen_b_by_name[name]
+                scores = scores_by_name.get(name, {int(b): 0.0 for b in candidates})
+                evidence = evidence_by_name.get(
+                    name, {"mode": "marginal", "feature": name, "chosen_b": int(chosen), "best_partner": None}
+                )
+            else:
+                partner_values = [
+                    (partner_name, raw_numeric[partner_name])
+                    for partner_name in partners_by_feature.get(name, [])
+                    if partner_name in raw_numeric
+                ]
+                if partner_values:
+                    chosen, scores, evidence = self._select_pair_aware_adaptive_b(
+                        name,
+                        col,
+                        partner_values,
+                        y_codes,
+                        n_classes,
+                        candidates,
+                        ratio,
+                    )
+                else:
+                    finite_mask = np.isfinite(col)
+                    if int(finite_mask.sum()) < 10:
+                        chosen = candidates[len(candidates) // 2]
+                        scores = {int(b): 0.0 for b in candidates}
+                    else:
+                        chosen, scores = _adap_select_b(col[finite_mask], y_codes[finite_mask], candidates, ratio)
+                    evidence = {"mode": "marginal", "feature": name, "chosen_b": int(chosen), "best_partner": None}
+            edges = _adap_quantile_edges(col, int(chosen))
+            self._bin_edges_[name_obj] = edges
+            self.per_feature_b_[name_obj] = len(edges) - 1
+            self.ig_scores_[name_obj] = {int(k): float(v) for k, v in scores.items()}
+            self._interaction_relaxed_adaptive_evidence_[name] = evidence
+
+        self._adaptive_code_label_map_: dict[str, str] = {}
+        self._adaptive_precoded_features_ = set(self._bin_edges_)
+        new_cat = cat_mask.copy()
+        new_int = getattr(self, "is_int_mask_", np.zeros(len(col_names), dtype=bool)).copy()
+        X_pre = X_df.copy()
+        for name_obj, edges in self._bin_edges_.items():
+            if name_obj not in X_df.columns:
+                continue
+            name = str(name_obj)
+            col = pd.to_numeric(X_df[name_obj], errors="coerce").values
+            n_bins = len(edges) - 1
+            has_nan = not np.isfinite(col).all()
+            j = col_names.index(name_obj) if name_obj in col_names else -1
+            codes = np.clip(np.digitize(col, edges[1:-1]), 0, n_bins - 1).astype(np.float64)
+            if has_nan:
+                codes[~np.isfinite(col)] = np.nan
+            X_pre[name_obj] = codes
+            if j >= 0:
+                new_cat[j] = False
+                new_int[j] = True
+            for k in range(n_bins):
+                cpp_label = f"{name_obj}=[{float(k):.3f},{float(k + 1):.3f}]"
+                orig_label = f"{name_obj}=[{edges[k]:.4g},{edges[k + 1]:.4g})"
+                self._adaptive_code_label_map_[cpp_label] = orig_label
+        self.cat_cols_mask_ = new_cat
+        self.is_int_mask_ = new_int
+        return X_pre if is_df else X_pre
+
     def _handle_test_nan(self, X_test: Any) -> tuple:
         """Apply training-time missing-column bin edges at test time.
 
-        In fixed-B non-adaptive models, this converts only the columns recorded
+        In constant-B non-adaptive models, this converts only the columns recorded
         in ``_missing_col_edges_`` back to the exact string-label representation
         used at fit time.  The rule is identical for L == 1 and L > 1: only
         numeric columns that had NaN/Inf during training are recorded here.
@@ -2359,9 +3025,9 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             return X_test, base_cat
         return (X_df if is_df else X_df.to_numpy()), local_cat
 
-    # ── End v1.1.0 missing value handling methods ─────────────────────────────
+    # ── End missing value handling methods ───────────────────────────────────
 
-    # ── End v1.1.0 adaptive binning methods ──────────────────────────────────
+    # ── End adaptive binning methods ─────────────────────────────────────────
 
     def _require_core(self) -> None:
         """Raise a diagnostic ImportError if the native extension is absent."""
@@ -2379,7 +3045,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                 f"  Platform : {platform.system()} {platform.machine()}\n"
                 f"  Python   : {sys.version.split()[0]}\n"
                 f"  sys.path : {sys.path}\n\n"
-                "Likely causes and fixes:\n"
+                "Likely causes and remedies:\n"
                 "  1. No pre-built wheel for your platform (most common).\n"
                 "     Check https://pypi.org/project/hugiml-core/#files for available wheels.\n"
                 "     Linux x86_64 wheels require glibc >= 2.17. "
@@ -2532,7 +3198,12 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         if self.adaptive_binning and not _use_fused_adaptive_l1:
             self._resolve_col_meta(X_train)  # prime cat_cols_mask_ first
             _y_for_ig = self._safe_cast_y(y_train)
-            if _CORE_AVAILABLE and hasattr(_core, "select_adaptive_bins"):
+            _use_pair_aware_adaptive = bool(
+                self.L != 1 and bool(getattr(self, "interaction_relaxed_mining", False))
+            )
+            if _use_pair_aware_adaptive:
+                X_train = self._apply_pair_aware_adaptive_binning(X_train, _y_for_ig)
+            elif _CORE_AVAILABLE and hasattr(_core, "select_adaptive_bins"):
                 X_train = self._apply_adaptive_binning_cpp(X_train, _y_for_ig)
             else:
                 X_train = self._apply_adaptive_binning(X_train, _y_for_ig)
@@ -2545,7 +3216,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                 )
         # ─────────────────────────────────────────────────────────────────
 
-        # ── Fixed-B non-finite handling (non-adaptive path) ───────────────
+        # ── Constant-B non-finite handling (non-adaptive path) ───────────────
         # Use one consistent scheme for every L: numeric columns stay numeric
         # unless they contain NaN/Inf during training.  Columns with training
         # non-finite cells are pre-binned to the string/categorical path so
@@ -2857,7 +3528,27 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                 fit_deadline = (
                     time.perf_counter() + self.max_fit_seconds if self.max_fit_seconds else None
                 )
-                raw_patterns = self._mine_with_fallback(y_train, n_cls, K_mine, fit_deadline)
+                relaxed_cols: list[int] | None = None
+                if bool(getattr(self, "interaction_relaxed_mining", False)):
+                    survivors = list(getattr(self, "interaction_relaxed_mining_survivors_", []) or [])
+                    name_to_idx = {str(name): j for j, name in enumerate(list(col_names))}
+                    if survivors:
+                        relaxed_cols = [
+                            name_to_idx[str(row["name"])]
+                            for row in survivors
+                            if str(row.get("name")) in name_to_idx
+                        ]
+                    else:
+                        survivors, relaxed_cols = self._select_interaction_relaxed_survivors_from_frame(
+                            X_train,
+                            y_train,
+                            [str(name) for name in list(col_names)],
+                            is_cat_np.astype(bool, copy=False),
+                        )
+                        self.interaction_relaxed_mining_survivors_ = [dict(row) for row in survivors]
+                raw_patterns = self._mine_with_fallback(
+                    y_train, n_cls, K_mine, fit_deadline, relaxed_cols=relaxed_cols
+                )
                 self.raw_patterns_ = sorted(
                     raw_patterns, key=lambda pe: (-pe.utility, tuple(pe.items))
                 )
@@ -3039,14 +3730,35 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         return self
 
     def _mine_with_fallback(
-        self, y_train: np.ndarray, n_cls: int, K: int, deadline: float | None
+        self,
+        y_train: np.ndarray,
+        n_cls: int,
+        K: int,
+        deadline: float | None,
+        relaxed_cols: list[int] | None = None,
     ) -> list:
         """Mine patterns with graceful degradation on OOM or timeout.
 
         The ``deadline`` is forwarded into the C++ mining engine as a
         wall-clock ``timeout_s`` budget so the native layer can abort
         mid-run rather than only being checked between attempts.
+
+        ``relaxed_cols``, when not None/empty, routes every attempt through
+        ``mine_patterns_relaxed`` instead of ``mine_patterns`` (interaction_
+        relaxed_mining). The minimal final fallback attempt drops G to 0.0
+        for ordinary mining already; relaxation does not change that
+        behavior, and the result remains bounded by the requested K.
         """
+        use_relaxed = bool(relaxed_cols)
+        mine_fn = _core.mine_patterns_relaxed if use_relaxed else _core.mine_patterns
+
+        def _call(K_arg, L_arg, G_arg, timeout_arg):
+            if use_relaxed:
+                return mine_fn(
+                    self.td_, y_train, n_cls, K_arg, L_arg, G_arg, relaxed_cols, timeout_arg
+                )
+            return mine_fn(self.td_, y_train, n_cls, K_arg, L_arg, G_arg, timeout_arg)
+
         attempts = [
             (K, self.L, self.G, "full"),
             (max(K // 2, 10), self.L, self.G, "K//2"),
@@ -3062,20 +3774,10 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                     f"falling back to minimal (K={minimal_K}, L={minimal_L})."
                 )
                 logger.warning("  fit timeout: %s", self._degraded_reason)
-                # Give the minimal attempt a fixed 5-second window; it is
+                # Give the minimal attempt a constant 5-second window; it is
                 # cheap and must not run indefinitely on degenerate data.
                 try:
-                    return list(
-                        _core.mine_patterns(
-                            self.td_,
-                            y_train,
-                            n_cls,
-                            minimal_K,
-                            minimal_L,
-                            minimal_G,
-                            5.0,
-                        )
-                    )
+                    return list(_call(minimal_K, minimal_L, minimal_G, 5.0))
                 except Exception as exc:
                     raise HUGIMLTimeoutError(
                         f"fit() exceeded max_fit_seconds and the minimal fallback "
@@ -3085,17 +3787,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             # can abort mid-run rather than running past the wall-clock limit.
             remaining_s = max(deadline - time.perf_counter(), 0.0) if deadline else 0.0
             try:
-                patterns: list = list(
-                    _core.mine_patterns(
-                        self.td_,
-                        y_train,
-                        n_cls,
-                        attempt_K,
-                        attempt_L,
-                        attempt_G,
-                        remaining_s,
-                    )
-                )
+                patterns: list = list(_call(attempt_K, attempt_L, attempt_G, remaining_s))
                 if label != "full" and len(patterns) > 0:
                     self._degraded_reason = (
                         f"Recovered with {label}: K={attempt_K}, L={attempt_L}, G={attempt_G}"
@@ -3130,13 +3822,13 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         """
         check_is_fitted(self)
         # Keep the same representation used to fit the downstream original
-        # feature block: raw user input before adaptive/fixed-B pre-binning.
+        # feature block: raw user input before adaptive/constant-B pre-binning.
         # _build_test_hup applies _handle_test_nan() internally for the HUG
         # pattern matrix only; original_plus_* downstream columns are fitted
         # from raw X_train_original_for_downstream and therefore must transform
         # the raw test input as well.
         X_test_original_for_downstream = X_test
-        # ── v1.1.0 adaptive pre-binning ───────────────────────────────────
+        # ── Adaptive pre-binning ─────────────────────────────────────────
         if getattr(self, "adaptive_binning", False) and getattr(self, "_bin_edges_", None):
             X_test = self._prebin_for_predict(X_test)
         # ─────────────────────────────────────────────────────────────────
@@ -3203,13 +3895,13 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         """
         check_is_fitted(self)
         # Keep the same representation used to fit the downstream original
-        # feature block: raw user input before adaptive/fixed-B pre-binning.
+        # feature block: raw user input before adaptive/constant-B pre-binning.
         # _build_test_hup applies _handle_test_nan() internally for the HUG
         # pattern matrix only; original_plus_* downstream columns are fitted
         # from raw X_train_original_for_downstream and therefore must transform
         # the raw test input as well.
         X_test_original_for_downstream = X_test
-        # ── v1.1.0 adaptive pre-binning ───────────────────────────────────
+        # ── Adaptive pre-binning ─────────────────────────────────────────
         if getattr(self, "adaptive_binning", False) and getattr(self, "_bin_edges_", None):
             X_test = self._prebin_for_predict(X_test)
         # ─────────────────────────────────────────────────────────────────
@@ -3717,10 +4409,10 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
     ) -> tuple[np.ndarray, np.ndarray]:
         """Score dense downstream columns and return ``(scores, mask)``.
 
-        Prefer the native dense TopK helper when the v1.1.9 extension exposes it,
-        but fall back to the same Python IG scoring used by the sparse path when
-        the Python package is run against a v1.1.8 native wheel.  This preserves
-        correctness for hybrid feature modes with ``topk_budget_strict=True``.
+        Prefer the native dense TopK helper when the extension exposes it,
+        but fall back to the same Python IG scoring used by the sparse path.
+        This preserves correctness for hybrid feature modes with
+        ``topk_budget_strict=True``.
         """
         X_arr = np.ascontiguousarray(self._as_dense_float32(X), dtype=np.float32)
         n_cols = int(X_arr.shape[1])
@@ -4209,7 +4901,10 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             self.augmented_pair_config_ = {
                 "enabled": False,
                 "reason": "adaptive_binning_required",
-                "max_features": int(self.augmented_pair_max_features),
+                "augmented_pair_mode": str(self.augmented_pair_mode),
+                "aug_feature_size": int(self.aug_feature_size),
+                "ii_partner_size": self.ii_partner_size,
+                "max_pair_features": int(self.max_pair_features),
                 "budget": int(self.topK) if self.topK is not None and self.topK >= 0 else None,
                 "num_candidates": 0,
                 "num_retained": 0,
@@ -4228,7 +4923,10 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             self.augmented_pair_config_ = {
                 "enabled": False,
                 "reason": "missing_ig_scores",
-                "max_features": int(self.augmented_pair_max_features),
+                "augmented_pair_mode": str(self.augmented_pair_mode),
+                "aug_feature_size": int(self.aug_feature_size),
+                "ii_partner_size": self.ii_partner_size,
+                "max_pair_features": int(self.max_pair_features),
                 "budget": int(self.topK) if self.topK is not None and self.topK >= 0 else None,
                 "num_candidates": 0,
                 "num_retained": 0,
@@ -4236,7 +4934,10 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             return
         pair_budget = None if bool(getattr(self, "topk_budget_strict", False)) else self.topK
         block = NativeAugmentedPairTransformBlock(
-            max_features=self.augmented_pair_max_features,
+            augmented_pair_mode=self.augmented_pair_mode,
+            aug_feature_size=self.aug_feature_size,
+            ii_partner_size=self.ii_partner_size,
+            max_pair_features=self.max_pair_features,
             budget_topK=pair_budget,
             min_source_ig=self.G,
         )
@@ -4252,17 +4953,20 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         )
         self._augmented_pair_block_ = block
         self.augmented_pair_transforms_ = list(block.augmented_pair_transforms_)
-        self.augmented_pair_selected_features_ = list(block.selected_ig_features_)
+        self.augmented_pair_selected_features_ = list(block.selected_aug_features_)
         self.augmented_pair_transforms_enabled_ = bool(self.augmented_pair_transforms_)
         self.augmented_pair_config_ = {
             "enabled": self.augmented_pair_transforms_enabled_,
-            "max_features": int(self.augmented_pair_max_features),
+            "augmented_pair_mode": str(self.augmented_pair_mode),
+            "aug_feature_size": int(self.aug_feature_size),
+            "ii_partner_size": self.ii_partner_size,
+            "max_pair_features": int(self.max_pair_features),
             "budget": int(self.topK) if self.topK is not None and self.topK >= 0 else None,
             "budget_source": "global_strict_topK"
             if bool(getattr(self, "topk_budget_strict", False))
             else "topK",
             "ops": ["product", "absolute_difference", "sum", "signed_difference"],
-            "score": "adaptive_binned_ig",
+            "score": str(self.augmented_pair_mode),
             "min_source_ig": float(
                 getattr(block, "min_source_ig_", max(1e-12, float(self.G or 0.0)))
             ),
@@ -4426,11 +5130,11 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             unit_text = (
                 f"A +1 change in the product term changes the log-odds by "
                 f"{coefficient_raw_scale:.6g}. For a product feature, changing one source "
-                "variable does not have a fixed marginal effect; it depends on the current "
+                "variable does not have a constant marginal effect; it depends on the current "
                 "value of the other source variable."
             )
             raw_scale_note = (
-                "The raw-unit effect is expressed on the product-term scale, not as a fixed "
+                "The raw-unit effect is expressed on the product-term scale, not as a constant "
                 "one-unit effect of either individual source feature. " + reference_note
             )
         elif operation == "sum":
@@ -4584,7 +5288,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
 
         For logistic-regression downstream models, coefficient columns are
         log-odds effects.  Product-term effects are expressed on the product
-        scale; changing one individual input does not have a fixed marginal
+        scale; changing one individual input does not have a constant marginal
         effect because it depends on the current value of the other input.
         """
         return pd.DataFrame(self._augmented_pair_effect_rows())
@@ -4604,7 +5308,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         csr_matrix, shape (n_samples, n_patterns)
         """
         check_is_fitted(self)
-        # ── v1.1.0 adaptive pre-binning ───────────────────────────────────
+        # ── Adaptive pre-binning ─────────────────────────────────────────
         if getattr(self, "adaptive_binning", False) and getattr(self, "_bin_edges_", None):
             X = self._prebin_for_predict(X)
         # ─────────────────────────────────────────────────────────────────
@@ -4613,7 +5317,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
     def _build_test_hup(self, X_test: Any) -> csr_matrix:
         """Build the sparse binary pattern matrix for test data.
 
-        This follows the original v1.1.x single-pass path.
+        This follows the single-pass path.
         """
         self._check_health()
         # In original_plus_patterns mode, a fitted model may legitimately have
@@ -4624,7 +5328,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             and getattr(self, "feature_mode", "patterns_only") != "patterns_only"
         ):
             return csr_matrix((len(X_test), 0), dtype=np.float32)
-        # ── v1.1.0 non-finite handling ────────────────────────────────────
+        # ── Non-finite handling ──────────────────────────────────────────
         if not getattr(self, "adaptive_binning", False):
             X_test, _cat_mask = self._handle_test_nan(X_test)
         else:
@@ -4725,7 +5429,13 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                     if _lc is None:
                         continue
                     lc: dict[object, int] = _lc
-                    code = lc.get(v)
+                    # cpp_cat_cats stores category labels as strings (the
+                    # native side stringifies every category value), while
+                    # X_cat_raw preserves the original typed value. Match the
+                    # native convention here, or every categorical lookup
+                    # silently misses and that column is dropped from every
+                    # test-time transaction.
+                    code = lc.get(str(v))
                     if code is None:
                         continue
                     bi = code + 1
@@ -4882,8 +5592,14 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                             vals = X_test.iloc[:, numeric_idx].to_numpy(
                                 dtype=np.float64, copy=False
                             )
-                            test_min = np.nanmin(np.where(np.isfinite(vals), vals, np.nan), axis=0)
-                            test_max = np.nanmax(np.where(np.isfinite(vals), vals, np.nan), axis=0)
+                            finite_vals = np.isfinite(vals)
+                            test_min = np.full(len(numeric_idx), np.nan, dtype=float)
+                            test_max = np.full(len(numeric_idx), np.nan, dtype=float)
+                            observed = finite_vals.any(axis=0)
+                            if np.any(observed):
+                                observed_vals = np.where(finite_vals[:, observed], vals[:, observed], np.nan)
+                                test_min[observed] = np.nanmin(observed_vals, axis=0)
+                                test_max[observed] = np.nanmax(observed_vals, axis=0)
                             drift = (
                                 valid
                                 & np.isfinite(test_min)
@@ -4933,7 +5649,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         Notes
         -----
         Drift metrics are computed on the numeric array retained by the mining
-        path.  Fixed-B numeric columns that contained NaN/Inf during training are
+        path.  Constant-B numeric columns that contained NaN/Inf during training are
         converted to the categorical bin-label path so missingness is handled
         consistently at fit/predict time; those columns are therefore not
         represented as continuous numeric drift baselines.  PSI/KL alerts for
@@ -4964,7 +5680,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
     def get_drift_psi(self, X_test: Any) -> dict:
         """Return per-feature PSI values as a dict.
 
-        See ``detect_drift()`` for the fixed-B missing-numeric limitation: columns
+        See ``detect_drift()`` for the constant-B missing-numeric limitation: columns
         that were routed to categorical bin labels because they contained
         NaN/Inf during training do not have meaningful continuous PSI baselines.
         """
@@ -5110,6 +5826,122 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
 
         return [", ".join(_resolve_item(it) for it in pe.items) for pe in self.patterns_]
 
+    @staticmethod
+    def _feature_name_from_item_label(label: str) -> str:
+        """Return the source feature name from a rendered transaction item."""
+        text = str(label or "")
+        if "=" not in text:
+            return text.strip()
+        return text.split("=", 1)[0].strip()
+
+    def _survivor_audit_lookup(self) -> dict[str, dict[str, object]]:
+        """Return interaction-relaxed survivor metadata keyed by feature name."""
+        if not bool(getattr(self, "interaction_relaxed_mining", False)):
+            return {}
+        rows = list(getattr(self, "interaction_relaxed_mining_survivors_", []) or [])
+        lookup: dict[str, dict[str, object]] = {}
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            name = str(row.get("name", "")).strip()
+            if not name:
+                continue
+            lookup[name] = dict(row)
+        return lookup
+
+    def _pattern_source_features(self, pattern_entry: Any) -> list[str]:
+        """Return source feature names used by a native pattern entry."""
+        item_map = getattr(getattr(self, "td_", None), "item_map", {}) or {}
+        label_remap = getattr(self, "_adaptive_code_label_map_", {}) or {}
+        names: list[str] = []
+        seen: set[str] = set()
+        for item_id in getattr(pattern_entry, "items", []) or []:
+            raw_label = item_map.get(int(item_id), str(item_id))
+            label = label_remap.get(raw_label, raw_label)
+            feature_name = self._feature_name_from_item_label(str(label))
+            if feature_name and feature_name not in seen:
+                seen.add(feature_name)
+                names.append(feature_name)
+        return names
+
+    @staticmethod
+    def _finite_float_or_nan(value: Any) -> float:
+        """Convert a scalar to float, using NaN for missing/non-finite values."""
+        try:
+            out = float(value)
+        except Exception:
+            return float("nan")
+        return out if np.isfinite(out) else float("nan")
+
+    def _pattern_survivor_audit(self, pattern_entry: Any) -> dict[str, object]:
+        """Return survivor-led provenance for one mined pattern."""
+        survivor_lookup = self._survivor_audit_lookup()
+        source_features = self._pattern_source_features(pattern_entry)
+        survivor_features = [name for name in source_features if name in survivor_lookup]
+        survivor_rows = [survivor_lookup[name] for name in survivor_features]
+        marginal_igs = [
+            self._finite_float_or_nan(row.get("marginal_ig", np.nan))
+            for row in survivor_rows
+        ]
+        interaction_scores = [
+            self._finite_float_or_nan(row.get("interaction_score", row.get("score", np.nan)))
+            for row in survivor_rows
+        ]
+        best_partners: list[str] = []
+        for row in survivor_rows:
+            partner = str(row.get("best_partner", "")).strip()
+            if partner and partner not in best_partners:
+                best_partners.append(partner)
+        finite_marginal = [v for v in marginal_igs if np.isfinite(v)]
+        finite_interaction = [v for v in interaction_scores if np.isfinite(v)]
+        survivor_led = bool(survivor_features)
+        return {
+            "pattern_origin": "interaction_relaxed" if survivor_led else "standard",
+            "survivor_led": survivor_led,
+            "survivor_features": survivor_features,
+            "survivor_feature_count": len(survivor_features),
+            "survivor_min_marginal_ig": min(finite_marginal)
+            if finite_marginal
+            else np.nan,
+            "survivor_max_interaction_score": max(finite_interaction)
+            if finite_interaction
+            else np.nan,
+            "survivor_best_partners": best_partners,
+        }
+
+    def _pattern_audit_lookup_by_label(self) -> dict[str, dict[str, object]]:
+        """Return survivor-led metadata keyed by raw and namespaced labels."""
+        labels = self.get_hug_features()
+        lookup: dict[str, dict[str, object]] = {}
+        for label, pe in zip(labels, getattr(self, "patterns_", []) or []):
+            audit = self._pattern_survivor_audit(pe)
+            lookup[label] = audit
+            lookup[f"pattern:{label}"] = audit
+        return lookup
+
+    def _pattern_origin_counts_for_downstream_features(
+        self, features: list[str] | None = None
+    ) -> dict[str, int]:
+        """Return origin counts for downstream pattern features."""
+        names = list(features or self._get_downstream_feature_names())
+        lookup = self._pattern_audit_lookup_by_label()
+        counts = {"standard": 0, "interaction_relaxed": 0, "survivor_led": 0}
+        for feat in names:
+            if self._downstream_feature_type(str(feat)) != "pattern":
+                continue
+            display_name = self._downstream_feature_display_name(str(feat))
+            audit = lookup.get(str(feat), lookup.get(display_name, {}))
+            origin = str(audit.get("pattern_origin", "standard"))
+            if origin not in counts:
+                counts[origin] = 0
+            counts[origin] += 1
+            if bool(audit.get("survivor_led", False)):
+                counts["survivor_led"] += 1
+        counts["total_pattern_features"] = sum(
+            1 for feat in names if self._downstream_feature_type(str(feat)) == "pattern"
+        )
+        return counts
+
     def get_transformed_shape(self) -> tuple[int, int]:
         """Return (n_samples, n_patterns) for the training pattern matrix.
 
@@ -5128,7 +5960,8 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
     def get_pattern_info(self) -> pd.DataFrame:
         """Summary DataFrame with one row per mined HUG pattern.
 
-        Columns: pattern, utility, information_gain, support.
+        Columns include pattern, utility, information_gain, support, and
+        survivor-led provenance when interaction-relaxed mining is enabled.
 
         This is an audit/governance table.  Unlike ``get_hug_features()``, it
         requires the retained training pattern matrix to compute support and
@@ -5141,12 +5974,14 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         records: list[dict[str, object]] = []
         for i, pe in enumerate(self.patterns_):
             support = float(self.x_train_hup_[:, i].sum()) / n_train
+            audit = self._pattern_survivor_audit(pe)
             records.append(
                 {
                     "pattern": features[i],
                     "utility": round(pe.utility, 6),
                     "information_gain": round(pe.ig, 6),
                     "support": round(support, 4),
+                    **audit,
                 }
             )
         return pd.DataFrame(records)
@@ -5235,6 +6070,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             "n_patterns_mined": int(len(getattr(self, "patterns_", []))),
             "n_downstream_features": counts["total"],
             "downstream_feature_counts": counts,
+            "pattern_origin_counts": self._pattern_origin_counts_for_downstream_features(),
         }
 
     def _cache_downstream_feature_metadata(self) -> None:
@@ -5251,15 +6087,53 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         n_features = len(features)
 
         self._downstream_pattern_support_ = np.full(n_features, np.nan, dtype=np.float64)
+        self._downstream_pattern_origin_ = np.full(n_features, "", dtype=object)
+        self._downstream_survivor_led_ = np.zeros(n_features, dtype=np.bool_)
+        self._downstream_survivor_features_ = [list() for _ in range(n_features)]
+        self._downstream_survivor_feature_count_ = np.zeros(n_features, dtype=np.int64)
+        self._downstream_survivor_min_marginal_ig_ = np.full(
+            n_features, np.nan, dtype=np.float64
+        )
+        self._downstream_survivor_max_interaction_score_ = np.full(
+            n_features, np.nan, dtype=np.float64
+        )
+        self._downstream_survivor_best_partners_ = [list() for _ in range(n_features)]
         try:
             support_lookup = self._pattern_support_lookup()
         except Exception:
             support_lookup = {}
+        try:
+            audit_lookup = self._pattern_audit_lookup_by_label()
+        except Exception:
+            audit_lookup = {}
         for idx, feat in enumerate(features):
             if self._downstream_feature_type(feat) == "pattern":
                 display_name = self._downstream_feature_display_name(feat)
                 self._downstream_pattern_support_[idx] = support_lookup.get(
                     feat, support_lookup.get(display_name, np.nan)
+                )
+                audit = audit_lookup.get(feat, audit_lookup.get(display_name, {}))
+                self._downstream_pattern_origin_[idx] = str(
+                    audit.get("pattern_origin", "standard")
+                )
+                self._downstream_survivor_led_[idx] = bool(
+                    audit.get("survivor_led", False)
+                )
+                survivor_features = list(audit.get("survivor_features", []) or [])
+                self._downstream_survivor_features_[idx] = survivor_features
+                self._downstream_survivor_feature_count_[idx] = int(
+                    audit.get("survivor_feature_count", len(survivor_features))
+                )
+                self._downstream_survivor_min_marginal_ig_[idx] = self._finite_float_or_nan(
+                    audit.get("survivor_min_marginal_ig", np.nan)
+                )
+                self._downstream_survivor_max_interaction_score_[
+                    idx
+                ] = self._finite_float_or_nan(
+                    audit.get("survivor_max_interaction_score", np.nan)
+                )
+                self._downstream_survivor_best_partners_[idx] = list(
+                    audit.get("survivor_best_partners", []) or []
                 )
 
         X_meta = getattr(self, "x_train_downstream_", None)
@@ -5330,6 +6204,36 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         if cached_pattern_support is not None and len(cached_pattern_support) != len(features):
             cached_pattern_support = None
         support_lookup = self._pattern_support_lookup() if cached_pattern_support is None else {}
+        cached_pattern_origin = getattr(self, "_downstream_pattern_origin_", None)
+        cached_survivor_led = getattr(self, "_downstream_survivor_led_", None)
+        cached_survivor_features = getattr(self, "_downstream_survivor_features_", None)
+        cached_survivor_feature_count = getattr(
+            self, "_downstream_survivor_feature_count_", None
+        )
+        cached_survivor_min_marginal_ig = getattr(
+            self, "_downstream_survivor_min_marginal_ig_", None
+        )
+        cached_survivor_max_interaction_score = getattr(
+            self, "_downstream_survivor_max_interaction_score_", None
+        )
+        cached_survivor_best_partners = getattr(
+            self, "_downstream_survivor_best_partners_", None
+        )
+        has_cached_survivor_audit = all(
+            value is not None and len(value) == len(features)
+            for value in (
+                cached_pattern_origin,
+                cached_survivor_led,
+                cached_survivor_features,
+                cached_survivor_feature_count,
+                cached_survivor_min_marginal_ig,
+                cached_survivor_max_interaction_score,
+                cached_survivor_best_partners,
+            )
+        )
+        pattern_audit_lookup = (
+            {} if has_cached_survivor_audit else self._pattern_audit_lookup_by_label()
+        )
         strict_scores = getattr(self, "_strict_topk_feature_scores_", None)
         strict_score_lookup: dict[str, float] = {}
         if strict_scores is not None:
@@ -5376,9 +6280,47 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                         feat, support_lookup.get(display_name, np.nan)
                     )
                 support_type = "pattern_support"
+                if has_cached_survivor_audit:
+                    pattern_origin = str(cached_pattern_origin[idx]) or "standard"
+                    survivor_led = bool(cached_survivor_led[idx])
+                    survivor_features = list(cached_survivor_features[idx] or [])
+                    survivor_feature_count = int(cached_survivor_feature_count[idx])
+                    survivor_min_marginal_ig = self._finite_float_or_nan(
+                        cached_survivor_min_marginal_ig[idx]
+                    )
+                    survivor_max_interaction_score = self._finite_float_or_nan(
+                        cached_survivor_max_interaction_score[idx]
+                    )
+                    survivor_best_partners = list(cached_survivor_best_partners[idx] or [])
+                else:
+                    audit = pattern_audit_lookup.get(
+                        feat, pattern_audit_lookup.get(display_name, {})
+                    )
+                    pattern_origin = str(audit.get("pattern_origin", "standard"))
+                    survivor_led = bool(audit.get("survivor_led", False))
+                    survivor_features = list(audit.get("survivor_features", []) or [])
+                    survivor_feature_count = int(
+                        audit.get("survivor_feature_count", len(survivor_features))
+                    )
+                    survivor_min_marginal_ig = self._finite_float_or_nan(
+                        audit.get("survivor_min_marginal_ig", np.nan)
+                    )
+                    survivor_max_interaction_score = self._finite_float_or_nan(
+                        audit.get("survivor_max_interaction_score", np.nan)
+                    )
+                    survivor_best_partners = list(
+                        audit.get("survivor_best_partners", []) or []
+                    )
             else:
                 pattern_support = np.nan
                 support_type = "not_applicable"
+                pattern_origin = "not_applicable"
+                survivor_led = False
+                survivor_features = []
+                survivor_feature_count = 0
+                survivor_min_marginal_ig = np.nan
+                survivor_max_interaction_score = np.nan
+                survivor_best_partners = []
 
             support_value = (
                 round(float(pattern_support), 4) if np.isfinite(pattern_support) else np.nan
@@ -5434,6 +6376,13 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                     "feature": feat,
                     "display_name": display_name,
                     "feature_type": feature_type,
+                    "pattern_origin": pattern_origin,
+                    "survivor_led": survivor_led,
+                    "survivor_features": survivor_features,
+                    "survivor_feature_count": survivor_feature_count,
+                    "survivor_min_marginal_ig": survivor_min_marginal_ig,
+                    "survivor_max_interaction_score": survivor_max_interaction_score,
+                    "survivor_best_partners": survivor_best_partners,
                     "coefficient": round(float(c), 6),
                     "abs_coefficient": round(abs(float(c)), 6),
                     "pattern_support": support_value,
@@ -5487,7 +6436,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             result.attrs["audit_note"] = audit_note
         return pd.DataFrame(result)
 
-    # ── v1.1.0  Adaptive-binning diagnostic plots ─────────────────────────────
+    # ── Adaptive-binning diagnostic plots ────────────────────────────────────
     # These methods are available on any fitted HUGIMLClassifierNative instance
     # when adaptive_binning=True.  HUGIMLAdaptive inherits them automatically
     # as a subclass.  Both require matplotlib (optional dependency).
@@ -5621,7 +6570,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                 "or:  pip install 'hugiml-core[plots]'"
             )
 
-    # ── End v1.1.0 adaptive-binning diagnostic plots ──────────────────────────
+    # ── End adaptive-binning diagnostic plots ────────────────────────────────
 
     def _summary_shape_text(self, matrix_attr: str, cached_shape_attr: str) -> str:
         """Return a stable summary shape for audit or production-retained models."""
@@ -5697,7 +6646,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             lines += ["", "Top downstream features by importance:"]
             lines.append("  (not available — non-LR downstream estimator)")
 
-        # ── v1.1.0 adaptive binning section ──────────────────────────────
+        # ── Adaptive binning section ────────────────────────────────────
         if getattr(self, "_missing_col_edges_", None):
             lines += [
                 "",
@@ -5757,7 +6706,7 @@ def _hugiml_validate_fast_tune_grid(candidates: list[dict[str, Any]]) -> dict[st
 
     The fast path is exact when adaptive binning is enabled and only mining/
     representation dimensions vary: G, L, topK, and feature_mode.  Because G is
-    part of the native mining call, candidates are cached in separate fixed-G
+    part of the native mining call, candidates are cached in separate constant-G
     groups.  B may appear and even vary, but is ignored while
     adaptive_binning=True because per-feature binning supplies the effective
     discretisation.
@@ -5923,7 +6872,7 @@ def _hugiml_fast_grid_tune(
     Requirements
     ------------
     - adaptive_binning=True for every candidate.
-    - G may vary; the tuner partitions candidates into fixed-G cache groups.
+    - G may vary; the tuner partitions candidates into constant-G cache groups.
     - Only G, L, topK, and feature_mode vary. B may appear in the grid but is
       ignored for cache partitioning because adaptive binning chooses per-feature
       bins and fit() passes sentinel B=2 to the native transaction builder.
@@ -5942,7 +6891,7 @@ def _hugiml_fast_grid_tune(
     params0 = dict(base_params or {})
     params0.setdefault("adaptive_binning", True)
     params0.setdefault("use_hotpath", True)
-    # Do not set a single global G here; G is part of mining and is fixed per
+    # Do not set a single global G here; G is part of mining and is constant per
     # cache group below.  A caller-supplied base G is used only for candidates
     # that omit G from the grid.
     params0.setdefault("G", grid_info["G_values"][0])

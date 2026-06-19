@@ -93,9 +93,13 @@ elif is_macos:
             .strip()
         )
     except Exception:
-        libomp_prefix = "/opt/homebrew/opt/libomp"
-    omp_compile = [f"-I{libomp_prefix}/include", "-Xpreprocessor", "-fopenmp"]
-    omp_link = [f"-L{libomp_prefix}/lib", "-lomp", f"-Wl,-rpath,{libomp_prefix}/lib"]
+        libomp_prefix = os.environ.get("HUGIML_LIBOMP_ROOT", "").strip()
+    if libomp_prefix:
+        omp_compile = [f"-I{libomp_prefix}/include", "-Xpreprocessor", "-fopenmp"]
+        omp_link = [f"-L{libomp_prefix}/lib", "-lomp", f"-Wl,-rpath,{libomp_prefix}/lib"]
+    else:
+        omp_compile = ["-Xpreprocessor", "-fopenmp"]
+        omp_link = ["-lomp"]
     _opt_release = ["-O2", "-Wall", "-Wextra", "-Wno-unused-parameter"]
     _opt_fast = ["-O1", "-Wall", "-Wno-unused-parameter"]
     _opt_bind = ["-O0", "-g0", "-Wall", "-Wno-unused-parameter"]

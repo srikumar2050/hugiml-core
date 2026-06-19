@@ -242,8 +242,9 @@ def test_explanation_stability_reports_feature_type_specific_metrics():
         topK=15,
         feature_mode="original_plus_patterns",
         augmented_pair_transforms=True,
-        augmented_pair_max_features=5,
+        aug_feature_size=5,
         max_fit_seconds=5,
+        interaction_relaxed_mining=False,
     )
     clf.fit(X[:90], y[:90])
     explainer = HUGPatternExplainer(clf)
@@ -263,8 +264,9 @@ def test_pattern_space_shap_warns_for_mixed_downstream_features():
         topK=12,
         feature_mode="original_plus_patterns",
         augmented_pair_transforms=True,
-        augmented_pair_max_features=5,
+        aug_feature_size=5,
         max_fit_seconds=5,
+        interaction_relaxed_mining=False,
     ).fit(X, y)
     with pytest.warns(RuntimeWarning, match="Pattern-space SHAP is incomplete"):
         assert shap_values_from_pattern_matrix(clf, X[:5]) is None

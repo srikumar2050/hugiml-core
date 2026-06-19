@@ -141,7 +141,24 @@ struct MinHeapCmp {
     }
 };
 
+struct IgMinHeapCmp {
+    bool operator()(const PatternEntry& a, const PatternEntry& b) const {
+        return a.ig > b.ig;
+    }
+};
+
 void THUIsl::save(const std::vector<int>& items, const UL& ul) {
+    // interaction_relaxed_mining: a pattern whose root (items[0]) is a
+    // relaxed item is routed ONLY to relaxed_heap (IG-ranked, independent
+    // K-sized budget), never into the ordinary utility-ranked heap -- this
+    // mirrors mine_patterns_l2_augmented_patterns_v2_cpp's mutually
+    // exclusive routing so a single pattern cannot occupy a slot in both
+    // pools. When relaxed_cols is empty this check is false for every item
+    // and behavior is identical to the unmodified single-heap path.
+    if (!items.empty() && is_relaxed_root(items.front())) {
+        save_by_ig(items, ul);
+        return;
+    }
     double u = ul.sI;
     PatternEntry pe{u, items, ul.ig};
     if (static_cast<int>(heap.size()) < K) {
@@ -153,6 +170,20 @@ void THUIsl::save(const std::vector<int>& items, const UL& ul) {
         heap.back() = pe;
         std::push_heap(heap.begin(), heap.end(), MinHeapCmp{});
         minU = heap.front().utility;
+    }
+}
+
+void THUIsl::save_by_ig(const std::vector<int>& items, const UL& ul) {
+    PatternEntry pe{ul.sI, items, ul.ig};
+    if (static_cast<int>(relaxed_heap.size()) < K) {
+        relaxed_heap.push_back(pe);
+        std::push_heap(relaxed_heap.begin(), relaxed_heap.end(), IgMinHeapCmp{});
+        if (static_cast<int>(relaxed_heap.size()) == K) minIg = relaxed_heap.front().ig;
+    } else if (ul.ig > minIg) {
+        std::pop_heap(relaxed_heap.begin(), relaxed_heap.end(), IgMinHeapCmp{});
+        relaxed_heap.back() = pe;
+        std::push_heap(relaxed_heap.begin(), relaxed_heap.end(), IgMinHeapCmp{});
+        minIg = relaxed_heap.front().ig;
     }
 }
 
@@ -238,6 +269,13 @@ void THUIsl::mine(const TransList& transactions,
     // minU is seeded by mine_patterns_cpp (td.riu_thresh(K)) before this call.
     // Do NOT reset it here — only clear the heap and the recursion counter.
     heap.clear();
+    // relaxed_heap/minIg ARE reset here (unlike minU/heap, there is no
+    // external seeding contract for them) so that reusing a THUIsl
+    // instance across multiple mine() calls cannot leak relaxed-heap
+    // entries from a previous run into a new one. No current call site
+    // reuses a THUIsl instance, but nothing in the public API prevents it.
+    relaxed_heap.clear();
+    minIg = -std::numeric_limits<double>::infinity();
     _explore_calls = 0;
     int  n_items  = static_cast<int>(item_twu.size());
     // EUCS (Extended Utility Co-occurrence Structure) is disabled by default.
@@ -260,11 +298,15 @@ void THUIsl::mine(const TransList& transactions,
     using LeafMap = std::unordered_map<int, std::unordered_map<int, double>>;
     LeafMap leaf_map;
 
-    // Build utility-list map for items that pass the initial threshold
+    // Build utility-list map for items that pass the initial threshold.
+    // interaction_relaxed_mining: items whose column is in relaxed_cols are
+    // admitted regardless of the TWU floor (root-only relaxation; see the
+    // THUIsl::relaxed_cols comment in mining.hpp). When relaxed_cols is
+    // empty this is identical to the unmodified filter below.
     std::unordered_map<int, UL> ul_map;
     ul_map.reserve(n_items);
     for (int iid = 1; iid <= n_items; iid++)
-        if (item_twu[iid - 1] >= minU)
+        if (item_twu[iid - 1] >= minU || is_relaxed_root(iid))
             ul_map.emplace(iid, UL(iid));
 
     // Sorted by TWU ascending (same as Python sorted_items)
@@ -503,7 +545,26 @@ void THUIsl::explore(std::vector<int>  prefix,
             }
         }
         UL* ux = uls[static_cast<size_t>(i)];
-        if (ux->sI >= minU && ux->sI > 0.0 && ux->ig > G) {
+        // pat's root is prefix.front() if a prefix already exists (depth
+        // >= 1), or ux->item itself if this is the first item appended
+        // (depth == 0, prefix is empty). Either way this determines which
+        // heap save() will route into; the eligibility condition here must
+        // match that routing, or a relaxed-rooted pattern can be skipped
+        // before save() is ever called regardless of how save() itself
+        // would route it. interaction_relaxed_mining: for a relaxed-rooted
+        // pattern, neither ux->ig > G nor the ordinary heap's minU
+        // utility floor apply -- both are requirements specific to the
+        // ordinary, utility-ranked heap, and save() routes this pattern to
+        // the IG-ranked relaxed_heap unconditionally (matching the L2 v2
+        // hot path's precedent: a relaxed-rooted pattern is saved there
+        // with only an sI > 0.0 sanity check, no G threshold at all).
+        const bool root_is_relaxed = prefix.empty()
+            ? is_relaxed_root(ux->item)
+            : is_relaxed_root(prefix.front());
+        const bool eligible = root_is_relaxed
+            ? (ux->sI > 0.0)
+            : (ux->sI >= minU && ux->sI > 0.0 && ux->ig > G);
+        if (eligible) {
             std::vector<int> pat = prefix;
             pat.push_back(ux->item);
             save(pat, *ux);
@@ -520,8 +581,39 @@ void THUIsl::explore(std::vector<int>  prefix,
             }
         }
         UL* ux = uls[static_cast<size_t>(i)];
-        if (ux->ig <= G) continue;
-        if (ux->sI + ux->sR < minU || ux->sI <= 0.0) continue;
+        // interaction_relaxed_mining exemptions. Two distinct cases are
+        // both needed, since without case (a) relaxed columns would never
+        // produce a pattern of length >1: the first relaxed root would be
+        // blocked from ever extending past depth 0.
+        //
+        //   (a) depth == 0 AND ux is a relaxed root candidate: this loop's
+        //       ux is itself about to become prefix[0]. Its own ig <= G is
+        //       exactly why it needed relaxing in the first place, so this
+        //       check must not apply to it here -- it was already let into
+        //       ul_map past the TWU/RIU filter for the same reason; gating
+        //       it again here on ig would undo that. The depth==0 guard is
+        //       required, not optional: without it, a relaxed-column item
+        //       that happens to also be considered as a depth>=1 PARTNER
+        //       candidate would wrongly get the same exemption, letting it
+        //       appear at a non-root position -- silently widening scope
+        //       beyond the agreed root-only design.
+        //   (b) the CURRENT prefix's root (prefix.front(), depth >= 1) was
+        //       already a relaxed root established at depth 0. ux here is
+        //       a depth 1+ partner being considered for extension; its own
+        //       ig <= G is NOT exempted regardless of whether ux itself is
+        //       also a relaxed column -- only the growth-bound check below
+        //       is exempted for this case, so the branch is not pruned
+        //       purely on accumulated utility while the partner's own G
+        //       gate still applies normally.
+        const bool ux_is_relaxed_root_at_depth0 =
+            (depth == 0) && is_relaxed_root(ux->item);
+        const bool prefix_rooted_in_relaxed =
+            !prefix.empty() && is_relaxed_root(prefix.front());
+        if (!ux_is_relaxed_root_at_depth0 && ux->ig <= G) continue;
+        if (!(ux_is_relaxed_root_at_depth0 || prefix_rooted_in_relaxed) &&
+            (ux->sI + ux->sR < minU || ux->sI <= 0.0)) continue;
+        if ((ux_is_relaxed_root_at_depth0 || prefix_rooted_in_relaxed) &&
+            ux->sI <= 0.0) continue;
 
         if (L != 1 && !fmap.empty() && fmap.find(ux->item) == fmap.end()) continue;
 
@@ -629,6 +721,70 @@ std::vector<PatternEntry> mine_patterns_cpp(
     if (L == 2)
         return mine_patterns_l2_cpp(td, ytrain, n_cls, K, G, timeout_s);
     return mine_patterns_generic_cpp(td, ytrain, n_cls, K, L, G, timeout_s);
+}
+
+// ── Extended: interaction_relaxed_mining, generic L (incl. L>2) path ──
+std::vector<PatternEntry> mine_patterns_generic_relaxed_cpp(
+    const TransactionDataCpp& td,
+    const std::vector<int>&   ytrain,
+    int n_cls, int K, int L, double G,
+    const std::vector<int>&   relaxed_cols,
+    double timeout_s) {
+
+    THUIsl miner(K, L, G);
+    miner.relaxed_cols = relaxed_cols;
+    miner.minU = td.riu_thresh(K);
+
+    if (timeout_s > 0.0) {
+        miner.has_deadline = true;
+        miner.deadline_tp  = THUIsl::Clock::now() +
+            std::chrono::duration_cast<THUIsl::Clock::duration>(
+                std::chrono::duration<double>(timeout_s));
+    }
+
+    try {
+        miner.mine(td.transactions, td.item_twu, ytrain, n_cls,
+                   &td.item_col, &td.item_iu, &td.transaction_utils);
+    } catch (const std::runtime_error& e) {
+        if (std::string(e.what()) != "mining_timeout") throw;
+        // Fall through and partition/merge whatever was collected so far.
+    }
+
+    if (relaxed_cols.empty() || td.item_col.empty()) {
+        // No relaxation requested: behave exactly like mine_patterns_generic_cpp.
+        return miner.heap;
+    }
+
+    // THUIsl::save() already routes a pattern into EITHER miner.heap
+    // (ordinary, utility-ranked, capped at K) OR miner.relaxed_heap
+    // (relaxed-root, IG-ranked, capped at K) at write time -- see save().
+    // No post-hoc partitioning of miner.heap is needed or correct here:
+    // relaxed-root patterns never land in miner.heap in the first place
+    // (save() routes them directly into relaxed_heap), so partitioning
+    // miner.heap alone would always produce an empty relaxed pool and
+    // silently discard every rescued pattern. Read both pools directly
+    // and merge them here, matching the L2 v2 hot path exactly: each pool
+    // independently capped at K by THUIsl's own two heaps, then globally
+    // re-ranked by IG and truncated to the final K.
+    std::vector<PatternEntry> merged(miner.heap);
+    merged.insert(merged.end(), miner.relaxed_heap.begin(), miner.relaxed_heap.end());
+    std::sort(merged.begin(), merged.end(),
+              [](const PatternEntry& a, const PatternEntry& b) { return a.ig > b.ig; });
+    if (static_cast<int>(merged.size()) > K) merged.resize(static_cast<size_t>(K));
+    return merged;
+}
+
+std::vector<PatternEntry> mine_patterns_relaxed_cpp(
+    const TransactionDataCpp& td,
+    const std::vector<int>&   ytrain,
+    int n_cls, int K, int L, double G,
+    const std::vector<int>&   relaxed_cols,
+    double timeout_s) {
+    if (L == 2)
+        return mine_patterns_l2_augmented_patterns_v2_cpp(
+            td, ytrain, n_cls, K, G, relaxed_cols, timeout_s);
+    return mine_patterns_generic_relaxed_cpp(
+        td, ytrain, n_cls, K, L, G, relaxed_cols, timeout_s);
 }
 
 }  // namespace hugiml

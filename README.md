@@ -128,7 +128,7 @@ import pandas as pd
 from sklearn.model_selection import train_test_split
 from hugiml import HUGIMLClassifier
 
-clf = HUGIMLClassifier(B=7, L=1, G=5e-3)
+clf = HUGIMLClassifier(adaptive_binning=True, L=1, G=5e-3, topK=100)
 
 X_enc, y_enc = clf.prepareXy(X_df, y)   # schema/type prep — no model fitting
 
@@ -152,12 +152,12 @@ from hugiml import HUGIMLClassifier
 clf = HUGIMLClassifier(
     allCols=[int_col_names, float_col_names, cat_col_names],
     origColumns=X.columns.tolist(),
-    B=15,
+    B=-1,
+    adaptive_binning=True,
+    b_candidates=[2, 3, 5, 7, 10, 15],
     L=1,
     G=1e-5,
     topK=150,
-    adaptive_binning=True,
-    b_candidates=[2, 3, 5, 7, 10, 15],
 )
 
 clf.fit(X_train, y_train)
@@ -170,27 +170,29 @@ proba = clf.predict_proba(X_test)
 
 ## Feature Modes
 
-HUGIML can use the mined binary pattern matrix in three downstream feature modes. The default remains the original pattern-only behavior, so existing code keeps the same semantics unless `feature_mode` is set explicitly.
+HUGIML can use the mined binary pattern matrix in three downstream feature modes. The default remains pattern-only behavior, so existing code keeps the same high-interpretability semantics unless `feature_mode` is set explicitly.
 
 | `feature_mode` | Downstream estimator input | When to use |
 |---|---|---|
 | `"patterns_only"` | HUGIML binary pattern matrix only | Standard HUGIML; best when the mined pattern space itself captures the decision boundary. |
-| `"original_plus_patterns"` | Original features plus all mined binary patterns | Useful when the original features contain strong marginal signal and HUGIML patterns add supervised nonlinear refinements. |
+| `"original_plus_patterns"` | Original features plus all mined binary patterns | Useful when original features contain strong marginal signal and HUGIML patterns add supervised nonlinear refinements. |
 | `"original_plus_interactions"` | Original features plus only `L > 1` mined patterns | Useful when original features should handle marginal effects and HUGIML should contribute interaction/compound-region features only. |
+
+The recommended tuning grid and configuration choices are described in [Hyperparameter Search](#hyperparameter-search). Start there for first-pass model selection, then select a representation based on interpretability and runtime needs.
 
 ```python
 from hugiml import HUGIMLClassifier
 
 # Backward-compatible default: pattern matrix only
-clf = HUGIMLClassifier(B=10, L=2, G=1e-2, topK=150,
+clf = HUGIMLClassifier(B=-1, L=2, G=1e-2, topK=150,
                               adaptive_binning=True, feature_mode="patterns_only")
 
 # Hybrid: original features + all binary HUGIML patterns
-clf_hybrid = HUGIMLClassifier(B=10, L=2, G=1e-2, topK=150,
+clf_hybrid = HUGIMLClassifier(B=-1, L=2, G=1e-2, topK=150,
                                     adaptive_binning=True, feature_mode="original_plus_patterns")
 
 # Hybrid: original features + higher-order/interaction patterns only
-clf_interactions = HUGIMLClassifier(B=10, L=2, G=1e-2, topK=150,
+clf_interactions = HUGIMLClassifier(B=-1, L=2, G=1e-2, topK=150,
                                           adaptive_binning=True,
                                           feature_mode="original_plus_interactions")
 ```
@@ -230,13 +232,45 @@ In production mode, audit-oriented methods return a clear guidance result or rai
 
 ## Hyperparameter Search
 
-HUGIML provides a fast cached tuning path for adaptive-binning grids. When `adaptive_binning=True`, the full binning and transaction construction phase runs once per unique `(G, L, topK)` combination; subsequent candidates that vary only `feature_mode` reuse the cached artefacts and skip re-mining.
+HUGIML provides a fast cached tuning path for adaptive-binning grids. When `adaptive_binning=True`, the binning and transaction construction work is reused across eligible candidates, so compact grids can be evaluated without rebuilding the same mining inputs repeatedly.
+
+### Default recommended parameter grid
+
+For a first tuning pass, use the built-in default recommended parameter grid. It is intentionally small: it keeps adaptive binning enabled, compares one-level and two-level pattern mining, compares pure pattern models with original-plus-pattern models, and varies the TopK feature budget.
+
+```python
+from hugiml import HUGIMLClassifier
+
+grid = HUGIMLClassifier.default_param_grid()
+
+# Equivalent explicit grid:
+grid = {
+    "B": [-1],
+    "adaptive_binning": [True],
+    "L": [1, 2],
+    "feature_mode": ["patterns_only", "original_plus_patterns"],
+    "topK": [30, 50, 100],
+    "G": [1e-2],
+}
+```
+
+| Parameter | Default recommended values | Purpose |
+|---|---:|---|
+| `B` | `[-1]` | Uses adaptive binning instead of a fixed global bin count. |
+| `adaptive_binning` | `[True]` | Lets each numerical feature choose a supervised bin count. |
+| `L` | `[1, 2]` | Compares single-feature patterns with pair/interaction patterns. |
+| `feature_mode` | `patterns_only`, `original_plus_patterns` | Compares pure HUG pattern models with hybrid original-plus-pattern models. |
+| `topK` | `[30, 50, 100]` | Controls the selected feature budget. |
+| `G` | `[1e-2]` | Keeps the gain threshold fixed for a compact first pass. |
+
+Use focused follow-up grids when you want to explore interaction-relaxed mining or augmented-pair transforms. Do not enable `interaction_relaxed_mining=True` and `augmented_pair_transforms=True` in the same `L >= 2` candidate.
 
 ### `tune()` — cross-validated search with automatic fast path
 
 ```python
 result = HUGIMLClassifier.tune(
     X, y,
+    param_grid=HUGIMLClassifier.default_param_grid(),
     cv=5,
     shuffle=True,
     random_state=42,
@@ -251,24 +285,98 @@ print(f"Fast path used: {result.fast_path_used_}")
 best_model = result.best_estimator_
 ```
 
-A custom grid is supplied via `param_grid`. Only `G`, `L`, `topK`, and `feature_mode` may vary; `B` may appear but is ignored when `adaptive_binning=True`.
+A custom grid is supplied via `param_grid`. For the cached adaptive-binning path, keep the varying dimensions compact and centered on mining or representation choices such as `G`, `L`, `topK`, and `feature_mode`. Fixed values such as `B=-1` and `adaptive_binning=True` may be included for clarity.
 
 ```python
-grid = {
-    "G":            [1e-3, 1e-2],
-    "L":            [1, 2],
-    "topK":         [30, 50],
+custom_grid = {
+    "B": [-1],
+    "adaptive_binning": [True],
+    "G": [1e-2, 5e-3],
+    "L": [1, 2],
+    "topK": [50, 100],
     "feature_mode": ["patterns_only", "original_plus_patterns"],
 }
 
 result = HUGIMLClassifier.tune(
     X, y,
-    param_grid=grid,
-    base_params={"adaptive_binning": True},
+    param_grid=custom_grid,
     cv=3,
     scoring="roc_auc",
     refit=True,
 )
+```
+
+### Choosing the model configuration
+
+After the default grid identifies a useful budget range, choose one of these focused configurations based on the representation you want.
+
+| Option | Feature mode | Interaction path | Extra downstream pair columns? | Interpretability | Runtime profile | Good default when... |
+|---|---|---|---|---|---|---|
+| Pure HUG patterns | `patterns_only` | Standard `L=1` or `L=2` mining | No | Very high | Lowest to moderate | You want the simplest pattern-only model. |
+| Patterns + interaction-relaxed mining | `patterns_only` | `interaction_relaxed_mining=True` | No | Very high | Higher than augmented pairs | You want interaction evidence to affect HUG pattern discovery without adding a new feature family. |
+| Patterns + augmented pairs | `patterns_only` | `augmented_pair_transforms=True` | Yes | High | Often faster than relaxed mining | You want selected pair evidence with better runtime control. |
+| Originals + patterns | `original_plus_patterns` | Standard `L=1` or `L=2` mining | No | High | Moderate | Original variables have strong marginal signal and patterns add readable refinements. |
+| Originals + patterns + relaxed mining | `original_plus_patterns` | `interaction_relaxed_mining=True` | No | High | Higher than augmented pairs | You want original features plus survivor-led HUG patterns, but no pair-operator columns. |
+| Originals + patterns + augmented pairs | `original_plus_patterns` | `augmented_pair_transforms=True` | Yes | Moderate | Moderate to higher | You want the highest representation capacity among the recommended options. |
+
+A **survivor** is a source feature that remains after interaction-information screening. It may not be one of the strongest features by itself, but it has useful pairwise or synergy evidence with another feature. In interaction-relaxed mining, these survivor source features are allowed to participate in native HUG pattern mining. A survivor is not automatically a final model feature; it is a candidate source that can help form mined patterns.
+
+`interaction_relaxed_mining=True` relaxes the usual entry path for interaction-useful source features. Instead of adding product, difference, or sum columns to the downstream estimator, it lets a small survivor pool enter the native mining step, so the final representation remains HUG patterns plus any original features selected by `feature_mode`.
+
+Use these focused follow-up grids:
+
+```python
+# Pattern-only with interaction-relaxed mining.
+patterns_relaxed_grid = {
+    "B": [-1],
+    "adaptive_binning": [True],
+    "L": [2],
+    "G": [1e-2, 5e-3],
+    "topK": [50, 100],
+    "feature_mode": ["patterns_only"],
+    "augmented_pair_transforms": [False],
+    "interaction_relaxed_mining": [True],
+    "interaction_relaxed_feature_size": [8, 12],
+}
+
+# Pattern-only with augmented pair features.
+patterns_augmented_grid = {
+    "B": [-1],
+    "adaptive_binning": [True],
+    "L": [2],
+    "G": [1e-2, 5e-3],
+    "topK": [50, 100],
+    "feature_mode": ["patterns_only"],
+    "augmented_pair_transforms": [True],
+    "augmented_pair_mode": ["interaction_information"],
+    "aug_feature_size": [8, 12],
+}
+
+# Originals plus patterns with interaction-relaxed mining.
+originals_relaxed_grid = {
+    "B": [-1],
+    "adaptive_binning": [True],
+    "L": [2],
+    "G": [1e-2, 5e-3],
+    "topK": [50, 100],
+    "feature_mode": ["original_plus_patterns"],
+    "augmented_pair_transforms": [False],
+    "interaction_relaxed_mining": [True],
+    "interaction_relaxed_feature_size": [8, 12],
+}
+
+# Originals plus patterns with augmented pair features.
+originals_augmented_grid = {
+    "B": [-1],
+    "adaptive_binning": [True],
+    "L": [2],
+    "G": [1e-2, 5e-3],
+    "topK": [50, 100],
+    "feature_mode": ["original_plus_patterns"],
+    "augmented_pair_transforms": [True],
+    "augmented_pair_mode": ["interaction_information"],
+    "aug_feature_size": [8, 12],
+}
 ```
 
 ### `fast_grid_tune()` — single-split cached path for custom CV loops
@@ -277,8 +385,7 @@ result = HUGIMLClassifier.tune(
 tune_result = HUGIMLClassifier.fast_grid_tune(
     X_train, y_train,
     X_val,   y_val,
-    param_grid=grid,
-    base_params={"adaptive_binning": True},
+    param_grid=HUGIMLClassifier.default_param_grid(),
     scoring="roc_auc",
     refit_full=False,
 )
@@ -291,7 +398,7 @@ print(f"Validation score: {tune_result['best_score']:.4f}")
 
 ## Governance Studio Dashboard
 
-The **HUGIML Governance Studio** is an interactive Streamlit dashboard for preparing model runs, comparing candidate models, reviewing model evidence, and producing governance-ready summaries. The v1.1.11 dashboard keeps the v1.1.10 Workbench/Governance layout and adds richer evidence views for adaptive binning, augmented pairs, feature families, pattern coverage, monitoring, and validation review.
+The **HUGIML Governance Studio** is an interactive Streamlit dashboard for preparing model runs, comparing candidate models, reviewing model evidence, and producing governance-ready summaries. It keeps the existing Workbench/Governance layout and exposes evidence views for adaptive binning, interaction-relaxed mining, augmented pairs, feature families, pattern coverage, monitoring, and validation review.
 
 ### Installation
 
@@ -363,6 +470,8 @@ abs(age - duration)
 
 They are active when `L > 1`, `adaptive_binning=True`, and `augmented_pair_transforms=True` (the default). They are appended only to the downstream estimator; the mined HUG pattern matrix and `transform(X)` remain pattern-space APIs.
 
+The default `augmented_pair_mode="interaction_information"` scores candidate source columns using pair context before building product, absolute-difference, sum, and signed-difference features. Set `augmented_pair_mode="marginal_ig"` to use the v1.1.11 marginal-information-gain source selection behavior. `aug_feature_size` controls how many source columns are retained in interaction-information mode; `ii_partner_size` optionally bounds partner search; `max_pair_features` controls the source budget for marginal-IG mode.
+
 ```python
 clf = HUGIMLClassifier(
     B=-1,
@@ -372,6 +481,8 @@ clf = HUGIMLClassifier(
     G=1e-2,
     feature_mode="original_plus_patterns",
     augmented_pair_transforms=True,
+    augmented_pair_mode="interaction_information",
+    aug_feature_size=10,
     topk_budget_strict=True,
 )
 clf.fit(X_train, y_train)
@@ -799,8 +910,10 @@ Adaptive binning is a safe default when you do not want to tune `B`; fixed `B=5`
 | Configuration | Downstream feature budget when `topK = K` |
 |---|---|
 | `patterns_only`, `L = 1` | Up to **K** HUG pattern features. |
+| `patterns_only`, `L > 1`, `interaction_relaxed_mining=True` | Up to **K** HUG pattern features. The mining search may admit up to `interaction_relaxed_feature_size` interaction-information survivor source columns, but no extra downstream feature family is added. |
 | `patterns_only`, `L > 1`, augmented pairs enabled | Up to **K** HUG pattern features + up to **K** augmented-pair features, so **D ≤ 2K**. |
 | `original_plus_patterns`, `L = 1` | Up to **K** selected original features + up to **K** HUG pattern features, so **D ≤ 2K**. |
+| `original_plus_patterns`, `L > 1`, `interaction_relaxed_mining=True` | Up to **K** selected original features + up to **K** HUG pattern features, so **D ≤ 2K**. Survivor-led mining affects which patterns are available, not the number of downstream feature families. |
 | `original_plus_patterns`, `L > 1`, augmented pairs enabled | Up to **K** selected original features + up to **K** HUG pattern features + up to **K** augmented-pair features, so **D ≤ 3K**. |
 | `original_plus_interactions` | Original features are capped at **K**; retained interaction/pattern features are also bounded by the HUG pattern budget. With augmented pairs enabled, the same additional **K** augmented-pair cap applies. |
 | `topk_budget_strict=True` | HUGIML first avoids oversized family blocks, then applies one global TopK selection across the constructed original, pattern, and augmented-pair candidates, so final **D ≤ K**. |
@@ -813,13 +926,15 @@ Adaptive binning is a safe default when you do not want to tune `B`; fixed `B=5`
 - selected original input features
 - augmented-pair features, when enabled for higher-order configurations
 
+Interaction-relaxed mining changes the native search path but does not add a separate downstream feature family; its budget is `interaction_relaxed_feature_size`, which controls survivor-source admission before pattern mining.
+
 Each active family can contribute up to `topK` downstream columns before strict global selection. Therefore, the maximum downstream width is the number of active selected families multiplied by `topK`:
 
 - one active family: up to `topK` columns
 - two active families: up to `2 × topK` columns
 - three active families: up to `3 × topK` columns
 
-For example, with `topK=150`, `original_plus_patterns` at `L=1` can retain up to `150` selected original columns and up to `150` HUG pattern columns, for a maximum downstream width of `300`. With `L>1` and augmented-pair transforms enabled, the same configuration can retain up to `150` selected original columns, `150` HUG pattern columns, and `150` augmented-pair columns, for a maximum downstream width of `450`. When `topk_budget_strict=True`, HUGIML applies one final global TopK selection across the constructed downstream candidates, so the final downstream width is capped at `topK`.
+For example, with `topK=150`, `original_plus_patterns` at `L=1` can retain up to `150` selected original columns and up to `150` HUG pattern columns, for a maximum downstream width of `300`. With `L>1` and `interaction_relaxed_mining=True`, the same downstream width bound remains `300`; the relaxed path affects pattern discovery rather than adding feature columns. With `L>1` and augmented-pair transforms enabled, the same configuration can retain up to `150` selected original columns, `150` HUG pattern columns, and `150` augmented-pair columns, for a maximum downstream width of `450`. When `topk_budget_strict=True`, HUGIML applies one final global TopK selection across the constructed downstream candidates, so the final downstream width is capped at `topK`.
 
 With strict budgeting enabled, HUGIML applies the TopK budget during feature construction rather than after building a full expanded matrix. This keeps the practical downstream width bounded and avoids large intermediate matrices. In hybrid modes, original features are scored and preselected before prediction-time preparation, so prediction prepares only the retained original columns.
 

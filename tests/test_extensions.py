@@ -42,7 +42,9 @@ def fitted_clf(bc_data):
 
     X, y = bc_data
     Xtr, Xte, ytr, yte = train_test_split(X, y, test_size=0.25, stratify=y, random_state=42)
-    clf = HUGIMLClassifierNative(B=5, L=1, G=1e-2, topK=40)
+    # adaptive_binning=False is explicit because dependent tests assert on
+    # the exact bin edges and labels produced by B=5.
+    clf = HUGIMLClassifierNative(B=5, L=1, G=1e-2, topK=40, adaptive_binning=False)
     clf.fit(Xtr, ytr)
     return clf, Xtr, Xte, ytr, yte
 
@@ -54,13 +56,11 @@ def fitted_multiclass(wine_data):
 
     X, y = wine_data
     Xtr, Xte, ytr, yte = train_test_split(X, y, test_size=0.25, stratify=y, random_state=0)
-    clf = HUGIMLClassifierNative(B=7, L=2, G=1e-4, topK=80)
+    clf = HUGIMLClassifierNative(B=7, L=2, G=1e-4, topK=80, interaction_relaxed_mining=False)
     clf.fit(Xtr, ytr)
     return clf, Xtr, Xte, ytr, yte
 
 
-# ─────────────────────────────────────────────────────────────────────────────
-# metrics.py
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -703,7 +703,7 @@ class TestPlots:
 
         X, y = bc_data
         Xtr, Xte, ytr, yte = train_test_split(X, y, test_size=0.25, stratify=y, random_state=42)
-        clf = HUGIMLClassifierNative(B=8, L=2, G=1e-4, topK=80, adaptive_binning=True)
+        clf = HUGIMLClassifierNative(B=8, L=2, G=1e-4, topK=80, adaptive_binning=True, interaction_relaxed_mining=False)
         clf.fit(Xtr, ytr)
         feat = list(clf._bin_edges_.keys())[0]
         fig = HUGPlotter(clf).plot_marginal_bin_profile(feat)
@@ -879,7 +879,7 @@ class TestBenchmarkRunner:
 
 
 # =============================================================================
-# Missing Value Handling (v1.1.0)
+# Missing value handling
 # =============================================================================
 
 
@@ -911,7 +911,17 @@ class TestMissingValues:
         from hugiml import HUGIMLClassifierNative
 
         Xtr, Xte, ytr, yte = nan_split
-        clf = HUGIMLClassifierNative(B=5, L=2, G=1e-4, topK=80)
+        # Exercises the non-adaptive, constant-B NaN-handling scheme
+        # (_missing_col_edges_/_prebin_nan_cols), which only runs when
+        # adaptive_binning=False.
+        clf = HUGIMLClassifierNative(
+            B=5,
+            L=2,
+            G=1e-4,
+            topK=80,
+            adaptive_binning=False,
+            interaction_relaxed_mining=False,
+        )
         clf.fit(Xtr, ytr)
         return clf, Xtr, Xte, ytr, yte
 
@@ -924,7 +934,7 @@ class TestMissingValues:
         Xtr, Xte, ytr, yte = train_test_split(
             X_enc, y_enc, test_size=0.25, stratify=y_enc, random_state=42
         )
-        clf = HUGIMLClassifierNative(B=5, L=2, G=1e-4, topK=80)
+        clf = HUGIMLClassifierNative(B=5, L=2, G=1e-4, topK=80, adaptive_binning=False, interaction_relaxed_mining=False)
         clf.fit(Xtr, ytr)
         assert clf._missing_col_edges_ == {}
         assert not np.any(clf.cat_cols_mask_)
@@ -937,7 +947,11 @@ class TestMissingValues:
         Xtr, Xte, ytr, yte = train_test_split(
             X_enc, y_enc, test_size=0.25, stratify=y_enc, random_state=42
         )
-        clf_clean = HUGIMLClassifierNative(B=5, L=2, G=1e-4, topK=80)
+        # adaptive_binning=False matches nan_fitted's scheme so the
+        # comparison isolates NaN-handling cost rather than binning method.
+        clf_clean = HUGIMLClassifierNative(
+            B=5, L=2, G=1e-4, topK=80, adaptive_binning=False, interaction_relaxed_mining=False
+        )
         clf_clean.fit(Xtr, ytr)
         auc_clean = roc_auc_score(yte, clf_clean.predict_proba(Xte)[:, 1])
         clf, Xtr2, Xte2, ytr2, yte2 = nan_fitted
@@ -961,7 +975,7 @@ class TestMissingValues:
         Xtr, Xte, ytr, yte = train_test_split(
             X_enc, y_enc, test_size=0.25, stratify=y_enc, random_state=42
         )
-        clf = HUGIMLClassifierNative(B=5, L=2, G=1e-4, topK=80)
+        clf = HUGIMLClassifierNative(B=5, L=2, G=1e-4, topK=80, interaction_relaxed_mining=False)
         clf.fit(Xtr, ytr)
         Xte_nan = Xte.copy()
         Xte_nan.iloc[:10, 0] = np.nan
@@ -980,7 +994,7 @@ class TestMissingValues:
         Xtr, Xte, ytr, yte = train_test_split(
             X_enc, y_enc, test_size=0.25, stratify=y_enc, random_state=42
         )
-        clf = HUGIMLClassifierNative(B=5, L=2, G=1e-4, topK=80)
+        clf = HUGIMLClassifierNative(B=5, L=2, G=1e-4, topK=80, interaction_relaxed_mining=False)
         clf.fit(Xtr, ytr)
         Xte_nan = Xte.copy()
         Xte_nan.iloc[0, 0] = np.nan
@@ -1025,7 +1039,7 @@ class TestMissingValues:
         from hugiml import HUGIMLClassifierNative
 
         Xtr, Xte, ytr, yte = nan_split
-        clf = HUGIMLClassifierNative(B=8, L=2, G=1e-4, topK=80, adaptive_binning=True)
+        clf = HUGIMLClassifierNative(B=8, L=2, G=1e-4, topK=80, adaptive_binning=True, interaction_relaxed_mining=False)
         clf.fit(Xtr, ytr)
         assert not any("=nan" in feat.lower() for feat in clf.get_hug_features())
         assert roc_auc_score(yte, clf.predict_proba(Xte)[:, 1]) > 0.90
@@ -1037,7 +1051,7 @@ class TestMissingValues:
         rng = np.random.default_rng(0)
         X_nan = X.copy()
         X_nan[rng.random(X_nan.shape) < 0.05] = np.nan
-        clf = HUGIMLAdaptive(b_candidates=[3, 5, 7], L=2, G=1e-4, topK=80)
+        clf = HUGIMLAdaptive(b_candidates=[3, 5, 7], L=2, G=1e-4, topK=80, interaction_relaxed_mining=False)
         X_enc, y_enc = clf.prepareXy(X_nan, y)
         Xtr, Xte, ytr, yte = train_test_split(
             X_enc, y_enc, test_size=0.25, stratify=y_enc, random_state=42

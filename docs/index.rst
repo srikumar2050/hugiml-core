@@ -14,19 +14,20 @@ Why HUGIML?
 
 * **Intrinsic interpretability:** learned HUG patterns are the model representation, not an after-the-fact explanation.
 * **Regulated-domain fit:** model cards, audit artifacts, pruning trails, calibration, drift monitoring, and deployment helpers are included.
-* **Native performance:** computationally intensive mining, transaction construction, and matrix-building stages are C++ accelerated with optional OpenMP support. Version 1.1.11 builds on the v1.1.10 dashboard/workbench release with expanded governance evidence views and binary feature conversion for two-value numeric columns. Earlier 1.1.x capabilities remain available, including production/audit execution modes, fast adaptive-binning tuning, higher-order interaction selection, the native ``L=2`` hot path, augmented-pair operations, strict global ``topK`` budgeting, compact native transaction memory, and fused adaptive ``L=1`` execution.
+* **Native performance:** computationally intensive mining, transaction construction, interaction-information scoring, pair-aware adaptive binning, and matrix-building stages are C++ accelerated with optional OpenMP support. Version 1.1.12 builds on v1.1.11 with interaction-information augmented-pair source selection and interaction-relaxed mining. Earlier 1.1.x capabilities remain available, including production/audit execution modes, fast adaptive-binning tuning, higher-order interaction selection, the native ``L=2`` hot path, augmented-pair operations, strict global ``topK`` budgeting, compact native transaction memory, and fused adaptive ``L=1`` execution.
 * **Python ergonomics:** the estimator follows the scikit-learn API and works with pandas DataFrames or NumPy arrays.
 
 
 Current release focus
 ---------------------
 
-The 1.1.11 release builds on v1.1.10 with two practical upgrades for review workflows and feature preparation:
+The 1.1.12 release focuses on interaction-aware feature discovery while keeping v1.1.11 behavior available:
 
-* Governance Studio adds richer evidence panels for adaptive binning, augmented pairs, feature families, pattern coverage, validation, monitoring, and governance summaries.
-* Numeric two-value columns are converted into categorical indicator features during preparation so binary inputs are represented as explicit presence/absence evidence instead of numeric intervals.
+* Augmented pairs now default to interaction-information source selection. ``augmented_pair_mode="marginal_ig"`` keeps the v1.1.11 source-ranking behavior.
+* ``interaction_relaxed_mining=True`` lets interaction-information survivor sources enter native pattern mining without adding pair-operator feature columns.
+* Pair-aware adaptive-binning metadata and survivor-led audit fields make the new interaction paths visible in governance and feature-importance outputs.
 
-The broader v1.1.10 workbench, native-backend diagnostics, public ``check_native()`` helper, cleaned package exports, and backward-compatible classifier names remain available.
+The broader v1.1.11 dashboard evidence views, binary feature conversion, native-backend diagnostics, public ``check_native()`` helper, cleaned package exports, and backward-compatible classifier names remain available.
 
 Installation
 ------------

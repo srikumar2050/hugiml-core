@@ -182,3 +182,54 @@ def test_dashboard_tests_are_discovered_and_core_coverage_gate_is_preserved() ->
     assert "*/dashboard/*" in coverage_run["omit"]
     assert "src/hugiml/dashboard/*" in coverage_report["omit"]
     assert coverage_report["fail_under"] >= 73
+
+
+def test_hugiml_artifact_tables_include_survivor_led_audit_columns() -> None:
+    src = _source()
+    assert "survivor_led" in src
+    assert "survivor_features" in src
+    assert "survivor_feature_count" in src
+    assert "pattern_origin" in src
+    assert "Survivor-led pattern audit" not in src
+
+
+def test_hugiml_advanced_exposes_new_interaction_parameters() -> None:
+    src = _source()
+    assert "Augmented pair transforms" in src
+    assert "Augmented pair scoring" in src
+    assert "Augmented pair scoring values" in src
+    assert "interaction_information" in src
+    assert "marginal_ig" in src
+    assert "Interaction relaxed mining" in src
+    assert "Interaction relaxed values" in src
+    assert "Augmented source count" in src
+    assert "Max pair features" in src
+    assert "Relaxed source count" in src
+    assert "Interaction-information partner count" in src
+    assert "wb_hugiml_augmented_pair_mode_grid" in src
+    assert "wb_hugiml_interaction_relaxed_feature_size_grid" in src
+
+
+def test_hugiml_guided_keeps_core_grid_and_advanced_filters_interaction_paths() -> None:
+    src = _source()
+    guided = src[src.index("if mode == \"Guided\":"):src.index("params[\"adaptive_binning\"] = st.toggle")]
+    assert "Augmented pair transforms" not in guided
+    assert "Interaction relaxed mining" not in guided
+    assert "Augmented pair scoring" not in guided
+    assert "_filter_hugiml_interaction_configs(configs)" in src
+    assert "invalid HUGIML interaction-path candidate" in src
+
+
+def test_dashboard_runner_preserves_new_hugiml_params_for_reruns() -> None:
+    src = _source(RUNNER)
+    for token in (
+        "augmented_pair_transforms",
+        "augmented_pair_mode",
+        "aug_feature_size",
+        "max_pair_features",
+        "ii_partner_size",
+        "interaction_relaxed_mining",
+        "interaction_relaxed_feature_size",
+    ):
+        assert token in src
+    assert "_HUGIML_PARAM_KEYS" in src

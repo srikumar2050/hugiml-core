@@ -13,7 +13,9 @@ class _CoefEstimator:
 
 
 def _fake_fitted_classifier_with_augmented_ops():
-    clf = HUGIMLClassifierNative(B=4, L=2, feature_mode="patterns_only")
+    clf = HUGIMLClassifierNative(
+        B=4, L=2, feature_mode="patterns_only", interaction_relaxed_mining=False
+    )
     clf.classes_ = np.array([0, 1])
     clf.n_features_in_ = 2
     clf.feature_names_in_ = ["col0", "col1"]
@@ -26,7 +28,7 @@ def _fake_fitted_classifier_with_augmented_ops():
     clf.x_train_downstream_ = csr_matrix(np.ones((5, 2), dtype=np.float32))
     clf.model_ = SimpleNamespace(named_steps={"clf": _CoefEstimator([0.8, -0.4])})
     clf.augmented_pair_transforms = True
-    clf.augmented_pair_max_features = 2
+    clf.aug_feature_size = 2
     clf.augmented_pair_selected_features_ = ["col0", "col1"]
     clf.augmented_pair_transforms_enabled_ = True
     clf.augmented_pair_config_ = {"enabled": True, "ops": ["sum", "signed_difference"]}
@@ -100,10 +102,10 @@ def test_pickle_preserves_augmented_pair_metadata_for_new_ops():
 
 
 def test_native_block_state_contains_opcode_and_schema_fields_for_new_ops():
-    block = NativeAugmentedPairTransformBlock(max_features=2)
+    block = NativeAugmentedPairTransformBlock(aug_feature_size=2)
     block.input_feature_names_ = ["col0", "col1"]
-    block.selected_ig_features_ = ["col0", "col1"]
-    block.selected_ig_scores_ = {"col0": 0.5, "col1": 0.4}
+    block.selected_aug_features_ = ["col0", "col1"]
+    block.selected_aug_scores_ = {"col0": 0.5, "col1": 0.4}
     block.input_bin_edges_ = {"col0": [0, 1], "col1": [0, 1]}
     block.source_observed_medians_ = {"col0": 0.5, "col1": 0.5}
     block.source_observed_medians_array_ = np.array([0.5, 0.5])

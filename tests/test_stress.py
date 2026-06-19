@@ -62,7 +62,7 @@ def _quick_clf(**kw):
     # efficiency.  TestBitmapAtScale.test_build_train_matrix_large calls
     # build_train_matrix on clf.td_ which requires patterns to be produced
     # via the slow path so that row indices are non-empty.
-    defaults = dict(B=4, L=1, G=0.0, topK=30, use_hotpath=False)
+    defaults = dict(B=4, L=1, G=0.0, topK=30, use_hotpath=False, interaction_relaxed_mining=False)
     defaults.update(kw)
     return HUGIMLClassifierNative(**defaults)
 
@@ -256,7 +256,9 @@ class TestMiningTimeout:
         from hugiml import HUGIMLClassifierNative
 
         X, y = _make_dataset(400, 12, seed=99)
-        clf = HUGIMLClassifierNative(B=4, L=2, G=0.0, topK=100, max_fit_seconds=10)
+        clf = HUGIMLClassifierNative(
+            B=4, L=2, G=0.0, topK=100, max_fit_seconds=10, interaction_relaxed_mining=False
+        )
         X_p, y_p = clf.prepareXy(X.reset_index(drop=True), y.reset_index(drop=True))
         t0 = time.perf_counter()
         clf.fit(X_p, y_p)
@@ -535,7 +537,7 @@ class TestL2Stress:
         t0 = time.perf_counter()
         X, y = _make_dataset(n, p, seed=1234)
         X_tr, X_te, y_tr, y_te = train_test_split(X, y, test_size=0.2, random_state=0)
-        clf = HUGIMLClassifierNative(B=4, L=2, G=0.0, topK=50, max_fit_seconds=30)
+        clf = HUGIMLClassifierNative(B=4, L=2, G=0.0, topK=50, max_fit_seconds=30, interaction_relaxed_mining=False)
         X_p, y_p = clf.prepareXy(X_tr.reset_index(drop=True), y_tr.reset_index(drop=True))
         clf.fit(X_p, y_p)
         elapsed_fit = time.perf_counter() - t0
@@ -554,7 +556,7 @@ class TestL2Stress:
 
         X, y = _make_dataset(400, 10, seed=77)
         X_tr, _, y_tr, _ = train_test_split(X, y, test_size=0.2, random_state=0)
-        clf = HUGIMLClassifierNative(B=4, L=2, G=0.0, topK=60, max_fit_seconds=20)
+        clf = HUGIMLClassifierNative(B=4, L=2, G=0.0, topK=60, max_fit_seconds=20, interaction_relaxed_mining=False)
         X_p, y_p = clf.prepareXy(X_tr.reset_index(drop=True), y_tr.reset_index(drop=True))
 
         gc.collect()
@@ -577,7 +579,7 @@ class TestL2Stress:
 
         X, y = _make_dataset(500, 8, seed=42)
         X_tr, X_te, y_tr, _ = train_test_split(X, y, test_size=0.2, random_state=0)
-        clf = HUGIMLClassifierNative(B=4, L=2, G=0.0, topK=80)
+        clf = HUGIMLClassifierNative(B=4, L=2, G=0.0, topK=80, interaction_relaxed_mining=False)
         X_p, y_p = clf.prepareXy(X_tr.reset_index(drop=True), y_tr.reset_index(drop=True))
         clf.fit(X_p, y_p)
 
@@ -595,7 +597,7 @@ class TestL2Stress:
 
         X, y = _make_dataset(400, 8, seed=55)
         X_tr, X_te, y_tr, _ = train_test_split(X, y, test_size=0.25, random_state=0)
-        clf = HUGIMLClassifierNative(B=4, L=2, G=0.0, topK=40, max_fit_seconds=20)
+        clf = HUGIMLClassifierNative(B=4, L=2, G=0.0, topK=40, max_fit_seconds=20, interaction_relaxed_mining=False)
         X_p, y_p = clf.prepareXy(X_tr.reset_index(drop=True), y_tr.reset_index(drop=True))
         clf.fit(X_p, y_p)
         proba = clf.predict_proba(X_te.reset_index(drop=True))
@@ -614,7 +616,7 @@ class TestL2Stress:
 
         X, y = _make_dataset(300, 8, seed=99)
         X_tr, X_te, y_tr, _ = train_test_split(X, y, test_size=0.2, random_state=0)
-        clf = HUGIMLClassifierNative(B=4, L=2, G=0.0, topK=30, max_fit_seconds=15)
+        clf = HUGIMLClassifierNative(B=4, L=2, G=0.0, topK=30, max_fit_seconds=15, interaction_relaxed_mining=False)
         X_p, y_p = clf.prepareXy(X_tr.reset_index(drop=True), y_tr.reset_index(drop=True))
         clf.fit(X_p, y_p)
         preds_before = clf.predict(X_te.reset_index(drop=True))
@@ -751,7 +753,7 @@ class TestHighCardinalityCategorical:
 
         X, y = self._make_highcard_dataset(n=300, n_cat_cols=2, cardinality=30, n_num_cols=4)
         X_tr, X_te, y_tr, _ = train_test_split(X, y, test_size=0.2, random_state=0)
-        clf = HUGIMLClassifierNative(B=4, L=2, G=0.0, topK=40, max_fit_seconds=30)
+        clf = HUGIMLClassifierNative(B=4, L=2, G=0.0, topK=40, max_fit_seconds=30, interaction_relaxed_mining=False)
         X_p, y_p = clf.prepareXy(X_tr.reset_index(drop=True), y_tr.reset_index(drop=True))
         t0 = time.perf_counter()
         try:

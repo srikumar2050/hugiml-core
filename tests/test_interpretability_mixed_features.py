@@ -25,9 +25,13 @@ def _fit_mixed(strict=False):
         topK=20,
         feature_mode="original_plus_patterns",
         augmented_pair_transforms=True,
-        augmented_pair_max_features=6,
+        aug_feature_size=6,
         topk_budget_strict=strict,
         max_fit_seconds=5,
+        # This file specifically exercises the augmented-pair path
+        # (augmented_pair_transforms=True above); interaction_relaxed_mining
+        # defaults to True and is mutually exclusive with it at L >= 2.
+        interaction_relaxed_mining=False,
     )
     clf.fit(X, y)
     return clf, X, y
@@ -292,7 +296,7 @@ def test_augmented_pair_raw_scale_effects_are_exposed_and_correct():
     if not prod.empty:
         assert (
             prod["unit_effect_interpretation"]
-            .str.contains("does not have a fixed marginal effect", regex=False)
+            .str.contains("does not have a constant marginal effect", regex=False)
             .all()
         )
     absdiff = effects[effects["operation"] == "absolute_difference"]

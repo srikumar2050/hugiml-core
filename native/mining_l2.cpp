@@ -96,6 +96,34 @@ static void l2_save(std::vector<PatternEntry>& heap,
     }
 }
 
+// Relaxed-survivor patterns are ranked and capped by IG, not utility.
+// This lets low-support, high-information interaction pairs retain capacity
+// in the relaxed track.
+struct L2IgMinHeapCmp {
+    bool operator()(const PatternEntry& a, const PatternEntry& b) const {
+        return a.ig > b.ig;
+    }
+};
+
+static void l2_save_by_ig(std::vector<PatternEntry>& heap,
+                          double& minIg,
+                          int K,
+                          const std::vector<int>& items,
+                          double utility,
+                          double ig) {
+    PatternEntry pe{utility, items, ig};
+    if (static_cast<int>(heap.size()) < K) {
+        heap.push_back(pe);
+        std::push_heap(heap.begin(), heap.end(), L2IgMinHeapCmp{});
+        if (static_cast<int>(heap.size()) == K) minIg = heap.front().ig;
+    } else if (ig > minIg) {
+        std::pop_heap(heap.begin(), heap.end(), L2IgMinHeapCmp{});
+        heap.back() = pe;
+        std::push_heap(heap.begin(), heap.end(), L2IgMinHeapCmp{});
+        minIg = heap.front().ig;
+    }
+}
+
 static size_t fnv1a_tids(const std::vector<int32_t>& v) {
     size_t h = 14695981039346656037ULL;
     for (int32_t x : v) {
@@ -510,6 +538,609 @@ std::vector<PatternEntry> mine_patterns_l2_cpp(
 #endif
 
     return heap;
+}
+
+// ── Extended: augmented_patterns relaxed-gate L2 hot path ─────────────
+//
+// Same exact-intersection L2 algorithm as mine_patterns_l2_cpp. The only
+// difference: items whose source column is in relaxed_cols are exempt from
+// every G-based gate (singleton save, extension guard, pair ig check) and
+// from the RIU/TWU-based item-set seed filter that would otherwise drop a
+// near-zero-utility item before it is ever scored. This mirrors, inside
+// native mining, the same "let interaction-information survivors through
+// regardless of marginal signal" idea already used to pick augmented-pair
+// source columns — but without generating any sum/product/etc. operator
+// features: relaxed columns are simply admitted as ordinary mining items
+// and combine with everything else through the normal pairwise loop.
+//
+// This is a standalone function (not a parameter added to the existing
+// mine_patterns_l2_cpp) so the well-tested default hot path is untouched;
+// it is intended purely to validate the idea before deciding whether to
+// fold it into the production entry points.
+//
+// Budget contract: K is the caller's topK budget (the same K everywhere
+// else in this codebase governs downstream matrix width / memory). The
+// relaxed-survivor track is a CARVE-OUT of K, not an addition to it:
+//   ordinary_K = K - relaxed_quota
+//   relaxed_quota slots are reserved for IG-ranked relaxed-survivor patterns
+// so total output size is always <= K, matching topK semantics elsewhere
+// in the pipeline (no silent 2x widening of the downstream feature matrix).
+//
+// Routing is mutually exclusive, not additive: any pattern touching at
+// least one relaxed item is routed ONLY to the relaxed (IG-ranked) heap,
+// even if it would also have independently cleared G as an ordinary
+// pattern. Without this exclusivity a single pattern could occupy one
+// slot in each heap, which silently re-introduces the K + relaxed_quota
+// overshoot this carve-out exists to prevent.
+AugmentedPatternsResult mine_patterns_l2_augmented_patterns_cpp(
+    const TransactionDataCpp& td,
+    const std::vector<int>&   ytrain,
+    int n_cls, int K, double G,
+    const std::vector<int>&   relaxed_cols,
+    int relaxed_quota,
+    double timeout_s)
+{
+    using Clock = std::chrono::steady_clock;
+    using TimePoint = Clock::time_point;
+    static constexpr int CHECK_INTERVAL = 256;
+
+    // relaxed_quota carves a slice out of K; it never adds to it.
+    // relaxed_quota <= 0 means "no reservation" (relaxed_heap stays empty,
+    // behaviourally identical to mine_patterns_l2_cpp once relaxed_cols is
+    // also empty). relaxed_quota >= K is clamped so at least one ordinary
+    // slot always remains.
+    if (relaxed_quota < 0) relaxed_quota = 0;
+    if (relaxed_quota > K - 1 && K > 1) relaxed_quota = K - 1;
+    if (relaxed_quota > K) relaxed_quota = K;
+    const int ordinary_K = K - relaxed_quota;
+
+    bool has_deadline = (timeout_s > 0.0);
+    TimePoint deadline_tp = {};
+
+    if (has_deadline) {
+        deadline_tp = Clock::now() +
+            std::chrono::duration_cast<Clock::duration>(
+                std::chrono::duration<double>(timeout_s));
+    }
+    auto timed_out = [&]() -> bool {
+        return has_deadline && Clock::now() >= deadline_tp;
+    };
+
+    const int n_train = static_cast<int>(ytrain.size());
+    const int n_items = static_cast<int>(td.item_twu.size());
+
+    // is_relaxed_item[item-1] precomputed once via item_col lookup.
+    std::vector<uint8_t> is_relaxed_item(static_cast<size_t>(n_items), 0);
+    if (!relaxed_cols.empty() && !td.item_col.empty()) {
+        std::unordered_set<int> relaxed_set(relaxed_cols.begin(), relaxed_cols.end());
+        for (int iid = 1; iid <= n_items; iid++) {
+            const int col = td.item_col[static_cast<size_t>(iid - 1)];
+            if (relaxed_set.count(col)) is_relaxed_item[static_cast<size_t>(iid - 1)] = 1;
+        }
+    }
+    auto relaxed = [&](int item) -> bool {
+        if (item <= 0 || item > n_items) return false;
+        return is_relaxed_item[static_cast<size_t>(item - 1)] != 0;
+    };
+
+    double minU = td.riu_thresh(K);
+
+    // Item-set seed filter: ordinarily td.item_twu[iid-1] >= minU. Relaxed
+    // items bypass this so a near-zero-utility interaction survivor is not
+    // dropped before it can ever be scored by the G-based checks below.
+    std::vector<int> sorted_items;
+    sorted_items.reserve(static_cast<size_t>(n_items));
+    for (int iid = 1; iid <= n_items; iid++) {
+        if (td.item_twu[static_cast<size_t>(iid - 1)] >= minU || relaxed(iid))
+            sorted_items.push_back(iid);
+    }
+    std::sort(sorted_items.begin(), sorted_items.end(),
+              [&](int a, int b) {
+                  double ta = td.item_twu[static_cast<size_t>(a - 1)];
+                  double tb = td.item_twu[static_cast<size_t>(b - 1)];
+                  return (ta < tb) || (ta == tb && a < b);
+              });
+
+    const int m = static_cast<int>(sorted_items.size());
+    if (m == 0) return AugmentedPatternsResult{};
+
+    std::vector<int> ci_for_item(static_cast<size_t>(n_items) + 1, -1);
+    for (int pos = 0; pos < m; pos++)
+        ci_for_item[static_cast<size_t>(sorted_items[pos])] = pos;
+
+    std::vector<L2UL> uls(static_cast<size_t>(m));
+    for (int ci = 0; ci < m; ci++) uls[static_cast<size_t>(ci)].item = sorted_items[ci];
+
+    std::vector<int> cnt_global(n_cls, 0);
+    for (int lbl : ytrain)
+        if (lbl >= 0 && lbl < n_cls) cnt_global[static_cast<size_t>(lbl)]++;
+
+    std::vector<int> loop_counts(static_cast<size_t>(m), 0);
+    std::vector<int> cnt_item(static_cast<size_t>(m) * static_cast<size_t>(n_cls), 0);
+
+    int loop_ctr = 0;
+    const int n_tx = static_cast<int>(td.transactions.size());
+    for (int tid = 0; tid < n_tx; tid++) {
+        if (has_deadline && ((++loop_ctr & (CHECK_INTERVAL - 1)) == 0) && timed_out())
+            return AugmentedPatternsResult{};
+
+        const Trans& trans = td.transactions[static_cast<size_t>(tid)];
+        if (trans.size() == 1 && trans[0] == -1) continue;
+
+        std::vector<std::pair<int, double>> active;
+        active.reserve(trans.size());
+        for (size_t pos = 0; pos < trans.size(); ++pos) {
+            int it = trans[pos];
+            if (it <= 0 || it > n_items) continue;
+            if (ci_for_item[static_cast<size_t>(it)] < 0) continue;
+            double u = 0.0;
+            if (static_cast<size_t>(tid) < td.transaction_utils.size() &&
+                pos < td.transaction_utils[static_cast<size_t>(tid)].size()) {
+                u = td.transaction_utils[static_cast<size_t>(tid)][pos];
+            } else if (static_cast<size_t>(it - 1) < td.item_iu.size()) {
+                u = td.item_iu[static_cast<size_t>(it - 1)];
+            }
+            active.push_back({it, u});
+        }
+        if (active.empty()) continue;
+
+        std::sort(active.begin(), active.end(), [&](auto& a, auto& b) {
+            return ci_for_item[static_cast<size_t>(a.first)] <
+                   ci_for_item[static_cast<size_t>(b.first)];
+        });
+
+        double rem = 0.0;
+        const int lbl = (tid < static_cast<int>(ytrain.size())) ? ytrain[static_cast<size_t>(tid)] : -1;
+        const bool lbl_valid = (lbl >= 0 && lbl < n_cls);
+        for (int ai = static_cast<int>(active.size()) - 1; ai >= 0; --ai) {
+            const int it = active[static_cast<size_t>(ai)].first;
+            const double u  = active[static_cast<size_t>(ai)].second;
+            const int ci = ci_for_item[static_cast<size_t>(it)];
+            L2UL& ul = uls[static_cast<size_t>(ci)];
+            ul.sI += u;
+            ul.sR += rem;
+            ul.tid.push_back(static_cast<int32_t>(tid));
+            ul.iu.push_back(u);
+            loop_counts[static_cast<size_t>(ci)]++;
+            if (lbl_valid)
+                cnt_item[static_cast<size_t>(ci) * static_cast<size_t>(n_cls) + static_cast<size_t>(lbl)]++;
+            rem += u;
+        }
+    }
+
+    for (int ci = 0; ci < m; ci++) {
+        std::vector<int> cnt_in(
+            cnt_item.data() + static_cast<size_t>(ci) * static_cast<size_t>(n_cls),
+            cnt_item.data() + static_cast<size_t>(ci + 1) * static_cast<size_t>(n_cls));
+        uls[static_cast<size_t>(ci)].ig = l2_ig_global(
+            cnt_global, cnt_in, loop_counts[static_cast<size_t>(ci)], n_train, n_cls);
+    }
+
+    std::vector<PatternEntry> heap;
+    heap.reserve(static_cast<size_t>(ordinary_K) + 1);
+    std::vector<PatternEntry> relaxed_heap;
+    relaxed_heap.reserve(static_cast<size_t>(relaxed_quota) + 1);
+    double minIg = -std::numeric_limits<double>::infinity();
+
+    // Singleton save. Mutually exclusive by design so the combined output
+    // never exceeds K (ordinary_K + relaxed_quota == K):
+    //   - a relaxed item goes to relaxed_heap (IG-ranked), period.
+    //   - a non-relaxed item that clears G goes to the ordinary heap
+    //     (utility-ranked), exactly as in mine_patterns_l2_cpp.
+    // A relaxed item that also independently clears G is NOT additionally
+    // saved to the ordinary heap — it would otherwise occupy one slot in
+    // each track for a single pattern, silently inflating the K budget.
+    for (int ci = m - 1; ci >= 0; --ci) {
+        const L2UL& ux = uls[static_cast<size_t>(ci)];
+        const bool ux_relaxed = relaxed(ux.item);
+        if (ux_relaxed) {
+            if (ux.sI > 0.0 && relaxed_quota > 0)
+                l2_save_by_ig(relaxed_heap, minIg, relaxed_quota,
+                              std::vector<int>{ux.item}, ux.sI, ux.ig);
+            continue;
+        }
+        const bool passes_g = ux.ig > G;
+        if (ux.sI >= minU && ux.sI > 0.0 && passes_g && ordinary_K > 0)
+            l2_save(heap, minU, ordinary_K, std::vector<int>{ux.item}, ux.sI, ux.ig);
+    }
+
+    // Serial pair construction (no OpenMP in this bounded path — kept
+    // simple and easy to audit; revisit for performance once validated).
+    for (int i = m - 2; i >= 0; --i) {
+        if (has_deadline && ((++loop_ctr & (CHECK_INTERVAL - 1)) == 0) && timed_out())
+            return AugmentedPatternsResult{heap, relaxed_heap};
+
+        const L2UL& ux = uls[static_cast<size_t>(i)];
+        const bool ux_relaxed = relaxed(ux.item);
+        // Extension guard: explore from ux if it clears G OR is relaxed
+        // (relaxed items must still reach the pair loop to be scored,
+        // even though their own singleton ig may sit below G).
+        if (!(ux.ig > G) && !ux_relaxed) continue;
+        // Growth-bound exemption for relaxed items -- see the matching
+        // comment in mine_patterns_l2_augmented_patterns_v2_cpp below for
+        // why this is needed (without it, a relaxed item could pass the
+        // gate above and still be pruned here before reaching the pair
+        // loop). This function is superseded by the v2 (overgenerate then
+        // IG-refilter) design and is not the one any current caller is
+        // expected to use, but it remains directly callable, so the same
+        // exemption is applied here for consistency.
+        if (!ux_relaxed && (ux.sI + ux.sR < minU || ux.sI <= 0.0)) continue;
+        if (ux_relaxed && ux.sI <= 0.0) continue;
+
+        std::vector<L2Child>       ext;
+        std::unordered_set<size_t> ext_cov_hashes;
+
+        for (int j = i + 1; j < m; j++) {
+            if (has_deadline && ((++loop_ctr & (CHECK_INTERVAL - 1)) == 0) && timed_out())
+                return AugmentedPatternsResult{heap, relaxed_heap};
+
+            const L2UL& uy = uls[static_cast<size_t>(j)];
+            if (same_feature_l2(td.item_col, ux.item, uy.item))
+                continue;
+            const bool uy_relaxed = relaxed(uy.item);
+            if (!(uy.ig > G) && !uy_relaxed) continue;
+            if (ux.tid.empty() || uy.tid.empty()) continue;
+
+            std::vector<int32_t> c_tid;
+            std::vector<int> cnt_pair(n_cls, 0);
+            double c_sI = 0.0;
+            c_tid.reserve(std::min(ux.tid.size(), uy.tid.size()));
+
+            size_t xi = 0, yi = 0;
+            while (xi < ux.tid.size() && yi < uy.tid.size()) {
+                int32_t xt = ux.tid[xi];
+                int32_t yt = uy.tid[yi];
+                if (xt < yt) { ++xi; continue; }
+                if (yt < xt) { ++yi; continue; }
+
+                c_tid.push_back(xt);
+                c_sI += ux.iu[xi] + uy.iu[yi];
+                const int lbl = ytrain[static_cast<size_t>(xt)];
+                if (lbl >= 0 && lbl < n_cls) cnt_pair[static_cast<size_t>(lbl)]++;
+                ++xi; ++yi;
+            }
+            if (c_tid.empty()) continue;
+
+            const double c_ig = l2_ig_global(
+                cnt_global, cnt_pair, static_cast<int>(c_tid.size()), n_train, n_cls);
+            const bool pair_relaxed = ux_relaxed || uy_relaxed;
+            // Pair gate: relaxed if EITHER source item is a relaxed survivor.
+            // This is the key relaxation that lets a near-zero-marginal-IG
+            // interaction survivor combine with any partner and still be
+            // scored. Pairs that clear neither G nor relaxation are dropped
+            // entirely (same as the ordinary hot path).
+            if (!(c_ig > G) && !pair_relaxed) continue;
+
+            const size_t h = fnv1a_tids(c_tid);
+            bool duplicate_tids = false;
+            if (ext_cov_hashes.count(h)) {
+                for (const L2Child& existing : ext) {
+                    const int ey = existing.item_y;
+                    if (ey <= 0 || ey > n_items) continue;
+                    const int eci = ci_for_item[static_cast<size_t>(ey)];
+                    if (eci < 0 || eci >= m) continue;
+                    const L2UL& euy = uls[static_cast<size_t>(eci)];
+                    std::vector<int32_t> e_tid;
+                    e_tid.reserve(std::min(ux.tid.size(), euy.tid.size()));
+                    size_t exi = 0, eyi = 0;
+                    while (exi < ux.tid.size() && eyi < euy.tid.size()) {
+                        if (ux.tid[exi] < euy.tid[eyi]) { ++exi; continue; }
+                        if (euy.tid[eyi] < ux.tid[exi]) { ++eyi; continue; }
+                        e_tid.push_back(ux.tid[exi]);
+                        ++exi; ++eyi;
+                    }
+                    if (e_tid == c_tid) { duplicate_tids = true; break; }
+                }
+            }
+            if (duplicate_tids) continue;
+            ext_cov_hashes.insert(h);
+
+            ext.push_back({c_sI, c_ig, ux.item, uy.item});
+        }
+
+        for (int e = static_cast<int>(ext.size()) - 1; e >= 0; --e) {
+            const L2Child& ch = ext[static_cast<size_t>(e)];
+            const bool pair_relaxed = ux_relaxed || relaxed(ch.item_y);
+            if (pair_relaxed) {
+                if (ch.sI > 0.0 && relaxed_quota > 0)
+                    l2_save_by_ig(relaxed_heap, minIg, relaxed_quota,
+                                 std::vector<int>{ch.item_x, ch.item_y}, ch.sI, ch.ig);
+                continue;
+            }
+            const bool passes_g = ch.ig > G;
+            if (ch.sI >= minU && ch.sI > 0.0 && passes_g && ordinary_K > 0)
+                l2_save(heap, minU, ordinary_K,
+                        std::vector<int>{ch.item_x, ch.item_y}, ch.sI, ch.ig);
+        }
+    }
+
+    return AugmentedPatternsResult{heap, relaxed_heap};
+}
+
+// ── Extended v2: single-budget overgenerate-then-IG-refilter ──────────
+//
+// Same item-level relaxation as mine_patterns_l2_augmented_patterns_cpp
+// (relaxed_cols items bypass G-based and RIU/TWU-seed gates). The
+// difference is purely in how the K budget is spent: instead of carving a
+// constant relaxed_quota out of K up front, this variant runs the ordinary
+// (utility-ranked) heap and the relaxed-survivor (IG-ranked) heap each at
+// FULL capacity K, producing up to 2K raw candidates total, then merges
+// both pools and keeps only the global top-K by IG. No relaxed_quota
+// parameter is needed -- the "how much budget should go to rescued
+// survivors" question is answered empirically per-dataset by IG ranking
+// rather than constant in advance.
+//
+// Routing into the two intermediate heaps is still mutually exclusive
+// (a pattern touching a relaxed item only ever enters the relaxed pool),
+// purely so a pattern cannot be double-generated; the final cap is a
+// single IG-sorted truncation over the union, not per-pool.
+std::vector<PatternEntry> mine_patterns_l2_augmented_patterns_v2_cpp(
+    const TransactionDataCpp& td,
+    const std::vector<int>&   ytrain,
+    int n_cls, int K, double G,
+    const std::vector<int>&   relaxed_cols,
+    double timeout_s)
+{
+    using Clock = std::chrono::steady_clock;
+    using TimePoint = Clock::time_point;
+    static constexpr int CHECK_INTERVAL = 256;
+
+    bool has_deadline = (timeout_s > 0.0);
+    TimePoint deadline_tp = {};
+    if (has_deadline) {
+        deadline_tp = Clock::now() +
+            std::chrono::duration_cast<Clock::duration>(
+                std::chrono::duration<double>(timeout_s));
+    }
+    auto timed_out = [&]() -> bool {
+        return has_deadline && Clock::now() >= deadline_tp;
+    };
+
+    const int n_train = static_cast<int>(ytrain.size());
+    const int n_items = static_cast<int>(td.item_twu.size());
+
+    std::vector<uint8_t> is_relaxed_item(static_cast<size_t>(n_items), 0);
+    if (!relaxed_cols.empty() && !td.item_col.empty()) {
+        std::unordered_set<int> relaxed_set(relaxed_cols.begin(), relaxed_cols.end());
+        for (int iid = 1; iid <= n_items; iid++) {
+            const int col = td.item_col[static_cast<size_t>(iid - 1)];
+            if (relaxed_set.count(col)) is_relaxed_item[static_cast<size_t>(iid - 1)] = 1;
+        }
+    }
+    auto relaxed = [&](int item) -> bool {
+        if (item <= 0 || item > n_items) return false;
+        return is_relaxed_item[static_cast<size_t>(item - 1)] != 0;
+    };
+
+    double minU = td.riu_thresh(K);
+
+    std::vector<int> sorted_items;
+    sorted_items.reserve(static_cast<size_t>(n_items));
+    for (int iid = 1; iid <= n_items; iid++) {
+        if (td.item_twu[static_cast<size_t>(iid - 1)] >= minU || relaxed(iid))
+            sorted_items.push_back(iid);
+    }
+    std::sort(sorted_items.begin(), sorted_items.end(),
+              [&](int a, int b) {
+                  double ta = td.item_twu[static_cast<size_t>(a - 1)];
+                  double tb = td.item_twu[static_cast<size_t>(b - 1)];
+                  return (ta < tb) || (ta == tb && a < b);
+              });
+
+    const int m = static_cast<int>(sorted_items.size());
+    if (m == 0) return {};
+
+    std::vector<int> ci_for_item(static_cast<size_t>(n_items) + 1, -1);
+    for (int pos = 0; pos < m; pos++)
+        ci_for_item[static_cast<size_t>(sorted_items[pos])] = pos;
+
+    std::vector<L2UL> uls(static_cast<size_t>(m));
+    for (int ci = 0; ci < m; ci++) uls[static_cast<size_t>(ci)].item = sorted_items[ci];
+
+    std::vector<int> cnt_global(n_cls, 0);
+    for (int lbl : ytrain)
+        if (lbl >= 0 && lbl < n_cls) cnt_global[static_cast<size_t>(lbl)]++;
+
+    std::vector<int> loop_counts(static_cast<size_t>(m), 0);
+    std::vector<int> cnt_item(static_cast<size_t>(m) * static_cast<size_t>(n_cls), 0);
+
+    int loop_ctr = 0;
+    const int n_tx = static_cast<int>(td.transactions.size());
+    for (int tid = 0; tid < n_tx; tid++) {
+        if (has_deadline && ((++loop_ctr & (CHECK_INTERVAL - 1)) == 0) && timed_out())
+            return {};
+
+        const Trans& trans = td.transactions[static_cast<size_t>(tid)];
+        if (trans.size() == 1 && trans[0] == -1) continue;
+
+        std::vector<std::pair<int, double>> active;
+        active.reserve(trans.size());
+        for (size_t pos = 0; pos < trans.size(); ++pos) {
+            int it = trans[pos];
+            if (it <= 0 || it > n_items) continue;
+            if (ci_for_item[static_cast<size_t>(it)] < 0) continue;
+            double u = 0.0;
+            if (static_cast<size_t>(tid) < td.transaction_utils.size() &&
+                pos < td.transaction_utils[static_cast<size_t>(tid)].size()) {
+                u = td.transaction_utils[static_cast<size_t>(tid)][pos];
+            } else if (static_cast<size_t>(it - 1) < td.item_iu.size()) {
+                u = td.item_iu[static_cast<size_t>(it - 1)];
+            }
+            active.push_back({it, u});
+        }
+        if (active.empty()) continue;
+
+        std::sort(active.begin(), active.end(), [&](auto& a, auto& b) {
+            return ci_for_item[static_cast<size_t>(a.first)] <
+                   ci_for_item[static_cast<size_t>(b.first)];
+        });
+
+        double rem = 0.0;
+        const int lbl = (tid < static_cast<int>(ytrain.size())) ? ytrain[static_cast<size_t>(tid)] : -1;
+        const bool lbl_valid = (lbl >= 0 && lbl < n_cls);
+        for (int ai = static_cast<int>(active.size()) - 1; ai >= 0; --ai) {
+            const int it = active[static_cast<size_t>(ai)].first;
+            const double u  = active[static_cast<size_t>(ai)].second;
+            const int ci = ci_for_item[static_cast<size_t>(it)];
+            L2UL& ul = uls[static_cast<size_t>(ci)];
+            ul.sI += u;
+            ul.sR += rem;
+            ul.tid.push_back(static_cast<int32_t>(tid));
+            ul.iu.push_back(u);
+            loop_counts[static_cast<size_t>(ci)]++;
+            if (lbl_valid)
+                cnt_item[static_cast<size_t>(ci) * static_cast<size_t>(n_cls) + static_cast<size_t>(lbl)]++;
+            rem += u;
+        }
+    }
+
+    for (int ci = 0; ci < m; ci++) {
+        std::vector<int> cnt_in(
+            cnt_item.data() + static_cast<size_t>(ci) * static_cast<size_t>(n_cls),
+            cnt_item.data() + static_cast<size_t>(ci + 1) * static_cast<size_t>(n_cls));
+        uls[static_cast<size_t>(ci)].ig = l2_ig_global(
+            cnt_global, cnt_in, loop_counts[static_cast<size_t>(ci)], n_train, n_cls);
+    }
+
+    // Both pools run at FULL capacity K -- this is the only budget
+    // difference from the carve-out variant.
+    std::vector<PatternEntry> heap;
+    heap.reserve(static_cast<size_t>(K) + 1);
+    std::vector<PatternEntry> relaxed_heap;
+    relaxed_heap.reserve(static_cast<size_t>(K) + 1);
+    double minIg = -std::numeric_limits<double>::infinity();
+
+    for (int ci = m - 1; ci >= 0; --ci) {
+        const L2UL& ux = uls[static_cast<size_t>(ci)];
+        const bool ux_relaxed = relaxed(ux.item);
+        if (ux_relaxed) {
+            if (ux.sI > 0.0)
+                l2_save_by_ig(relaxed_heap, minIg, K,
+                              std::vector<int>{ux.item}, ux.sI, ux.ig);
+            continue;
+        }
+        const bool passes_g = ux.ig > G;
+        if (ux.sI >= minU && ux.sI > 0.0 && passes_g)
+            l2_save(heap, minU, K, std::vector<int>{ux.item}, ux.sI, ux.ig);
+    }
+
+    for (int i = m - 2; i >= 0; --i) {
+        if (has_deadline && ((++loop_ctr & (CHECK_INTERVAL - 1)) == 0) && timed_out()) {
+            std::vector<PatternEntry> merged(heap);
+            merged.insert(merged.end(), relaxed_heap.begin(), relaxed_heap.end());
+            std::sort(merged.begin(), merged.end(),
+                      [](const PatternEntry& a, const PatternEntry& b) { return a.ig > b.ig; });
+            if (static_cast<int>(merged.size()) > K) merged.resize(static_cast<size_t>(K));
+            return merged;
+        }
+
+        const L2UL& ux = uls[static_cast<size_t>(i)];
+        const bool ux_relaxed = relaxed(ux.item);
+        if (!(ux.ig > G) && !ux_relaxed) continue;
+        // Growth-bound exemption for relaxed items: without this, a
+        // relaxed survivor admitted past the singleton G/seed-filter gate
+        // above could still be silently pruned from ever reaching the pair
+        // loop below by the ordinary heap's rising competitive minU bound.
+        // This mirrors the same exemption applied to the generic L path's
+        // explore() (mining.cpp).
+        if (!ux_relaxed && (ux.sI + ux.sR < minU || ux.sI <= 0.0)) continue;
+        if (ux_relaxed && ux.sI <= 0.0) continue;
+
+        std::vector<L2Child>       ext;
+        std::unordered_set<size_t> ext_cov_hashes;
+
+        for (int j = i + 1; j < m; j++) {
+            if (has_deadline && ((++loop_ctr & (CHECK_INTERVAL - 1)) == 0) && timed_out()) {
+                std::vector<PatternEntry> merged(heap);
+                merged.insert(merged.end(), relaxed_heap.begin(), relaxed_heap.end());
+                std::sort(merged.begin(), merged.end(),
+                          [](const PatternEntry& a, const PatternEntry& b) { return a.ig > b.ig; });
+                if (static_cast<int>(merged.size()) > K) merged.resize(static_cast<size_t>(K));
+                return merged;
+            }
+
+            const L2UL& uy = uls[static_cast<size_t>(j)];
+            if (same_feature_l2(td.item_col, ux.item, uy.item))
+                continue;
+            const bool uy_relaxed = relaxed(uy.item);
+            if (!(uy.ig > G) && !uy_relaxed) continue;
+            if (ux.tid.empty() || uy.tid.empty()) continue;
+
+            std::vector<int32_t> c_tid;
+            std::vector<int> cnt_pair(n_cls, 0);
+            double c_sI = 0.0;
+            c_tid.reserve(std::min(ux.tid.size(), uy.tid.size()));
+
+            size_t xi = 0, yi = 0;
+            while (xi < ux.tid.size() && yi < uy.tid.size()) {
+                int32_t xt = ux.tid[xi];
+                int32_t yt = uy.tid[yi];
+                if (xt < yt) { ++xi; continue; }
+                if (yt < xt) { ++yi; continue; }
+
+                c_tid.push_back(xt);
+                c_sI += ux.iu[xi] + uy.iu[yi];
+                const int lbl = ytrain[static_cast<size_t>(xt)];
+                if (lbl >= 0 && lbl < n_cls) cnt_pair[static_cast<size_t>(lbl)]++;
+                ++xi; ++yi;
+            }
+            if (c_tid.empty()) continue;
+
+            const double c_ig = l2_ig_global(
+                cnt_global, cnt_pair, static_cast<int>(c_tid.size()), n_train, n_cls);
+            const bool pair_relaxed = ux_relaxed || uy_relaxed;
+            if (!(c_ig > G) && !pair_relaxed) continue;
+
+            const size_t h = fnv1a_tids(c_tid);
+            bool duplicate_tids = false;
+            if (ext_cov_hashes.count(h)) {
+                for (const L2Child& existing : ext) {
+                    const int ey = existing.item_y;
+                    if (ey <= 0 || ey > n_items) continue;
+                    const int eci = ci_for_item[static_cast<size_t>(ey)];
+                    if (eci < 0 || eci >= m) continue;
+                    const L2UL& euy = uls[static_cast<size_t>(eci)];
+                    std::vector<int32_t> e_tid;
+                    e_tid.reserve(std::min(ux.tid.size(), euy.tid.size()));
+                    size_t exi = 0, eyi = 0;
+                    while (exi < ux.tid.size() && eyi < euy.tid.size()) {
+                        if (ux.tid[exi] < euy.tid[eyi]) { ++exi; continue; }
+                        if (euy.tid[eyi] < ux.tid[exi]) { ++eyi; continue; }
+                        e_tid.push_back(ux.tid[exi]);
+                        ++exi; ++eyi;
+                    }
+                    if (e_tid == c_tid) { duplicate_tids = true; break; }
+                }
+            }
+            if (duplicate_tids) continue;
+            ext_cov_hashes.insert(h);
+
+            ext.push_back({c_sI, c_ig, ux.item, uy.item});
+        }
+
+        for (int e = static_cast<int>(ext.size()) - 1; e >= 0; --e) {
+            const L2Child& ch = ext[static_cast<size_t>(e)];
+            const bool pair_relaxed = ux_relaxed || relaxed(ch.item_y);
+            if (pair_relaxed) {
+                if (ch.sI > 0.0)
+                    l2_save_by_ig(relaxed_heap, minIg, K,
+                                 std::vector<int>{ch.item_x, ch.item_y}, ch.sI, ch.ig);
+                continue;
+            }
+            const bool passes_g = ch.ig > G;
+            if (ch.sI >= minU && ch.sI > 0.0 && passes_g)
+                l2_save(heap, minU, K,
+                        std::vector<int>{ch.item_x, ch.item_y}, ch.sI, ch.ig);
+        }
+    }
+
+    // Merge both pools (up to 2K candidates) and keep the global top-K by IG.
+    std::vector<PatternEntry> merged(heap);
+    merged.insert(merged.end(), relaxed_heap.begin(), relaxed_heap.end());
+    std::sort(merged.begin(), merged.end(),
+              [](const PatternEntry& a, const PatternEntry& b) { return a.ig > b.ig; });
+    if (static_cast<int>(merged.size()) > K) merged.resize(static_cast<size_t>(K));
+    return merged;
 }
 
 }  // namespace hugiml

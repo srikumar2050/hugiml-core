@@ -251,8 +251,26 @@ def render_pruning_analysis(ctx: dict, *args, **kwargs) -> None:
         pattern_df = _filter_selected_by_downstream(pattern_df, model, X, "_repr_column")
 
         st.markdown("#### Selected HUG patterns")
-        display_cols = [c for c in ["rank", "_label", "_source_features"] if c in pattern_df.columns]
-        st.dataframe(pattern_df[display_cols].rename(columns={"_label": "pattern", "_source_features": "source_features"}), width="stretch", hide_index=True)
+        display_cols = [
+            c
+            for c in [
+                "rank",
+                "_label",
+                "_source_features",
+                "pattern_origin",
+                "survivor_led",
+                "survivor_features",
+                "survivor_feature_count",
+            ]
+            if c in pattern_df.columns
+        ]
+        st.dataframe(
+            pattern_df[display_cols].rename(
+                columns={"_label": "pattern", "_source_features": "source_features"}
+            ),
+            width="stretch",
+            hide_index=True,
+        )
 
         selected = st.multiselect(
             "HUG patterns to remove from downstream representation",

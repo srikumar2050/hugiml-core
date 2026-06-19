@@ -1,7 +1,7 @@
 Governance Studio dashboard
 ===========================
 
-HUGIML Governance Studio is the Streamlit dashboard and workbench for preparing data, configuring HUGIML runs, comparing candidate models, reviewing model evidence, and assembling governance-ready summaries. Version 1.1.11 keeps the v1.1.10 workbench and adds broader evidence coverage for dashboard governance review.
+HUGIML Governance Studio is the Streamlit dashboard and workbench for preparing data, configuring HUGIML runs, comparing candidate models, reviewing model evidence, and assembling governance-ready summaries. The dashboard keeps the existing Workbench/Governance layout and exposes the current evidence views for adaptive binning, augmented pairs, interaction-relaxed mining, survivor-led patterns, feature families, validation, monitoring, and governance review.
 
 Installation and launch
 -----------------------
@@ -35,12 +35,13 @@ Workbench workflow
 Evidence views
 --------------
 
-The dashboard includes the full v1.1.10 workbench experience plus the v1.1.11 governance evidence panels:
+The dashboard includes the full workbench experience plus governance evidence panels:
 
 * Overview, validation metrics, and active configuration summary.
-* Representation audit across original features, HUG patterns, and augmented pairs.
+* Representation audit across original features, HUG patterns, augmented pairs, and survivor-led pattern metadata.
 * Adaptive-binning evidence, including selected bin counts and information-gain summaries where available.
-* Augmented-pair traceability for product and difference features used by the downstream estimator.
+* Augmented-pair traceability for product, absolute-difference, sum, and signed-difference features used by the downstream estimator.
+* Interaction-relaxed mining evidence, including survivor-source counts, best partners, and survivor-led pattern flags where available.
 * Feature-family review across original, pattern, and augmented representations.
 * Pattern inventory, coefficient review, support coverage, and population-coverage summaries.
 * Case-level prediction review with active pattern evidence.

@@ -28,8 +28,9 @@ def _clf(feature_mode="original_plus_patterns", adaptive_binning=True):
         adaptive_binning=adaptive_binning,
         feature_mode=feature_mode,
         augmented_pair_transforms=True,
-        augmented_pair_max_features=20,
+        aug_feature_size=20,
         use_hotpath=True,
+        interaction_relaxed_mining=False,
     )
 
 

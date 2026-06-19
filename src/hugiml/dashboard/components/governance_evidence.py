@@ -517,6 +517,91 @@ def render_adaptive_binning_evidence(model: Any = None, X: Any = None, *args: An
     return df
 
 
+def survivor_led_patterns_frame(model: Any) -> pd.DataFrame:
+    """Return mined-pattern audit rows admitted through relaxed interaction evidence."""
+    if model is None:
+        return pd.DataFrame()
+    frames: list[pd.DataFrame] = []
+    method = getattr(model, "get_pattern_info", None)
+    if callable(method):
+        try:
+            frames.append(_safe_dataframe(method()))
+        except Exception:
+            pass
+    if not frames or all(frame.empty for frame in frames):
+        method = getattr(model, "feature_importances", None)
+        if callable(method):
+            try:
+                fi = _safe_dataframe(method())
+                if not fi.empty:
+                    type_col = _first_existing_column(fi, ["feature_type", "type"])
+                    if type_col:
+                        fi = fi[fi[type_col].astype(str).str.lower().eq("pattern")]
+                    frames.append(fi)
+            except Exception:
+                pass
+    for df in frames:
+        if df.empty or "survivor_led" not in df.columns:
+            continue
+        mask = df["survivor_led"].map(_is_enabled_flag)
+        if not mask.any():
+            continue
+        out = df.loc[mask].copy()
+        preferred = [
+            "pattern",
+            "display_name",
+            "feature",
+            "pattern_origin",
+            "survivor_led",
+            "survivor_features",
+            "survivor_feature_count",
+            "survivor_min_marginal_ig",
+            "survivor_max_interaction_score",
+            "survivor_best_partners",
+            "information_gain",
+            "support",
+            "coefficient",
+            "abs_coefficient",
+        ]
+        columns = [c for c in preferred if c in out.columns] + [
+            c for c in out.columns if c not in preferred
+        ]
+        return out[columns].reset_index(drop=True)
+    return pd.DataFrame()
+
+
+def render_survivor_led_pattern_audit(model: Any = None, *args: Any, **kwargs: Any) -> pd.DataFrame:
+    """Render audit evidence for patterns surfaced by interaction-relaxed mining."""
+    st.markdown("### Survivor-Led Pattern Audit")
+    st.caption(
+        "Shows ordinary HUG pattern rows whose source features were admitted through "
+        "interaction-relaxed mining despite weak standalone marginal evidence."
+    )
+
+    if model is None:
+        st.info("No fitted model is available for survivor-led pattern audit.")
+        return pd.DataFrame()
+    df = survivor_led_patterns_frame(model)
+    if df.empty:
+        st.info("No survivor-led pattern rows are recorded for this model.")
+        return df
+
+    query = st.text_input(
+        "Search survivor-led patterns",
+        value="",
+        key="survivor_led_pattern_search",
+    )
+    show_df = df.copy()
+    if query:
+        mask = show_df.astype(str).apply(
+            lambda col: col.str.contains(query, case=False, na=False)
+        ).any(axis=1)
+        show_df = show_df.loc[mask]
+    st.metric("Survivor-led patterns", f"{len(show_df):,}")
+    st.dataframe(dataframe_for_display(show_df), width="stretch", hide_index=True)
+    return df
+
+
 def augmented_pair_effects_frame(model: Any) -> pd.DataFrame:
     method = getattr(model, "explain_augmented_pair_effects", None)
     if not callable(method):

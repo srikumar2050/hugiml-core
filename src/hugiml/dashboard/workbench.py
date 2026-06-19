@@ -1,7 +1,7 @@
 """Experiment Workbench UI for HUGIML Studio.
 
 The workbench is intentionally separated from Governance. It is the place to
-configure HUGIML and optional comparison models, run experiments, compare
+configure HUGIML and optional comparison models, run evaluations, compare
 metrics/plots, and promote a fitted HUGIML run into the governance workspace.
 """
 
@@ -83,7 +83,16 @@ PARAM_HINTS = {
     "G": "Minimum gain/utility threshold for pattern mining.",
     "feature_mode": "How original and mined features are combined.",
     "topk_budget_strict": "Whether strict top-K budget is applied.",
+    "augmented_pair_transforms": "Enable generated pair features for L>=2 using original-feature pairs.",
+    "augmented_pair_mode": "Source-column scoring for augmented-pair features.",
+    "aug_feature_size": "Number of source columns considered for augmented-pair generation.",
+    "max_pair_features": "Maximum generated pair features kept for downstream modeling.",
+    "ii_partner_size": "Optional number of partner columns used by interaction-information scoring.",
+    "interaction_relaxed_mining": "Allow interaction-information survivor columns into native mining without generated pair features.",
+    "interaction_relaxed_feature_size": "Number of source columns selected for interaction-relaxed mining.",
 }
+
+AUGMENTED_PAIR_MODE_OPTIONS = ["interaction_information", "marginal_ig"]
 
 
 def _hugiml_core_default_grid() -> dict[str, list[Any]]:
@@ -137,6 +146,13 @@ def _hugiml_auto_params() -> dict[str, Any]:
         "G": 0.01,
         "feature_mode": "original_plus_patterns",
         "topk_budget_strict": False,
+        "augmented_pair_transforms": True,
+        "augmented_pair_mode": "interaction_information",
+        "aug_feature_size": 10,
+        "max_pair_features": 10,
+        "ii_partner_size": None,
+        "interaction_relaxed_mining": False,
+        "interaction_relaxed_feature_size": 10,
     })
     return params
 
@@ -223,6 +239,38 @@ def _expand_param_grid(base: dict[str, Any], grid: dict[str, list[Any]]) -> list
         rows.append(params)
     return rows
 
+
+def _parse_optional_int_grid(value: str) -> list[int | None]:
+    items = [x.strip() for x in str(value).split(",") if x.strip()]
+    out: list[int | None] = []
+    for item in items:
+        if item.lower() in {"none", "null", "auto"}:
+            out.append(None)
+        else:
+            out.append(int(item))
+    return out
+
+
+def _l_allows_l2_interaction(params: dict[str, Any]) -> bool:
+    try:
+        return int(params.get("L", 1)) >= 2 or int(params.get("L", 1)) == -1
+    except Exception:
+        return True
+
+
+def _filter_hugiml_interaction_configs(configs: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
+    valid: list[dict[str, Any]] = []
+    invalid = 0
+    for cfg in configs:
+        if (
+            _l_allows_l2_interaction(cfg)
+            and bool(cfg.get("interaction_relaxed_mining", False))
+            and bool(cfg.get("augmented_pair_transforms", True))
+        ):
+            invalid += 1
+            continue
+        valid.append(cfg)
+    return valid, invalid
 
 
 class RuleFitClassifierAdapter:
@@ -971,6 +1019,72 @@ def _render_hugiml_config() -> list[dict[str, Any]]:
     params["feature_mode"] = selected_feature_modes[0]
     params["topk_budget_strict"] = st.toggle("Strict top-K budget", value=False, help=PARAM_HINTS["topk_budget_strict"], key="wb_hugiml_topk_strict")
 
+    st.markdown("##### Interaction path")
+    st.caption(
+        "Guided keeps the HUGIML core grid. Advanced can tune augmented-pair scoring "
+        "or interaction-relaxed mining explicitly."
+    )
+    i1, i2, i3 = st.columns(3)
+    params["augmented_pair_transforms"] = bool(i1.toggle(
+        "Augmented pair transforms",
+        value=True,
+        help=PARAM_HINTS["augmented_pair_transforms"],
+        key="wb_hugiml_augmented_pair_transforms",
+    ))
+    params["interaction_relaxed_mining"] = bool(i2.toggle(
+        "Interaction relaxed mining",
+        value=False,
+        help=PARAM_HINTS["interaction_relaxed_mining"],
+        key="wb_hugiml_interaction_relaxed_mining",
+    ))
+    default_aug_mode = str(params.get("augmented_pair_mode", "interaction_information"))
+    if default_aug_mode not in AUGMENTED_PAIR_MODE_OPTIONS:
+        default_aug_mode = "interaction_information"
+    params["augmented_pair_mode"] = str(i3.selectbox(
+        "Augmented pair scoring",
+        AUGMENTED_PAIR_MODE_OPTIONS,
+        index=AUGMENTED_PAIR_MODE_OPTIONS.index(default_aug_mode),
+        help=PARAM_HINTS["augmented_pair_mode"],
+        key="wb_hugiml_augmented_pair_mode",
+    ))
+    s1, s2, s3 = st.columns(3)
+    params["aug_feature_size"] = int(s1.number_input(
+        "Augmented source count",
+        value=int(params.get("aug_feature_size", 10)),
+        min_value=2,
+        step=1,
+        help=PARAM_HINTS["aug_feature_size"],
+        key="wb_hugiml_aug_feature_size",
+    ))
+    params["max_pair_features"] = int(s2.number_input(
+        "Max pair features",
+        value=int(params.get("max_pair_features", 10)),
+        min_value=1,
+        step=1,
+        help=PARAM_HINTS["max_pair_features"],
+        key="wb_hugiml_max_pair_features",
+    ))
+    params["interaction_relaxed_feature_size"] = int(s3.number_input(
+        "Relaxed source count",
+        value=int(params.get("interaction_relaxed_feature_size", 10)),
+        min_value=2,
+        step=1,
+        help=PARAM_HINTS["interaction_relaxed_feature_size"],
+        key="wb_hugiml_interaction_relaxed_feature_size",
+    ))
+    partner_raw = st.text_input(
+        "Interaction-information partner count",
+        value="None" if params.get("ii_partner_size") is None else str(params.get("ii_partner_size")),
+        help=PARAM_HINTS["ii_partner_size"],
+        key="wb_hugiml_ii_partner_size",
+    ).strip()
+    params["ii_partner_size"] = None if partner_raw.lower() in {"", "none", "null", "auto"} else int(partner_raw)
+    if _l_allows_l2_interaction(params) and params["augmented_pair_transforms"] and params["interaction_relaxed_mining"]:
+        st.warning(
+            "For L>=2, interaction relaxed mining and augmented pair transforms are alternative paths. "
+            "Advanced grid candidates that enable both are omitted."
+        )
+
     with st.expander("Advanced grid values", expanded=True):
         if params["adaptive_binning"]:
             st.caption("Comma-separated values create multiple candidate HUGIML runs. Blank fields keep the values above. B is locked at -1 while adaptive binning is enabled.")
@@ -983,17 +1097,42 @@ def _render_hugiml_config() -> list[dict[str, Any]]:
             b_values = [int(v) for v in b_values if int(v) >= 2] or [2]
         if params["adaptive_binning"]:
             g4.text_input("B values", value="-1", disabled=True, key="wb_hugiml_b_grid_locked", help="B is fixed at -1 while adaptive binning is enabled.")
+        h1, h2, h3, h4 = st.columns(4)
+        h5, h6, h7, h8 = st.columns(4)
+        selected_aug_modes = h3.multiselect(
+            "Augmented pair scoring values",
+            AUGMENTED_PAIR_MODE_OPTIONS,
+            default=[params["augmented_pair_mode"]],
+            help="Values for augmented_pair_mode in Advanced tuning.",
+            key="wb_hugiml_augmented_pair_mode_grid",
+        ) or [params["augmented_pair_mode"]]
         grid = {
             "L": _parse_grid(g1.text_input("L values", value=str(params["L"]), key="wb_hugiml_l_grid"), int),
             "topK": _parse_grid(g2.text_input("topK values", value=str(params["topK"]), key="wb_hugiml_topk_grid"), int),
             "G": _parse_grid(g3.text_input("G values", value=str(params["G"]), key="wb_hugiml_g_grid"), float),
             "B": b_values,
             "feature_mode": selected_feature_modes,
+            "augmented_pair_transforms": _parse_grid(h1.text_input("Augmented pair values", value=str(params["augmented_pair_transforms"]), key="wb_hugiml_augmented_pair_grid"), bool),
+            "interaction_relaxed_mining": _parse_grid(h2.text_input("Interaction relaxed values", value=str(params["interaction_relaxed_mining"]), key="wb_hugiml_interaction_relaxed_grid"), bool),
+            "augmented_pair_mode": selected_aug_modes,
+            "aug_feature_size": _parse_grid(h4.text_input("Augmented source count values", value=str(params["aug_feature_size"]), key="wb_hugiml_aug_feature_size_grid"), int),
+            "max_pair_features": _parse_grid(h5.text_input("Max pair feature values", value=str(params["max_pair_features"]), key="wb_hugiml_max_pair_features_grid"), int),
+            "interaction_relaxed_feature_size": _parse_grid(h6.text_input("Relaxed source count values", value=str(params["interaction_relaxed_feature_size"]), key="wb_hugiml_interaction_relaxed_feature_size_grid"), int),
+            "ii_partner_size": _parse_optional_int_grid(h7.text_input("Partner count values", value=partner_raw or "None", key="wb_hugiml_ii_partner_size_grid")),
         }
     configs = _expand_param_grid(params, grid)
     if params["adaptive_binning"]:
         for cfg in configs:
             cfg["B"] = -1
+    configs, invalid_configs = _filter_hugiml_interaction_configs(configs)
+    if invalid_configs:
+        st.warning(f"Omitted {invalid_configs:,} invalid HUGIML interaction-path candidate(s).")
+    if not configs:
+        st.error("No valid HUGIML Advanced candidates remain. Disable one interaction path or use L=1.")
+        fallback = dict(params)
+        if _l_allows_l2_interaction(fallback) and fallback.get("interaction_relaxed_mining"):
+            fallback["augmented_pair_transforms"] = False
+        configs = [fallback]
     return configs
 
 def _render_generic_config(model_name: str) -> list[dict[str, Any]]:
@@ -1518,7 +1657,19 @@ def _render_hugiml_artifacts(model: Any, run_id: str = "hugiml", key_prefix: str
             "Patterns",
             patterns,
             key=f"{ns}_hugiml_pattern_search",
-            columns=["pattern", "utility", "information_gain", "support"],
+            columns=[
+                "pattern",
+                "pattern_origin",
+                "survivor_led",
+                "survivor_features",
+                "survivor_feature_count",
+                "survivor_min_marginal_ig",
+                "survivor_max_interaction_score",
+                "survivor_best_partners",
+                "utility",
+                "information_gain",
+                "support",
+            ],
         )
     with orig_tab:
         orig = features[features.get("feature_type", pd.Series(dtype=str)).astype(str).eq("original")] if not features.empty and "feature_type" in features.columns else pd.DataFrame()
@@ -1541,7 +1692,21 @@ def _render_hugiml_artifacts(model: Any, run_id: str = "hugiml", key_prefix: str
             "Downstream features",
             features,
             key=f"{ns}_hugiml_all_search",
-            columns=["feature_type", "display_name", "feature", "importance", "coefficient", "abs_coefficient", "support", "non_missing_rate", "variance"],
+            columns=[
+                "feature_type",
+                "display_name",
+                "feature",
+                "pattern_origin",
+                "survivor_led",
+                "survivor_features",
+                "survivor_feature_count",
+                "importance",
+                "coefficient",
+                "abs_coefficient",
+                "support",
+                "non_missing_rate",
+                "variance",
+            ],
         )
         if _has_items(composition):
             with st.expander("Model composition", expanded=False, key=f"{ns}_model_composition_exp"):
@@ -1773,6 +1938,9 @@ def _render_selected_config_pair(base_run: dict[str, Any], alt_run: dict[str, An
     preferred_order = [
         "run_id", "model", "mode", "cv_roc_auc", "f1", "candidate_count", "fast_path_used",
         "adaptive_binning", "B", "L", "topK", "G", "feature_mode", "topk_budget_strict",
+        "augmented_pair_transforms", "augmented_pair_mode", "aug_feature_size",
+        "max_pair_features", "ii_partner_size", "interaction_relaxed_mining",
+        "interaction_relaxed_feature_size",
         "C", "max_iter", "max_depth", "min_samples_leaf", "tree_size", "max_rules",
         "n_estimators", "learning_rate", "max_bins", "interactions",
     ]
@@ -2242,7 +2410,22 @@ def _run_config_frame(run: dict[str, Any], label: str) -> pd.DataFrame:
             {"selection": label, "field": "candidate_count", "value": params.get("candidate_count")},
             {"selection": label, "field": "fast_path_used", "value": params.get("fast_path_used")},
         ])
-        for key in ("adaptive_binning", "B", "L", "topK", "G", "feature_mode", "topk_budget_strict"):
+        for key in (
+            "adaptive_binning",
+            "B",
+            "L",
+            "topK",
+            "G",
+            "feature_mode",
+            "topk_budget_strict",
+            "augmented_pair_transforms",
+            "augmented_pair_mode",
+            "aug_feature_size",
+            "max_pair_features",
+            "ii_partner_size",
+            "interaction_relaxed_mining",
+            "interaction_relaxed_feature_size",
+        ):
             if key in selected:
                 rows.append({"selection": label, "field": key, "value": selected.get(key)})
         return pd.DataFrame(rows)

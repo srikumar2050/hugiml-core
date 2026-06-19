@@ -416,3 +416,82 @@ def test_overview_imports_and_renders_sbom_download():
     assert "generate_sbom" in source
     assert "download_button" in source
     assert "Software Bill of Materials" in source
+
+
+def test_representation_audit_wires_survivor_led_pattern_audit():
+    app = Path("src/hugiml/dashboard/app.py").read_text()
+    assert "render_survivor_led_pattern_audit" in app
+    assert "Survivor-led pattern audit" in app
+    assert 'render_survivor_led_pattern_audit(ctx["model"])' in app
+
+
+def test_survivor_led_pattern_frame_filters_audit_rows(monkeypatch):
+    ge = _import_with_fake_streamlit(monkeypatch, "hugiml.dashboard.components.governance_evidence")
+
+    class Model:
+        def get_pattern_info(self):
+            return pd.DataFrame(
+                {
+                    "pattern": ["x0=low", "x1=high, x2=low"],
+                    "pattern_origin": ["standard", "interaction_relaxed"],
+                    "survivor_led": [False, True],
+                    "survivor_features": [[], ["x1"]],
+                    "survivor_feature_count": [0, 1],
+                    "survivor_min_marginal_ig": [np.nan, 0.0002],
+                    "survivor_max_interaction_score": [np.nan, 0.18],
+                    "survivor_best_partners": [[], ["x2"]],
+                    "information_gain": [0.03, 0.02],
+                    "support": [0.40, 0.08],
+                }
+            )
+
+    df = ge.survivor_led_patterns_frame(Model())
+    assert df["pattern"].tolist() == ["x1=high, x2=low"]
+    assert df["pattern_origin"].tolist() == ["interaction_relaxed"]
+    assert df["survivor_feature_count"].tolist() == [1]
+
+
+def test_survivor_led_pattern_render_executes(monkeypatch):
+    ge = _import_with_fake_streamlit(monkeypatch, "hugiml.dashboard.components.governance_evidence")
+
+    class Model:
+        def get_pattern_info(self):
+            return pd.DataFrame(
+                {
+                    "pattern": ["x1=high, x2=low"],
+                    "pattern_origin": ["interaction_relaxed"],
+                    "survivor_led": [True],
+                    "survivor_features": [["x1"]],
+                    "survivor_feature_count": [1],
+                }
+            )
+
+    df = ge.render_survivor_led_pattern_audit(Model())
+    assert len(df) == 1
+    assert bool(df["survivor_led"].iloc[0])
+
+
+def test_feature_family_pattern_audit_surfaces_survivor_led_columns(monkeypatch):
+    ff = _import_with_fake_streamlit(monkeypatch, "hugiml.dashboard.components.feature_family")
+
+    class Model:
+        def get_pattern_info(self):
+            return pd.DataFrame(
+                {
+                    "pattern": ["x0=low", "x1=high, x2=low"],
+                    "pattern_origin": ["standard", "interaction_relaxed"],
+                    "survivor_led": [False, True],
+                    "survivor_features": [[], ["x1"]],
+                    "survivor_feature_count": [0, 1],
+                    "survivor_min_marginal_ig": [np.nan, 0.0002],
+                    "survivor_max_interaction_score": [np.nan, 0.18],
+                    "survivor_best_partners": [[], ["x2"]],
+                }
+            )
+
+    df = ff.pattern_feature_audit(Model())
+    assert "pattern_origin" in df.columns
+    assert "survivor_led" in df.columns
+    row = df.loc[df["pattern_origin"].eq("interaction_relaxed")].iloc[0]
+    assert bool(row["survivor_led"])
+    assert row["survivor_features"] == "x1"

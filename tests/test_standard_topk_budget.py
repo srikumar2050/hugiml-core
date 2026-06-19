@@ -27,7 +27,7 @@ def test_topk_minus_one_resolves_from_n_items_l1():
 
 def test_topk_minus_one_resolves_from_n_items_l2():
     """topK=-1 with L=2 auto-resolves to C(n_items,2) (capped at 20 000)."""
-    clf = HUGIMLClassifierNative(topK=-1, L=2)
+    clf = HUGIMLClassifierNative(topK=-1, L=2, interaction_relaxed_mining=False)
     n = 20
     assert clf._effective_topK(n_items=n) == min(math.comb(n, 2), 20000)
 

@@ -57,7 +57,7 @@ def test_require_audit_artifact_empty_attrs_is_unconditional_in_production():
 
 def test_fixedB_L_gt_1_clean_numeric_columns_remain_numeric_and_ndarray_type_is_preserved():
     X = np.random.RandomState(0).randn(20, 4)
-    clf = HUGIMLClassifier(B=4, L=2, adaptive_binning=False)
+    clf = HUGIMLClassifier(B=4, L=2, adaptive_binning=False, interaction_relaxed_mining=False)
     clf.feature_names_in_ = [f"x{j}" for j in range(X.shape[1])]
     clf.cat_cols_mask_ = np.zeros(X.shape[1], dtype=bool)
     clf.is_int_mask_ = np.zeros(X.shape[1], dtype=bool)
@@ -94,7 +94,7 @@ def test_fixedB_L_gt_1_prebins_only_training_missing_numeric_columns():
     X = np.random.RandomState(3).randn(20, 4)
     X[0, 1] = np.nan
     X[1, 3] = np.inf
-    clf = HUGIMLClassifier(B=4, L=2, adaptive_binning=False)
+    clf = HUGIMLClassifier(B=4, L=2, adaptive_binning=False, interaction_relaxed_mining=False)
     clf.feature_names_in_ = [f"x{j}" for j in range(X.shape[1])]
     clf.cat_cols_mask_ = np.zeros(X.shape[1], dtype=bool)
     clf.is_int_mask_ = np.zeros(X.shape[1], dtype=bool)
@@ -139,7 +139,7 @@ def test_fixedB_L_gt_1_clean_named_dataframe_preserves_dataframe_column_names_an
             "gamma": rng.normal(size=20),
         }
     )
-    clf = HUGIMLClassifier(B=4, L=2, adaptive_binning=False)
+    clf = HUGIMLClassifier(B=4, L=2, adaptive_binning=False, interaction_relaxed_mining=False)
     clf.feature_names_in_ = list(X.columns)
     clf.cat_cols_mask_ = np.zeros(X.shape[1], dtype=bool)
     clf.is_int_mask_ = np.zeros(X.shape[1], dtype=bool)

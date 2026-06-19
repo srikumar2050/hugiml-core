@@ -42,7 +42,7 @@ Minimal classifier workflow
    from sklearn.metrics import roc_auc_score
    from hugiml import HUGIMLClassifier
 
-   clf = HUGIMLClassifier(B=7, L=1, G=5e-3)
+   clf = HUGIMLClassifier(adaptive_binning=True, L=1, G=5e-3, topK=100)
 
    X_enc, y_enc = clf.prepareXy(X_df, y)
    X_train, X_test, y_train, y_test = train_test_split(
@@ -70,12 +70,12 @@ When you already know the feature schema, pass ``allCols`` and ``origColumns`` e
    clf = HUGIMLClassifier(
        allCols=[integer_columns, float_columns, categorical_columns],
        origColumns=X_train.columns.tolist(),
-       B=15,
+       B=-1,
+       adaptive_binning=True,
+       b_candidates=[2, 3, 5, 7, 10, 15],
        L=1,
        G=1e-5,
        topK=150,
-       adaptive_binning=True,
-       b_candidates=[2, 3, 5, 7, 10, 15],
    )
 
    clf.fit(X_train, y_train)
@@ -96,15 +96,35 @@ After fitting, inspect both predictive behavior and explanation complexity:
 
 
 
-Performance-oriented starting point
------------------------------------
+Recommended starting points
+---------------------------
 
-For the current implementation, start with the native ``L=1`` hot path, a bounded pattern budget, and adaptive binning only when per-feature bin selection is useful. Increase complexity only when validation results justify it:
+Start with a bounded pattern budget. Then choose the interaction path based on the representation you want reviewers to inspect.
+
+.. list-table::
+   :header-rows: 1
+
+   * - Goal
+     - Suggested settings
+     - Interpretability
+   * - Fast compact baseline
+     - ``adaptive_binning=True``, ``L=1``, ``feature_mode="patterns_only"``
+     - Very high
+   * - Pattern-only interactions
+     - ``adaptive_binning=True``, ``L=2``, ``feature_mode="patterns_only"``, ``augmented_pair_transforms=False``, ``interaction_relaxed_mining=True``
+     - Very high
+   * - Faster interaction lift
+     - ``adaptive_binning=True``, ``L=2``, ``feature_mode="patterns_only"``, ``augmented_pair_transforms=True``, ``augmented_pair_mode="interaction_information"``
+     - High
+   * - Original features plus patterns
+     - ``feature_mode="original_plus_patterns"`` with either interaction-relaxed mining or augmented pairs
+     - High to moderate
 
 .. code-block:: python
 
    clf = HUGIMLClassifier(
-       B=7,
+       B=-1,
+       adaptive_binning=True,
        L=1,
        G=5e-3,
        topK=100,
@@ -116,6 +136,8 @@ For the current implementation, start with the native ``L=1`` hot path, a bounde
    print(clf.fit_metadata_.summary())
    print(clf.fit_metadata_)
 
-Use ``adaptive_binning=True`` with ``L=1`` when you want supervised per-feature bin resolution without paying the cost of a fully materialized adaptive pre-binned matrix. Use ``L=2`` when interaction patterns are important, and compensate by tightening ``G`` or keeping ``topK`` bounded. Use ``topK=-1`` only for smaller datasets or controlled benchmark runs, because it allows the automatic budget to grow with the item universe.
+Use ``L=2`` when interaction patterns or pair evidence are important, and compensate by tightening ``G`` or keeping ``topK`` bounded. Use ``topK=-1`` only for smaller datasets or controlled benchmark runs, because it allows the automatic budget to grow with the item universe.
+
+For ``L >= 2``, ``augmented_pair_transforms=True`` and ``interaction_relaxed_mining=True`` are mutually exclusive. Augmented pairs usually keep runtime lower by adding selected downstream pair features. Interaction-relaxed mining keeps the model in original-feature HUG pattern space and adds survivor-led audit metadata.
 
 If your logs show ``HUGIMLConvergenceWarning`` for a constant column, the model is telling you that the column has zero utility. Drop the column upstream if it is expected; otherwise, treat it as a data-quality signal.

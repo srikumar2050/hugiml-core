@@ -21,8 +21,8 @@ The sklearn estimator contract requires:
 * ``clone()``-ability (no state leaking from init params)
 
 ``parametrize_with_checks`` is used to enumerate the full sklearn check suite.
-The API changed in sklearn 1.6 to return a ``MarkDecorator`` rather than a
-list; this module handles both styles transparently.
+The helper accepts both ``MarkDecorator`` and list-style return values from
+sklearn.
 
 Checks in ``_XFAIL_PATTERNS`` are marked ``xfail`` because they are
 incompatible with HUGIMLClassifierNative's documented design contract
@@ -161,7 +161,7 @@ class TestBasicContract:
         assert clf.B == 6
 
     def test_get_set_params_roundtrip(self):
-        clf = HUGIMLClassifierNative(B=5, L=2, G=1e-3)
+        clf = HUGIMLClassifierNative(B=5, L=2, G=1e-3, interaction_relaxed_mining=False)
         params = clf.get_params()
         clf2 = HUGIMLClassifierNative(**params)
         assert clf2.get_params() == params
@@ -172,7 +172,9 @@ class TestBasicContract:
         assert "HUGIMLClassifier(" in r
 
     def test_clone_preserves_params(self):
-        clf = HUGIMLClassifierNative(B=6, L=2, G=5e-4, topK=80)
+        clf = HUGIMLClassifierNative(
+            B=6, L=2, G=5e-4, topK=80, interaction_relaxed_mining=False
+        )
         clf2 = clone(clf)
         assert clf2.get_params() == clf.get_params()
         assert not hasattr(clf2, "patterns_"), "clone() must return an unfitted estimator"

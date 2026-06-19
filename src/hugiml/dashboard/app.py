@@ -41,6 +41,7 @@ from hugiml.dashboard.components.feature_family import render_feature_family_aud
 from hugiml.dashboard.components.governance_evidence import (
     render_adaptive_binning_evidence,
     render_augmented_pair_traceability,
+    render_survivor_led_pattern_audit,
 )
 from hugiml.dashboard.components.missingness import render_missingness
 from hugiml.dashboard.components.overview import render_overview
@@ -1190,10 +1191,11 @@ def _render_representation_page(ctx: dict[str, Any]) -> None:
 
     st.divider()
 
-    tab1, tab2, tab3 = st.tabs([
+    tab1, tab2, tab3, tab4 = st.tabs([
         "Feature families",
         "Adaptive binning evidence",
         "Augmented pair traceability",
+        "Survivor-led pattern audit",
     ])
     with tab1:
         render_feature_family_audit(
@@ -1207,6 +1209,8 @@ def _render_representation_page(ctx: dict[str, Any]) -> None:
         render_adaptive_binning_evidence(ctx["model"], ctx.get("X"))
     with tab3:
         render_augmented_pair_traceability(ctx["model"])
+    with tab4:
+        render_survivor_led_pattern_audit(ctx["model"])
 
 
 def _render_data_quality_policy_page(ctx: dict[str, Any]) -> None:

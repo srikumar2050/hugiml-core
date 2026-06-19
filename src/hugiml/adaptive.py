@@ -76,9 +76,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-# Re-export the binning helpers that were previously defined locally here.
-# Tests do ``from hugiml.adaptive import _information_gain``; this import
-# keeps that working while the canonical implementation lives in _binning.
+# Re-export the binning helpers as part of the public adaptive API.
 from hugiml._binning import (  # noqa: F401  (public re-export)
     _apply_edges,
     _information_gain,
@@ -157,6 +155,7 @@ class HUGIMLAdaptive(HUGIMLClassifierNative):
         n_jobs: int = 1,
         verbose: bool = False,
         max_fit_seconds: float | None = None,
+        interaction_relaxed_mining: bool = False,
     ) -> None:
         super().__init__(
             adaptive_binning=True,
@@ -168,6 +167,7 @@ class HUGIMLAdaptive(HUGIMLClassifierNative):
             n_jobs=n_jobs,
             verbose=verbose,
             max_fit_seconds=max_fit_seconds,
+            interaction_relaxed_mining=interaction_relaxed_mining,
         )
 
     @classmethod
@@ -194,6 +194,7 @@ class HUGIMLAdaptive(HUGIMLClassifierNative):
             verbose=self.verbose,
             max_fit_seconds=self.max_fit_seconds,
             use_hotpath=self.use_hotpath,
+            interaction_relaxed_mining=self.interaction_relaxed_mining,
         )
 
     # ── fit ───────────────────────────────────────────────────────────────────
@@ -203,7 +204,7 @@ class HUGIMLAdaptive(HUGIMLClassifierNative):
 
         Delegates entirely to ``HUGIMLClassifierNative.fit`` with
         ``adaptive_binning=True``.  When ``X_train`` is a plain ndarray and
-        ``prepareXy`` has been called previously, column names from
+        ``prepareXy`` has supplied column names, names from
         ``feature_names_in_`` are applied so that feature-name-aware
         operations (adaptive binning, bin-edge lookup, schema validation) work
         correctly.

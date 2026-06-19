@@ -4,6 +4,21 @@ All notable changes to hugiml-core are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
+## [1.1.12] - 2026-06-20
+
+### Added
+
+- Added interaction-information source selection for augmented-pair features, with `aug_feature_size`, `ii_partner_size`, and `augmented_pair_mode` controls.
+- Added `interaction_relaxed_mining`, which lets interaction-information survivor features participate in native pattern mining without adding pair-operator columns.
+- Added pair-aware adaptive binning metadata for the interaction-relaxed path and survivor-led audit fields for pattern and downstream-feature review.
+
+### Changed
+
+- Updated augmented-pair defaults to use `augmented_pair_mode="interaction_information"`; `augmented_pair_mode="marginal_ig"` remains available for the v1.1.11 source-selection behavior.
+- Updated dashboard and governance evidence views to separate survivor-led pattern evidence from augmented-pair feature evidence.
+- Kept `augmented_pair_max_features` as a v1.1.11-compatible alias for the new augmented-pair source budgets.
+
+---
 ## [1.1.11] - 2026-06-17
 
 ### Added

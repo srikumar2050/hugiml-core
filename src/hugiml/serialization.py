@@ -504,7 +504,7 @@ def save_model(clf: Any, path: str | os.PathLike) -> None:
         import dataclasses
 
         fit_state["fit_metadata_"] = dataclasses.asdict(clf.fit_metadata_)
-    # ── v1.1.0 missing value handling state ──────────────────────────────
+    # ── Missing value handling state ────────────────────────────────────
     # _missing_col_edges_ stores quantile edges for columns that had NaN/Inf
     # in training data.  Serialised as float lists for JSON compatibility.
     # Schema v5 writes this field unconditionally.  An empty dict explicitly
@@ -516,7 +516,7 @@ def save_model(clf: Any, path: str | os.PathLike) -> None:
         name: edges.tolist() for name, edges in missing_edges_state.items()
     }
     # ─────────────────────────────────────────────────────────────────────
-    # ── v1.1.0 adaptive binning state ────────────────────────────────────
+    # ── Adaptive binning state ──────────────────────────────────────────
     # _bin_edges_ (dict[str, np.ndarray]) is serialised as JSON-compatible
     # lists.  per_feature_b_ and ig_scores_ are plain dicts.  JSON object
     # keys must be strings so ig_scores_ int keys are stringified here and
@@ -539,7 +539,10 @@ def save_model(clf: Any, path: str | os.PathLike) -> None:
     aug_block = getattr(clf, "_augmented_pair_block_", None)
     fit_state["augmented_pair_state"] = {
         "augmented_pair_transforms": bool(getattr(clf, "augmented_pair_transforms", True)),
-        "augmented_pair_max_features": int(getattr(clf, "augmented_pair_max_features", 10)),
+        "augmented_pair_mode": str(getattr(clf, "augmented_pair_mode", "interaction_information")),
+        "aug_feature_size": int(getattr(clf, "aug_feature_size", 10)),
+        "ii_partner_size": getattr(clf, "ii_partner_size", None),
+        "max_pair_features": int(getattr(clf, "max_pair_features", 10)),
         "enabled": bool(getattr(clf, "augmented_pair_transforms_enabled_", False)),
         "config": getattr(clf, "augmented_pair_config_", {"enabled": False}),
         "selected_features": getattr(clf, "augmented_pair_selected_features_", []),
@@ -548,15 +551,22 @@ def save_model(clf: Any, path: str | os.PathLike) -> None:
     }
     if aug_block is not None:
         fit_state["augmented_pair_state"]["block_state"] = {
-            "max_features": int(
-                getattr(aug_block, "max_features", getattr(clf, "augmented_pair_max_features", 10))
+            "augmented_pair_mode": str(
+                getattr(aug_block, "augmented_pair_mode", "interaction_information")
             ),
-            "top_ig": int(
-                getattr(aug_block, "top_ig", getattr(clf, "augmented_pair_max_features", 10))
+            "aug_feature_size": int(
+                getattr(aug_block, "aug_feature_size", getattr(clf, "aug_feature_size", 10))
+            ),
+            "ii_partner_size": getattr(aug_block, "ii_partner_size", None),
+            "max_pair_features": int(
+                getattr(aug_block, "max_pair_features", getattr(clf, "max_pair_features", 10))
             ),
             "budget_topK": getattr(aug_block, "budget_topK", None),
-            "selected_ig_features": list(getattr(aug_block, "selected_ig_features_", [])),
-            "selected_ig_scores": dict(getattr(aug_block, "selected_ig_scores_", {})),
+            "selected_aug_features": list(getattr(aug_block, "selected_aug_features_", [])),
+            "selected_aug_scores": dict(getattr(aug_block, "selected_aug_scores_", {})),
+            "augmented_pair_source_scores": list(
+                getattr(aug_block, "augmented_pair_source_scores_", [])
+            ),
             "input_bin_edges": getattr(aug_block, "input_bin_edges_", {}),
             "source_observed_medians": dict(
                 getattr(
@@ -570,6 +580,13 @@ def save_model(clf: Any, path: str | os.PathLike) -> None:
             "feature_names": list(getattr(aug_block, "feature_names_", [])),
         }
     # ────────────────────────────────────────────────────────────────────
+    fit_state["interaction_relaxed_mining_state"] = {
+        "interaction_relaxed_mining": bool(getattr(clf, "interaction_relaxed_mining", False)),
+        "interaction_relaxed_feature_size": int(
+            getattr(clf, "interaction_relaxed_feature_size", 10)
+        ),
+        "survivors": list(getattr(clf, "interaction_relaxed_mining_survivors_", [])),
+    }
     members["clf_fit.json"] = _json_dumps(fit_state)
 
     # Patterns
@@ -990,7 +1007,7 @@ def _load_v3(path: str | os.PathLike) -> Any:
         except Exception as exc:
             logger.debug("Could not restore FitMetadata: %s", exc, exc_info=True)
 
-    # ── v1.1.0 missing value handling state ──────────────────────────────
+    # ── Missing value handling state ────────────────────────────────────
     missing_edges = clf_fit.get("missing_col_edges", {})
     if missing_edges is not None:
         clf._missing_col_edges_ = {
@@ -999,7 +1016,7 @@ def _load_v3(path: str | os.PathLike) -> Any:
     else:
         clf._missing_col_edges_ = {}
     # ─────────────────────────────────────────────────────────────────────
-    # ── v1.1.0 adaptive binning state ────────────────────────────────────
+    # ── Adaptive binning state ──────────────────────────────────────────
     adap = clf_fit.get("adaptive_binning_state")
     if adap:
         clf._bin_edges_ = {
@@ -1016,14 +1033,32 @@ def _load_v3(path: str | os.PathLike) -> Any:
     else:
         clf._adaptive_code_label_map_ = {}
     # ────────────────────────────────────────────────────────────────────
-    # ── v1.1.5+ augmented pair transform state ──────────────────────────
+    # ── Augmented pair transform state ──────────────────────────────────
     aug_state = clf_fit.get("augmented_pair_state") or {}
     clf.augmented_pair_transforms = bool(
         aug_state.get("augmented_pair_transforms", getattr(clf, "augmented_pair_transforms", True))
     )
-    clf.augmented_pair_max_features = int(
+    _legacy_max_features = aug_state.get("augmented_pair_max_features")
+    clf.augmented_pair_mode = str(
         aug_state.get(
-            "augmented_pair_max_features", getattr(clf, "augmented_pair_max_features", 10)
+            "augmented_pair_mode", getattr(clf, "augmented_pair_mode", "interaction_information")
+        )
+    )
+    clf.aug_feature_size = int(
+        aug_state.get(
+            "aug_feature_size",
+            _legacy_max_features
+            if _legacy_max_features is not None
+            else getattr(clf, "aug_feature_size", 10),
+        )
+    )
+    clf.ii_partner_size = aug_state.get("ii_partner_size", getattr(clf, "ii_partner_size", None))
+    clf.max_pair_features = int(
+        aug_state.get(
+            "max_pair_features",
+            _legacy_max_features
+            if _legacy_max_features is not None
+            else getattr(clf, "max_pair_features", 10),
         )
     )
     clf.augmented_pair_transforms_ = list(aug_state.get("transforms", []))
@@ -1038,13 +1073,41 @@ def _load_v3(path: str | os.PathLike) -> Any:
         try:
             from hugiml.classifier import NativeAugmentedPairTransformBlock
 
+            _legacy_block_max_features = block_state.get("max_features")
+            block_aug_feature_size = int(
+                block_state.get(
+                    "aug_feature_size",
+                    _legacy_block_max_features
+                    if _legacy_block_max_features is not None
+                    else clf.aug_feature_size,
+                )
+            )
+            block_max_pair_features = int(
+                block_state.get(
+                    "max_pair_features",
+                    _legacy_block_max_features
+                    if _legacy_block_max_features is not None
+                    else clf.max_pair_features,
+                )
+            )
             block = NativeAugmentedPairTransformBlock(
-                max_features=int(block_state.get("max_features", clf.augmented_pair_max_features)),
+                augmented_pair_mode=str(
+                    block_state.get("augmented_pair_mode", clf.augmented_pair_mode)
+                ),
+                aug_feature_size=block_aug_feature_size,
+                max_pair_features=block_max_pair_features,
+                ii_partner_size=block_state.get("ii_partner_size", clf.ii_partner_size),
                 budget_topK=block_state.get("budget_topK"),
             )
-            block.top_ig = int(block_state.get("top_ig", block.max_features))
-            block.selected_ig_features_ = list(block_state.get("selected_ig_features", []))
-            block.selected_ig_scores_ = dict(block_state.get("selected_ig_scores", {}))
+            block.selected_aug_features_ = list(
+                block_state.get("selected_aug_features", block_state.get("selected_ig_features", []))
+            )
+            block.selected_aug_scores_ = dict(
+                block_state.get("selected_aug_scores", block_state.get("selected_ig_scores", {}))
+            )
+            block.augmented_pair_source_scores_ = list(
+                block_state.get("augmented_pair_source_scores", [])
+            )
             block.input_bin_edges_ = block_state.get("input_bin_edges", {})
             block.source_observed_medians_ = dict(
                 block_state.get("source_observed_medians", block_state.get("numeric_medians", {}))
@@ -1061,7 +1124,7 @@ def _load_v3(path: str | os.PathLike) -> Any:
                     np.asarray(
                         [
                             block.source_observed_medians_.get(c, 0.0)
-                            for c in block.selected_ig_features_
+                            for c in block.selected_aug_features_
                         ],
                         dtype=np.float64,
                     ),
@@ -1102,6 +1165,19 @@ def _load_v3(path: str | os.PathLike) -> Any:
         except Exception as exc:
             logger.debug("Could not restore augmented pair transforms: %s", exc, exc_info=True)
             clf._augmented_pair_block_ = None
+    # ────────────────────────────────────────────────────────────────────
+    # ── interaction_relaxed_mining state ────────────────────────────────
+    relaxed_state = clf_fit.get("interaction_relaxed_mining_state") or {}
+    clf.interaction_relaxed_mining = bool(
+        relaxed_state.get("interaction_relaxed_mining", getattr(clf, "interaction_relaxed_mining", False))
+    )
+    clf.interaction_relaxed_feature_size = int(
+        relaxed_state.get(
+            "interaction_relaxed_feature_size", getattr(clf, "interaction_relaxed_feature_size", 10)
+        )
+    )
+    if relaxed_state.get("survivors"):
+        clf.interaction_relaxed_mining_survivors_ = list(relaxed_state["survivors"])
     # ────────────────────────────────────────────────────────────────────
 
     # TransactionDataWrapper
