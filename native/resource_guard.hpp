@@ -93,6 +93,24 @@ inline void ensure_native_memory_available(uint64_t requested_bytes,
     }
 }
 
+// Non-throwing counterpart of ensure_native_memory_available(), for OPTIONAL
+// allocations (e.g. caches that trade memory for speed). Returns false rather
+// than raising when the request would not fit, so callers can gracefully fall
+// back to a slower/lower-memory code path instead of aborting the whole call.
+// Uses a tighter default safety_fraction than the hard guard above, since this
+// gates a "nice to have" allocation stacked on top of whatever else the
+// caller already budgeted (and already passed its own hard guard) for.
+inline bool native_memory_budget_allows(uint64_t requested_bytes,
+                                        double safety_fraction = 0.50) {
+    if (requested_bytes == 0) return true;
+    const uint64_t limit = address_space_limit_bytes();
+    if (limit == 0) return true;  // no enforced limit on this platform/config
+    const uint64_t rss = current_rss_bytes();
+    const uint64_t budget = static_cast<uint64_t>(static_cast<double>(limit) * safety_fraction);
+    if (rss > budget) return false;
+    return requested_bytes <= (budget - rss);
+}
+
 inline void check_timeout_deadline(bool has_deadline,
                                    const std::chrono::steady_clock::time_point& deadline,
                                    const std::string& context) {

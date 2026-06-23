@@ -6,6 +6,14 @@ The canonical release notes live in ``CHANGELOG.md`` at the repository root. Kee
 Recent releases
 ---------------
 
+1.1.13 — 2026-06-24
+~~~~~~~~~~~~~~~~~~~
+
+* Improved fit and predict runtime through faster categorical processing, optional categorical-code reuse, and consistent zero-variance column exclusion.
+* Added centralized HUGIML and benchmark hyperparameter grid configuration used by classifier tuning, the benchmark runner, and the dashboard Workbench.
+* Added ``experiments/`` reproducibility workflows for regenerating benchmark and scalability dashboard outputs.
+* Updated tuning defaults so candidate sweeps use leaner execution while the returned refit model remains audit-ready unless production mode is explicitly requested.
+
 1.1.12 — 2026-06-20
 ~~~~~~~~~~~~~~~~~~~
 

@@ -1369,6 +1369,16 @@ def run_app() -> None:
     _apply_css(theme)
 
     section, workspace = _render_top_nav()
+
+    if workspace == "Governance" and not isinstance(
+        st.session_state.get("hugiml_promoted_governance_ctx"), dict
+    ):
+        st.info(
+            "No promoted HUGIML run yet. Go to Workbench \u2192 Results \u2192 "
+            "select a HUGIML run \u2192 Promote to Governance."
+        )
+        return
+
     ctx, theme = _load_context(args, workspace)
 
     if ctx is None:

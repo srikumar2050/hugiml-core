@@ -234,43 +234,54 @@ In production mode, audit-oriented methods return a clear guidance result or rai
 
 HUGIML provides a fast cached tuning path for adaptive-binning grids. When `adaptive_binning=True`, the binning and transaction construction work is reused across eligible candidates, so compact grids can be evaluated without rebuilding the same mining inputs repeatedly.
 
-### Default recommended parameter grid
+### Recommended named parameter grids
 
-For a first tuning pass, use the built-in default recommended parameter grid. It is intentionally small: it keeps adaptive binning enabled, compares one-level and two-level pattern mining, compares pure pattern models with original-plus-pattern models, and varies the TopK feature budget.
+HUGIML tuning reads the recommended grids from `hugiml.hyperparameter_configs`. Use the default ``"performance"`` grid for a compact first pass, then switch to ``"interpretability"`` when the final representation should remain pattern-only.
 
 ```python
 from hugiml import HUGIMLClassifier
 
-grid = HUGIMLClassifier.default_param_grid()
+performance_grid = HUGIMLClassifier.default_param_grid()
+interpretability_grid = HUGIMLClassifier.default_param_grid("interpretability")
 
-# Equivalent explicit grid:
-grid = {
+# Equivalent default performance grid:
+performance_grid = {
     "B": [-1],
     "adaptive_binning": [True],
     "L": [1, 2],
-    "feature_mode": ["patterns_only", "original_plus_patterns"],
-    "topK": [30, 50, 100],
-    "G": [1e-2],
+    "topK": [50, 100],
+    "feature_mode": ["original_plus_patterns"],
+    "G": [0.01, 0.001],
+}
+
+# Equivalent interpretability grid:
+interpretability_grid = {
+    "B": [-1],
+    "adaptive_binning": [True],
+    "L": [1, 2],
+    "topK": [50, 100],
+    "feature_mode": ["patterns_only"],
+    "G": [0.01, 0.001],
+    "interaction_relaxed_mining": [True],
+    "augmented_pair_transforms": [False],
 }
 ```
 
-| Parameter | Default recommended values | Purpose |
-|---|---:|---|
-| `B` | `[-1]` | Uses adaptive binning instead of a fixed global bin count. |
-| `adaptive_binning` | `[True]` | Lets each numerical feature choose a supervised bin count. |
-| `L` | `[1, 2]` | Compares single-feature patterns with pair/interaction patterns. |
-| `feature_mode` | `patterns_only`, `original_plus_patterns` | Compares pure HUG pattern models with hybrid original-plus-pattern models. |
-| `topK` | `[30, 50, 100]` | Controls the selected feature budget. |
-| `G` | `[1e-2]` | Keeps the gain threshold fixed for a compact first pass. |
+| Grid | Recommended use | Main values |
+|---|---|---|
+| `performance` | First-pass predictive tuning | `feature_mode=["original_plus_patterns"]`, `L=[1,2]`, `topK=[50,100]`, `G=[0.01,0.001]` |
+| `interpretability` | Pattern-only representation review | `feature_mode=["patterns_only"]`, `interaction_relaxed_mining=True`, `augmented_pair_transforms=False` |
 
-Use focused follow-up grids when you want to explore interaction-relaxed mining or augmented-pair transforms. Do not enable `interaction_relaxed_mining=True` and `augmented_pair_transforms=True` in the same `L >= 2` candidate.
+Both grids keep `B=[-1]` and `adaptive_binning=[True]`, so each numerical feature chooses a supervised bin count. Do not enable `interaction_relaxed_mining=True` and `augmented_pair_transforms=True` in the same `L >= 2` candidate.
+
+Use focused follow-up grids when you want to explore interaction-relaxed mining or augmented-pair transforms.
 
 ### `tune()` — cross-validated search with automatic fast path
 
 ```python
 result = HUGIMLClassifier.tune(
     X, y,
-    param_grid=HUGIMLClassifier.default_param_grid(),
+    param_grid="performance",
     cv=5,
     shuffle=True,
     random_state=42,
@@ -385,7 +396,7 @@ originals_augmented_grid = {
 tune_result = HUGIMLClassifier.fast_grid_tune(
     X_train, y_train,
     X_val,   y_val,
-    param_grid=HUGIMLClassifier.default_param_grid(),
+    param_grid="performance",
     scoring="roc_auc",
     refit_full=False,
 )
@@ -1028,6 +1039,9 @@ hugiml-core/
 ├── notebooks/                   Worked examples (12 domain folders)
 ├── tests/                       Pytest suite
 ├── benchmarks/                  Micro-benchmarks and regression gate
+├── experiments/                 Reproducible dashboard-generation workflows
+│   ├── benchmark/               Benchmark dashboard regeneration assets
+│   └── scalability/             Scalability dashboard regeneration assets
 ├── docker/                      Dockerfile + FastAPI inference server
 ├── kubernetes/                  Deployment manifests
 ├── scripts/                     Build and utility scripts

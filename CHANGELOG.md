@@ -4,6 +4,20 @@ All notable changes to hugiml-core are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
+## [1.1.13] - 2026-06-24
+
+### Added
+
+- Added `experiments/` reproducibility workflows for regenerating benchmark and scalability dashboard outputs.
+
+
+### Changed
+
+- Improved fit and predict runtime through faster categorical handling, reusable categorical-code paths, and consistent zero-variance column exclusion.
+- Centralized HUGIML and benchmark hyperparameter grids in `hugiml.hyperparameter_configs`, with shared use by classifier tuning, benchmarks, and the Workbench UI.
+- Updated tuning defaults so search candidates run with leaner retained state while the returned refit model remains audit-ready unless production mode is explicitly requested.
+
+---
 ## [1.1.12] - 2026-06-20
 
 ### Added

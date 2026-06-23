@@ -26,6 +26,14 @@ Metrics
    :members:
    :show-inheritance:
 
+
+Hyperparameter configuration
+----------------------------
+
+.. automodule:: hugiml.hyperparameter_configs
+   :members:
+   :show-inheritance:
+
 Calibration
 -----------
 

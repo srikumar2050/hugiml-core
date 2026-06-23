@@ -45,6 +45,11 @@ from sklearn.tree import DecisionTreeClassifier, export_text
 
 from hugiml.dashboard.display import dataframe_for_display
 from hugiml.dashboard.runner import _default_params, fit_hugiml_config, score_cases
+from hugiml.hyperparameter_configs import (
+    DEFAULT_HUGIML_GRID_NAME,
+    get_hugiml_grid,
+    list_hugiml_grids,
+)
 
 
 @dataclass(frozen=True)
@@ -95,23 +100,31 @@ PARAM_HINTS = {
 AUGMENTED_PAIR_MODE_OPTIONS = ["interaction_information", "marginal_ig"]
 
 
-def _hugiml_core_default_grid() -> dict[str, list[Any]]:
-    """Return the HUGIML core default tuning grid with dashboard safeguards."""
+def _hugiml_core_default_grid(grid_name: str | None = None) -> dict[str, list[Any]]:
+    """Return a named HUGIML core tuning grid with dashboard safeguards.
+
+    ``grid_name`` selects which grid in ``hugiml.hyperparameter_configs`` to
+    use (``"performance"`` when omitted). The classifier's own
+    ``default_param_grid`` is preferred so the grid a user sees mining run
+    against is read from the same place the classifier itself would use if
+    asked directly; the direct config-module lookup below is a fallback for
+    the unlikely case that importing the classifier itself raises (its
+    import pulls in numpy/pandas/scipy/sklearn, any of which failing would
+    otherwise leave the Workbench with no tuning grid at all to show).
+    """
     try:
         from hugiml import HUGIMLClassifierNative
 
-        grid = copy.deepcopy(HUGIMLClassifierNative.default_param_grid())
+        grid = copy.deepcopy(HUGIMLClassifierNative.default_param_grid(grid_name))
     except Exception:
-        grid = {
-            "B": [-1],
-            "adaptive_binning": [True],
-            "L": [1, 2],
-            "feature_mode": ["patterns_only", "original_plus_patterns", "original_plus_interactions"],
-            "topK": [30, 50, 100],
-            "G": [0.01],
-        }
+        grid = get_hugiml_grid(grid_name)
     grid["adaptive_binning"] = [True]
     return grid
+
+
+def _hugiml_core_grid_names() -> list[str]:
+    """Return the selectable grid names for the Workbench tuning UI."""
+    return list_hugiml_grids()
 
 
 
@@ -119,16 +132,20 @@ def _hugiml_core_default_grid() -> dict[str, list[Any]]:
 def _hugiml_valid_feature_modes() -> list[str]:
     """Return feature modes for the Advanced UI, preserving a stable Workbench order.
 
-    The core default tuning grid may intentionally omit slower/non-default modes,
-    but Advanced should still expose known valid modes such as
-    original_plus_interactions for explicit user-driven tuning.
+    Any single named tuning grid may intentionally restrict feature_mode to
+    the one value it's built around, but Advanced should still expose every
+    feature_mode that appears in any registered grid, plus
+    original_plus_interactions for explicit user-driven tuning, since that
+    mode isn't part of either named grid today.
     """
     fallback = ["original_plus_patterns", "patterns_only", "original_plus_interactions"]
-    try:
-        grid = _hugiml_core_default_grid()
-        modes = list(grid.get("feature_mode") or [])
-    except Exception:
-        modes = []
+    modes: list[str] = []
+    for grid_name in _hugiml_core_grid_names():
+        try:
+            grid = _hugiml_core_default_grid(grid_name)
+            modes.extend(grid.get("feature_mode") or [])
+        except Exception:
+            continue
     valid = []
     for mode in [*fallback, *modes]:
         if mode and mode not in valid:
@@ -157,16 +174,38 @@ def _hugiml_auto_params() -> dict[str, Any]:
     return params
 
 
-def _hugiml_guided_fast_tune_params() -> dict[str, Any]:
-    """Sentinel configuration consumed by _run_single_model for fast core tuning."""
+def _hugiml_guided_fast_tune_params(grid_name: str | None = None) -> dict[str, Any]:
+    """Sentinel configuration consumed by _run_single_model for fast core tuning.
+
+    ``grid_name`` selects which named grid in ``hugiml.hyperparameter_configs``
+    drives the sweep -- ``"performance"`` (the default, optimised for
+    predictive performance) or ``"interpretability"`` (restricted to
+    ``feature_mode="patterns_only"`` with relaxed interaction mining, for a
+    model whose explanation surface is the mined patterns alone). No
+    execution_mode override is set here: tune() already evaluates every
+    search candidate under 'production' for speed and refits the returned
+    model under 'audit' by default, which is what's wanted, since a
+    Workbench run can be promoted to Governance afterward and several
+    Governance components (patterns, feature_family, pruning, prediction,
+    governance_evidence, overview) call get_pattern_info() on whatever
+    model they're given.
+    """
+    resolved = grid_name or DEFAULT_HUGIML_GRID_NAME
+    label = "guided_fast_tune" if resolved == DEFAULT_HUGIML_GRID_NAME else f"guided_fast_tune_{resolved}"
+    display = "Guided fast tune" if resolved == DEFAULT_HUGIML_GRID_NAME else f"Guided fast tune ({resolved})"
     return {
         "__hugiml_tune__": True,
-        "__label__": "guided_fast_tune",
-        "__display_name__": "Guided fast tune",
-        "param_grid": _hugiml_core_default_grid(),
+        "__label__": label,
+        "__display_name__": display,
+        "param_grid": _hugiml_core_default_grid(resolved),
         "base_params": {"adaptive_binning": True},
         "use_fast_path": True,
     }
+
+
+def _hugiml_interpretability_fast_tune_params() -> dict[str, Any]:
+    """Sentinel configuration for a fast tune restricted to the interpretability grid."""
+    return _hugiml_guided_fast_tune_params("interpretability")
 
 
 def _hugiml_grid_count(grid: dict[str, list[Any]]) -> int:
@@ -970,16 +1009,35 @@ def _render_hugiml_config() -> list[dict[str, Any]]:
         return [params]
 
     if mode == "Guided":
-        guided = _hugiml_guided_fast_tune_params()
+        grid_names = _hugiml_core_grid_names()
+        grid_name = (
+            st.selectbox(
+                "Tuning grid",
+                grid_names,
+                index=grid_names.index(DEFAULT_HUGIML_GRID_NAME)
+                if DEFAULT_HUGIML_GRID_NAME in grid_names
+                else 0,
+                help=(
+                    "'performance' searches feature_mode='original_plus_patterns' for "
+                    "predictive performance. 'interpretability' restricts the downstream "
+                    "model to feature_mode='patterns_only' with relaxed interaction mining, "
+                    "so its explanation surface is the mined patterns alone."
+                ),
+                key="wb_hugiml_grid_name",
+            )
+            if len(grid_names) > 1
+            else (grid_names[0] if grid_names else DEFAULT_HUGIML_GRID_NAME)
+        )
+        guided = _hugiml_guided_fast_tune_params(grid_name)
         grid = guided["param_grid"]
         st.caption(
-            "Uses HUGIML core's default hyperparameter grid with `use_fast_path=True`; "
+            f"Uses the '{grid_name}' HUGIML hyperparameter grid with `use_fast_path=True`; "
             "adaptive binning is enabled for every candidate."
         )
         c1, c2 = st.columns([1, 3])
         c1.metric("Candidates", f"{_hugiml_grid_count(grid):,}")
         c2.caption("The Workbench records the selected best configuration after CV tuning.")
-        with st.expander("View guided default grid", expanded=False):
+        with st.expander("View guided grid", expanded=False):
             st.json(grid, expanded=False)
         return [guided]
 

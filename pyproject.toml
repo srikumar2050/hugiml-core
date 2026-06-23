@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hugiml-core"
-version = "1.1.12"
+version = "1.1.13"
 description = "High-performance interpretable rule-based ML — HUG-IML classifier, adaptive binning, EBM-style plots, pattern pruning, and benchmark runner (IEEE Access 2024)."
 readme = "README.md"
 license = { text = "Apache-2.0" }
@@ -148,7 +148,7 @@ select = "cp313-manylinux*"
 test-requires = ["numpy", "scipy", "scikit-learn>=1.0,<1.8", "pandas", "pytest", "packaging"]
 
 [tool.cibuildwheel.linux]
-# manylinux_2_28 (AlmaLinux 8-based) ships OpenBLAS, fixing scipy source-build failures.
+# manylinux_2_28 (AlmaLinux 8-based) ships OpenBLAS for scipy source builds.
 # manylinux2014 (CentOS 7) did not include OpenBLAS and is effectively end-of-life.
 before-build = "pip install pybind11"
 environment = { CC = "gcc", CXX = "g++" }
@@ -197,11 +197,11 @@ filterwarnings = [
 [tool.ruff]
 line-length = 100
 target-version = "py39"
+extend-exclude = ["notebooks/"]
 
 [tool.ruff.lint]
 select = ["E", "W", "F", "I", "UP"]
 ignore = ["E501"]
-exclude = ["notebooks/"]
 
 # ── Mypy type checker ─────────────────────────────────────────────────────────
 [tool.mypy]

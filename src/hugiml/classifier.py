@@ -130,6 +130,7 @@ from hugiml.exceptions import (
     HUGIMLVersionError,
     HUGIMLWarning,
 )
+from hugiml.hyperparameter_configs import DEFAULT_HUGIML_GRID_NAME, get_hugiml_grid
 from hugiml.monitoring import DriftDetector, PredictionMonitor
 from hugiml.serialization import MIN_SCHEMA_VERSION, MODEL_SCHEMA_VERSION
 from hugiml.serialization import load_model as _load_model
@@ -165,7 +166,6 @@ DEFAULT_AUGMENTED_PAIR_UNBOUNDED_CAP = 100
 AUGMENTED_PAIR_OPS = ("product", "absolute_difference", "sum", "signed_difference")
 AUGMENTED_PAIR_MODES = ("interaction_information", "marginal_ig")
 _II_N_BINS = 4
-
 
 
 def _best_ig_score(score_obj: Any) -> float:
@@ -266,9 +266,9 @@ def _codes_from_edges(values: np.ndarray, edges: np.ndarray) -> np.ndarray:
     if len(edges) == 2:
         codes[finite] = 0
     else:
-        codes[finite] = np.clip(
-            np.digitize(arr[finite], edges[1:-1]), 0, n_bins - 1
-        ).astype(np.int64, copy=False)
+        codes[finite] = np.clip(np.digitize(arr[finite], edges[1:-1]), 0, n_bins - 1).astype(
+            np.int64, copy=False
+        )
     return codes
 
 
@@ -281,7 +281,11 @@ def _edge_information_gain(
     arr = np.asarray(values, dtype=np.float64)
     finite = np.isfinite(arr)
     if int(finite.sum()) < 10:
-        edges = _adap_quantile_edges(arr[finite], max(2, int(n_bins))) if np.any(finite) else np.array([0.0, 1.0])
+        edges = (
+            _adap_quantile_edges(arr[finite], max(2, int(n_bins)))
+            if np.any(finite)
+            else np.array([0.0, 1.0])
+        )
         return 0.0, edges, _codes_from_edges(arr, edges)
     edges = _adap_quantile_edges(arr[finite], max(2, int(n_bins)))
     codes = _codes_from_edges(arr, edges)
@@ -456,10 +460,7 @@ class NativeAugmentedPairTransformBlock:
         # marginal IG values for traceability while keeping the generated
         # product/difference/sum transforms outside HUG pattern mining.
         if self.augmented_pair_mode == "interaction_information":
-            if not (
-                _CORE_AVAILABLE
-                and hasattr(_core, "select_interaction_information_features")
-            ):
+            if not (_CORE_AVAILABLE and hasattr(_core, "select_interaction_information_features")):
                 raise HUGIMLParamError(
                     "interaction_information augmented-pair mode requires "
                     "_hugiml_core.select_interaction_information_features."
@@ -708,7 +709,8 @@ def _is_binary_feature_series(s: pd.Series) -> bool:
     try:
         return int(observed.nunique(dropna=True)) == 2
     except TypeError:
-        return len(pd.unique(observed.astype(object))) == 2
+        normalized = observed.map(lambda value: repr(value))
+        return int(normalized.nunique(dropna=True)) == 2
 
 
 # =============================================================================
@@ -811,7 +813,7 @@ class FitMetadata:
 
 
 # =============================================================================
-# Memory profiling context manager
+# Memory measurement context manager
 # =============================================================================
 
 # tracemalloc is a process-global resource.  Concurrent fits on separate
@@ -826,10 +828,37 @@ class _MemoryTracker:
     owns the tracemalloc session.  Other concurrent fits skip tracing and
     report traced_peak_mb = 0.0, which is clearly distinguished from a
     real measurement rather than a corrupted one.
+
+    Parameters
+    ----------
+    enable_tracing : bool, default True
+        When True (the original, unconditional behaviour -- used for
+        execution_mode='audit'), tracks both tracemalloc's line-level
+        allocation breakdown (``traced_peak_mb``) and process RSS
+        (``rss_mb``), exactly as before this parameter was added.
+        When False (used for execution_mode='production'), skips
+        tracemalloc entirely -- no start/stop/snapshot/compare -- and
+        reports traced_peak_mb=0.0, while still tracking the much
+        cheaper RSS delta in rss_mb. tracemalloc's per-allocation
+        overhead can dominate fit() wall time on categorical-heavy
+        inputs (every categorical cell takes a failed-cast/exception
+        round trip in the native layer before the GIL is released;
+        each such exception is itself further allocation that
+        tracemalloc has to record), so production workloads that don't
+        need the line-level breakdown can opt out of paying for it.
     """
+
+    def __init__(self, enable_tracing: bool = True) -> None:
+        self.enable_tracing = enable_tracing
 
     def __enter__(self) -> _MemoryTracker:
         self._rss_before = _get_peak_rss_kb()
+        if not self.enable_tracing:
+            # production fast path: RSS only, no tracemalloc session at all.
+            self._lock_acquired = False
+            self._snap_before = None
+            self._started = False
+            return self
         self._lock_acquired = _tracemalloc_lock.acquire(blocking=False)
         self._snap_before: tracemalloc.Snapshot | None = None
         if self._lock_acquired:
@@ -1056,14 +1085,10 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
     monitor: PredictionMonitor | None  # set by enable_monitoring() / disable_monitoring()
     feature_names_in_: list[str] | None  # set by prepareXy / _resolve_col_meta after fit
 
-    DEFAULT_PARAM_GRID: dict[str, list] = {
-        "B": [-1],
-        "adaptive_binning": [True],
-        "L": [1, 2],
-        "feature_mode": ["patterns_only", "original_plus_patterns"],
-        "topK": [30, 50, 100],
-        "G": [1e-2],
-    }
+    # The grid values themselves live in hugiml.hyperparameter_configs, shared
+    # with the benchmark runner and dashboard rather than declared here only.
+    # See default_param_grid() below for the public, name-aware accessor.
+    DEFAULT_PARAM_GRID: dict[str, list] = get_hugiml_grid(DEFAULT_HUGIML_GRID_NAME)
 
     def __init__(
         self,
@@ -1279,19 +1304,23 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         return cls(**params)
 
     @classmethod
-    def default_param_grid(cls) -> dict[str, list]:
-        """Return the default validation grid for compact HUGIML tuning.
+    def default_param_grid(cls, name: str | None = None) -> dict[str, list]:
+        """Return a named validation grid for compact HUGIML tuning.
 
-        The grid uses adaptive binning (``B=-1``), searches ``L`` in
-        ``{1, 2}``, searches ``feature_mode`` in ``{'patterns_only',
-        'original_plus_patterns'}``, keeps ``G`` constant at 1e-3, and searches ``topK`` in
-        ``{30, 50, 100}``. For ``L > 1`` and
-        ``augmented_pair_transforms=True``, native augmented-pair transforms
-        use ``augmented_pair_mode='interaction_information'`` by default,
-        retain ``aug_feature_size`` source columns, and apply the same
-        ``topK`` budget to generated pair-pattern features.
+        ``name`` selects either ``performance`` or ``interpretability``. When
+        omitted, the performance grid is returned. Grid definitions live in
+        :mod:`hugiml.hyperparameter_configs` and are copied before return so
+        callers can narrow candidate values locally.
+
+        The performance grid uses adaptive binning with ``B=-1``, searches
+        ``L`` values ``1`` and ``2``, searches ``topK`` values ``50`` and
+        ``100``, uses ``feature_mode='original_plus_patterns'``, and evaluates
+        ``G`` values ``0.01`` and ``0.001``. The interpretability grid uses the
+        same ``L``, ``topK``, and ``G`` values with
+        ``feature_mode='patterns_only'``, ``interaction_relaxed_mining=True``,
+        and ``augmented_pair_transforms=False``.
         """
-        return {k: list(v) for k, v in cls.DEFAULT_PARAM_GRID.items()}
+        return get_hugiml_grid(name)
 
     # ── Representation ────────────────────────────────────────────────────────
 
@@ -1953,11 +1982,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         if self.interaction_relaxed_mining:
             # Mutually exclusive with the augmented-pair operator-feature
             # path at L >= 2.
-            if (
-                bool(self.augmented_pair_transforms)
-                and isinstance(self.L, int)
-                and self.L >= 2
-            ):
+            if bool(self.augmented_pair_transforms) and isinstance(self.L, int) and self.L >= 2:
                 raise HUGIMLParamError(
                     "interaction_relaxed_mining=True is mutually exclusive with "
                     "augmented_pair_transforms=True at L >= 2. Set "
@@ -2046,6 +2071,100 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         # Use deterministic synthetic names for ndarray inputs.
         self.feature_names_in_ = [f"col{j}" for j in range(p)]
         return self.cat_cols_mask_
+
+    def _identify_zero_variance_columns(self, X_train: Any) -> list[str]:
+        """Return the names of columns with at most one distinct observed value.
+
+        A column where every non-missing cell holds the same value (or every
+        cell is missing) carries no mutual information with the target by
+        construction, so it can never contribute an eligible item to the
+        registry built during transaction preparation -- the existing
+        information-gain computation already assigns such a column zero
+        utility for every candidate bin or category. Recognising this here,
+        before that computation runs, lets the per-row work building the
+        item registry (categorical label extraction in particular, which is
+        comparatively the most expensive part of it) skip these columns
+        entirely rather than touching every row only to confirm what is
+        already known from one cheap, vectorised distinct-value count.
+
+        Called once at fit time; the resulting column names are stored on
+        the fitted estimator (``_zero_variance_cols_``) so predict-time
+        processing excludes exactly the same columns regardless of what
+        values they happen to hold in new data -- the model never learned
+        anything from this column during training, so it consistently
+        ignores it afterward rather than re-deciding per call.
+        """
+        names = list(getattr(self, "feature_names_in_", []) or [])
+        if not names:
+            return []
+        if isinstance(X_train, pd.DataFrame):
+            zero_variance = [
+                name
+                for name in names
+                if name in X_train.columns and X_train[name].nunique(dropna=True) <= 1
+            ]
+        else:
+            arr = np.asarray(X_train, dtype=object)
+            zero_variance = []
+            for j, name in enumerate(names):
+                if j >= arr.shape[1]:
+                    continue
+                observed: set[Any] = set()
+                for value in arr[:, j]:
+                    try:
+                        missing = pd.isna(value)
+                    except (TypeError, ValueError):
+                        missing = False
+                    if isinstance(missing, (list, tuple, np.ndarray)):
+                        missing = False
+                    if bool(missing):
+                        continue
+                    try:
+                        observed.add(value)
+                    except TypeError:
+                        observed.add(repr(value))
+                    if len(observed) > 1:
+                        break
+                if len(observed) <= 1:
+                    zero_variance.append(name)
+        return zero_variance
+
+    def _exclude_zero_variance_columns(
+        self,
+        X_num: np.ndarray,
+        X_cat_raw: list[Any],
+        cat_mask: np.ndarray,
+        zero_variance_names: list[str],
+    ) -> None:
+        """Neutralise the listed columns in-place so native code skips them cheaply.
+
+        Categorical columns are excluded by setting their ``X_cat_raw`` entry
+        to ``None``, which the native categorical-extraction step (shared by
+        the fit-time and predict-time code paths) already treats as "no data
+        for this column" and skips outright -- no native-side change needed,
+        since that behaviour already exists for the ordinary case where a
+        caller has no categorical columns at all. Numeric columns are
+        neutralised by writing a single constant value through the column;
+        since the column is already constant (or entirely missing) by the
+        definition used to select it, this changes nothing about what the
+        column represents while letting every downstream numeric pass over
+        it (range computation, binning, correlation) settle on its answer
+        immediately rather than scanning genuinely varying values.
+        """
+        if not zero_variance_names:
+            return
+        names = list(getattr(self, "feature_names_in_", []) or [])
+        name_to_index = {name: j for j, name in enumerate(names)}
+        for name in zero_variance_names:
+            j = name_to_index.get(name)
+            if j is None or j >= len(cat_mask):
+                continue
+            if cat_mask[j]:
+                if j < len(X_cat_raw):
+                    X_cat_raw[j] = None
+            else:
+                if X_num.shape[1] > j:
+                    X_num[:, j] = 0.0
 
     @staticmethod
     def _timer() -> Any:
@@ -2493,7 +2612,11 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         # X_cat_raw downstream, stays correct).
         _fit_cat_mask = getattr(self, "cat_cols_mask_", None)
         _fit_feat_names = getattr(self, "feature_names_in_", None)
-        if _fit_cat_mask is not None and _fit_feat_names is not None and len(_fit_feat_names) == len(_fit_cat_mask):
+        if (
+            _fit_cat_mask is not None
+            and _fit_feat_names is not None
+            and len(_fit_feat_names) == len(_fit_cat_mask)
+        ):
             _fit_cat_names = {
                 str(name) for name, is_cat in zip(_fit_feat_names, _fit_cat_mask) if is_cat
             }
@@ -2662,9 +2785,15 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                 "_hugiml_core.select_interaction_information_features and "
                 "_hugiml_core.mine_patterns_relaxed."
             )
-        X_df = self._frame_from_input(X_train, col_names or getattr(self, "feature_names_in_", None))
+        X_df = self._frame_from_input(
+            X_train, col_names or getattr(self, "feature_names_in_", None)
+        )
         names = [str(name) for name in list(X_df.columns)]
-        cat = cat_mask if cat_mask is not None else getattr(self, "cat_cols_mask_", np.zeros(len(names), dtype=bool))
+        cat = (
+            cat_mask
+            if cat_mask is not None
+            else getattr(self, "cat_cols_mask_", np.zeros(len(names), dtype=bool))
+        )
         binary_cat_names = set(getattr(self, "binary_categorical_cols_", []) or [])
         score_idx: list[int] = []
         score_cols: list[np.ndarray] = []
@@ -2691,9 +2820,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         )
         name_to_idx = {name: score_idx[k] for k, name in enumerate(score_names)}
         relaxed_cols = [
-            name_to_idx[str(row["name"])]
-            for row in selected
-            if str(row.get("name")) in name_to_idx
+            name_to_idx[str(row["name"])] for row in selected if str(row.get("name")) in name_to_idx
         ]
         return [dict(row) for row in selected], relaxed_cols
 
@@ -2763,7 +2890,9 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                         pb,
                     )
                     conditional = max(0.0, float(joint) - float(right_score))
-                    pair_score = max(conditional, min(float(joint), max(float(left_score), float(right_score))))
+                    pair_score = max(
+                        conditional, min(float(joint), max(float(left_score), float(right_score)))
+                    )
                     if pair_score > best_pair_score:
                         best_pair_score = float(pair_score)
                         best_partner_name = partner_name
@@ -2778,7 +2907,11 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
 
         if not scores:
             chosen = candidates[len(candidates) // 2]
-            return int(chosen), {int(b): 0.0 for b in candidates}, {"mode": "no_scores", "best_partner": None}
+            return (
+                int(chosen),
+                {int(b): 0.0 for b in candidates},
+                {"mode": "no_scores", "best_partner": None},
+            )
         best_score = max(scores.values())
         if best_score <= 0.0:
             chosen = min(scores)
@@ -2806,7 +2939,9 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
     def _apply_pair_aware_adaptive_binning(self, X_train: Any, y_arr: np.ndarray) -> Any:
         is_df = isinstance(X_train, pd.DataFrame)
         X_df = self._frame_from_input(X_train, getattr(self, "feature_names_in_", None))
-        base_candidates = sorted({int(v) for v in (self.b_candidates or [2, 3, 5, 7, 10, 15]) if int(v) >= 2})
+        base_candidates = sorted(
+            {int(v) for v in (self.b_candidates or [2, 3, 5, 7, 10, 15]) if int(v) >= 2}
+        )
         candidates = sorted(set(base_candidates + [4, 6, 8]))
         ratio = float(self.min_marginal_gain_ratio)
         cat_mask = self.cat_cols_mask_
@@ -2823,9 +2958,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         self.interaction_relaxed_mining_survivors_ = [dict(row) for row in survivors]
 
         num_cols = [
-            (j, name)
-            for j, name in enumerate(col_names)
-            if not (j < len(cat_mask) and cat_mask[j])
+            (j, name) for j, name in enumerate(col_names) if not (j < len(cat_mask) and cat_mask[j])
         ]
         num_names = [str(name) for _, name in num_cols]
         pair_names = self._interaction_relaxed_pairs_from_survivors(survivors, num_names)
@@ -2904,7 +3037,13 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                 chosen = chosen_b_by_name[name]
                 scores = scores_by_name.get(name, {int(b): 0.0 for b in candidates})
                 evidence = evidence_by_name.get(
-                    name, {"mode": "marginal", "feature": name, "chosen_b": int(chosen), "best_partner": None}
+                    name,
+                    {
+                        "mode": "marginal",
+                        "feature": name,
+                        "chosen_b": int(chosen),
+                        "best_partner": None,
+                    },
                 )
             else:
                 partner_values = [
@@ -2928,8 +3067,15 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                         chosen = candidates[len(candidates) // 2]
                         scores = {int(b): 0.0 for b in candidates}
                     else:
-                        chosen, scores = _adap_select_b(col[finite_mask], y_codes[finite_mask], candidates, ratio)
-                    evidence = {"mode": "marginal", "feature": name, "chosen_b": int(chosen), "best_partner": None}
+                        chosen, scores = _adap_select_b(
+                            col[finite_mask], y_codes[finite_mask], candidates, ratio
+                        )
+                    evidence = {
+                        "mode": "marginal",
+                        "feature": name,
+                        "chosen_b": int(chosen),
+                        "best_partner": None,
+                    }
             edges = _adap_quantile_edges(col, int(chosen))
             self._bin_edges_[name_obj] = edges
             self.per_feature_b_[name_obj] = len(edges) - 1
@@ -3035,9 +3181,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             import platform
             import sys
 
-            cause = (
-                f"\n  Original error: {_CORE_IMPORT_ERROR}" if _CORE_IMPORT_ERROR else ""
-            )
+            cause = f"\n  Original error: {_CORE_IMPORT_ERROR}" if _CORE_IMPORT_ERROR else ""
             raise ImportError(
                 "HUGIMLClassifier requires the compiled C++ extension '_hugiml_core', "
                 "which was not importable at package load time."
@@ -3059,7 +3203,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                 "Fast development build:\n"
                 "  HUGIML_FAST_BUILD=1 python setup.py build_ext --inplace\n"
                 "Verify after install:\n"
-                "  python -c \"import hugiml; assert hugiml.check_native(), "
+                '  python -c "import hugiml; assert hugiml.check_native(), '
                 "'native missing'\""
             )
 
@@ -3187,8 +3331,8 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             and hasattr(_core, "prepare_and_mine_l1_adaptive")
         )
 
-        # ── v1.2.0 adaptive pre-binning (C++ hot path or Python fallback) ─────
-        # ── v1.2.0 adaptive B-selection always uses C++ ──────────────────
+        # ── Adaptive pre-binning (C++ hot path or Python fallback) ────────
+        # ── Adaptive B-selection always uses C++ ──────────────────────────
         # _apply_adaptive_binning_cpp calls _core.select_adaptive_bins
         # (elbow_stop_nb_cpp) whenever the C++ extension is available.
         # use_hotpath does NOT gate this: C++ adaptive selection is always
@@ -3228,7 +3372,27 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             X_train = self._prebin_nan_cols(X_train)
         # ─────────────────────────────────────────────────────────────────
 
-        mem = _MemoryTracker()
+        # Line-level allocation tracing (tracemalloc, inside _MemoryTracker)
+        # is independent of the audit/production retention distinction below.
+        # execution_mode='production' skips it, since it can dominate fit()
+        # wall time on categorical-heavy inputs and the line-level breakdown
+        # it provides is diagnostic rather than prediction-relevant.
+        # execution_mode='audit' (the default) keeps it active, tracking the
+        # same traced_peak_mb granularity as every other stage of fit().
+        #
+        # Internal cache-building fits performed by fast_grid_tune() set
+        # _fast_tune_cache_only and are tagged execution_mode='audit' purely
+        # so x_train_hup_ / x_train_downstream_ survive for reuse across the
+        # feature_mode variants built from the same cached fit -- that need
+        # is about which arrays are retained afterward, not about whether
+        # allocation tracing runs during the fit itself, so those fits skip
+        # tracing too regardless of the execution_mode tag they carry.
+        mem = _MemoryTracker(
+            enable_tracing=(
+                getattr(self, "execution_mode", "audit") != "production"
+                and not getattr(self, "_fast_tune_cache_only", False)
+            )
+        )
         with mem:
             # Stage 1: resolve column metadata
             t = self._timer()
@@ -3244,6 +3408,18 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                 X_num, y_train = check_X_y(X_num, y_train, dtype=None, ensure_all_finite=False)
             except TypeError:
                 X_num, y_train = check_X_y(X_num, y_train, dtype=None, force_all_finite=False)
+
+            # Columns with at most one distinct observed value carry no
+            # information for either path below to mine, so they're excluded
+            # from the per-row work that would otherwise touch every row only
+            # to confirm what a single distinct-value count already shows.
+            # n_features_in_ / feature_names_in_ still reflect every column
+            # exactly as given, so predict()'s schema check is unaffected --
+            # only the per-column native processing is skipped.
+            self._zero_variance_cols_ = self._identify_zero_variance_columns(X_train)
+            self._exclude_zero_variance_columns(
+                X_num, X_cat_raw, cat_mask, self._zero_variance_cols_
+            )
 
             self.n_features_in_ = X_num.shape[1]
             self.classes_ = np.unique(y_train)
@@ -3279,7 +3455,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                 )
 
             # Stage 2+3+4: prepare / mine / build matrix
-            # ── v1.2.0 fused L=1 hot path ──────────────────────────────────
+            # ── Fused L=1 hot path ─────────────────────────────────────────
             # When use_hotpath=True and L=1: a single C++ call replaces
             # prepare_transactions + mine_patterns + build_train_matrix.
             # No TransList, no hash-map lookups, direct COO from TID index.
@@ -3530,7 +3706,9 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                 )
                 relaxed_cols: list[int] | None = None
                 if bool(getattr(self, "interaction_relaxed_mining", False)):
-                    survivors = list(getattr(self, "interaction_relaxed_mining_survivors_", []) or [])
+                    survivors = list(
+                        getattr(self, "interaction_relaxed_mining_survivors_", []) or []
+                    )
                     name_to_idx = {str(name): j for j, name in enumerate(list(col_names))}
                     if survivors:
                         relaxed_cols = [
@@ -3539,13 +3717,17 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                             if str(row.get("name")) in name_to_idx
                         ]
                     else:
-                        survivors, relaxed_cols = self._select_interaction_relaxed_survivors_from_frame(
-                            X_train,
-                            y_train,
-                            [str(name) for name in list(col_names)],
-                            is_cat_np.astype(bool, copy=False),
+                        survivors, relaxed_cols = (
+                            self._select_interaction_relaxed_survivors_from_frame(
+                                X_train,
+                                y_train,
+                                [str(name) for name in list(col_names)],
+                                is_cat_np.astype(bool, copy=False),
+                            )
                         )
-                        self.interaction_relaxed_mining_survivors_ = [dict(row) for row in survivors]
+                        self.interaction_relaxed_mining_survivors_ = [
+                            dict(row) for row in survivors
+                        ]
                 raw_patterns = self._mine_with_fallback(
                     y_train, n_cls, K_mine, fit_deadline, relaxed_cols=relaxed_cols
                 )
@@ -4113,8 +4295,31 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                     else:
                         data[name] = np.full(n_rows, np.nan, dtype=object)
                 X_cat = pd.DataFrame(data)
+            X_cat_str = X_cat.astype("string") if len(cat_cols) else X_cat
+            if len(cat_cols):
+                # Collapse category values outside selected_dummy before one-hot
+                # encoding, so get_dummies expands only the downstream levels
+                # retained during fitting rather than every distinct value in
+                # the prediction batch.
+                #
+                # Collapse to a sentinel value, not to missing/NaN. A valid but
+                # unselected category is semantically different from a missing
+                # cell, especially when a column's "_<NA>" dummy survived feature
+                # selection. The sentinel-generated dummy is removed by the
+                # reindex below, leaving all selected dummy columns at zero for
+                # that row.
+                #
+                # This is vectorized per column: construct candidate dummy names
+                # once and test membership against the fitted selected set.
+                dummy_set_local = set(selected_dummy)
+                _COLLAPSE_SENTINEL = "\ue000__hugiml_other__"
+                for col in cat_cols:
+                    candidate_names = col + "_" + X_cat_str[col]
+                    not_keep = X_cat_str[col].notna() & ~candidate_names.isin(dummy_set_local)
+                    if not_keep.any():
+                        X_cat_str.loc[not_keep, col] = _COLLAPSE_SENTINEL
             X_cat_dum = (
-                pd.get_dummies(X_cat.astype("string"), dummy_na=True)
+                pd.get_dummies(X_cat_str, dummy_na=True)
                 if len(cat_cols)
                 else pd.DataFrame(index=range(n_rows))
             )
@@ -4256,7 +4461,9 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         cat_mask = getattr(self, "cat_cols_mask_", None)
         cat_by_mask = set()
         if cat_mask is not None:
-            cat_by_mask = {str(c) for c, is_cat in zip(X_df.columns.astype(str), cat_mask) if bool(is_cat)}
+            cat_by_mask = {
+                str(c) for c, is_cat in zip(X_df.columns.astype(str), cat_mask) if bool(is_cat)
+            }
         numeric_cols = [
             c for c in X_df.columns if str(c) not in cat_by_mask and not numeric[c].isna().all()
         ]
@@ -4298,12 +4505,22 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                 X_num_arr = np.empty((len(X_df), 0))
             cat_cols = getattr(self, "_original_cat_cols_", [])
             X_cat = X_df.reindex(columns=cat_cols)
+            dummy_cols = getattr(self, "_original_dummy_columns_", [])
+            X_cat_str = X_cat.astype("string") if len(cat_cols) else X_cat
+            if len(cat_cols):
+                # Same sentinel approach as the selected-original transform.
+                dummy_set_local = set(dummy_cols)
+                _COLLAPSE_SENTINEL = "\ue000__hugiml_other__"
+                for col in cat_cols:
+                    candidate_names = col + "_" + X_cat_str[col]
+                    not_keep = X_cat_str[col].notna() & ~candidate_names.isin(dummy_set_local)
+                    if not_keep.any():
+                        X_cat_str.loc[not_keep, col] = _COLLAPSE_SENTINEL
             X_cat_dum = (
-                pd.get_dummies(X_cat.astype("string"), dummy_na=True)
+                pd.get_dummies(X_cat_str, dummy_na=True)
                 if len(cat_cols)
                 else pd.DataFrame(index=X_df.index)
             )
-            dummy_cols = getattr(self, "_original_dummy_columns_", [])
             X_cat_dum = X_cat_dum.reindex(columns=dummy_cols, fill_value=0)
 
         X_cat_arr = (
@@ -5341,6 +5558,14 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         except TypeError:
             X_num = check_array(X_num, dtype=None, force_all_finite=False)
 
+        # Exclude exactly the columns identified as zero-variance during
+        # fit(), regardless of what they hold in this batch -- the fitted
+        # model never learned anything from them, so prediction ignores them
+        # the same way every time rather than re-deciding per call.
+        zero_variance_cols = getattr(self, "_zero_variance_cols_", None)
+        if zero_variance_cols and _cat_mask is not None:
+            self._exclude_zero_variance_columns(X_num, X_cat_raw, _cat_mask, zero_variance_cols)
+
         n = X_num.shape[0]
         X_cat_arg = X_cat_raw if any(v is not None for v in X_cat_raw) else None
 
@@ -5597,7 +5822,9 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                             test_max = np.full(len(numeric_idx), np.nan, dtype=float)
                             observed = finite_vals.any(axis=0)
                             if np.any(observed):
-                                observed_vals = np.where(finite_vals[:, observed], vals[:, observed], np.nan)
+                                observed_vals = np.where(
+                                    finite_vals[:, observed], vals[:, observed], np.nan
+                                )
                                 test_min[observed] = np.nanmin(observed_vals, axis=0)
                                 test_max[observed] = np.nanmax(observed_vals, axis=0)
                             drift = (
@@ -5880,8 +6107,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         survivor_features = [name for name in source_features if name in survivor_lookup]
         survivor_rows = [survivor_lookup[name] for name in survivor_features]
         marginal_igs = [
-            self._finite_float_or_nan(row.get("marginal_ig", np.nan))
-            for row in survivor_rows
+            self._finite_float_or_nan(row.get("marginal_ig", np.nan)) for row in survivor_rows
         ]
         interaction_scores = [
             self._finite_float_or_nan(row.get("interaction_score", row.get("score", np.nan)))
@@ -5900,9 +6126,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             "survivor_led": survivor_led,
             "survivor_features": survivor_features,
             "survivor_feature_count": len(survivor_features),
-            "survivor_min_marginal_ig": min(finite_marginal)
-            if finite_marginal
-            else np.nan,
+            "survivor_min_marginal_ig": min(finite_marginal) if finite_marginal else np.nan,
             "survivor_max_interaction_score": max(finite_interaction)
             if finite_interaction
             else np.nan,
@@ -6091,9 +6315,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         self._downstream_survivor_led_ = np.zeros(n_features, dtype=np.bool_)
         self._downstream_survivor_features_ = [list() for _ in range(n_features)]
         self._downstream_survivor_feature_count_ = np.zeros(n_features, dtype=np.int64)
-        self._downstream_survivor_min_marginal_ig_ = np.full(
-            n_features, np.nan, dtype=np.float64
-        )
+        self._downstream_survivor_min_marginal_ig_ = np.full(n_features, np.nan, dtype=np.float64)
         self._downstream_survivor_max_interaction_score_ = np.full(
             n_features, np.nan, dtype=np.float64
         )
@@ -6113,12 +6335,8 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                     feat, support_lookup.get(display_name, np.nan)
                 )
                 audit = audit_lookup.get(feat, audit_lookup.get(display_name, {}))
-                self._downstream_pattern_origin_[idx] = str(
-                    audit.get("pattern_origin", "standard")
-                )
-                self._downstream_survivor_led_[idx] = bool(
-                    audit.get("survivor_led", False)
-                )
+                self._downstream_pattern_origin_[idx] = str(audit.get("pattern_origin", "standard"))
+                self._downstream_survivor_led_[idx] = bool(audit.get("survivor_led", False))
                 survivor_features = list(audit.get("survivor_features", []) or [])
                 self._downstream_survivor_features_[idx] = survivor_features
                 self._downstream_survivor_feature_count_[idx] = int(
@@ -6127,9 +6345,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                 self._downstream_survivor_min_marginal_ig_[idx] = self._finite_float_or_nan(
                     audit.get("survivor_min_marginal_ig", np.nan)
                 )
-                self._downstream_survivor_max_interaction_score_[
-                    idx
-                ] = self._finite_float_or_nan(
+                self._downstream_survivor_max_interaction_score_[idx] = self._finite_float_or_nan(
                     audit.get("survivor_max_interaction_score", np.nan)
                 )
                 self._downstream_survivor_best_partners_[idx] = list(
@@ -6207,18 +6423,14 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         cached_pattern_origin = getattr(self, "_downstream_pattern_origin_", None)
         cached_survivor_led = getattr(self, "_downstream_survivor_led_", None)
         cached_survivor_features = getattr(self, "_downstream_survivor_features_", None)
-        cached_survivor_feature_count = getattr(
-            self, "_downstream_survivor_feature_count_", None
-        )
+        cached_survivor_feature_count = getattr(self, "_downstream_survivor_feature_count_", None)
         cached_survivor_min_marginal_ig = getattr(
             self, "_downstream_survivor_min_marginal_ig_", None
         )
         cached_survivor_max_interaction_score = getattr(
             self, "_downstream_survivor_max_interaction_score_", None
         )
-        cached_survivor_best_partners = getattr(
-            self, "_downstream_survivor_best_partners_", None
-        )
+        cached_survivor_best_partners = getattr(self, "_downstream_survivor_best_partners_", None)
         has_cached_survivor_audit = all(
             value is not None and len(value) == len(features)
             for value in (
@@ -6308,9 +6520,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                     survivor_max_interaction_score = self._finite_float_or_nan(
                         audit.get("survivor_max_interaction_score", np.nan)
                     )
-                    survivor_best_partners = list(
-                        audit.get("survivor_best_partners", []) or []
-                    )
+                    survivor_best_partners = list(audit.get("survivor_best_partners", []) or [])
             else:
                 pattern_support = np.nan
                 support_type = "not_applicable"
@@ -6681,11 +6891,22 @@ def _hugiml_auc_score_for_fast_grid(y_true: Any, proba: np.ndarray, classes: np.
     return float(roc_auc_score(y_arr, proba, multi_class="ovr", average="macro"))
 
 
-def _hugiml_expand_grid_for_fast_tune(param_grid: dict[str, list] | None) -> list[dict[str, Any]]:
-    """Expand a compact sklearn-style parameter grid for fast HUGIML tuning."""
+def _hugiml_expand_grid_for_fast_tune(
+    param_grid: dict[str, list] | str | None,
+) -> list[dict[str, Any]]:
+    """Expand a compact sklearn-style parameter grid for fast HUGIML tuning.
+
+    ``param_grid`` may be a dict of parameter lists (the sklearn-style grid
+    itself), the name of one of the grids in ``hugiml.hyperparameter_configs``
+    (for example ``"interpretability"``), or ``None`` to use the default
+    named grid.
+    """
     from itertools import product
 
-    grid = HUGIMLClassifier.default_param_grid() if param_grid is None else param_grid
+    if param_grid is None or isinstance(param_grid, str):
+        grid = get_hugiml_grid(param_grid)
+    else:
+        grid = param_grid
     if not isinstance(grid, dict) or not grid:
         raise HUGIMLParamError("param_grid must be a non-empty dict of parameter lists.")
     keys = list(grid.keys())
@@ -6860,7 +7081,7 @@ def _hugiml_fast_grid_tune(
     y_train: Any,
     X_val: Any,
     y_val: Any,
-    param_grid: dict[str, list] | None = None,
+    param_grid: dict[str, list] | str | None = None,
     *,
     base_params: dict[str, Any] | None = None,
     scoring: str = "roc_auc",
@@ -6880,6 +7101,38 @@ def _hugiml_fast_grid_tune(
       loop; timeout/degradation can make cached mining fits differ from
       standalone candidates.
 
+    ``base_params['execution_mode']`` defaults to ``'production'`` when not
+    supplied, since a tuning sweep evaluates many candidates and the
+    line-level allocation diagnostics that ``'audit'`` provides are rarely
+    useful for any individual one of them; pass
+    ``base_params={'execution_mode': 'audit', ...}`` to opt back in. This
+    only affects line-level tracing cost and the post-fit retention of
+    training matrices -- it does not change which patterns are mined,
+    scores, or rankings, all of which are identical either way (the
+    per-(G, L, topK) cache fits that do the actual mining are tagged
+    'audit' internally regardless, so that the candidates derived from
+    them keep access to the cached pattern matrix; see the cache-building
+    loop below).
+
+    With ``refit_full=False`` (the default), ``best_model`` is one of these
+    lightweight per-candidate objects: drift-baseline and rich metadata were
+    never computed for it regardless of execution_mode (see below), and
+    under the 'production' default its training pattern matrix is not
+    retained either, so get_pattern_info() also raises on it -- call this
+    function again with ``refit_full=True``, or call fit() directly with the
+    selected params, for a model meant to be inspected afterward rather than
+    just used for prediction.
+
+    With ``refit_full=True``, the refit that produces the returned
+    ``best_model`` defaults to ``execution_mode='audit'`` regardless of what
+    the search candidates used, unless the caller's own ``base_params``
+    explicitly named an ``execution_mode`` -- the search benefits from
+    'production' for speed across many candidates, but the one model
+    actually handed back for the caller to keep and inspect defaults to
+    having full access to get_pattern_info(), detect_drift(),
+    get_drift_psi(), and feature_importances() without missing-artifact
+    warnings, rather than inheriting the search's speed-oriented default.
+
     Returns a dict with best_model, best_params, best_score, cv_results, and
     cache timings. Uses the same scorer as the ordinary grid path for all
     supported scoring values. During tuning it skips drift-baseline and rich final
@@ -6891,6 +7144,12 @@ def _hugiml_fast_grid_tune(
     params0 = dict(base_params or {})
     params0.setdefault("adaptive_binning", True)
     params0.setdefault("use_hotpath", True)
+    # Recorded before the setdefault below so refit_full can tell "the caller
+    # asked for production" apart from "this default applies to every search
+    # candidate but a refit_full model should still get full audit access by
+    # default" -- see the refit_full block further down.
+    _caller_set_execution_mode = "execution_mode" in params0
+    params0.setdefault("execution_mode", "production")
     # Do not set a single global G here; G is part of mining and is constant per
     # cache group below.  A caller-supplied base G is used only for candidates
     # that omit G from the grid.
@@ -6900,7 +7159,7 @@ def _hugiml_fast_grid_tune(
             "fast_grid_tune requires max_fit_seconds=None for exact equivalence."
         )
 
-    requested_execution_mode = str(params0.get("execution_mode", "audit"))
+    requested_execution_mode = str(params0.get("execution_mode", "production"))
     if requested_execution_mode not in {"audit", "production"}:
         raise HUGIMLParamError(
             "execution_mode must be either 'audit' or 'production'. "
@@ -7017,6 +7276,15 @@ def _hugiml_fast_grid_tune(
     if refit_full:
         refit_params = dict(params0)
         refit_params.update(best_params)
+        # The search above runs every candidate under 'production' by default
+        # for speed; refit_full's purpose is producing one normal, fully
+        # inspectable model from the winning configuration, so unless the
+        # caller explicitly asked for 'production', this refit uses 'audit'
+        # so get_pattern_info(), detect_drift(), and similar audit-mode-only
+        # methods work on the model handed back here without the caller
+        # needing to know to ask for that separately.
+        if not _caller_set_execution_mode:
+            refit_params["execution_mode"] = "audit"
         # Keep user-supplied B if present; adaptive_binning ignores it for transaction B.
         best_model = cls(**refit_params).fit(X_train, y_train_arr)
 
@@ -7176,7 +7444,7 @@ def _hugiml_tune(
     *,
     cv: int | Any = 5,
     scoring: str = "roc_auc",
-    param_grid: dict[str, list] | None = None,
+    param_grid: dict[str, list] | str | None = None,
     refit: bool = True,
     base_params: dict[str, Any] | None = None,
     random_state: int | None = 42,
@@ -7201,11 +7469,24 @@ def _hugiml_tune(
     scoring : {'roc_auc', 'accuracy', 'balanced_accuracy', 'f1', 'f1_macro', 'f1_weighted'}
         Validation metric. 'roc_auc' supports binary and multiclass OVR macro AUC.
     param_grid : dict or None
-        sklearn-style grid. None uses HUGIMLClassifier.default_param_grid().
+        A dict (sklearn-style grid), the name of a grid registered in
+        hugiml.hyperparameter_configs (for example 'interpretability'),
+        or None to use HUGIMLClassifier.default_param_grid().
     refit : bool, default=True
         If True, refit the best configuration on the full X, y with normal fit().
     base_params : dict or None
-        Constructor parameters shared by every candidate.
+        Constructor parameters shared by every candidate. ``execution_mode``
+        defaults to ``'production'`` for the candidates evaluated during the
+        search, since per-candidate line-level allocation diagnostics are
+        rarely useful mid-sweep; mining results, scores, and the resulting
+        ranking are identical to ``'audit'`` either way. ``result.best_estimator_``
+        -- the one model actually returned -- is refit under
+        ``execution_mode='audit'`` regardless, so get_pattern_info(),
+        detect_drift(), get_drift_psi(), and feature_importances() all work
+        on it without missing-artifact warnings, unless ``base_params``
+        explicitly names an ``execution_mode``, in which case that value is
+        used everywhere (search and final refit alike) and the above
+        defaulting is skipped entirely.
     random_state : int or None, default=42
         Random seed for StratifiedKFold when cv is an integer.
     shuffle : bool, default=True
@@ -7230,6 +7511,12 @@ def _hugiml_tune(
 
     t_start = time.perf_counter()
     base_params0 = dict(base_params or {})
+    # Recorded before the setdefault below for the same reason as in
+    # fast_grid_tune: the final refit further down restores 'audit' by
+    # default even though every candidate during the search uses
+    # 'production', unless the caller explicitly chose an execution_mode.
+    _caller_set_execution_mode = "execution_mode" in base_params0
+    base_params0.setdefault("execution_mode", "production")
     candidates = _hugiml_expand_grid_for_fast_tune(param_grid)
 
     y_arr = cls._safe_cast_y(y)
@@ -7407,6 +7694,15 @@ def _hugiml_tune(
     best_params = dict(base_params0)
     best_params.update(dict(summary_rows[0]["params"]))
     best_score = float(summary_rows[0]["mean_test_score"])
+    # The search above evaluates every candidate under 'production' by
+    # default for speed; best_estimator_ is the model the caller actually
+    # keeps and is the natural target for get_pattern_info(), detect_drift(),
+    # and similar audit-mode-only methods afterward, so unless the caller's
+    # own base_params explicitly named an execution_mode, it's refit under
+    # 'audit' here rather than inheriting the search's speed-oriented
+    # default.
+    if not _caller_set_execution_mode:
+        best_params["execution_mode"] = "audit"
     if refit:
         best_estimator = cls(**best_params).fit(X, y_arr)
     else:

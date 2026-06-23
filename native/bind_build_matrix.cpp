@@ -80,34 +80,7 @@ void bind_build_matrix(py::module_& m)
 
             std::vector<std::vector<std::string>> cat_strs;
             std::vector<std::vector<bool>>        cat_valid;
-
-            if (!X_cat_raw.is_none() && p > 0) {
-                const auto& is_cat_v = td.is_cat_v;
-                if (static_cast<int>(is_cat_v.size()) == p) {
-                    cat_strs.resize(p);
-                    cat_valid.resize(p);
-                    py::list raw_list = X_cat_raw.cast<py::list>();
-                    for (int j = 0; j < p; j++) {
-                        if (!is_cat_v[j]) continue;
-                        py::object col_obj = raw_list[j].cast<py::object>();
-                        if (col_obj.is_none()) continue;
-                        cat_strs[j].resize(n);
-                        cat_valid[j].resize(n, false);
-                        py::array arr = col_obj.cast<py::array>();
-                        py::list  lst = arr.attr("tolist")().cast<py::list>();
-                        for (int r = 0; r < n; r++) {
-                            py::object val = lst[r];
-                            if (val.is_none()) continue;
-                            try {
-                                double dv = val.cast<double>();
-                                if (std::isnan(dv)) continue;
-                            } catch (...) {}
-                            cat_valid[j][r] = true;
-                            cat_strs[j][r]  = py::str(val).cast<std::string>();
-                        }
-                    }
-                }
-            }
+            extract_cat_data_for_test(X_cat_raw, td.is_cat_v, n, p, cat_strs, cat_valid);
 
             COO coo;
             try {
@@ -146,34 +119,7 @@ void bind_build_matrix(py::module_& m)
 
             std::vector<std::vector<std::string>> cat_strs;
             std::vector<std::vector<bool>>        cat_valid;
-
-            if (!X_cat_raw.is_none() && p > 0) {
-                const auto& is_cat_v = td.is_cat_v;
-                if (static_cast<int>(is_cat_v.size()) == p) {
-                    cat_strs.resize(p);
-                    cat_valid.resize(p);
-                    py::list raw_list = X_cat_raw.cast<py::list>();
-                    for (int j = 0; j < p; j++) {
-                        if (!is_cat_v[j]) continue;
-                        py::object col_obj = raw_list[j].cast<py::object>();
-                        if (col_obj.is_none()) continue;
-                        cat_strs[j].resize(n);
-                        cat_valid[j].resize(n, false);
-                        py::array arr = col_obj.cast<py::array>();
-                        py::list  lst = arr.attr("tolist")().cast<py::list>();
-                        for (int r = 0; r < n; r++) {
-                            py::object val = lst[r];
-                            if (val.is_none()) continue;
-                            try {
-                                double dv = val.cast<double>();
-                                if (std::isnan(dv)) continue;
-                            } catch (...) {}
-                            cat_valid[j][r] = true;
-                            cat_strs[j][r]  = py::str(val).cast<std::string>();
-                        }
-                    }
-                }
-            }
+            extract_cat_data_for_test(X_cat_raw, td.is_cat_v, n, p, cat_strs, cat_valid);
 
             COO coo;
             try {

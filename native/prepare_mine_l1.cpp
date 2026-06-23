@@ -155,6 +155,11 @@ struct L1ColDesc {
     // For categorical columns: label → 0-based code
     std::unordered_map<std::string, int> label2code;
 
+    // For categorical columns, when caching is enabled: the per-row code
+    // computed during column-stats preparation (size n). Empty when caching
+    // is not used; the fused scan then falls back to the v1.1.12 lookup path.
+    std::vector<int32_t> cached_codes;
+
     // Precoded column: direct int cast (no upper_bound)
     bool is_precoded_col     = false;
     bool is_adaptive_raw_col = false;  // raw values + adaptive edges, no X_codes materialization
@@ -259,9 +264,7 @@ AdaptiveBinResult select_adaptive_bins_cpp(
         ", n_num_cols=" + std::to_string(n_num) + ")");
     result.X_codes_flat.resize(static_cast<size_t>(n) * static_cast<size_t>(n_num), int32_t{-1});
 
-    // Apply the selected edges row-wise.  The previous column-wise loop wrote
-    // into row-major output with a stride of n_num_cols; this row-wise loop
-    // writes contiguous output and is also parallel across rows.
+    // Apply the selected edges row-wise into contiguous row-major output.
     std::exception_ptr code_error = nullptr;
     failed = false;
     #pragma omp parallel for schedule(static) if(n > 4096 && n_num > 0)
@@ -349,6 +352,19 @@ static L1FitResult prepare_and_mine_l1_cpp_impl(
     }
 
     check_timeout_deadline(has_deadline, deadline_tp, "prepare_and_mine_l1 setup");
+
+    // ── Optional categorical-codes cache: affordability check ────────────────
+    // Relative to v1.1.12, categorical codes computed in Phase 1 may be reused
+    // in the fused scan. The soft check is sized to categorical columns only,
+    // so memory pressure falls back to the existing lookup path.
+    int n_cat_total_l1 = 0;
+    {
+        auto icb_tmp = is_cat_arr.unchecked<1>();
+        for (int j = 0; j < p; j++) if (icb_tmp(j)) n_cat_total_l1++;
+    }
+    const bool enable_codes_cache_l1 = (n_cat_total_l1 == 0) ? false :
+        native_memory_budget_allows(
+            static_cast<uint64_t>(n) * static_cast<uint64_t>(n_cat_total_l1) * sizeof(int32_t));
 
     // ── y vector + class count ────────────────────────────────────────────────
     std::vector<int> y_vec(n);
@@ -572,7 +588,13 @@ static L1FitResult prepare_and_mine_l1_cpp_impl(
             td.ber.push_back({1.0});
             td.cv.push_back(0.0);
 
-            if (any_item) active_cols.push_back(std::move(cd));
+            if (any_item) {
+                if (enable_codes_cache_l1) {
+                    cd.cached_codes = std::move(col_codes);
+                }
+                active_cols.push_back(std::move(cd));
+            }
+            // col_codes is released here when it is not retained.
 
         } else if (adaptive_spec_idx[j] >= 0) {
             // ── Adaptive raw numeric column (no X_codes materialization) ─────
@@ -587,9 +609,8 @@ static L1FitResult prepare_and_mine_l1_cpp_impl(
                 continue;
             }
 
-            // Downstream predict() will pre-bin raw values to integer codes, so
-            // td.all_edges remains the code-space [0, 1, ..., B_j] exactly like
-            // the previous two-step adaptive path.
+            // Downstream predict() pre-bins raw values to integer codes, so
+            // td.all_edges remains the code-space [0, 1, ..., B_j].
             std::vector<double> code_edges(static_cast<size_t>(nb_act + 1));
             for (int k = 0; k <= nb_act; k++) code_edges[k] = static_cast<double>(k);
             td.nb_col.push_back(nb_act);
@@ -898,11 +919,19 @@ static L1FitResult prepare_and_mine_l1_cpp_impl(
             int code = -1;
 
             if (cd.is_cat_col) {
-                if (cat_raw_strs.empty() || cat_raw_strs[j].empty()) continue;
-                if (cat_raw_valid.empty() || !cat_raw_valid[j][r]) continue;
-                auto it = cd.label2code.find(cat_raw_strs[j][r]);
-                if (it == cd.label2code.end()) continue;
-                code = it->second;
+                if (!cd.cached_codes.empty()) {
+                    // Fast path: code already computed during column-stats
+                    // preparation; cached_codes[r] is -1 for missing/invalid rows.
+                    code = cd.cached_codes[r];
+                    if (code < 0) continue;
+                } else {
+                    // Cache disabled: use the v1.1.12 lookup path.
+                    if (cat_raw_strs.empty() || cat_raw_strs[j].empty()) continue;
+                    if (cat_raw_valid.empty() || !cat_raw_valid[j][r]) continue;
+                    auto it = cd.label2code.find(cat_raw_strs[j][r]);
+                    if (it == cd.label2code.end()) continue;
+                    code = it->second;
+                }
             } else if (cd.is_adaptive_raw_col) {
                 double raw = Xb(r, j);
                 if (!std::isfinite(raw)) continue;
@@ -1129,7 +1158,7 @@ L1FitResult prepare_and_mine_l1_adaptive_cpp(
 }
 
 
-// Fast fixed-B path for dense numeric L=1 hotpath.  It avoids the historical
+// Fast fixed-B path for dense numeric L=1 hotpath. It avoids repeated
 // Python string pre-binning and avoids materialised transactions.  Missing or
 // non-finite cells are skipped during item generation, for both train and test.
 namespace {

@@ -110,7 +110,8 @@ inline py::tuple coo_to_csr_tuple(hugiml::COO&& coo, int n_rows, int n_cols) {
 
 // ── Categorical data pre-extraction (call with GIL held) ─────────────────────
 // Converts list-of-column-arrays (or None) to C++ string/validity matrices.
-
+// Relative to v1.1.12, string labels take the common path directly and the
+// numeric missing-value check is used only for non-string cells.
 inline void extract_cat_data(
     py::object       X_cat_raw_py,
     const py::array_t<uint8_t, py::array::forcecast>& is_cat_arr,
@@ -135,7 +136,59 @@ inline void extract_cat_data(
         py::list  lst = arr.attr("tolist")().cast<py::list>();
         for (int r = 0; r < n; r++) {
             py::object val = lst[r];
-            if (val.is_none()) continue;
+            PyObject* vp = val.ptr();
+            if (vp == Py_None) continue;
+            if (PyUnicode_Check(vp)) {
+                // String labels are the common case.
+                out_valid[j][r] = true;
+                out_strs[j][r]  = val.cast<std::string>();
+                continue;
+            }
+            // Non-string cells use the numeric missing-value check.
+            try {
+                double dv = val.cast<double>();
+                if (std::isnan(dv)) continue;
+            } catch (...) {}
+            out_valid[j][r] = true;
+            out_strs[j][r]  = py::str(val).cast<std::string>();
+        }
+    }
+}
+
+// ── Categorical data pre-extraction for test-time matrix building ───────────
+// Same extraction semantics as extract_cat_data(), using the fitted
+// TransactionDataCpp categorical mask stored in td.is_cat_v.
+inline void extract_cat_data_for_test(
+    py::object              X_cat_raw_py,
+    const std::vector<bool>& is_cat_v,
+    int n, int p,
+    std::vector<std::vector<std::string>>& out_strs,
+    std::vector<std::vector<bool>>&        out_valid)
+{
+    if (X_cat_raw_py.is_none() || p <= 0) return;
+    if (static_cast<int>(is_cat_v.size()) != p) return;
+
+    out_strs.resize(p);
+    out_valid.resize(p);
+    py::list raw_list = X_cat_raw_py.cast<py::list>();
+
+    for (int j = 0; j < p; j++) {
+        if (!is_cat_v[j]) continue;
+        py::object col_obj = raw_list[j].cast<py::object>();
+        if (col_obj.is_none()) continue;
+        out_strs[j].resize(n);
+        out_valid[j].resize(n, false);
+        py::array arr = col_obj.cast<py::array>();
+        py::list  lst = arr.attr("tolist")().cast<py::list>();
+        for (int r = 0; r < n; r++) {
+            py::object val = lst[r];
+            PyObject* vp = val.ptr();
+            if (vp == Py_None) continue;
+            if (PyUnicode_Check(vp)) {
+                out_valid[j][r] = true;
+                out_strs[j][r]  = val.cast<std::string>();
+                continue;
+            }
             try {
                 double dv = val.cast<double>();
                 if (std::isnan(dv)) continue;

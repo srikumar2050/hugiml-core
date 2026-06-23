@@ -82,20 +82,21 @@ Useful custom-dataset options:
 * ``--n-splits`` controls the outer stratified CV folds.
 * ``--models`` restricts the model set.
 
-The runner performs deterministic, lightweight preprocessing for benchmark
-compatibility: categorical columns are encoded as category codes, missing
-numeric values are filled with medians, and fully missing columns are removed.
-For production modeling, keep benchmark preprocessing separate from the
-validated feature pipeline used by the deployed model.
+The runner preserves pandas categorical metadata for HUGIML. Non-HUGIML
+baselines are wrapped in a fold-fitted one-hot encoder plus numeric imputer so
+benchmark preprocessing stays inside each validation split. Fully missing
+columns are removed before model comparison. For production modeling, keep
+benchmark preprocessing separate from the validated feature pipeline used by the
+deployed model.
 
 Tuned benchmarks
 ----------------
 
 Add ``--tune`` to run inner-CV hyperparameter tuning inside each outer fold.
 For HUGIML, eligible adaptive-binning grids use the fast tuning path exposed by
-``HUGIMLClassifierNative.tune``. Other estimators use their benchmark grids when
-available, and models without a stable tuning grid remain on their fixed
-baseline configuration.
+``HUGIMLClassifierNative.tune``. Other estimators use the shared benchmark grids
+from ``hugiml.hyperparameter_configs`` when available, and models without a
+stable tuning grid remain on their baseline configuration.
 
 .. code-block:: bash
 

@@ -14,20 +14,25 @@ Why HUGIML?
 
 * **Intrinsic interpretability:** learned HUG patterns are the model representation, not an after-the-fact explanation.
 * **Regulated-domain fit:** model cards, audit artifacts, pruning trails, calibration, drift monitoring, and deployment helpers are included.
-* **Native performance:** computationally intensive mining, transaction construction, interaction-information scoring, pair-aware adaptive binning, and matrix-building stages are C++ accelerated with optional OpenMP support. Version 1.1.12 builds on v1.1.11 with interaction-information augmented-pair source selection and interaction-relaxed mining. Earlier 1.1.x capabilities remain available, including production/audit execution modes, fast adaptive-binning tuning, higher-order interaction selection, the native ``L=2`` hot path, augmented-pair operations, strict global ``topK`` budgeting, compact native transaction memory, and fused adaptive ``L=1`` execution.
+* **Native performance:** computationally intensive mining, transaction construction, interaction-information scoring, pair-aware adaptive binning, and matrix-building stages are C++ accelerated with optional OpenMP support. Version 1.1.13 builds on v1.1.12 with faster categorical handling, leaner tuning execution, and shared hyperparameter grid definitions. Earlier 1.1.x capabilities remain available, including production/audit execution modes, fast adaptive-binning tuning, higher-order interaction selection, the native ``L=2`` hot path, augmented-pair operations, strict global ``topK`` budgeting, compact native transaction memory, and fused adaptive ``L=1`` execution.
 * **Python ergonomics:** the estimator follows the scikit-learn API and works with pandas DataFrames or NumPy arrays.
 
 
 Current release focus
 ---------------------
 
-The 1.1.12 release focuses on interaction-aware feature discovery while keeping v1.1.11 behavior available:
+The 1.1.13 pre-release focuses on runtime and configuration consistency while
+retaining the v1.1.12 interaction-aware feature discovery behavior:
 
-* Augmented pairs now default to interaction-information source selection. ``augmented_pair_mode="marginal_ig"`` keeps the v1.1.11 source-ranking behavior.
-* ``interaction_relaxed_mining=True`` lets interaction-information survivor sources enter native pattern mining without adding pair-operator feature columns.
-* Pair-aware adaptive-binning metadata and survivor-led audit fields make the new interaction paths visible in governance and feature-importance outputs.
+* Fit and predict paths reduce repeated categorical processing and skip
+  zero-variance training columns consistently across save/load.
+* Hyperparameter grids are centralized in ``hugiml.hyperparameter_configs`` and
+  reused by classifier tuning, benchmarks, and the Workbench UI.
+* Tuning candidates use leaner execution by default, while the returned refit
+  model remains audit-ready unless a caller explicitly chooses production mode.
 
-The broader v1.1.11 dashboard evidence views, binary feature conversion, native-backend diagnostics, public ``check_native()`` helper, cleaned package exports, and backward-compatible classifier names remain available.
+The v1.1.12 augmented-pair, interaction-relaxed mining, pair-aware adaptive
+binning, and survivor-led governance evidence remain available.
 
 Installation
 ------------

@@ -120,6 +120,15 @@ def train_hugiml(X: pd.DataFrame, y, cv: int = 5, scoring: str = "roc_auc", rand
             param_grid=None,
             refit=True,
             use_fast_path=True,
+            # tune() evaluates every search candidate under
+            # execution_mode='production' for speed and refits the returned
+            # best_estimator_ under 'audit' by default -- this dashboard's
+            # own components (patterns, feature_family, pruning, prediction,
+            # governance_evidence, overview) call get_pattern_info() on the
+            # trained model, which needs that 'audit' state; an explicit
+            # override here would silently degrade those views to a sparser
+            # fallback instead of erroring, since each call site wraps
+            # get_pattern_info() in a try/except.
         )
 
     return fit_hugiml_config(X, y, params=_default_params(), cv=cv, scoring=scoring, random_state=random_state)

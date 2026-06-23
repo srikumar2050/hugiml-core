@@ -587,6 +587,14 @@ def save_model(clf: Any, path: str | os.PathLike) -> None:
         ),
         "survivors": list(getattr(clf, "interaction_relaxed_mining_survivors_", [])),
     }
+    # Columns identified at fit time as having at most one distinct observed
+    # value. Excluded from native processing at both fit and predict time;
+    # persisted so a loaded model continues excluding exactly the same
+    # columns rather than treating them as ordinary columns again after a
+    # save/load round trip. Absent on models saved before this field existed,
+    # which load_model treats the same way fit() treats a model that hasn't
+    # computed it yet: as an empty list, no columns excluded.
+    fit_state["zero_variance_cols"] = list(getattr(clf, "_zero_variance_cols_", []) or [])
     members["clf_fit.json"] = _json_dumps(fit_state)
 
     # Patterns
@@ -1178,6 +1186,15 @@ def _load_v3(path: str | os.PathLike) -> Any:
     )
     if relaxed_state.get("survivors"):
         clf.interaction_relaxed_mining_survivors_ = list(relaxed_state["survivors"])
+    # ────────────────────────────────────────────────────────────────────
+    # ── zero-variance column exclusion state ────────────────────────────
+    # Absent on archives written before this field existed; defaulting to
+    # an empty list there means a model saved by an earlier version simply
+    # excludes nothing extra after loading, identical to its own behaviour
+    # before this field was introduced -- not a behaviour change for those
+    # archives, just no opportunity to skip columns that version never
+    # identified in the first place.
+    clf._zero_variance_cols_ = list(clf_fit.get("zero_variance_cols") or [])
     # ────────────────────────────────────────────────────────────────────
 
     # TransactionDataWrapper

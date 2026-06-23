@@ -32,9 +32,8 @@
  *     Peak transient memory for this phase is O(STRIPE_ROWS × n_active)
  *     rather than O(n × n_active).
  *
- * The old ColStream.bin_codes[n] array is gone entirely.  ColDesc stores
- * only the column index, type flags, and the code_to_bname lookup table
- * (length nb_col[j], typically 2–20 entries).
+ * ColDesc stores only the column index, type flags, and the code_to_bname
+ * lookup table (length nb_col[j], typically 2–20 entries).
  */
 
 #include "transaction.hpp"
@@ -192,28 +191,48 @@ TransactionDataCpp prepare_transactions_cpp(
     int ic = 0;
 
     // ── Active-column descriptor ──────────────────────────────────────────────
-    // Replaces the old ColStream which stored bin_codes[n] (O(n) per column).
     // ColDesc stores only the column index and the code_to_bname lookup table,
-    // which is O(nb_col[j]) — negligible.
+    // which is O(nb_col[j]) -- small for the intended bin counts.
     //
     // Per-column label2int maps for categorical columns are stored separately
     // so the stripe loop can encode rows without re-scanning cat_categories.
+    //
+    // Relative to v1.1.12, categorical per-row codes can be retained after
+    // Phase 1 when the soft memory budget allows it. Phase 2 can then read
+    // cached integer codes instead of repeating string map lookups. Numeric
+    // columns keep the same streaming representation as before.
     struct ColDesc {
         int              col_idx;       // original column index j
         std::vector<int> code_to_bname; // code 0-based → bname, -1 = no item
         // For categorical columns: label-string → integer code.
         // Built once in Phase 1 and reused across all stripes.
         std::unordered_map<std::string, int> label2int;
+        // For categorical columns, when caching is enabled: the per-row code
+        // computed in Phase 1 (size n). Empty when caching was skipped
+        // (either because the column isn't categorical, or because the
+        // memory budget check below disabled it) -- Phase 2 falls back to
+        // the label2int lookup in that case, preserving v1.1.12 semantics.
+        std::vector<int32_t> cached_codes;
     };
     std::vector<ColDesc> active_cols;
     active_cols.reserve(p);
+
+    // ── Optional categorical-codes cache: affordability check ────────────────
+    // Only categorical columns ever populate cached_codes, so size the check
+    // on the categorical column count specifically, not on p. Skipped entirely
+    // (cheap early-exit) when there are no categorical columns at all.
+    int n_cat_total = 0;
+    for (int j = 0; j < p; j++) if (is_cat[j]) n_cat_total++;
+    const bool enable_codes_cache = (n_cat_total == 0) ? false :
+        native_memory_budget_allows(
+            static_cast<uint64_t>(n) * static_cast<uint64_t>(n_cat_total) * sizeof(int32_t));
 
     // ── Phase 1 : Column statistics + item registry ───────────────────────────
     // For each column:
     //   a) Compute global stats (edges, Pearson r, NMI).  Requires all n rows.
     //   b) Register items in tu / bn2id / item_map.
     //   c) If any item was registered, add a ColDesc to active_cols.
-    // No bin_codes are stored here.
+    // Full numeric bin-code matrices are not stored here.
 
     for (int j = 0; j < p; j++) {
 
@@ -235,8 +254,9 @@ TransactionDataCpp prepare_transactions_cpp(
             for (int i = 0; i < static_cast<int>(uniq.size()); i++)
                 label2int[uniq[i]] = i;
 
-            // Per-row codes — needed for NMI and Pearson sign, but only
-            // for this column's stats pass.  Freed at end of this block.
+            // Per-row codes — needed for NMI and Pearson sign this iteration,
+            // and (when enable_codes_cache) retained afterwards so Phase 2
+            // can reuse the integer codes in the stripe scan.
             std::vector<int32_t> col_codes(n, -1);
             for (int r = 0; r < n; r++) {
                 if (have_cat && have_valid && cat_raw_valid[j][r]) {
@@ -308,9 +328,13 @@ TransactionDataCpp prepare_transactions_cpp(
                 cd.col_idx      = j;
                 cd.code_to_bname = std::move(code_to_bname);
                 cd.label2int    = std::move(label2int);
+                if (enable_codes_cache) {
+                    cd.cached_codes = std::move(col_codes);
+                }
                 active_cols.push_back(std::move(cd));
             }
-            // col_codes is freed here (goes out of scope).
+            // When caching is disabled (or this column had no eligible items),
+            // col_codes is released here when it is not retained.
 
         } else if (is_int[j]) {
             // ── Integer ──────────────────────────────────────────────────────
@@ -621,18 +645,28 @@ TransactionDataCpp prepare_transactions_cpp(
             const int nb = static_cast<int>(cd.code_to_bname.size()); // = nb_col[j]
 
             if (is_cat[j]) {
-                // Categorical: encode each row via label2int.
-                const bool have_cat   = (!cat_raw_strs.empty()  && !cat_raw_strs[j].empty());
-                const bool have_valid = (!cat_raw_valid.empty() && !cat_raw_valid[j].empty());
-                for (int s = 0; s < stripe_n; s++) {
-                    int r = stripe_start + s;
-                    int32_t code = -1;
-                    if (have_cat && have_valid && cat_raw_valid[j][r]) {
-                        auto it = cd.label2int.find(cat_raw_strs[j][r]);
-                        if (it != cd.label2int.end())
-                            code = static_cast<int32_t>(it->second);
+                if (!cd.cached_codes.empty()) {
+                    // Fast path: codes were already computed in Phase 1 and
+                    // retained (cache affordability check passed). Direct
+                    // array read; cached_codes[r] is -1 for missing/invalid rows.
+                    for (int s = 0; s < stripe_n; s++) {
+                        int r = stripe_start + s;
+                        stripe_codes[static_cast<size_t>(s) * n_active + a] = cd.cached_codes[r];
                     }
-                    stripe_codes[static_cast<size_t>(s) * n_active + a] = code;
+                } else {
+                    // Cache disabled: use the v1.1.12 lookup path.
+                    const bool have_cat   = (!cat_raw_strs.empty()  && !cat_raw_strs[j].empty());
+                    const bool have_valid = (!cat_raw_valid.empty() && !cat_raw_valid[j].empty());
+                    for (int s = 0; s < stripe_n; s++) {
+                        int r = stripe_start + s;
+                        int32_t code = -1;
+                        if (have_cat && have_valid && cat_raw_valid[j][r]) {
+                            auto it = cd.label2int.find(cat_raw_strs[j][r]);
+                            if (it != cd.label2int.end())
+                                code = static_cast<int32_t>(it->second);
+                        }
+                        stripe_codes[static_cast<size_t>(s) * n_active + a] = code;
+                    }
                 }
 
             } else if (is_precoded[j]) {

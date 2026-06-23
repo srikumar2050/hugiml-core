@@ -42,6 +42,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (
@@ -54,7 +55,9 @@ from sklearn.metrics import (
 )
 from sklearn.model_selection import GridSearchCV, StratifiedKFold
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import StandardScaler
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+
+from hugiml.hyperparameter_configs import BASELINE_MODEL_GRIDS, get_baseline_grid
 
 warnings.filterwarnings("ignore")
 
@@ -78,12 +81,12 @@ def _load_adult():
         from sklearn.datasets import fetch_openml
 
         data = fetch_openml("adult", version=2, as_frame=True, parser="auto")
-        X = data.data.copy().fillna("MISSING")
+        X = data.data.copy()
         y = (data.target.str.strip().str.rstrip(".") == ">50K").astype(int).values
         X = X.dropna(axis=1, thresh=int(0.7 * len(X)))
-        cat_cols = X.select_dtypes(include=["object", "category", "string"]).columns.tolist()
+        cat_cols = X.select_dtypes(include=["object", "category", "string", "bool"]).columns.tolist()
         for c in cat_cols:
-            X[c] = X[c].astype("category").cat.codes
+            X[c] = X[c].astype("string").fillna("MISSING").astype("category")
         return X, y
     except Exception:
         np.random.seed(42)
@@ -178,24 +181,29 @@ def _encode_target(y_raw: pd.Series, positive_label: str | None = None) -> np.nd
     return (y.astype(str) == positive).astype(int).to_numpy()
 
 
-def _prepare_features_for_benchmarks(X: pd.DataFrame) -> pd.DataFrame:
-    """Return a numeric dataframe suitable for all benchmark baselines.
+def _categorical_columns(X: pd.DataFrame) -> list[str]:
+    """Columns that should be treated as categorical feature metadata."""
+    return X.select_dtypes(include=["object", "category", "string", "bool"]).columns.tolist()
 
-    HUG-IML can handle richer feature metadata, but all baselines in this runner
-    need numeric matrix input. We use deterministic category codes and simple
-    median/zero fills. This keeps
-    the benchmark dependency-light.
+
+def _prepare_features_for_hugiml(X: pd.DataFrame) -> pd.DataFrame:
+    """Return a dataframe for HUG-IML without ordinal-encoding categoricals.
+
+    HUG-IML can consume pandas categorical/object/string columns directly. The
+    benchmark runner must therefore preserve those dtypes. Numeric-looking
+    string categories such as "Y_1996" stay categorical here; they are not
+    converted to integer codes.
     """
-    Xp = X.copy()
-
-    # Drop columns that are entirely missing.
+    Xp = X.copy().replace([np.inf, -np.inf], np.nan)
     Xp = Xp.dropna(axis=1, how="all")
 
-    cat_cols = Xp.select_dtypes(include=["object", "category", "string", "bool"]).columns.tolist()
+    cat_cols = _categorical_columns(Xp)
     for c in cat_cols:
-        Xp[c] = Xp[c].astype("string").fillna("MISSING").astype("category").cat.codes
+        Xp[c] = Xp[c].astype("string").fillna("MISSING").astype("category")
 
     for c in Xp.columns:
+        if c in cat_cols:
+            continue
         if not pd.api.types.is_numeric_dtype(Xp[c]):
             Xp[c] = pd.to_numeric(Xp[c], errors="coerce")
         if Xp[c].isna().any():
@@ -204,7 +212,104 @@ def _prepare_features_for_benchmarks(X: pd.DataFrame) -> pd.DataFrame:
                 med = 0
             Xp[c] = Xp[c].fillna(med)
 
-    return Xp
+    return Xp.reset_index(drop=True)
+
+
+class _BaselineOHEPreprocessor(BaseEstimator, TransformerMixin):
+    """Train-fitted OHE + numeric imputation for non-HUG-IML baselines.
+
+    This transformer is used inside sklearn Pipelines so that
+    cross-validation/tuning fits the encoder only on each training fold. It
+    avoids global ordinal category coding. It keeps category handling fitted
+    inside each validation fold and leaves HUG-IML categorical metadata intact.
+    """
+
+    def __init__(self):
+        pass
+
+    def fit(self, X, y=None):
+        Xp = _prepare_features_for_hugiml(pd.DataFrame(X).copy())
+        self.columns_ = Xp.columns.tolist()
+        self.cat_cols_ = _categorical_columns(Xp)
+        self.num_cols_ = [c for c in self.columns_ if c not in self.cat_cols_]
+
+        self.num_medians_ = {}
+        for c in self.num_cols_:
+            s = pd.to_numeric(Xp[c], errors="coerce")
+            med = s.median()
+            self.num_medians_[c] = 0.0 if pd.isna(med) else float(med)
+
+        self.encoder_ = None
+        self.ohe_cols_ = []
+        if self.cat_cols_:
+            cats = Xp[self.cat_cols_].astype("string").fillna("MISSING")
+            kwargs = {"handle_unknown": "ignore", "dtype": np.float64}
+            try:
+                self.encoder_ = OneHotEncoder(sparse_output=False, **kwargs)
+            except TypeError:  # sklearn < 1.2
+                self.encoder_ = OneHotEncoder(sparse=False, **kwargs)
+            self.encoder_.fit(cats)
+            self.ohe_cols_ = self.encoder_.get_feature_names_out(self.cat_cols_).tolist()
+
+        self.feature_names_out_ = [str(c) for c in self.num_cols_] + [str(c) for c in self.ohe_cols_]
+        if not self.feature_names_out_:
+            self.feature_names_out_ = ["constant_zero"]
+        return self
+
+    def transform(self, X):
+        Xp = pd.DataFrame(X).copy().replace([np.inf, -np.inf], np.nan)
+        for c in self.columns_:
+            if c not in Xp.columns:
+                Xp[c] = np.nan
+        Xp = Xp[self.columns_]
+
+        parts = []
+        if self.num_cols_:
+            Xn = pd.DataFrame(index=Xp.index)
+            for c in self.num_cols_:
+                Xn[c] = pd.to_numeric(Xp[c], errors="coerce").fillna(self.num_medians_[c])
+            parts.append(Xn.astype(float))
+
+        if self.cat_cols_ and self.encoder_ is not None:
+            Xc = Xp[self.cat_cols_].astype("string").fillna("MISSING")
+            arr = self.encoder_.transform(Xc)
+            parts.append(pd.DataFrame(arr, index=Xp.index, columns=self.ohe_cols_))
+
+        if parts:
+            out = pd.concat(parts, axis=1)
+        else:
+            out = pd.DataFrame({"constant_zero": np.zeros(len(Xp), dtype=float)}, index=Xp.index)
+
+        for c in self.feature_names_out_:
+            if c not in out.columns:
+                out[c] = 0.0
+        return out[self.feature_names_out_].reset_index(drop=True)
+
+    def get_feature_names_out(self, input_features=None):
+        return np.asarray(getattr(self, "feature_names_out_", []), dtype=object)
+
+
+def _wrap_non_hugiml_pipeline(clf):
+    """Attach OHE preprocessing to every non-HUG-IML estimator."""
+    return Pipeline([("prep", _BaselineOHEPreprocessor()), ("model", clf)])
+
+
+def _prefix_grid_for_wrapped_model(grid: dict[str, list[Any]] | None) -> dict[str, list[Any]] | None:
+    if not grid:
+        return grid
+    return {f"model__{k}": v for k, v in grid.items()}
+
+
+def _prepare_features_for_benchmarks(X: pd.DataFrame) -> pd.DataFrame:
+    """Return a numeric OHE dataframe for legacy baseline-only callers.
+
+    New benchmark code should use ``_prepare_features_for_hugiml`` for HUG-IML
+    and wrap non-HUG-IML estimators with ``_wrap_non_hugiml_pipeline``. This
+    function remains for backward compatibility, but it now uses one-hot
+    encoding instead of ordinal category codes.
+    """
+    prep = _BaselineOHEPreprocessor()
+    return prep.fit_transform(X)
 
 
 def _load_custom_dataset(
@@ -231,7 +336,7 @@ def _load_custom_dataset(
 
     y = _encode_target(raw[target], positive_label=positive_label)
     X = raw.drop(columns=drop_cols)
-    X = _prepare_features_for_benchmarks(X)
+    X = _prepare_features_for_hugiml(X)
     return X, y
 
 
@@ -339,33 +444,7 @@ BUILDERS = {
 }
 
 
-TUNING_GRIDS: dict[str, dict[str, list[Any]]] = {
-    "RandomForest": {
-        "n_estimators": [200, 400],
-        "max_depth": [4, 8, None],
-        "min_samples_leaf": [1, 5],
-    },
-    "XGBoost": {
-        "n_estimators": [100, 200],
-        "max_depth": [3, 4],
-        "learning_rate": [0.03, 0.1],
-        "subsample": [0.8, 1.0],
-    },
-    "LightGBM": {
-        "n_estimators": [100, 200],
-        "learning_rate": [0.03, 0.1],
-        "num_leaves": [15, 31],
-        "subsample": [0.8, 1.0],
-    },
-    "LogisticReg": {
-        "lr__C": [0.1, 1.0, 10.0],
-    },
-    "EBM": {
-        "learning_rate": [0.01, 0.05],
-        "max_bins": [128, 256],
-    },
-    # RuleFit and GAM APIs vary across installations; keep static by default.
-}
+TUNING_GRIDS: dict[str, dict[str, list[Any]]] = BASELINE_MODEL_GRIDS
 
 
 def _build_hugiml_for_fold(X_tr: pd.DataFrame, random_state: int = 42):
@@ -415,7 +494,9 @@ def _tune_sklearn_like(
     inner_splits: int,
     random_state: int,
 ):
-    grid = TUNING_GRIDS.get(model_name)
+    grid = get_baseline_grid(model_name)
+    if isinstance(clf, Pipeline) and "model" in clf.named_steps:
+        grid = _prefix_grid_for_wrapped_model(grid)
     if not grid:
         clf.fit(X_tr, y_tr)
         return clf, {"static": True}, float("nan")
@@ -527,8 +608,13 @@ def _run_cv_benchmark(
     random_state: int,
     model_names: list[str] | None = None,
 ) -> pd.DataFrame:
+    X = _prepare_features_for_hugiml(X) if isinstance(X, pd.DataFrame) else X
+
     print(f"\n{'=' * 60}\nDataset: {dataset_name}\n{'=' * 60}")
     print(f"  Shape: {X.shape}  |  class balance: {np.mean(y):.3f}")
+    if isinstance(X, pd.DataFrame):
+        cat_cols = _categorical_columns(X)
+        print(f"  Native categorical features: {len(cat_cols)}")
     print(f"  Tuning: {'on' if tune else 'off'}")
 
     n_splits = _validated_stratified_splits(y, n_splits, label="Outer benchmark CV")
@@ -562,7 +648,7 @@ def _run_cv_benchmark(
                             X_tr, y_tr, inner_splits=inner_splits, random_state=random_state
                         )
                     else:
-                        clf0 = builder(random_state=random_state)
+                        clf0 = _wrap_non_hugiml_pipeline(builder(random_state=random_state))
                         clf, best_params, best_inner_score = _tune_sklearn_like(
                             model_name,
                             clf0,
@@ -579,7 +665,7 @@ def _run_cv_benchmark(
                 elif model_name == "HUG-IML":
                     clf = _build_hugiml_for_fold(X_tr, random_state=random_state)
                 else:
-                    clf = copy.deepcopy(clf_proto)
+                    clf = _wrap_non_hugiml_pipeline(copy.deepcopy(clf_proto))
 
                 m = _evaluate(
                     clf,
@@ -628,7 +714,7 @@ def run_benchmark(
 ) -> pd.DataFrame:
     """Run CV benchmark for one built-in dataset and return per-fold results."""
     X, y = DATASET_LOADERS[dataset_name]()
-    X = _prepare_features_for_benchmarks(X)
+    X = _prepare_features_for_hugiml(X)
     return _run_cv_benchmark(
         X,
         y,
