@@ -4,6 +4,15 @@ All notable changes to hugiml-core are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
+## [1.1.14] - 2026-06-25
+
+### Changed
+
+- Reduced memory pressure for adaptive-binning workflows by allowing native bin selection to use a deterministic stratified sample before applying the selected bin edges to the full training data.
+- Preserved float32 numeric inputs through native L1 preparation where possible, avoiding unnecessary widening copies while keeping C-contiguous arrays for native execution.
+- Exposed the sampling option in Workbench Advanced configuration and refreshed the Governance Studio static preview to match the new control.
+
+---
 ## [1.1.13] - 2026-06-24
 
 ### Added

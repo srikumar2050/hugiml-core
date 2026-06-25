@@ -21,6 +21,7 @@
 #include <algorithm>
 #include <chrono>
 #include <numeric>
+#include <random>
 #include <set>
 #include <cmath>
 #include <exception>
@@ -176,6 +177,59 @@ struct L1ColDesc {
     bool   is_int_col  = false;
 };
 
+static double normalized_adaptive_sample_frac(double frac) {
+    if (!std::isfinite(frac) || frac <= 0.0 || frac >= 1.0) return 1.0;
+    return frac;
+}
+
+static std::vector<int> stratified_adaptive_rows(
+    const std::vector<int>& y_vec,
+    int n_cls,
+    double sample_frac,
+    uint64_t sample_seed) {
+    const int n = static_cast<int>(y_vec.size());
+    const double frac = normalized_adaptive_sample_frac(sample_frac);
+    std::vector<int> rows;
+    if (n <= 0 || frac >= 1.0) {
+        rows.resize(std::max(n, 0));
+        std::iota(rows.begin(), rows.end(), 0);
+        return rows;
+    }
+    const int cls_count = std::max(n_cls, 1);
+    std::vector<std::vector<int>> by_class(static_cast<size_t>(cls_count));
+    std::vector<int> overflow;
+    for (int r = 0; r < n; r++) {
+        int cls = y_vec[r];
+        if (cls >= 0 && cls < cls_count) by_class[static_cast<size_t>(cls)].push_back(r);
+        else overflow.push_back(r);
+    }
+    size_t expected = 0;
+    for (const auto& bucket : by_class) {
+        if (!bucket.empty()) expected += std::max<size_t>(1, static_cast<size_t>(std::ceil(bucket.size() * frac)));
+    }
+    if (!overflow.empty()) expected += std::max<size_t>(1, static_cast<size_t>(std::ceil(overflow.size() * frac)));
+    rows.reserve(std::min<size_t>(expected, static_cast<size_t>(n)));
+
+    auto take_from_bucket = [&](std::vector<int>& bucket, uint64_t salt) {
+        if (bucket.empty()) return;
+        size_t take = std::max<size_t>(1, static_cast<size_t>(std::ceil(bucket.size() * frac)));
+        take = std::min(take, bucket.size());
+        std::mt19937_64 rng(sample_seed + 0x9E3779B97F4A7C15ULL + salt * 0xBF58476D1CE4E5B9ULL);
+        std::shuffle(bucket.begin(), bucket.end(), rng);
+        rows.insert(rows.end(), bucket.begin(), bucket.begin() + static_cast<std::ptrdiff_t>(take));
+    };
+
+    for (size_t cls = 0; cls < by_class.size(); cls++) take_from_bucket(by_class[cls], static_cast<uint64_t>(cls));
+    take_from_bucket(overflow, static_cast<uint64_t>(by_class.size()));
+    std::sort(rows.begin(), rows.end());
+    rows.erase(std::unique(rows.begin(), rows.end()), rows.end());
+    if (rows.empty()) {
+        rows.resize(static_cast<size_t>(n));
+        std::iota(rows.begin(), rows.end(), 0);
+    }
+    return rows;
+}
+
 // ── select_adaptive_bins_cpp ──────────────────────────────────────────────────
 
 AdaptiveBinResult select_adaptive_bins_cpp(
@@ -185,9 +239,11 @@ AdaptiveBinResult select_adaptive_bins_cpp(
     const std::vector<std::string>&  col_names,
     const py::array_t<uint8_t, py::array::forcecast>& is_cat_arr,
     const std::vector<int>&          candidates,
-    double                           ratio)
+    double                           ratio,
+    double                           adaptive_sample_frac,
+    uint64_t                         adaptive_sample_seed)
 {
-    auto Xb  = X_num_arr.unchecked<2>();
+    auto Xb  = X_num_arr.template unchecked<2>();
     auto yb  = y_arr.unchecked<1>();
     auto icb = is_cat_arr.unchecked<1>();
 
@@ -196,13 +252,17 @@ AdaptiveBinResult select_adaptive_bins_cpp(
 
     std::vector<int> y_vec(n);
     for (int i = 0; i < n; i++) y_vec[i] = static_cast<int>(yb(i));
+    std::vector<int> adapt_rows = stratified_adaptive_rows(
+        y_vec, n_cls, adaptive_sample_frac, adaptive_sample_seed);
+    std::vector<int> y_adapt(adapt_rows.size());
+    for (size_t i = 0; i < adapt_rows.size(); i++) y_adapt[i] = y_vec[static_cast<size_t>(adapt_rows[i])];
 
     AdaptiveBinResult result;
     result.n_rows = n;
 
     // Select the non-categorical columns first so the parallel workers can
-    // write into pre-sized output slots.  This preserves the historical output
-    // order exactly while avoiding a serial push_back bottleneck.
+    // write into pre-sized output slots while preserving deterministic output
+    // order and avoiding a serial push_back bottleneck.
     std::vector<int> num_indices;
     num_indices.reserve(p);
     for (int j = 0; j < p; j++) {
@@ -228,11 +288,11 @@ AdaptiveBinResult select_adaptive_bins_cpp(
         try {
             int j = num_indices[ci];
 
-            std::vector<double> col_raw(n);
-            for (int r = 0; r < n; r++) col_raw[r] = Xb(r, j);
+            std::vector<double> col_raw(adapt_rows.size());
+            for (size_t rr = 0; rr < adapt_rows.size(); rr++) col_raw[rr] = Xb(adapt_rows[rr], j);
 
             std::vector<double> out_edges, out_ig;
-            int chosen = elbow_stop_nb_cpp(col_raw, y_vec, n_cls,
+            int chosen = elbow_stop_nb_cpp(col_raw, y_adapt, n_cls,
                                             candidates, ratio,
                                             out_edges, out_ig);
 
@@ -304,8 +364,9 @@ AdaptiveBinResult select_adaptive_bins_cpp(
 
 // ── prepare_and_mine_l1_cpp ───────────────────────────────────────────────────
 
+template <typename XArray>
 static L1FitResult prepare_and_mine_l1_cpp_impl(
-    const py::array_t<double,  py::array::c_style | py::array::forcecast>& X_num_arr,
+    const XArray& X_num_arr,
     const py::array_t<int64_t, py::array::c_style | py::array::forcecast>& y_arr,
     int B,
     std::vector<std::string>               col_names,
@@ -330,7 +391,7 @@ static L1FitResult prepare_and_mine_l1_cpp_impl(
             std::chrono::duration_cast<Clock::duration>(
                 std::chrono::duration<double>(timeout_s));
 
-    auto Xb  = X_num_arr.unchecked<2>();
+    auto Xb  = X_num_arr.template unchecked<2>();
     auto yb  = y_arr.unchecked<1>();
     auto icb = is_cat_arr.unchecked<1>();
     auto iib = is_int_arr.unchecked<1>();
@@ -354,8 +415,8 @@ static L1FitResult prepare_and_mine_l1_cpp_impl(
     check_timeout_deadline(has_deadline, deadline_tp, "prepare_and_mine_l1 setup");
 
     // ── Optional categorical-codes cache: affordability check ────────────────
-    // Relative to v1.1.12, categorical codes computed in Phase 1 may be reused
-    // in the fused scan. The soft check is sized to categorical columns only,
+    // Categorical codes computed in Phase 1 may be reused in the fused scan.
+    // The soft check is sized to categorical columns only,
     // so memory pressure falls back to the existing lookup path.
     int n_cat_total_l1 = 0;
     {
@@ -1047,16 +1108,19 @@ static L1FitResult prepare_and_mine_l1_cpp_impl(
 // Metadata-only adaptive B selection used by prepare_and_mine_l1_adaptive_cpp.
 // Unlike select_adaptive_bins_cpp, this deliberately does NOT allocate or fill
 // X_codes_flat; the later fused scan bins raw values on the fly.
+template <typename XArray>
 static AdaptiveBinResult select_adaptive_bins_metadata_only_cpp(
-    const py::array_t<double,  py::array::c_style | py::array::forcecast>& X_num_arr,
+    const XArray& X_num_arr,
     const py::array_t<int64_t, py::array::c_style | py::array::forcecast>& y_arr,
     int n_cls,
     const std::vector<std::string>&  col_names,
     const py::array_t<uint8_t, py::array::forcecast>& is_cat_arr,
     const std::vector<int>&          candidates,
-    double                           ratio)
+    double                           ratio,
+    double                           adaptive_sample_frac,
+    uint64_t                         adaptive_sample_seed)
 {
-    auto Xb  = X_num_arr.unchecked<2>();
+    auto Xb  = X_num_arr.template unchecked<2>();
     auto yb  = y_arr.unchecked<1>();
     auto icb = is_cat_arr.unchecked<1>();
     int n = static_cast<int>(Xb.shape(0));
@@ -1064,6 +1128,10 @@ static AdaptiveBinResult select_adaptive_bins_metadata_only_cpp(
 
     std::vector<int> y_vec(n);
     for (int i = 0; i < n; i++) y_vec[i] = static_cast<int>(yb(i));
+    std::vector<int> adapt_rows = stratified_adaptive_rows(
+        y_vec, n_cls, adaptive_sample_frac, adaptive_sample_seed);
+    std::vector<int> y_adapt(adapt_rows.size());
+    for (size_t i = 0; i < adapt_rows.size(); i++) y_adapt[i] = y_vec[static_cast<size_t>(adapt_rows[i])];
 
     AdaptiveBinResult result;
     result.n_rows = n;
@@ -1085,10 +1153,10 @@ static AdaptiveBinResult select_adaptive_bins_metadata_only_cpp(
         if (failed) continue;
         try {
             int j = num_indices[ci];
-            std::vector<double> col_raw(n);
-            for (int r = 0; r < n; r++) col_raw[r] = Xb(r, j);
+            std::vector<double> col_raw(adapt_rows.size());
+            for (size_t rr = 0; rr < adapt_rows.size(); rr++) col_raw[rr] = Xb(adapt_rows[rr], j);
             std::vector<double> out_edges, out_ig;
-            int chosen = elbow_stop_nb_cpp(col_raw, y_vec, n_cls,
+            int chosen = elbow_stop_nb_cpp(col_raw, y_adapt, n_cls,
                                             candidates, ratio,
                                             out_edges, out_ig);
             ColAdaptResult cr;
@@ -1127,6 +1195,57 @@ L1FitResult prepare_and_mine_l1_cpp(
         K, G, timeout_s, compute_original_scores, nullptr, nullptr);
 }
 
+L1FitResult prepare_and_mine_l1_cpp(
+    const py::array_t<float,  py::array::c_style>& X_num_arr,
+    const py::array_t<int64_t, py::array::c_style | py::array::forcecast>& y_arr,
+    int B,
+    std::vector<std::string>               col_names,
+    const py::array_t<uint8_t, py::array::forcecast>& is_cat_arr,
+    const py::array_t<uint8_t, py::array::forcecast>& is_int_arr,
+    std::vector<bool>                      is_precoded,
+    std::vector<std::vector<std::string>>  cat_raw_strs,
+    std::vector<std::vector<bool>>         cat_raw_valid,
+    int K, double G, double timeout_s, bool compute_original_scores)
+{
+    return prepare_and_mine_l1_cpp_impl(
+        X_num_arr, y_arr, B, std::move(col_names), is_cat_arr, is_int_arr,
+        std::move(is_precoded), std::move(cat_raw_strs), std::move(cat_raw_valid),
+        K, G, timeout_s, compute_original_scores, nullptr, nullptr);
+}
+
+template <typename XArray>
+static L1FitResult prepare_and_mine_l1_adaptive_cpp_impl(
+    const XArray& X_num_arr,
+    const py::array_t<int64_t, py::array::c_style | py::array::forcecast>& y_arr,
+    std::vector<std::string>               col_names,
+    const py::array_t<uint8_t, py::array::forcecast>& is_cat_arr,
+    const py::array_t<uint8_t, py::array::forcecast>& is_int_arr,
+    std::vector<std::vector<std::string>>  cat_raw_strs,
+    std::vector<std::vector<bool>>         cat_raw_valid,
+    const std::vector<int>&                candidates,
+    double                                 ratio,
+    int K, double G, double timeout_s, bool compute_original_scores,
+    double adaptive_sample_frac, uint64_t adaptive_sample_seed)
+{
+    auto yb = y_arr.unchecked<1>();
+    int n = static_cast<int>(yb.shape(0));
+    int max_label = 0;
+    for (int i = 0; i < n; i++) max_label = std::max(max_label, static_cast<int>(yb(i)));
+    int n_cls = max_label + 1;
+
+    AdaptiveBinResult meta = select_adaptive_bins_metadata_only_cpp(
+        X_num_arr, y_arr, n_cls, col_names, is_cat_arr, candidates, ratio,
+        adaptive_sample_frac, adaptive_sample_seed);
+
+    L1FitResult out = prepare_and_mine_l1_cpp_impl(
+        X_num_arr, y_arr, 2, std::move(col_names), is_cat_arr, is_int_arr,
+        std::vector<bool>{}, std::move(cat_raw_strs), std::move(cat_raw_valid),
+        K, G, timeout_s, compute_original_scores, &meta.num_col_indices, &meta.cols);
+    out.adaptive_cols = std::move(meta.cols);
+    out.adaptive_num_col_indices = std::move(meta.num_col_indices);
+    return out;
+}
+
 L1FitResult prepare_and_mine_l1_adaptive_cpp(
     const py::array_t<double,  py::array::c_style | py::array::forcecast>& X_num_arr,
     const py::array_t<int64_t, py::array::c_style | py::array::forcecast>& y_arr,
@@ -1137,24 +1256,32 @@ L1FitResult prepare_and_mine_l1_adaptive_cpp(
     std::vector<std::vector<bool>>         cat_raw_valid,
     const std::vector<int>&                candidates,
     double                                 ratio,
-    int K, double G, double timeout_s, bool compute_original_scores)
+    int K, double G, double timeout_s, bool compute_original_scores,
+    double adaptive_sample_frac, uint64_t adaptive_sample_seed)
 {
-    auto yb = y_arr.unchecked<1>();
-    int n = static_cast<int>(yb.shape(0));
-    int max_label = 0;
-    for (int i = 0; i < n; i++) max_label = std::max(max_label, static_cast<int>(yb(i)));
-    int n_cls = max_label + 1;
+    return prepare_and_mine_l1_adaptive_cpp_impl(
+        X_num_arr, y_arr, std::move(col_names), is_cat_arr, is_int_arr,
+        std::move(cat_raw_strs), std::move(cat_raw_valid), candidates, ratio,
+        K, G, timeout_s, compute_original_scores, adaptive_sample_frac, adaptive_sample_seed);
+}
 
-    AdaptiveBinResult meta = select_adaptive_bins_metadata_only_cpp(
-        X_num_arr, y_arr, n_cls, col_names, is_cat_arr, candidates, ratio);
-
-    L1FitResult out = prepare_and_mine_l1_cpp_impl(
-        X_num_arr, y_arr, 2, std::move(col_names), is_cat_arr, is_int_arr,
-        std::vector<bool>{}, std::move(cat_raw_strs), std::move(cat_raw_valid),
-        K, G, timeout_s, compute_original_scores, &meta.num_col_indices, &meta.cols);
-    out.adaptive_cols = std::move(meta.cols);
-    out.adaptive_num_col_indices = std::move(meta.num_col_indices);
-    return out;
+L1FitResult prepare_and_mine_l1_adaptive_cpp(
+    const py::array_t<float,  py::array::c_style>& X_num_arr,
+    const py::array_t<int64_t, py::array::c_style | py::array::forcecast>& y_arr,
+    std::vector<std::string>               col_names,
+    const py::array_t<uint8_t, py::array::forcecast>& is_cat_arr,
+    const py::array_t<uint8_t, py::array::forcecast>& is_int_arr,
+    std::vector<std::vector<std::string>>  cat_raw_strs,
+    std::vector<std::vector<bool>>         cat_raw_valid,
+    const std::vector<int>&                candidates,
+    double                                 ratio,
+    int K, double G, double timeout_s, bool compute_original_scores,
+    double adaptive_sample_frac, uint64_t adaptive_sample_seed)
+{
+    return prepare_and_mine_l1_adaptive_cpp_impl(
+        X_num_arr, y_arr, std::move(col_names), is_cat_arr, is_int_arr,
+        std::move(cat_raw_strs), std::move(cat_raw_valid), candidates, ratio,
+        K, G, timeout_s, compute_original_scores, adaptive_sample_frac, adaptive_sample_seed);
 }
 
 
@@ -1207,8 +1334,9 @@ static inline int fixed_code_from_raw(double raw, const FixedNumColDesc& cd) {
 }
 } // anonymous namespace
 
-L1FitResult prepare_and_mine_l1_fixed_numeric_cpp(
-    const py::array_t<double,  py::array::c_style | py::array::forcecast>& X_num_arr,
+template <typename XArray>
+static L1FitResult prepare_and_mine_l1_fixed_numeric_cpp_impl(
+    const XArray& X_num_arr,
     const py::array_t<int64_t, py::array::c_style | py::array::forcecast>& y_arr,
     int B,
     std::vector<std::string> col_names,
@@ -1221,7 +1349,7 @@ L1FitResult prepare_and_mine_l1_fixed_numeric_cpp(
         ? Clock::now() + std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double>(timeout_s))
         : Clock::time_point{};
 
-    auto Xb = X_num_arr.unchecked<2>();
+    auto Xb = X_num_arr.template unchecked<2>();
     auto yb = y_arr.unchecked<1>();
     auto iib = is_int_arr.unchecked<1>();
     const int n = static_cast<int>(Xb.shape(0));
@@ -1505,6 +1633,32 @@ L1FitResult prepare_and_mine_l1_fixed_numeric_cpp(
     result.coo_rows = std::move(coo_rows);
     result.coo_cols = std::move(coo_cols);
     return result;
+}
+
+L1FitResult prepare_and_mine_l1_fixed_numeric_cpp(
+    const py::array_t<double,  py::array::c_style | py::array::forcecast>& X_num_arr,
+    const py::array_t<int64_t, py::array::c_style | py::array::forcecast>& y_arr,
+    int B,
+    std::vector<std::string> col_names,
+    const py::array_t<uint8_t, py::array::forcecast>& is_int_arr,
+    int K, double G, double timeout_s, bool compute_original_scores)
+{
+    return prepare_and_mine_l1_fixed_numeric_cpp_impl(
+        X_num_arr, y_arr, B, std::move(col_names), is_int_arr,
+        K, G, timeout_s, compute_original_scores);
+}
+
+L1FitResult prepare_and_mine_l1_fixed_numeric_cpp(
+    const py::array_t<float,  py::array::c_style>& X_num_arr,
+    const py::array_t<int64_t, py::array::c_style | py::array::forcecast>& y_arr,
+    int B,
+    std::vector<std::string> col_names,
+    const py::array_t<uint8_t, py::array::forcecast>& is_int_arr,
+    int K, double G, double timeout_s, bool compute_original_scores)
+{
+    return prepare_and_mine_l1_fixed_numeric_cpp_impl(
+        X_num_arr, y_arr, B, std::move(col_names), is_int_arr,
+        K, G, timeout_s, compute_original_scores);
 }
 
 }  // namespace hugiml

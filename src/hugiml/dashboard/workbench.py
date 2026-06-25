@@ -95,6 +95,8 @@ PARAM_HINTS = {
     "ii_partner_size": "Optional number of partner columns used by interaction-information scoring.",
     "interaction_relaxed_mining": "Allow interaction-information survivor columns into native mining without generated pair features.",
     "interaction_relaxed_feature_size": "Number of source columns selected for interaction-relaxed mining.",
+    "adaptive_binning_sample_frac": "Advanced only: False uses all rows for bin selection; a value in (0, 1] uses a deterministic stratified sample before full-data fitting.",
+    "adaptive_binning_sample_random_state": "Random seed for deterministic adaptive-binning sample selection.",
 }
 
 AUGMENTED_PAIR_MODE_OPTIONS = ["interaction_information", "marginal_ig"]
@@ -287,6 +289,24 @@ def _parse_optional_int_grid(value: str) -> list[int | None]:
             out.append(None)
         else:
             out.append(int(item))
+    return out
+
+
+def _parse_adaptive_sample_frac_grid(value: str) -> list[float | bool]:
+    """Parse Workbench Advanced adaptive-binning sample fractions."""
+    items = [x.strip() for x in str(value).split(",") if x.strip()]
+    if not items:
+        return [False]
+    out: list[float | bool] = []
+    for item in items:
+        lower = item.lower()
+        if lower in {"false", "none", "null", "off", "no", "full", "all"}:
+            out.append(False)
+            continue
+        frac = float(item)
+        if not 0 < frac <= 1:
+            raise ValueError("adaptive_binning_sample_frac values must be False or in (0, 1].")
+        out.append(frac)
     return out
 
 
@@ -1047,6 +1067,8 @@ def _render_hugiml_config() -> list[dict[str, Any]]:
         help="Default is on. When enabled, HUGIML uses adaptive/default binning and B is kept at -1.",
         key="wb_hugiml_adaptive_binning",
     )
+    params["adaptive_binning_sample_frac"] = False
+    params["adaptive_binning_sample_random_state"] = 42
     if params["adaptive_binning"]:
         params["B"] = -1
     c1, c2, c3, c4 = st.columns(4)
@@ -1157,6 +1179,7 @@ def _render_hugiml_config() -> list[dict[str, Any]]:
             g4.text_input("B values", value="-1", disabled=True, key="wb_hugiml_b_grid_locked", help="B is fixed at -1 while adaptive binning is enabled.")
         h1, h2, h3, h4 = st.columns(4)
         h5, h6, h7, h8 = st.columns(4)
+        h9, h10 = st.columns(2)
         selected_aug_modes = h3.multiselect(
             "Augmented pair scoring values",
             AUGMENTED_PAIR_MODE_OPTIONS,
@@ -1164,12 +1187,42 @@ def _render_hugiml_config() -> list[dict[str, Any]]:
             help="Values for augmented_pair_mode in Advanced tuning.",
             key="wb_hugiml_augmented_pair_mode_grid",
         ) or [params["augmented_pair_mode"]]
+        sample_help = PARAM_HINTS["adaptive_binning_sample_frac"]
+        sample_values = (
+            _parse_adaptive_sample_frac_grid(
+                h9.text_input(
+                    "Adaptive sample fraction values",
+                    value="False",
+                    disabled=not params["adaptive_binning"],
+                    help=sample_help,
+                    key="wb_hugiml_adaptive_sample_frac_grid",
+                )
+            )
+            if params["adaptive_binning"]
+            else [False]
+        )
+        sample_seed_values = (
+            _parse_grid(
+                h10.text_input(
+                    "Adaptive sample seed values",
+                    value=str(params["adaptive_binning_sample_random_state"]),
+                    disabled=not params["adaptive_binning"],
+                    help=PARAM_HINTS["adaptive_binning_sample_random_state"],
+                    key="wb_hugiml_adaptive_sample_seed_grid",
+                ),
+                int,
+            )
+            if params["adaptive_binning"]
+            else [42]
+        )
         grid = {
             "L": _parse_grid(g1.text_input("L values", value=str(params["L"]), key="wb_hugiml_l_grid"), int),
             "topK": _parse_grid(g2.text_input("topK values", value=str(params["topK"]), key="wb_hugiml_topk_grid"), int),
             "G": _parse_grid(g3.text_input("G values", value=str(params["G"]), key="wb_hugiml_g_grid"), float),
             "B": b_values,
             "feature_mode": selected_feature_modes,
+            "adaptive_binning_sample_frac": sample_values,
+            "adaptive_binning_sample_random_state": sample_seed_values,
             "augmented_pair_transforms": _parse_grid(h1.text_input("Augmented pair values", value=str(params["augmented_pair_transforms"]), key="wb_hugiml_augmented_pair_grid"), bool),
             "interaction_relaxed_mining": _parse_grid(h2.text_input("Interaction relaxed values", value=str(params["interaction_relaxed_mining"]), key="wb_hugiml_interaction_relaxed_grid"), bool),
             "augmented_pair_mode": selected_aug_modes,
@@ -1182,6 +1235,10 @@ def _render_hugiml_config() -> list[dict[str, Any]]:
     if params["adaptive_binning"]:
         for cfg in configs:
             cfg["B"] = -1
+    else:
+        for cfg in configs:
+            cfg["adaptive_binning_sample_frac"] = False
+            cfg["adaptive_binning_sample_random_state"] = 42
     configs, invalid_configs = _filter_hugiml_interaction_configs(configs)
     if invalid_configs:
         st.warning(f"Omitted {invalid_configs:,} invalid HUGIML interaction-path candidate(s).")
@@ -1995,7 +2052,8 @@ def _render_selected_config_pair(base_run: dict[str, Any], alt_run: dict[str, An
             cfg_wide[col] = ""
     preferred_order = [
         "run_id", "model", "mode", "cv_roc_auc", "f1", "candidate_count", "fast_path_used",
-        "adaptive_binning", "B", "L", "topK", "G", "feature_mode", "topk_budget_strict",
+        "adaptive_binning", "adaptive_binning_sample_frac", "adaptive_binning_sample_random_state",
+        "B", "L", "topK", "G", "feature_mode", "topk_budget_strict",
         "augmented_pair_transforms", "augmented_pair_mode", "aug_feature_size",
         "max_pair_features", "ii_partner_size", "interaction_relaxed_mining",
         "interaction_relaxed_feature_size",
@@ -2430,11 +2488,19 @@ def _short_config_summary(run: dict[str, Any]) -> str:
         if params.get("candidate_count") is not None:
             bits.append(f"{int(params.get('candidate_count')):,} candidates")
         if selected:
-            bits.append(", ".join(f"{k}={selected.get(k)}" for k in ("adaptive_binning", "B", "L", "topK", "G", "feature_mode") if k in selected))
+            bits.append(", ".join(
+                f"{k}={selected.get(k)}"
+                for k in (
+                    "adaptive_binning", "adaptive_binning_sample_frac",
+                    "B", "L", "topK", "G", "feature_mode"
+                )
+                if k in selected
+            ))
         return " | ".join(bits)
     ordered = []
     preferred = (
-        "adaptive_binning", "B", "L", "topK", "G", "feature_mode", "topk_budget_strict",
+        "adaptive_binning", "adaptive_binning_sample_frac", "adaptive_binning_sample_random_state",
+        "B", "L", "topK", "G", "feature_mode", "topk_budget_strict",
         "C", "max_iter", "max_depth", "min_samples_leaf", "tree_size", "max_rules",
         "n_estimators", "learning_rate", "max_bins", "interactions",
     )
@@ -2470,6 +2536,8 @@ def _run_config_frame(run: dict[str, Any], label: str) -> pd.DataFrame:
         ])
         for key in (
             "adaptive_binning",
+            "adaptive_binning_sample_frac",
+            "adaptive_binning_sample_random_state",
             "B",
             "L",
             "topK",

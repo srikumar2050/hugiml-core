@@ -72,6 +72,9 @@ Key hyperparameters
    * - ``adaptive_binning``
      - Selects per-feature bin resolution with supervised information gain.
      - ``True`` when tuning ``B`` is undesirable
+   * - ``adaptive_binning_sample_frac``
+     - Optionally selects adaptive bin counts on a deterministic stratified row sample before full-data training.
+     - ``False`` for full-data selection; ``0.1`` to ``0.3`` for larger adaptive runs
 
 Missing values
 --------------
@@ -90,7 +93,7 @@ When missingness is itself meaningful, add explicit binary indicators before fit
 Adaptive binning
 ----------------
 
-Adaptive binning selects a bin count per numerical feature by evaluating candidate ``B`` values using supervised information gain and stopping when marginal gains become small.
+Adaptive binning selects a bin count per numerical feature by evaluating candidate ``B`` values using supervised information gain and stopping when marginal gains become small. On larger datasets, ``adaptive_binning_sample_frac`` can run the bin-count search on a deterministic stratified row sample; the selected edges are then applied to the full training data.
 
 .. image:: images/adaptive-binning-impact.png
    :alt: Adaptive binning benchmark
@@ -104,6 +107,7 @@ Adaptive binning selects a bin count per numerical feature by evaluating candida
        adaptive_binning=True,
        b_candidates=[2, 3, 5, 7, 10, 15],
        min_marginal_gain_ratio=0.02,
+       adaptive_binning_sample_frac=0.20,
        L=2,
        G=1e-4,
    )

@@ -73,6 +73,7 @@ When you already know the feature schema, pass ``allCols`` and ``origColumns`` e
        B=-1,
        adaptive_binning=True,
        b_candidates=[2, 3, 5, 7, 10, 15],
+       adaptive_binning_sample_frac=0.20,
        L=1,
        G=1e-5,
        topK=150,
@@ -81,6 +82,8 @@ When you already know the feature schema, pass ``allCols`` and ``origColumns`` e
    clf.fit(X_train, y_train)
    predictions = clf.predict(X_test)
    probabilities = clf.predict_proba(X_test)
+
+For smaller datasets, keep ``adaptive_binning_sample_frac=False`` to select bins on all rows. For larger adaptive-binning runs, a fractional value such as ``0.20`` reduces the bin-selection workload while the fitted model still uses the full training data after edges are selected.
 
 Recommended first checks
 ------------------------

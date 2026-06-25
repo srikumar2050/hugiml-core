@@ -14,25 +14,25 @@ Why HUGIML?
 
 * **Intrinsic interpretability:** learned HUG patterns are the model representation, not an after-the-fact explanation.
 * **Regulated-domain fit:** model cards, audit artifacts, pruning trails, calibration, drift monitoring, and deployment helpers are included.
-* **Native performance:** computationally intensive mining, transaction construction, interaction-information scoring, pair-aware adaptive binning, and matrix-building stages are C++ accelerated with optional OpenMP support. Version 1.1.13 builds on v1.1.12 with faster categorical handling, leaner tuning execution, and shared hyperparameter grid definitions. Earlier 1.1.x capabilities remain available, including production/audit execution modes, fast adaptive-binning tuning, higher-order interaction selection, the native ``L=2`` hot path, augmented-pair operations, strict global ``topK`` budgeting, compact native transaction memory, and fused adaptive ``L=1`` execution.
+* **Native performance:** computationally intensive mining, transaction construction, interaction-information scoring, pair-aware adaptive binning, and matrix-building stages are C++ accelerated with optional OpenMP support. Version 1.1.14 builds on v1.1.13 with lower-memory adaptive-binning selection, float32-aware native L1 preparation, and Workbench Advanced support for adaptive-binning sampling. Earlier 1.1.x capabilities remain available, including production/audit execution modes, fast adaptive-binning tuning, higher-order interaction selection, the native ``L=2`` hot path, augmented-pair operations, strict global ``topK`` budgeting, compact native transaction memory, and fused adaptive ``L=1`` execution.
 * **Python ergonomics:** the estimator follows the scikit-learn API and works with pandas DataFrames or NumPy arrays.
 
 
 Current release focus
 ---------------------
 
-The 1.1.13 pre-release focuses on runtime and configuration consistency while
-retaining the v1.1.12 interaction-aware feature discovery behavior:
+The 1.1.14 release focuses on memory-efficient adaptive-binning execution
+while retaining the v1.1.13 runtime and configuration improvements:
 
-* Fit and predict paths reduce repeated categorical processing and skip
-  zero-variance training columns consistently across save/load.
-* Hyperparameter grids are centralized in ``hugiml.hyperparameter_configs`` and
-  reused by classifier tuning, benchmarks, and the Workbench UI.
-* Tuning candidates use leaner execution by default, while the returned refit
-  model remains audit-ready unless a caller explicitly chooses production mode.
+* Adaptive bin-count selection can use a deterministic stratified row sample,
+  then apply the selected bin edges to the full training data.
+* All-numeric float32 inputs can stay float32 through native L1 preparation,
+  reducing widening copies while preserving native C-contiguous input handling.
+* Governance Studio Workbench Advanced exposes the adaptive-binning sampling
+  option for larger adaptive workflows.
 
-The v1.1.12 augmented-pair, interaction-relaxed mining, pair-aware adaptive
-binning, and survivor-led governance evidence remain available.
+The v1.1.13 categorical handling, zero-variance exclusion, centralized grids,
+and lean tuning defaults remain available.
 
 Installation
 ------------

@@ -508,7 +508,7 @@ For selected pair features, HUGIML reports the raw formula, standardized formula
 
 ## Adaptive Binning
 
-The global `B` parameter controls how many quantile bins each numerical feature is discretised into. Adaptive binning selects the optimal bin count per feature via supervised information-gain search and elbow stopping.
+The global `B` parameter controls how many quantile bins each numerical feature is discretised into. Adaptive binning selects the optimal bin count per feature via supervised information-gain search and elbow stopping. For larger datasets, `adaptive_binning_sample_frac` can choose bin counts from a deterministic stratified row sample, then apply the selected bin edges to the full training data.
 
 ```python
 from hugiml.adaptive import HUGIMLAdaptive
@@ -532,10 +532,11 @@ clf = HUGIMLClassifier(
     adaptive_binning=True,
     b_candidates=[3, 5, 7, 10],
     min_marginal_gain_ratio=0.02,
+    adaptive_binning_sample_frac=0.20,  # optional for large adaptive-binning runs
 )
 ```
 
-**How it works:** for each numerical feature, HUGIML evaluates information gain at candidate `B` values and stops when the marginal gain falls below `min_marginal_gain_ratio × current_IG`. This prevents blindly selecting the maximum bin count.
+**How it works:** for each numerical feature, HUGIML evaluates information gain at candidate `B` values and stops when the marginal gain falls below `min_marginal_gain_ratio × current_IG`. This prevents blindly selecting the maximum bin count. Set `adaptive_binning_sample_frac=False` for full-data bin selection, or a float in `(0, 1]` to use a stratified sample for the selection step.
 
 ---
 
@@ -887,7 +888,7 @@ EBM is excellent for smooth effect inspection; HUGIML is strong when the explana
   <img src="docs/images/adaptive-binning-impact.png" alt="Adaptive binning benchmark against fixed bin counts" width="700" height="300">
 </p>
 
-Adaptive binning is a safe default when you do not want to tune `B`; fixed `B=5` is a useful fast baseline.
+Adaptive binning is a safe default when you do not want to tune `B`; fixed `B=5` is a useful fast baseline. For larger adaptive workflows, the sampling option reduces bin-selection memory while preserving full-data training after edges are selected; in Governance Studio this option is exposed from the Workbench Advanced configuration path.
 
 ### Pattern explanations
 
@@ -967,7 +968,7 @@ With strict budgeting enabled, HUGIML applies the TopK budget during feature con
 | **Governance Studio** | Multi-view Streamlit dashboard with audit evidence views and upload support |
 | **Profile visualisations** | EBM-style 1-D/2-D HUG profiles, active-pattern explanations, coefficient-support views (Plotly) |
 | **Interpretability metrics** | Pattern count, coverage, overlap, sparsity, top-k cumulative contribution |
-| **Adaptive binning** | Per-feature supervised `B` selection — addresses the B-sensitivity trap |
+| **Adaptive binning** | Per-feature supervised `B` selection with optional stratified sampling — addresses the B-sensitivity trap |
 | **Pattern pruning** | Regulated remove/refit/calibrate workflow with full JSON audit trail |
 | **Multiclass & imbalance** | Multiclass report, SMOTE/class-weight pipeline, high-cardinality encoding |
 | **Benchmark suite** | Reproducible CV comparison vs EBM, XGBoost, RF, LR, RuleFit, GAM |

@@ -27,7 +27,7 @@ Workbench workflow
 
 * Choose a demo dataset or upload a tabular file.
 * Review and adjust target, identifier, protected, date, numeric, categorical, and excluded columns.
-* Configure HUGIML and optional comparison models.
+* Configure HUGIML and optional comparison models; Workbench Advanced includes the adaptive-binning sample fraction for larger adaptive-binning runs.
 * Run a single configuration or a small candidate grid.
 * Compare models using validation metrics and timing information.
 * Inspect feature roles, pattern evidence, case-level explanations, policy checks, and governance summaries.

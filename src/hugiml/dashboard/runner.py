@@ -43,6 +43,8 @@ def _make_classifier(**params):
 
 _HUGIML_PARAM_KEYS = {
     "adaptive_binning",
+    "adaptive_binning_sample_frac",
+    "adaptive_binning_sample_random_state",
     "B",
     "L",
     "topK",
@@ -62,6 +64,8 @@ _HUGIML_PARAM_KEYS = {
 def _default_params() -> dict:
     return {
         "adaptive_binning": True,
+        "adaptive_binning_sample_frac": False,
+        "adaptive_binning_sample_random_state": 42,
         "B": -1,
         "L": 2,
         "topK": 100,

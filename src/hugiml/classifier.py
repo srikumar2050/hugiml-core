@@ -1124,6 +1124,8 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         adaptive_binning: bool = True,
         b_candidates: list | None = None,
         min_marginal_gain_ratio: float = 0.02,
+        adaptive_binning_sample_frac: float | bool = False,
+        adaptive_binning_sample_random_state: int = 42,
         feature_mode: str = "patterns_only",
         use_hotpath: bool = True,
         augmented_pair_transforms: bool = True,
@@ -1168,6 +1170,8 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         self.adaptive_binning = adaptive_binning
         self.b_candidates = b_candidates
         self.min_marginal_gain_ratio = min_marginal_gain_ratio
+        self.adaptive_binning_sample_frac = adaptive_binning_sample_frac
+        self.adaptive_binning_sample_random_state = adaptive_binning_sample_random_state
         self.feature_mode = feature_mode
         self.use_hotpath = use_hotpath
         self.augmented_pair_transforms = augmented_pair_transforms
@@ -1352,6 +1356,8 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             adaptive_binning=self.adaptive_binning,
             b_candidates=self.b_candidates,
             min_marginal_gain_ratio=self.min_marginal_gain_ratio,
+            adaptive_binning_sample_frac=self.adaptive_binning_sample_frac,
+            adaptive_binning_sample_random_state=self.adaptive_binning_sample_random_state,
             feature_mode=self.feature_mode,
             use_hotpath=self.use_hotpath,
             augmented_pair_transforms=self.augmented_pair_transforms,
@@ -1491,12 +1497,18 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         self._fit_lock = threading.RLock()
 
         # ── Backward compatibility ───────────────────────────────────────
-        # Models saved with v1.0.0 have no adaptive_binning in their pickle
-        # state.  Initialise all adaptive attrs to their off-state defaults
-        # so the model behaves identically to a v1.0.0 model after restore.
+        # Models saved with v1.1.13 do not have adaptive-sampling state in
+        # their pickle payload. Fill in missing attributes so deserialized
+        # models keep their established behavior after restore.
         if not hasattr(self, "adaptive_binning"):
             self.adaptive_binning = False
+        if not hasattr(self, "adaptive_binning_sample_frac"):
+            self.adaptive_binning_sample_frac = False
+        if not hasattr(self, "adaptive_binning_sample_random_state"):
+            self.adaptive_binning_sample_random_state = 42
+        if not hasattr(self, "b_candidates"):
             self.b_candidates = None
+        if not hasattr(self, "min_marginal_gain_ratio"):
             self.min_marginal_gain_ratio = 0.02
         if not hasattr(self, "use_hotpath"):
             self.use_hotpath = True
@@ -1699,9 +1711,18 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             return y_float.astype(np.int64)
         return y_arr.astype(np.int64)
 
+    def _adaptive_binning_sample_fraction_for_native(self) -> float:
+        frac = getattr(self, "adaptive_binning_sample_frac", False)
+        if frac is False or frac is None:
+            return 1.0
+        return float(frac)
+
     @staticmethod
     def _to_float_array(arr: Any, cat_mask: np.ndarray | None = None) -> tuple:
-        """Split input into a float64 numeric array and raw categorical arrays.
+        """Split input into a numeric array and raw categorical arrays.
+
+        All-numeric float32 inputs remain float32 for native L1 preparation;
+        other numeric inputs use float64.
 
         Adversarial-input hardening:
         - Forces writable copies of read-only column views.
@@ -1722,19 +1743,32 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         if cat_mask is None:
             cat_mask = np.zeros(p, dtype=bool)
 
-        # Hot predict path: all-numeric inputs do not need per-column pandas
-        # Series extraction.  Keep behaviour identical by still returning a
-        # writable float64 copy and an all-None categorical list.
+        # Hot all-numeric path: keep float32 inputs as float32.  The native L1
+        # bindings accept float32 directly, so avoiding the unconditional
+        # float64 upcast removes a full n×p copy in scalability/production runs.
+        # Other numeric dtypes use float64 to preserve historical precision.
         if not np.any(cat_mask):
             try:
+                target_dtype = np.float64
                 if is_df:
-                    return arr.to_numpy(dtype=np.float64, copy=True), [None] * p
+                    try:
+                        dtypes = [getattr(dt, "type", None) for dt in arr.dtypes]
+                        if dtypes and all(dt is np.float32 for dt in dtypes):
+                            target_dtype = np.float32
+                    except Exception:
+                        target_dtype = np.float64
+                    out = arr.to_numpy(dtype=target_dtype, copy=True)
+                    return np.ascontiguousarray(out, dtype=target_dtype), [None] * p
                 assert arr_np is not None
-                return np.array(arr_np, dtype=np.float64, copy=True), [None] * p
+                if arr_np.dtype == np.float32:
+                    return np.ascontiguousarray(arr_np, dtype=np.float32), [None] * p
+                return np.ascontiguousarray(arr_np, dtype=np.float64), [None] * p
             except Exception:
                 pass
 
-        X_num = np.zeros((n, p), dtype=np.float64)
+        X_num = np.zeros(
+            (n, p), dtype=np.float32 if getattr(arr_np, "dtype", None) == np.float32 else np.float64
+        )
         X_cat_raw = [None] * p
 
         for j in range(p):
@@ -1751,7 +1785,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                 X_cat_raw[j] = col_obj
                 X_num[:, j] = 0.0
             else:
-                col = np.array(raw, dtype=np.float64, copy=True)
+                col = np.array(raw, dtype=X_num.dtype, copy=True)
                 # Non-finite cells (NaN/Inf) are pre-handled by
                 # _prebin_nan_cols (fit) and _handle_test_nan (predict)
                 # before reaching here.  No median imputation.
@@ -1917,6 +1951,25 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             raise HUGIMLParamError(
                 f"min_marginal_gain_ratio must be in (0, 1), got {self.min_marginal_gain_ratio}."
             )
+        frac = self.adaptive_binning_sample_frac
+        if isinstance(frac, bool):
+            if frac is True:
+                raise HUGIMLParamError(
+                    "adaptive_binning_sample_frac must be False or a float in (0, 1]."
+                )
+        elif frac is not None:
+            if not isinstance(frac, (float, int)):
+                raise HUGIMLParamError(
+                    "adaptive_binning_sample_frac must be False or a float in (0, 1]."
+                )
+            if not 0 < float(frac) <= 1:
+                raise HUGIMLParamError(
+                    f"adaptive_binning_sample_frac must be in (0, 1], got {frac}."
+                )
+        if not isinstance(self.adaptive_binning_sample_random_state, int) or isinstance(
+            self.adaptive_binning_sample_random_state, bool
+        ):
+            raise HUGIMLParamError("adaptive_binning_sample_random_state must be an int.")
         allowed_feature_modes = {
             "patterns_only",
             "original_plus_patterns",
@@ -2304,6 +2357,8 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             is_cat_zeros,
             candidates,
             ratio,
+            adaptive_binning_sample_frac=self._adaptive_binning_sample_fraction_for_native(),
+            adaptive_binning_sample_random_state=int(self.adaptive_binning_sample_random_state),
         )
 
         # Pack C++ results into Python model attributes.
@@ -3530,6 +3585,10 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                         self.G,
                         remaining_s,
                         compute_original_scores=(self.feature_mode != "patterns_only"),
+                        adaptive_binning_sample_frac=self._adaptive_binning_sample_fraction_for_native(),
+                        adaptive_binning_sample_random_state=int(
+                            self.adaptive_binning_sample_random_state
+                        ),
                     )
 
                     # Install adaptive metadata for predict()/transform() so test
@@ -4371,16 +4430,19 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                 names = [f"col{j}" for j in range(arr.shape[1])]
             cat_mask = getattr(self, "cat_cols_mask_", None)
             if cat_mask is not None and not bool(np.any(cat_mask)):
-                raw = np.array(arr, dtype=np.float64, copy=True)
+                raw_dtype = np.float32 if getattr(arr, "dtype", None) == np.float32 else np.float64
+                raw = np.array(arr, dtype=raw_dtype, copy=True, order="C")
                 raw[~np.isfinite(raw)] = np.nan
                 if fit:
                     self._original_numeric_cols_ = list(names)
                     self._original_cat_cols_ = []
-                    med_arr = np.nanmedian(raw, axis=0) if raw.shape[1] else np.empty(0)
-                    med_arr = np.where(np.isfinite(med_arr), med_arr, 0.0).astype(
-                        np.float64, copy=False
+                    med_arr = (
+                        np.nanmedian(raw, axis=0) if raw.shape[1] else np.empty(0, dtype=raw.dtype)
                     )
-                    self._original_numeric_medians_array_ = med_arr.copy()
+                    med_arr = np.where(np.isfinite(med_arr), med_arr, 0.0).astype(
+                        raw.dtype, copy=False
+                    )
+                    self._original_numeric_medians_array_ = med_arr.astype(np.float64, copy=True)
                     self._original_numeric_medians_ = pd.Series(med_arr, index=list(names))
                     bad = ~np.isfinite(raw)
                     if bad.any():
@@ -4404,8 +4466,10 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                     if med_arr is None or len(med_arr) != raw.shape[1]:
                         med = getattr(self, "_original_numeric_medians_", pd.Series(dtype=float))
                         med_arr = (
-                            med.reindex(num_cols).fillna(0.0).to_numpy(dtype=np.float64, copy=True)
+                            med.reindex(num_cols).fillna(0.0).to_numpy(dtype=raw.dtype, copy=True)
                         )
+                    else:
+                        med_arr = np.asarray(med_arr, dtype=raw.dtype)
                     bad = ~np.isfinite(raw)
                     if bad.any():
                         raw[bad] = np.take(med_arr, np.nonzero(bad)[1])

@@ -68,7 +68,10 @@ Cross-validated tuning
    print(result.results_)
 
 Use ``param_grid="interpretability"`` for the pattern-only recommended grid, or
-pass a custom sklearn-style grid when you need a focused search.
+pass a custom sklearn-style grid when you need a focused search. For large
+adaptive-binning datasets, include ``adaptive_binning_sample_frac`` as a fixed
+value such as ``0.20`` when you want bin-count selection to use a deterministic
+stratified sample before full-data fitting.
 
 Focused follow-up grids
 -----------------------

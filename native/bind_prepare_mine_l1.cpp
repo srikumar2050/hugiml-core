@@ -13,6 +13,34 @@
 namespace py = pybind11;
 using namespace hugiml;
 
+
+namespace {
+inline void validate_2d_shape(const py::array& arr, const char* name) {
+    if (arr.ndim() != 2)
+        throw std::invalid_argument(
+            std::string(name) + " must be 2-D, got " +
+            std::to_string(arr.ndim()) + "-D");
+    if (arr.shape(0) == 0)
+        throw std::invalid_argument(std::string(name) + " has 0 rows");
+}
+
+inline bool is_float32_array(const py::array& arr) {
+    return py::dtype::of<float>().is(arr.dtype());
+}
+
+inline auto ensure_float32_c(const py::array& arr) {
+    auto out = py::array_t<float, py::array::c_style>::ensure(arr);
+    if (!out) throw std::invalid_argument("X_num float32 input must be C-contiguous");
+    return out;
+}
+
+inline auto ensure_float64_c(const py::array& arr) {
+    auto out = py::array_t<double, py::array::c_style | py::array::forcecast>::ensure(arr);
+    if (!out) throw std::invalid_argument("X_num must be convertible to a C-contiguous float64 array");
+    return out;
+}
+} // namespace
+
 void bind_prepare_mine_l1(py::module_& m)
 {
     // ── AdaptiveBinResult (returned by select_adaptive_bins) ──────────────────
@@ -122,9 +150,11 @@ void bind_prepare_mine_l1(py::module_& m)
            py::object col_names_py,
            py::array_t<uint8_t, py::array::forcecast> is_cat,
            py::list candidates_py,
-           double ratio)
+           double ratio,
+           double adaptive_binning_sample_frac,
+           uint64_t adaptive_binning_sample_random_state)
         {
-            validate_2d_array(X_num, "X_num");
+            validate_2d_shape(X_num, "X_num");
 
             std::vector<std::string> col_names_cpp;
             if (!col_names_py.is_none()) {
@@ -143,7 +173,9 @@ void bind_prepare_mine_l1(py::module_& m)
                 return select_adaptive_bins_cpp(
                     X_num, y, n_cls,
                     col_names_cpp, is_cat,
-                    candidates, ratio);
+                    candidates, ratio,
+                    adaptive_binning_sample_frac,
+                    adaptive_binning_sample_random_state);
             } catch (const NativeMemoryError& e) {
                 PyErr_SetString(PyExc_MemoryError, e.what());
                 throw py::error_already_set();
@@ -156,12 +188,14 @@ void bind_prepare_mine_l1(py::module_& m)
         py::arg("X_num"), py::arg("y"), py::arg("n_cls"),
         py::arg("col_names"), py::arg("is_cat"),
         py::arg("candidates"), py::arg("ratio"),
+        py::arg("adaptive_binning_sample_frac") = 1.0,
+        py::arg("adaptive_binning_sample_random_state") = 42,
         "C++ adaptive B selection.  Returns AdaptiveBinResult with per-column\n"
         "metadata (chosen_b, edges, ig_scores) and the pre-coded X matrix.");
 
     // ── prepare_and_mine_l1 ──────────────────────────────────────────────────
     m.def("prepare_and_mine_l1",
-        [](py::array_t<double,  py::array::c_style | py::array::forcecast> X_num,
+        [](py::array X_num,
            py::array_t<int64_t, py::array::c_style | py::array::forcecast> y,
            int B,
            py::object col_names_py,
@@ -171,7 +205,7 @@ void bind_prepare_mine_l1(py::module_& m)
            py::object is_precoded_py,
            int K, double G, double timeout_s, bool compute_original_scores)
         {
-            validate_2d_array(X_num, "X_num");
+            validate_2d_shape(X_num, "X_num");
             validate_mining_params(K, 1, G);   // L=1 always
 
             int n = static_cast<int>(X_num.shape(0));
@@ -200,9 +234,23 @@ void bind_prepare_mine_l1(py::module_& m)
             }
 
             try {
+                const bool x_is_float32 = is_float32_array(X_num);
+                if (x_is_float32) {
+                    auto Xf = ensure_float32_c(X_num);
+                    py::gil_scoped_release release;
+                    return prepare_and_mine_l1_cpp(
+                        Xf, y, B,
+                        std::move(col_names_cpp),
+                        is_cat, is_int,
+                        std::move(ipc_vec),
+                        std::move(cat_strs),
+                        std::move(cat_valid),
+                        K, G, timeout_s, compute_original_scores);
+                }
+                auto Xd = ensure_float64_c(X_num);
                 py::gil_scoped_release release;
                 return prepare_and_mine_l1_cpp(
-                    X_num, y, B,
+                    Xd, y, B,
                     std::move(col_names_cpp),
                     is_cat, is_int,
                     std::move(ipc_vec),
@@ -231,7 +279,7 @@ void bind_prepare_mine_l1(py::module_& m)
 
     // ── prepare_and_mine_l1_adaptive ─────────────────────────────────────────
     m.def("prepare_and_mine_l1_adaptive",
-        [](py::array_t<double,  py::array::c_style | py::array::forcecast> X_num,
+        [](py::array X_num,
            py::array_t<int64_t, py::array::c_style | py::array::forcecast> y,
            py::object col_names_py,
            py::array_t<uint8_t, py::array::forcecast> is_cat,
@@ -239,9 +287,11 @@ void bind_prepare_mine_l1(py::module_& m)
            py::object X_cat_raw,
            py::list candidates_py,
            double ratio,
-           int K, double G, double timeout_s, bool compute_original_scores)
+           int K, double G, double timeout_s, bool compute_original_scores,
+           double adaptive_binning_sample_frac,
+           uint64_t adaptive_binning_sample_random_state)
         {
-            validate_2d_array(X_num, "X_num");
+            validate_2d_shape(X_num, "X_num");
             validate_mining_params(K, 1, G);
 
             int n = static_cast<int>(X_num.shape(0));
@@ -264,15 +314,33 @@ void bind_prepare_mine_l1(py::module_& m)
                 throw std::invalid_argument("candidates must be non-empty");
 
             try {
+                const bool x_is_float32 = is_float32_array(X_num);
+                if (x_is_float32) {
+                    auto Xf = ensure_float32_c(X_num);
+                    py::gil_scoped_release release;
+                    return prepare_and_mine_l1_adaptive_cpp(
+                        Xf, y,
+                        std::move(col_names_cpp),
+                        is_cat, is_int,
+                        std::move(cat_strs),
+                        std::move(cat_valid),
+                        candidates, ratio,
+                        K, G, timeout_s, compute_original_scores,
+                        adaptive_binning_sample_frac,
+                        adaptive_binning_sample_random_state);
+                }
+                auto Xd = ensure_float64_c(X_num);
                 py::gil_scoped_release release;
                 return prepare_and_mine_l1_adaptive_cpp(
-                    X_num, y,
+                    Xd, y,
                     std::move(col_names_cpp),
                     is_cat, is_int,
                     std::move(cat_strs),
                     std::move(cat_valid),
                     candidates, ratio,
-                    K, G, timeout_s, compute_original_scores);
+                    K, G, timeout_s, compute_original_scores,
+                    adaptive_binning_sample_frac,
+                    adaptive_binning_sample_random_state);
             } catch (const NativeMemoryError& e) {
                 PyErr_SetString(PyExc_MemoryError, e.what());
                 throw py::error_already_set();
@@ -287,20 +355,22 @@ void bind_prepare_mine_l1(py::module_& m)
         py::arg("X_cat_raw"), py::arg("candidates"), py::arg("ratio"),
         py::arg("K") = 200, py::arg("G") = 0.0, py::arg("timeout_s") = 0.0,
         py::arg("compute_original_scores") = false,
+        py::arg("adaptive_binning_sample_frac") = 1.0,
+        py::arg("adaptive_binning_sample_random_state") = 42,
         "Fused adaptive-B + L=1 hot path. Selects adaptive edges and mines L1\n"
         "without materialising X_codes_flat or a Python pre-binned DataFrame.");
 
 
     // ── prepare_and_mine_l1_fixed_numeric ───────────────────────────────────
     m.def("prepare_and_mine_l1_fixed_numeric",
-        [](py::array_t<double,  py::array::c_style | py::array::forcecast> X_num,
+        [](py::array X_num,
            py::array_t<int64_t, py::array::c_style | py::array::forcecast> y,
            int B,
            py::object col_names_py,
            py::array_t<uint8_t, py::array::forcecast> is_int,
            int K, double G, double timeout_s, bool compute_original_scores)
         {
-            validate_2d_array(X_num, "X_num");
+            validate_2d_shape(X_num, "X_num");
             validate_mining_params(K, 1, G);
 
             std::vector<std::string> col_names_cpp;
@@ -310,9 +380,17 @@ void bind_prepare_mine_l1(py::module_& m)
                 for (auto& it : lst) col_names_cpp.push_back(it.cast<std::string>());
             }
             try {
+                const bool x_is_float32 = is_float32_array(X_num);
+                if (x_is_float32) {
+                    auto Xf = ensure_float32_c(X_num);
+                    py::gil_scoped_release release;
+                    return prepare_and_mine_l1_fixed_numeric_cpp(
+                        Xf, y, B, std::move(col_names_cpp), is_int, K, G, timeout_s, compute_original_scores);
+                }
+                auto Xd = ensure_float64_c(X_num);
                 py::gil_scoped_release release;
                 return prepare_and_mine_l1_fixed_numeric_cpp(
-                    X_num, y, B, std::move(col_names_cpp), is_int, K, G, timeout_s, compute_original_scores);
+                    Xd, y, B, std::move(col_names_cpp), is_int, K, G, timeout_s, compute_original_scores);
             } catch (const NativeMemoryError& e) {
                 PyErr_SetString(PyExc_MemoryError, e.what());
                 throw py::error_already_set();

@@ -193,6 +193,18 @@ def test_hugiml_artifact_tables_include_survivor_led_audit_columns() -> None:
     assert "Survivor-led pattern audit" not in src
 
 
+
+
+def test_hugiml_advanced_exposes_adaptive_binning_sample_controls() -> None:
+    src = _source()
+    assert "Adaptive sample fraction values" in src
+    assert "Adaptive sample seed values" in src
+    assert "wb_hugiml_adaptive_sample_frac_grid" in src
+    assert "wb_hugiml_adaptive_sample_seed_grid" in src
+    assert "_parse_adaptive_sample_frac_grid" in src
+    assert "adaptive_binning_sample_frac" in src
+    assert "adaptive_binning_sample_random_state" in src
+
 def test_hugiml_advanced_exposes_new_interaction_parameters() -> None:
     src = _source()
     assert "Augmented pair transforms" in src
@@ -230,6 +242,8 @@ def test_dashboard_runner_preserves_new_hugiml_params_for_reruns() -> None:
         "ii_partner_size",
         "interaction_relaxed_mining",
         "interaction_relaxed_feature_size",
+        "adaptive_binning_sample_frac",
+        "adaptive_binning_sample_random_state",
     ):
         assert token in src
     assert "_HUGIML_PARAM_KEYS" in src

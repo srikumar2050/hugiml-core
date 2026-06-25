@@ -6,6 +6,13 @@ The canonical release notes live in ``CHANGELOG.md`` at the repository root. Kee
 Recent releases
 ---------------
 
+1.1.14 — 2026-06-25
+~~~~~~~~~~~~~~~~~~~
+
+* Reduced memory pressure for adaptive-binning workflows by adding deterministic stratified sampling for native bin-count selection.
+* Preserved float32 numeric inputs through the native L1 preparation path where possible, avoiding unnecessary widening copies while keeping C-contiguous arrays for native execution.
+* Exposed the sampling option in Workbench Advanced configuration and refreshed the Governance Studio static preview to match the new control.
+
 1.1.13 — 2026-06-24
 ~~~~~~~~~~~~~~~~~~~
 

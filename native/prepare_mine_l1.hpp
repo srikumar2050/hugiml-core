@@ -112,6 +112,18 @@ L1FitResult prepare_and_mine_l1_cpp(
     std::vector<std::vector<bool>>         cat_raw_valid,
     int K, double G, double timeout_s, bool compute_original_scores);
 
+L1FitResult prepare_and_mine_l1_cpp(
+    const pybind11::array_t<float,  pybind11::array::c_style>& X_num_arr,
+    const pybind11::array_t<int64_t, pybind11::array::c_style | pybind11::array::forcecast>& y_arr,
+    int B,
+    std::vector<std::string>               col_names,
+    const pybind11::array_t<uint8_t, pybind11::array::forcecast>& is_cat_arr,
+    const pybind11::array_t<uint8_t, pybind11::array::forcecast>& is_int_arr,
+    std::vector<bool>                      is_precoded,
+    std::vector<std::vector<std::string>>  cat_raw_strs,
+    std::vector<std::vector<bool>>         cat_raw_valid,
+    int K, double G, double timeout_s, bool compute_original_scores);
+
 /// C++ adaptive B selection (replaces Python _apply_adaptive_binning).
 /// Skips is_cat columns.  Returns per-column results + row-major int32 code matrix.
 AdaptiveBinResult select_adaptive_bins_cpp(
@@ -121,13 +133,23 @@ AdaptiveBinResult select_adaptive_bins_cpp(
     const std::vector<std::string>&        col_names,
     const pybind11::array_t<uint8_t, pybind11::array::forcecast>& is_cat_arr,
     const std::vector<int>&                candidates,
-    double                                 ratio);
+    double                                 ratio,
+    double                                 adaptive_sample_frac = 1.0,
+    uint64_t                               adaptive_sample_seed = 42);
 
 /// Fast fixed-B dense numeric L=1 hot path.  It keeps numeric columns numeric,
 /// skips non-finite cells, parallelises fixed-bin column preparation and the
 /// first row scan, and avoids materialising transactions.
 L1FitResult prepare_and_mine_l1_fixed_numeric_cpp(
     const pybind11::array_t<double,  pybind11::array::c_style | pybind11::array::forcecast>& X_num_arr,
+    const pybind11::array_t<int64_t, pybind11::array::c_style | pybind11::array::forcecast>& y_arr,
+    int B,
+    std::vector<std::string> col_names,
+    const pybind11::array_t<uint8_t, pybind11::array::forcecast>& is_int_arr,
+    int K, double G, double timeout_s, bool compute_original_scores);
+
+L1FitResult prepare_and_mine_l1_fixed_numeric_cpp(
+    const pybind11::array_t<float,  pybind11::array::c_style>& X_num_arr,
     const pybind11::array_t<int64_t, pybind11::array::c_style | pybind11::array::forcecast>& y_arr,
     int B,
     std::vector<std::string> col_names,
@@ -146,6 +168,20 @@ L1FitResult prepare_and_mine_l1_adaptive_cpp(
     std::vector<std::vector<bool>>         cat_raw_valid,
     const std::vector<int>&                candidates,
     double                                 ratio,
-    int K, double G, double timeout_s, bool compute_original_scores);
+    int K, double G, double timeout_s, bool compute_original_scores,
+    double adaptive_sample_frac = 1.0, uint64_t adaptive_sample_seed = 42);
+
+L1FitResult prepare_and_mine_l1_adaptive_cpp(
+    const pybind11::array_t<float,  pybind11::array::c_style>& X_num_arr,
+    const pybind11::array_t<int64_t, pybind11::array::c_style | pybind11::array::forcecast>& y_arr,
+    std::vector<std::string>               col_names,
+    const pybind11::array_t<uint8_t, pybind11::array::forcecast>& is_cat_arr,
+    const pybind11::array_t<uint8_t, pybind11::array::forcecast>& is_int_arr,
+    std::vector<std::vector<std::string>>  cat_raw_strs,
+    std::vector<std::vector<bool>>         cat_raw_valid,
+    const std::vector<int>&                candidates,
+    double                                 ratio,
+    int K, double G, double timeout_s, bool compute_original_scores,
+    double adaptive_sample_frac = 1.0, uint64_t adaptive_sample_seed = 42);
 
 }  // namespace hugiml
