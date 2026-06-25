@@ -1,192 +1,155 @@
-# HUGIML scalability experiment
+# HUGIML Scalability Dashboard
 
-The dashboard template is discovered automatically from the grandparent folder of the script, so the command below works when the template is in the repo root. A custom template can still be supplied with `--template-html`.
+Interactive benchmark dashboard comparing HUGIML model variants against XGBoost and LightGBM. The runner executes scalability tasks, writes a JSON checkpoint after each task, and assembles a self-contained HTML dashboard with professional visualizations, interactive filters, and data-driven insights from the checkpoint.
 
-## Quick start
+## Current model scenarios
 
-Run the full experiment from the repository root:
+The benchmark uses the following model set:
 
-```bash
-python experiments/scalability/scalability_dashboard.py --fresh
-```
+| Model key | Description |
+|---|---|
+| `hug_op_adaptive_full` | HUG original + patterns, full adaptive binning |
+| `hug_op_adaptive_s20` | HUG original + patterns, adaptive binning sampled at 20% |
+| `hug_op_b8` | HUG original + patterns, fixed `B=8` |
+| `hug_po_adaptive_full` | HUG patterns only, full adaptive binning |
+| `hug_po_adaptive_s20` | HUG patterns only, adaptive binning sampled at 20% |
+| `hug_po_b8` | HUG patterns only, fixed `B=8` |
+| `xgb` | XGBoost baseline |
+| `lgb` | LightGBM baseline |
 
-Assemble the dashboard from an existing checkpoint:
+## Scaling grids
 
-```bash
-python experiments/scalability/scalability_dashboard.py --assemble
-```
+### n-scaling
 
-All generated files are written under:
+| Dataset | Grid |
+|---|---|
+| `sparse_nonlinear` | `(10k,20)`, `(50k,20)`, `(100k,20)`, `(500k,20)`, `(1M,20)`, `(3M,20)`, `(5M,20)`, `(10M,20)` |
+| `threshold_grid` | `(1k,200)`, `(5k,200)`, `(10k,200)`, `(50k,200)`, `(100k,200)`, `(300k,200)`, `(500k,200)`, `(1M,200)` |
 
-```text
-experiments/scalability/results/
-```
+### p-scaling
 
-Main outputs:
-
-```text
-results/scalability_checkpoint.json
-results/scalability_dashboard_data.json
-results/scalability_details.csv
-results/scalability_summary.csv
-results/hugiml_scalability_dashboard.html
-```
-
-## Experiment design
-
-Two synthetic binary-classification datasets are generated inside the script using a reproducible seed.
-
-`sparse_nonlinear` uses dense float32 Gaussian features with signal concentrated in the first columns and remaining columns acting mostly as noise. The target is median-binarised from a nonlinear score.
-
-`threshold_grid` uses dense float32 Gaussian features with threshold and local-interaction signal terms. The target is median-binarised from the generated score.
-
-The default random seed is `42`. The dataset generators derive deterministic sub-seeds from `n`, `p`, and the user seed, so repeated runs reproduce the same data for the same task.
-
-## Evaluation protocol
-
-Each task uses a single stratified holdout split:
+Both datasets use:
 
 ```text
-75% train / 25% test
-```
-
-The split seed is `42`. The dashboard reports test ROC AUC. The details CSV also records phase timings:
-
-```text
-data_s, split_s, fit_s, predict_s, auc_s
-```
-
-`fit_s` measures only `clf.fit(X_train, y_train)`. `predict_s` measures `predict_proba(X_test)`, and `auc_s` measures ROC-AUC calculation on the test predictions.
-
-No cross-validation is used in this scalability experiment. The goal is to measure training time, memory growth, prediction time, and test AUC under controlled increases in `n` and `p`, not to tune hyperparameters.
-
-## Models
-
-The displayed models are:
-
-```text
-hug_op   HUGIML original_plus_patterns
-hug_po   HUGIML patterns_only
-xgb      XGBoost
-lgb      LightGBM
-```
-
-## Model configurations
-
-Shared HUGIML settings:
-
-```python
-B = -1
-b_candidates = [3,5,7,10]
-adaptive_binning=True
-L=1
-G=0.01
-topK=50
-n_jobs=4
-use_hotpath=True
-augmented_pair_transforms=False
-interaction_relaxed_mining=False
-execution_mode="production"
-```
-
-HUGIML mode settings:
-
-```python
-hug_op:
-  feature_mode="original_plus_patterns"
-  topk_budget_strict=True
-
-hug_po:
-  feature_mode="patterns_only"
-  topk_budget_strict=False
-```
-
-The `avf` sweep still compares adaptive binning against fixed binning. When adaptive binning is enabled only for that sweep, `b_candidates=[3, 5, 7, 10]`.
-
-XGBoost settings:
-
-```python
-n_estimators=50
-max_depth=4
-learning_rate=0.1
-subsample=0.85
-colsample_bytree=0.85
-tree_method="hist"
-n_jobs=4
-eval_metric="logloss"
-random_state=42
-```
-
-LightGBM settings:
-
-```python
-n_estimators=50
-max_depth=4
-num_leaves=15
-learning_rate=0.1
-subsample=0.85
-colsample_bytree=0.85
-n_jobs=4
-random_state=42
-verbose=-1
+(50k,20), (100k,100), (10k,1000), (5k,2000), (2500,4000), (2000,5000), (1000,10000)
 ```
 
 ## Parameter sweeps
 
-Parameter sweeps run HUGIML `hug_op` only.
+The original sweep experiments are preserved and run against `hug_op_adaptive_full`:
 
-For `sparse_nonlinear`:
+| Sweep | Values |
+|---|---|
+| `B` | `2, 3, 5, 7, 10, 15` |
+| `G` | `0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05` |
+| `topK` | `10, 20, 30, 50, 100, 200` |
+| `L` | `1, 2` |
+| `avf` | adaptive binning `True` / fixed `False` |
 
-```python
-B:    n=50_000, p=20, values=[2, 3, 5, 7, 10, 15]
-G:    n=50_000, p=20, values=[0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05]
-topK: n=50_000, p=20, values=[10, 20, 30, 50, 100, 200]
-L:    n=30_000, p=20, values=[1, 2]
-avf:  n=50_000, p=20, values=[True, False]
+With the current model set, there are 240 n/p scaling tasks plus 44 sweep tasks, for 284 tasks total when sweeps are enabled.
+
+Use `--no-sweeps` to run only n/p scaling.
+
+## Memory metrics
+
+The dashboard memory plots now use:
+
+```text
+peak_process_tree_rss_mb
 ```
 
-For `threshold_grid`:
+This is the maximum observed RSS of the worker process tree during the full task. It is the primary metric for classifier memory comparison because it captures the practical peak RAM footprint of the run.
 
-```python
-B:    n=30_000, p=200, values=[2, 3, 5, 7, 10, 15]
-G:    n=30_000, p=200, values=[0.0001, 0.0005, 0.001, 0.005, 0.01, 0.05]
-topK: n=30_000, p=200, values=[10, 20, 30, 50, 100, 200]
-L:    n=20_000, p=100, values=[1, 2]
-avf:  n=30_000, p=200, values=[True, False]
+Fit-window memory deltas are still logged/exported as diagnostics:
+
+```text
+fit_delta_from_before_fit_mb
+fit_delta_from_after_data_mb
 ```
 
-## Useful run controls
+## CLI
 
-Run a subset:
+The runner uses the following argument style:
 
 ```bash
-python experiments/scalability/scalability_dashboard.py --fresh --only-dataset sparse_nonlinear --only-section n_scaling --only-model hug_po
+python scalability_dashboard_improved.py --out-dir results --resume
 ```
 
-Skip successful tasks already present in the checkpoint:
+To assemble from an existing checkpoint without running benchmarks:
 
 ```bash
-python experiments/scalability/scalability_dashboard.py --resume
+python scalability_dashboard_improved.py --assemble --out-dir results
 ```
 
-Run a small batch from the task list:
+Optional output path:
 
 ```bash
-python experiments/scalability/scalability_dashboard.py --fresh --no-sweeps --max-tasks 8
+python scalability_dashboard_improved.py --assemble --out-dir results --output-html results/dashboard.html
 ```
 
-Runtime limit:
+Supported relevant options:
 
-```bash
-python experiments/scalability/scalability_dashboard.py --task-timeout 3600
+```text
+--assemble              # Assemble HTML dashboard from checkpoint only
+--out-dir              # Output directory (default: ./scalability_results)
+--output-html          # Custom output HTML path
+--fresh                # Start fresh (remove old checkpoint)
+--resume               # Resume from existing checkpoint
+--no-sweeps            # Run only n/p scaling (skip parameter sweeps)
+--start-task           # Start task index
+--max-tasks            # Maximum number of tasks to run
+--only-section         # Run specific section (n_scaling, p_scaling, parameter_sweep_*)
+--only-dataset         # Run specific dataset (sparse_nonlinear, threshold_grid)
+--only-model           # Run specific model (see model scenarios table)
+--task-timeout         # Timeout per task in seconds
+--mem-limit-mb         # Memory limit per task in MB
 ```
 
-`--task-timeout` is a per-task wall-clock limit in seconds. The default is `3600`, which is 60 minutes. Use `--task-timeout 0` to disable the time limit. If the limit is exceeded, the checkpoint row is marked `timeout`.
+## Dashboard Features
 
-Memory limit:
+The HTML dashboard is self-contained and requires no external dependencies or network access. It includes:
 
-```bash
-python experiments/scalability/scalability_dashboard.py --mem-limit-mb -1
-```
+### Overview Section
+- **Key findings**: Data-driven insights on fit performance, accuracy ranges, scaling invariance, and model coverage
+- **KPIs**: Largest n, fastest fit, best AUC, and lowest peak memory
+- **Charts**: n-scaling fit time, test AUC, and peak memory trends
+- **Snapshot**: Latest results at maximum n with model comparison
 
-`--mem-limit-mb` controls the process-tree RSS limit. The default is `-1`, which uses 90% of detected system memory. Use `--mem-limit-mb 0` to disable the memory limit, or a positive value such as `65536` to set an explicit MB cap. If the limit is exceeded, the checkpoint row is marked `oom`.
+### n-Scaling & p-Scaling Sections
+- **Interactive charts**: Fit time (log scale), test AUC, peak memory, pattern count
+- **Ratio chart**: p-scaling fit time relative to XGBoost baseline
+- **Grouped tables**: Collapsible sections by model for compact, scannable layout
+- **Memory precision**: Peak RSS displayed to 1 decimal place (e.g., 1.2 GB)
+
+### Parameter Sweep Sections
+Professional visualizations for each hyperparameter:
+
+- **B sweep**: Fit time + AUC/patterns dual-axis chart
+- **G sweep**: AUC/patterns sorted (descending) + fit time chart
+- **topK sweep**: Triple-axis chart (AUC, patterns, fit time)
+- **L comparison**: L=1 vs L=2 side-by-side metrics with decision guidance
+- **avf comparison**: Adaptive vs Fixed binning with pros/cons
+
+Parameter values remain responsive—all 5 sweeps populate dynamically from checkpoint data.
+
+### Methodology Section
+- **System info**: Python, platform, CPU count, RAM, worker threads
+- **Model scenarios**: Filterable by family (HugOP, HugPO, XGBoost, LightGBM)
+- **Benchmark grid**: Datasets, feature-count scaling, n-scaling settings
+- **Sweep grids**: Parameter ranges with values filterable by dataset
+
+### Theme & Responsiveness
+- Light/dark mode toggle
+- Dataset selector
+- Responsive design (desktop, tablet, mobile)
+- Embedded Chart.js for all visualizations
+
+## Outputs
+
+Assembly writes:
+
+| File | Contents |
+|---|---|
+| `scalability_checkpoint.json` | Full task checkpoint with 284+ results |
+| `scalability_results_flat.csv` | Flat CSV: fit time, AUC, patterns, memory, fit deltas |
+| `hugiml_scalability_dashboard.html` | Self-contained HTML dashboard (170 KB) |
