@@ -14,25 +14,29 @@ Why HUGIML?
 
 * **Intrinsic interpretability:** learned HUG patterns are the model representation, not an after-the-fact explanation.
 * **Regulated-domain fit:** model cards, audit artifacts, pruning trails, calibration, drift monitoring, and deployment helpers are included.
-* **Native performance:** computationally intensive mining, transaction construction, interaction-information scoring, pair-aware adaptive binning, and matrix-building stages are C++ accelerated with optional OpenMP support. Version 1.1.14 builds on v1.1.13 with lower-memory adaptive-binning selection, float32-aware native L1 preparation, and Workbench Advanced support for adaptive-binning sampling. Earlier 1.1.x capabilities remain available, including production/audit execution modes, fast adaptive-binning tuning, higher-order interaction selection, the native ``L=2`` hot path, augmented-pair operations, strict global ``topK`` budgeting, compact native transaction memory, and fused adaptive ``L=1`` execution.
+* **Native performance:** computationally intensive mining, transaction construction, interaction-information scoring, pair-aware adaptive binning, and matrix-building stages are C++ accelerated with optional OpenMP support. Version 1.1.15 builds on v1.1.14 with stronger interaction-relaxed mining, deterministic no-pattern fallback behavior, fallback-aware serialization, and refreshed interpretable benchmark grids. Earlier 1.1.x capabilities remain available, including production/audit execution modes, fast adaptive-binning tuning, higher-order interaction selection, the native ``L=2`` hot path, augmented-pair operations, strict global ``topK`` budgeting, compact native transaction memory, and fused adaptive ``L=1`` execution.
 * **Python ergonomics:** the estimator follows the scikit-learn API and works with pandas DataFrames or NumPy arrays.
 
 
 Current release focus
 ---------------------
 
-The 1.1.14 release focuses on memory-efficient adaptive-binning execution
-while retaining the v1.1.13 runtime and configuration improvements:
+The 1.1.15 release focuses on predictable behavior and refreshed
+interpretable-model comparisons while retaining the v1.1.14 adaptive-binning
+memory improvements:
 
-* Adaptive bin-count selection can use a deterministic stratified row sample,
-  then apply the selected bin edges to the full training data.
-* All-numeric float32 inputs can stay float32 through native L1 preparation,
-  reducing widening copies while preserving native C-contiguous input handling.
-* Governance Studio Workbench Advanced exposes the adaptive-binning sampling
-  option for larger adaptive workflows.
+* Interaction-relaxed mining can use survivor-pair joint evidence when native
+  external-utility admission would otherwise drop weak-marginal interaction
+  features.
+* ``patterns_only`` fits that mine no HUG patterns now install a deterministic
+  constant-prior fallback instead of failing.
+* Versioned save/load persists fallback state so predictions remain stable after
+  serialization.
+* Benchmark grids now include compact EBM settings and a registered RuleFit grid
+  for broader interpretable-baseline comparisons.
 
-The v1.1.13 categorical handling, zero-variance exclusion, centralized grids,
-and lean tuning defaults remain available.
+The v1.1.14 adaptive-binning sampling and float32-aware native L1 preparation
+remain available.
 
 Installation
 ------------

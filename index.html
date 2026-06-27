@@ -183,7 +183,7 @@
       <h1>HUGIML interactive dashboards</h1>
       <p class="hero-sub">
         Interactive evidence views for benchmark analysis, governance audit, and scalability profiling.
-        Each dashboard is a self-contained static HTML file — open locally or serve via GitHub Pages.
+        Each dashboard is a self-contained static HTML file.
       </p>
       <div class="hero-chips">
         <span class="hero-chip">HUG-IML</span>
@@ -201,8 +201,7 @@
         <h2>HUGIML Benchmark Analysis Dashboard</h2>
         <p>
           Interactive benchmark report comparing HUGIML with model baselines — XGBoost, LightGBM,
-          EBM, Random Forest, and Logistic Regression — across datasets, metrics, and runtime evidence.
-          Includes ROC curves, complexity budgets, and missing-value robustness panels.
+          EBM, RuleFit, Random Forest, and Logistic Regression — across datasets, metrics, and runtime evidence.
         </p>
         <div class="card-meta">
           <span class="meta-tag">AUC comparison</span>
@@ -237,8 +236,7 @@
         <h2>HUGIML Scalability Dashboard</h2>
         <p>
           Measured fit-time and inference-latency scaling vs XGBoost and LightGBM.
-          Covers n from 1k to 10Mn,
-          p up to 10 000, and parameter sweeps over B, G, topK, L, and adaptive binning.
+          Covers n from 1k to 10Mn, p up to 10 000, and parameter sweeps over B, G, topK, L, and adaptive binning.
         </p>
         <div class="card-meta">
           <span class="meta-tag">n-scaling to 10Mn</span>
@@ -252,7 +250,7 @@
     </section>
 
     <footer>
-      <span>For local analysis, install the package extras and run the dashboard/benchmark commands.</span>
+      <span>Rebuild benchmark/scalability dashboards from <code>experiments/benchmark</code> and <code>experiments/scalability</code>.</span>
       <span>
         <a href="https://doi.org/10.1109/ACCESS.2024.3455563" target="_blank">IEEE Access 2024</a>
         &nbsp;·&nbsp;

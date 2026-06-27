@@ -614,6 +614,10 @@ Existing example dashboards:
 
 - [Open the HUGIML Benchmark Analysis Dashboard](https://srikumar2050.github.io/hugiml-core/hugiml_benchmark_analysis_dashboard.html)
 
+The static benchmark dashboard is reproducible from the repository source with
+[`experiments/benchmark/benchmark_dashboard.py`](experiments/benchmark/benchmark_dashboard.py); see
+[Benchmark Suite](#benchmark-suite) for the exact rerun and assemble commands.
+
 ### Profile visualisations
 
 ```python
@@ -801,7 +805,12 @@ The **Governance Studio dashboard** provides interactive governance evidence vie
 
 ## Benchmark Suite
 
-Reproduce paper claims or benchmark on your own datasets:
+HUGIML includes two reproducible benchmark workflows:
+
+1. **Package benchmark runner** for quick CV-style comparisons from the installed package.
+2. **Experiment dashboard runners** in [`experiments/`](experiments/) for regenerating the published static benchmark and scalability dashboards.
+
+The package-level runner is useful for ad hoc benchmark checks:
 
 ```bash
 # Run full CV comparison
@@ -820,13 +829,61 @@ Or use the installed console script:
 hugiml-bench --datasets german_credit --output results/
 ```
 
+### Reproduce the benchmark analysis dashboard
+
+The public benchmark analysis dashboard is generated from
+[`experiments/benchmark/benchmark_dashboard.py`](experiments/benchmark/benchmark_dashboard.py).
+This script defines the 50-dataset panel, model grids, preprocessing policy, checkpointing, result aggregation,
+and static HTML assembly used for the dashboard.
+
+From the repository root:
+
+```bash
+# Full fresh run; writes checkpoint, CSV summaries, and revised HTML
+python experiments/benchmark/benchmark_dashboard.py --fresh
+
+# Resume a partially completed run from checkpoint
+python experiments/benchmark/benchmark_dashboard.py --resume
+
+# Rebuild only the HTML/CSV summaries from an existing checkpoint
+python experiments/benchmark/benchmark_dashboard.py --assemble
+```
+
+Default outputs are written under:
+
+```text
+experiments/benchmark/results/
+```
+
+The dashboard runner is deterministic for a fixed code version and dependency environment: dataset generation,
+train/validation/test splits, row subsampling, and model seeds are all controlled by the script. The generated
+artifacts include `details.csv`, `summary_by_scope.csv`, `scope_tests.csv`, `overall.csv`, and
+`hugiml_benchmark_analysis_dashboard_revised.html`.
+
 ### Scalability dashboard
 
 For runtime and memory scaling evidence, see the static scalability dashboard:
 
 - [Open the HUGIML Scalability Dashboard](https://srikumar2050.github.io/hugiml-core/hugiml_scalability_dashboard.html)
 
-The dashboard summarizes measured fit time, prediction latency, memory delta, pattern counts, and test AUC against XGBoost and LightGBM. It covers sample-size scaling, feature-count scaling, and parameter sweeps over `B`, `G`, `topK`, `L`, and adaptive binning. HUGIML retains many training and test artifacts to support governance and audit requirements. 
+The dashboard summarizes measured fit time, prediction latency, memory delta, pattern counts, and test AUC against XGBoost and LightGBM. It covers sample-size scaling, feature-count scaling, and parameter sweeps over `B`, `G`, `topK`, `L`, and adaptive binning. HUGIML retains many training and test artifacts to support governance and audit requirements.
+
+The scalability dashboard is reproducible from
+[`experiments/scalability/scalability_dashboard.py`](experiments/scalability/scalability_dashboard.py):
+
+```bash
+# Full scalability run with checkpointing
+python experiments/scalability/scalability_dashboard.py --fresh
+
+# Resume a partially completed scalability run
+python experiments/scalability/scalability_dashboard.py --resume
+
+# Rebuild only the static dashboard from an existing checkpoint
+python experiments/scalability/scalability_dashboard.py --assemble
+```
+
+Default outputs are written under the scalability results directory configured by the script and include the
+JSON checkpoint, flat CSV export, and `hugiml_scalability_dashboard.html`.
 
 Worked notebooks in [`notebooks/`](notebooks/) are organized as 12 self-contained folders:
 
@@ -971,8 +1028,8 @@ With strict budgeting enabled, HUGIML applies the TopK budget during feature con
 | **Adaptive binning** | Per-feature supervised `B` selection with optional stratified sampling — addresses the B-sensitivity trap |
 | **Pattern pruning** | Regulated remove/refit/calibrate workflow with full JSON audit trail |
 | **Multiclass & imbalance** | Multiclass report, SMOTE/class-weight pipeline, high-cardinality encoding |
-| **Benchmark suite** | Reproducible CV comparison vs EBM, XGBoost, RF, LR, RuleFit, GAM |
-| **Scalability dashboard** | Static runtime, latency, memory, n-scaling, p-scaling, and parameter-sweep evidence vs XGBoost and LightGBM |
+| **Benchmark suite** | Reproducible CV comparison and dashboard regeneration via `experiments/benchmark/benchmark_dashboard.py` |
+| **Scalability dashboard** | Static runtime, latency, memory, n-scaling, p-scaling, and parameter-sweep evidence reproducible via `experiments/scalability/scalability_dashboard.py` |
 | **Calibration** | ECE, MCE, Brier score, reliability diagram data |
 | **Drift detection** | PSI + symmetric KL divergence + label drift |
 | **Monitoring** | Thread-safe `PredictionMonitor`, latency tracking |
@@ -1041,8 +1098,8 @@ hugiml-core/
 ├── tests/                       Pytest suite
 ├── benchmarks/                  Micro-benchmarks and regression gate
 ├── experiments/                 Reproducible dashboard-generation workflows
-│   ├── benchmark/               Benchmark dashboard regeneration assets
-│   └── scalability/             Scalability dashboard regeneration assets
+│   ├── benchmark/               Benchmark analysis runner, checkpointing, CSV summaries, HTML assembly
+│   └── scalability/             Scalability runner, checkpointing, flat exports, HTML assembly
 ├── docker/                      Dockerfile + FastAPI inference server
 ├── kubernetes/                  Deployment manifests
 ├── scripts/                     Build and utility scripts

@@ -77,7 +77,7 @@ __all__ = [
 # Schema v5 adds execution_mode and lightweight retained training-matrix
 # shape/nnz metadata to clf_fit.json.  Loading remains backward-compatible
 # with v1-v4 because new fields are restored with .get(..., None).
-MODEL_SCHEMA_VERSION: int = 5
+MODEL_SCHEMA_VERSION: int = 6
 MIN_SCHEMA_VERSION: int = 1
 
 # ── Legacy (v1/v2) pickle-envelope constants ──────────────────────────────────
@@ -499,6 +499,13 @@ def save_model(clf: Any, path: str | os.PathLike) -> None:
             clf, "_training_downstream_matrix_shape_", None
         ),
         "training_downstream_matrix_nnz": getattr(clf, "_training_downstream_matrix_nnz_", None),
+        "fallback_state": {
+            "active": bool(getattr(clf, "fallback_active_", False)),
+            "strategy": getattr(clf, "fallback_strategy_", None),
+            "reason": getattr(clf, "fallback_reason_", None),
+            "majority_class": getattr(clf, "fallback_majority_class_", None),
+            "n_samples": getattr(clf, "fallback_n_samples_", None),
+        },
     }
     if hasattr(clf, "fit_metadata_") and clf.fit_metadata_ is not None:
         import dataclasses
@@ -610,6 +617,10 @@ def save_model(clf: Any, path: str | os.PathLike) -> None:
         "classes_": clf.classes_,
         "cat_cols_mask_": clf.cat_cols_mask_.astype(np.bool_),
     }
+    if hasattr(clf, "fallback_class_prior_"):
+        clf_arrays["fallback_class_prior_"] = np.asarray(
+            clf.fallback_class_prior_, dtype=np.float64
+        )
     if hasattr(clf, "is_int_mask_") and clf.is_int_mask_ is not None:
         clf_arrays["is_int_mask_"] = clf.is_int_mask_.astype(np.bool_)
     if hasattr(clf, "_pattern_orders_"):
@@ -912,6 +923,20 @@ def _load_v3(path: str | os.PathLike) -> Any:
             f"{execution_mode!r}. Expected 'audit' or 'production'."
         )
     clf.execution_mode = execution_mode
+    fallback_state = clf_fit.get("fallback_state") or {}
+    clf.fallback_active_ = bool(fallback_state.get("active", False))
+    if clf.fallback_active_:
+        clf.fallback_strategy_ = str(fallback_state.get("strategy") or "constant_prior")
+        clf.fallback_reason_ = fallback_state.get("reason")
+        clf.fallback_n_samples_ = fallback_state.get("n_samples")
+        clf.fallback_class_prior_ = clf_arrays.get(
+            "fallback_class_prior_",
+            np.full(len(clf.classes_), 1.0 / max(len(clf.classes_), 1), dtype=np.float64),
+        )
+        majority = fallback_state.get("majority_class")
+        if majority is None and len(clf.classes_):
+            majority = clf.classes_[int(np.argmax(clf.fallback_class_prior_))]
+        clf.fallback_majority_class_ = majority
     if clf_fit.get("training_pattern_matrix_shape") is not None:
         clf._training_pattern_matrix_shape_ = tuple(
             int(v) for v in clf_fit.get("training_pattern_matrix_shape")

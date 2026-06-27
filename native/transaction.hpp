@@ -176,6 +176,8 @@ TransactionDataCpp prepare_transactions_cpp(
     const py::array_t<uint8_t, py::array::forcecast>& is_int_arr,
     std::vector<bool>                     is_precoded_in,
     std::vector<std::vector<std::string>> cat_raw_strs,
-    std::vector<std::vector<bool>>        cat_raw_valid);
+    std::vector<std::vector<bool>>        cat_raw_valid,
+    const std::vector<int>*               eu_pair_left  = nullptr,
+    const std::vector<int>*               eu_pair_right = nullptr);
 
 }  // namespace hugiml

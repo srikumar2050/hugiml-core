@@ -120,7 +120,6 @@ from hugiml.exceptions import (
     HUGIMLConvergenceWarning,
     HUGIMLDtypeDriftWarning,
     HUGIMLMemoryError,
-    HUGIMLMiningError,
     HUGIMLParamError,
     HUGIMLPredictionError,
     HUGIMLRangeWarning,
@@ -1546,6 +1545,10 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             self._missing_col_edges_ = {}
         if not hasattr(self, "_adaptive_code_label_map_"):
             self._adaptive_code_label_map_ = {}
+        if not hasattr(self, "fallback_active_"):
+            self.fallback_active_ = False
+        if getattr(self, "fallback_active_", False) and not hasattr(self, "fallback_strategy_"):
+            self.fallback_strategy_ = "constant_prior"
         # Rebuild the code→label map from stored bin edges whenever it's absent
         # or empty but adaptive bin edges are present.  This handles save/load via
         # both pickle and the custom .hugiml format (serialization.py).
@@ -3337,8 +3340,16 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             "_training_downstream_matrix_shape_",
             "_training_downstream_matrix_nnz_",
             "_drift_det",
+            "fallback_active_",
+            "fallback_strategy_",
+            "fallback_reason_",
+            "fallback_class_prior_",
+            "fallback_majority_class_",
+            "fallback_n_samples_",
         ):
             self.__dict__.pop(_attr, None)
+
+        self.fallback_active_ = False
 
         t_total = self._timer()
         stage_times: dict[str, float] = {}
@@ -3679,13 +3690,10 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                 stage_times["mine_patterns"] = t.ms
 
                 if len(self.patterns_) == 0:
-                    if self.feature_mode == "patterns_only":
-                        raise HUGIMLMiningError(
-                            "No HUG patterns found.  Try reducing G, increasing topK, or adjusting B / L."
-                        )
-                    # In original_plus_patterns mode, zero mined HUG patterns is
-                    # not fatal: downstream fitting should fall back to the
-                    # original feature block with an empty pattern matrix.
+                    # Zero mined HUG patterns is not fatal.  In hybrid modes the
+                    # downstream estimator can still use the original feature
+                    # block.  In patterns_only mode, a common no-fail fallback
+                    # below returns a constant-prior classifier.
                     n_train = len(y_train)
                     self.x_train_hup_ = csr_matrix((n_train, 0), dtype=np.float32)
                     stage_times["build_matrix"] = 0.0
@@ -3733,7 +3741,31 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
 
             else:
                 # ── Original three-step path (L>1, or hotpath disabled) ───────
-                self.td_ = _core.prepare_transactions(
+                # interaction_relaxed_mining identifies survivor pairs via a
+                # joint/interaction-aware score upstream; here we only
+                # translate those pairs into column indices.  The actual
+                # joint-correlation computation and the override of the
+                # per-column marginal-correlation admission gate both happen
+                # natively inside prepare_transactions_cpp (see
+                # native/transaction.cpp), not in Python.
+                _eu_pair_left = None
+                _eu_pair_right = None
+                if bool(getattr(self, "interaction_relaxed_mining", False)):
+                    _pairs = getattr(self, "_interaction_relaxed_adaptive_pairs_", None) or []
+                    if _pairs:
+                        _name_to_idx = {str(name): jx for jx, name in enumerate(list(col_names))}
+                        _left_idx, _right_idx = [], []
+                        for _pair in _pairs:
+                            _left = str(_pair.get("left"))
+                            _right = str(_pair.get("right"))
+                            if _left in _name_to_idx and _right in _name_to_idx:
+                                _left_idx.append(_name_to_idx[_left])
+                                _right_idx.append(_name_to_idx[_right])
+                        if _left_idx:
+                            _eu_pair_left = np.asarray(_left_idx, dtype=np.int32)
+                            _eu_pair_right = np.asarray(_right_idx, dtype=np.int32)
+
+                _tx_args = [
                     X_num,
                     y_train,
                     2 if self.adaptive_binning else self.B,
@@ -3742,7 +3774,21 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                     is_int_np,
                     X_cat_raw if any(v is not None for v in X_cat_raw) else None,
                     is_precoded_np,
-                )
+                ]
+                _tx_kwargs: dict[str, Any] = {}
+                if _eu_pair_left is not None and _eu_pair_right is not None:
+                    _tx_kwargs["eu_pair_left"] = _eu_pair_left
+                    _tx_kwargs["eu_pair_right"] = _eu_pair_right
+                try:
+                    self.td_ = _core.prepare_transactions(*_tx_args, **_tx_kwargs)
+                except TypeError:
+                    # Retry without pair kwargs when the active native backend
+                    # does not expose eu_pair inputs; the marginal-correlation
+                    # path remains the compatible behavior.
+                    if _tx_kwargs:
+                        self.td_ = _core.prepare_transactions(*_tx_args)
+                    else:
+                        raise
                 stage_times["prepare_transactions"] = t.ms
                 cpp_mem_bytes = self.td_.memory_usage_bytes()
 
@@ -3800,13 +3846,10 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                 stage_times["mine_patterns"] = t.ms
 
                 if len(self.patterns_) == 0:
-                    if self.feature_mode == "patterns_only":
-                        raise HUGIMLMiningError(
-                            "No HUG patterns found.  Try reducing G, increasing topK, or adjusting B / L."
-                        )
-                    # In original_plus_patterns mode, zero mined HUG patterns is
-                    # not fatal: downstream fitting should fall back to the
-                    # original feature block with an empty pattern matrix.
+                    # Zero mined HUG patterns is not fatal.  In hybrid modes the
+                    # downstream estimator can still use the original feature
+                    # block.  In patterns_only mode, a common no-fail fallback
+                    # below returns a constant-prior classifier.
                     n_train = len(y_train)
                     self.x_train_hup_ = csr_matrix((n_train, 0), dtype=np.float32)
                     stage_times["build_matrix"] = 0.0
@@ -3864,48 +3907,86 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                 self._fast_tune_stage_times_ = dict(stage_times)
                 return self
 
-            # Stage 5: fit downstream classifier
-            t = self._timer()
-            self._setup_feature_mode_metadata()
-            self._setup_augmented_pair_transforms(
-                X_train_original_for_downstream, y_train, fit=True
-            )
-            self._current_y_for_downstream_topk_ = y_train
-            try:
-                self.x_train_downstream_ = self._make_downstream_features(
-                    X_train_original_for_downstream, self.x_train_hup_, fit=True
+            if len(getattr(self, "patterns_", [])) == 0 and self.feature_mode == "patterns_only":
+                # No mined patterns in a patterns-only model is a legitimate
+                # degenerate outcome, especially on null/tiny/strictly-filtered
+                # data.  Keep fit() total by installing a constant-prior
+                # majority fallback instead of raising HUGIMLMiningError.
+                t = self._timer()
+                self._setup_constant_prior_fallback(
+                    y_train,
+                    reason=(
+                        "No HUG patterns found. Try reducing G, increasing topK, "
+                        "or adjusting B / L."
+                    ),
                 )
-            finally:
-                if hasattr(self, "_current_y_for_downstream_topk_"):
-                    delattr(self, "_current_y_for_downstream_topk_")
-            self.x_train_downstream_ = self._apply_strict_topk_budget_fit(
-                self.x_train_downstream_, y_train
-            )
-            self._cache_downstream_feature_metadata()
-            self.model_ = Pipeline([("clf", self._make_estimator(n_cls))])
-            self.model_.fit(self.x_train_downstream_, y_train)
-            stage_times["fit_downstream"] = t.ms
+                stage_times["fit_downstream"] = t.ms
 
-            # Stage 6: wrap C++ td_ for Python compatibility
-            t = self._timer()
-            self.td_ = _TransactionDataWrapper(self.td_, self)
-            self._native_available_ = True
-            stage_times["compat"] = t.ms
+                # Stage 6: wrap C++ td_ for Python compatibility.  The fallback
+                # prediction path does not need td_, but retaining it preserves
+                # audit/serialization state and keeps transform() schema-stable.
+                t = self._timer()
+                self.td_ = _TransactionDataWrapper(self.td_, self)
+                self._native_available_ = True
+                stage_times["compat"] = t.ms
 
-            t = self._timer()
-            if self._is_production_mode():
-                self.__dict__.pop("_drift_det", None)
-                stage_times["drift_baseline"] = 0.0
+                t = self._timer()
+                if self._is_production_mode():
+                    self.__dict__.pop("_drift_det", None)
+                    stage_times["drift_baseline"] = 0.0
+                else:
+                    self._drift_det = DriftDetector()
+                    self._drift_det.fit_baseline(
+                        X_num,
+                        cat_mask,
+                        getattr(self, "feature_names_in_", None)
+                        or [f"col{j}" for j in range(X_num.shape[1])],
+                        y=y_train,
+                    )
+                    stage_times["drift_baseline"] = t.ms
             else:
-                self._drift_det = DriftDetector()
-                self._drift_det.fit_baseline(
-                    X_num,
-                    cat_mask,
-                    getattr(self, "feature_names_in_", None)
-                    or [f"col{j}" for j in range(X_num.shape[1])],
-                    y=y_train,
+                # Stage 5: fit downstream classifier
+                t = self._timer()
+                self._setup_feature_mode_metadata()
+                self._setup_augmented_pair_transforms(
+                    X_train_original_for_downstream, y_train, fit=True
                 )
-                stage_times["drift_baseline"] = t.ms
+                self._current_y_for_downstream_topk_ = y_train
+                try:
+                    self.x_train_downstream_ = self._make_downstream_features(
+                        X_train_original_for_downstream, self.x_train_hup_, fit=True
+                    )
+                finally:
+                    if hasattr(self, "_current_y_for_downstream_topk_"):
+                        delattr(self, "_current_y_for_downstream_topk_")
+                self.x_train_downstream_ = self._apply_strict_topk_budget_fit(
+                    self.x_train_downstream_, y_train
+                )
+                self._cache_downstream_feature_metadata()
+                self.model_ = Pipeline([("clf", self._make_estimator(n_cls))])
+                self.model_.fit(self.x_train_downstream_, y_train)
+                stage_times["fit_downstream"] = t.ms
+
+                # Stage 6: wrap C++ td_ for Python compatibility
+                t = self._timer()
+                self.td_ = _TransactionDataWrapper(self.td_, self)
+                self._native_available_ = True
+                stage_times["compat"] = t.ms
+
+                t = self._timer()
+                if self._is_production_mode():
+                    self.__dict__.pop("_drift_det", None)
+                    stage_times["drift_baseline"] = 0.0
+                else:
+                    self._drift_det = DriftDetector()
+                    self._drift_det.fit_baseline(
+                        X_num,
+                        cat_mask,
+                        getattr(self, "feature_names_in_", None)
+                        or [f"col{j}" for j in range(X_num.shape[1])],
+                        y=y_train,
+                    )
+                    stage_times["drift_baseline"] = t.ms
 
         rss_delta_mb = (_get_peak_rss_kb() - rss_before) / 1024
         n_compound = sum(1 for pe in self.patterns_ if len(pe.items) > 1)
@@ -4044,6 +4125,102 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                 raise
         return []
 
+    # ── Constant-prior no-pattern fallback ───────────────────────────────────
+
+    def _setup_constant_prior_fallback(self, y_train: np.ndarray, reason: str) -> None:
+        """Install a no-fail constant-prior classifier for zero-pattern fits.
+
+        The fallback is intentionally simple and deterministic: probabilities
+        are the empirical class priors from the training target, and hard
+        predictions are the majority class.  It is used only after the normal
+        HUG mining fallback attempts have completed and produced no patterns in
+        ``feature_mode='patterns_only'``.
+        """
+        y_arr = np.asarray(y_train)
+        classes = np.asarray(getattr(self, "classes_", np.unique(y_arr)))
+        counts = np.asarray([np.sum(y_arr == cls) for cls in classes], dtype=np.float64)
+        total = float(np.sum(counts))
+        if total <= 0.0:
+            prior = np.full(len(classes), 1.0 / max(len(classes), 1), dtype=np.float64)
+        else:
+            prior = counts / total
+
+        majority_idx = int(np.argmax(counts if counts.size else prior)) if len(classes) else 0
+        self.fallback_active_ = True
+        self.fallback_strategy_ = "constant_prior"
+        self.fallback_reason_ = str(reason)
+        self.fallback_class_prior_ = np.asarray(prior, dtype=np.float64)
+        self.fallback_majority_class_ = classes[majority_idx] if len(classes) else None
+        self.fallback_n_samples_ = int(y_arr.shape[0])
+
+        self.raw_patterns_ = []
+        self.patterns_ = []
+        self.x_train_hup_ = csr_matrix((len(y_arr), 0), dtype=np.float32)
+        self.x_train_downstream_ = csr_matrix((len(y_arr), 0), dtype=np.float32)
+        self._pattern_orders_ = np.zeros(0, dtype=int)
+        self._interaction_pattern_mask_ = np.zeros(0, dtype=bool)
+        self._downstream_feature_names_ = []
+        self._downstream_feature_names_full_ = []
+        self._strict_topk_selected_feature_names_ = []
+        self._strict_topk_feature_mask_ = np.zeros(0, dtype=bool)
+        self._strict_topk_feature_scores_ = np.zeros(0, dtype=np.float64)
+        self._original_feature_names_downstream_ = []
+        self._original_selected_feature_names_downstream_ = []
+        self._original_feature_names_downstream_full_ = []
+        self._original_feature_mask_downstream_ = None
+        self._original_feature_scores_downstream_ = np.zeros(0, dtype=np.float64)
+        self.augmented_pair_transforms_enabled_ = False
+        self.augmented_pair_config_ = {"enabled": False, "reason": "constant_prior_fallback"}
+        self.augmented_pair_transforms_ = []
+        self.augmented_pair_selected_features_ = []
+        self._augmented_pair_block_ = None
+        self._degraded_reason = str(reason)
+
+        # Keep a fitted sklearn estimator wrapped in a Pipeline for
+        # compatibility with code that inspects model_.named_steps["clf"],
+        # serialization (which dispatches on Pipeline vs bare estimator), and
+        # feature_importances() (which expects named_steps).  The public
+        # prediction path uses fallback_class_prior_ directly and never
+        # reaches model_.
+        from sklearn.dummy import DummyClassifier
+
+        dummy_X = np.zeros((len(y_arr), 1), dtype=np.float64)
+        _dummy = DummyClassifier(strategy="prior")
+        _dummy.fit(dummy_X, y_arr)
+        self.model_ = Pipeline([("clf", _dummy)])
+
+    def _is_constant_prior_fallback_active(self) -> bool:
+        return bool(
+            getattr(self, "fallback_active_", False)
+            and getattr(self, "fallback_strategy_", None) == "constant_prior"
+        )
+
+    def _n_rows_for_prediction(self, X: Any) -> int:
+        if isinstance(X, pd.DataFrame):
+            return int(len(X))
+        arr = np.asarray(X)
+        if arr.ndim == 1:
+            return 1
+        return int(arr.shape[0])
+
+    def _constant_prior_predict_proba(self, X: Any) -> np.ndarray:
+        self._validate_test_input(X)
+        n = self._n_rows_for_prediction(X)
+        prior = np.asarray(getattr(self, "fallback_class_prior_", []), dtype=np.float64)
+        if prior.size != len(getattr(self, "classes_", [])) or prior.size == 0:
+            n_cls = max(1, len(getattr(self, "classes_", [])))
+            prior = np.full(n_cls, 1.0 / n_cls, dtype=np.float64)
+        return np.tile(prior.reshape(1, -1), (n, 1))
+
+    def _constant_prior_predict(self, X: Any) -> np.ndarray:
+        self._validate_test_input(X)
+        n = self._n_rows_for_prediction(X)
+        majority = getattr(self, "fallback_majority_class_", None)
+        if majority is None:
+            classes = np.asarray(getattr(self, "classes_", []))
+            majority = classes[0] if classes.size else 0
+        return np.full(n, majority, dtype=np.asarray(getattr(self, "classes_", [majority])).dtype)
+
     # ── Prediction ────────────────────────────────────────────────────────────
 
     def predict_proba(self, X_test: Any) -> np.ndarray:
@@ -4062,6 +4239,13 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         np.ndarray, shape (n_samples, n_classes)
         """
         check_is_fitted(self)
+        if self._is_constant_prior_fallback_active():
+            t0 = time.perf_counter()
+            proba = self._constant_prior_predict_proba(X_test)
+            _mon = getattr(self, "monitor", None)
+            if _mon is not None:
+                _mon.record(proba, (time.perf_counter() - t0) * 1000)
+            return proba
         # Keep the same representation used to fit the downstream original
         # feature block: raw user input before adaptive/constant-B pre-binning.
         # _build_test_hup applies _handle_test_nan() internally for the HUG
@@ -4135,6 +4319,8 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         np.ndarray, shape (n_samples,)
         """
         check_is_fitted(self)
+        if self._is_constant_prior_fallback_active():
+            return self._constant_prior_predict(X_test)
         # Keep the same representation used to fit the downstream original
         # feature block: raw user input before adaptive/constant-B pre-binning.
         # _build_test_hup applies _handle_test_nan() internally for the HUG
@@ -5589,6 +5775,9 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         csr_matrix, shape (n_samples, n_patterns)
         """
         check_is_fitted(self)
+        if self._is_constant_prior_fallback_active():
+            self._validate_test_input(X)
+            return csr_matrix((self._n_rows_for_prediction(X), 0), dtype=np.float32)
         # ── Adaptive pre-binning ─────────────────────────────────────────
         if getattr(self, "adaptive_binning", False) and getattr(self, "_bin_edges_", None):
             X = self._prebin_for_predict(X)
@@ -5773,6 +5962,8 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
 
     def _check_health(self) -> None:
         check_is_fitted(self)
+        if self._is_constant_prior_fallback_active():
+            return
         if not hasattr(self, "patterns_"):
             raise HUGIMLPredictionError("Pattern state missing — fit() may have failed.")
         if (
@@ -6446,6 +6637,14 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             (e.g. non-linear models).
         """
         check_is_fitted(self)
+        if self._is_constant_prior_fallback_active():
+            return pd.DataFrame(
+                columns=[
+                    "pattern", "coefficient", "abs_coefficient",
+                    "pattern_support", "support_type", "feature_type",
+                    "pattern_origin", "survivor_led",
+                ]
+            )
         production_without_training_artifacts = self._is_production_mode() and not hasattr(
             self, "x_train_downstream_"
         )
@@ -7114,10 +7313,15 @@ def _hugiml_prepare_candidate_from_cached_base(
         )
 
     if len(cand.patterns_) == 0 and cand.feature_mode == "patterns_only":
-        raise HUGIMLMiningError(
-            "No HUG patterns found for cached candidate. Try reducing G, increasing topK, "
-            "or using original_plus_patterns."
+        cand._setup_constant_prior_fallback(
+            y_train,
+            reason=(
+                "No HUG patterns found for cached candidate. Try reducing G, increasing topK, "
+                "or using original_plus_patterns."
+            ),
         )
+        cand._apply_execution_mode_retention()
+        return cand
 
     cand._setup_feature_mode_metadata()
     cand._setup_augmented_pair_transforms(X_train_original, y_train, fit=True)

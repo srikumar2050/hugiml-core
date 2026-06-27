@@ -49,6 +49,11 @@ Recommended configurations
 
 ``augmented_pair_transforms=True`` and ``interaction_relaxed_mining=True`` are mutually exclusive for ``L >= 2``. Use augmented pairs when runtime is the main constraint. Use interaction-relaxed mining when preserving a pure original-feature pattern representation is the priority.
 
+No-pattern behavior
+-------------------
+
+Starting in v1.1.15, a ``patterns_only`` fit that mines no HUG patterns installs a deterministic constant-prior fallback. ``predict_proba`` returns the empirical training class prior, ``predict`` returns the majority class, and ``transform`` returns an empty CSR pattern matrix with the requested row count. Hybrid modes continue to use the original feature block when no patterns are mined.
+
 
 Augmented pair features
 -----------------------

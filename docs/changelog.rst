@@ -6,6 +6,14 @@ The canonical release notes live in ``CHANGELOG.md`` at the repository root. Kee
 Recent releases
 ---------------
 
+1.1.15 — 2026-06-27
+~~~~~~~~~~~~~~~~~~~
+
+* Added a deterministic constant-prior fallback for ``patterns_only`` fits when no HUG patterns are mined.
+* Persisted fallback state in the versioned model format so fallback predictions round-trip through save/load.
+* Strengthened ``interaction_relaxed_mining`` by using joint survivor-pair evidence during native external-utility admission.
+* Refreshed interpretable benchmark grids, including compact EBM settings and a registered RuleFit grid.
+
 1.1.14 — 2026-06-25
 ~~~~~~~~~~~~~~~~~~~
 

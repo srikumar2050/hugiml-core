@@ -14,8 +14,9 @@
 
 """Centralized hyperparameter grid definitions.
 
-Relative to v1.1.12, HUGIML tuning grids are now declared in one module and
-reused by the classifier, benchmark runner, and dashboard Workbench. This keeps
+Relative to v1.1.14, the shared benchmark grids keep HUGIML and baseline
+configuration in one module for classifier tuning, the benchmark runner, and
+dashboard Workbench reuse. This keeps
 the recommended search spaces aligned across command-line, Python, and UI entry
 points.
 
@@ -110,23 +111,27 @@ BASELINE_MODEL_GRIDS: dict[str, dict[str, list]] = {
         "n_estimators": [100, 200],
         "max_depth": [3, 4],
         "learning_rate": [0.03, 0.1],
-        "subsample": [0.8, 1.0],
     },
     "LightGBM": {
         "n_estimators": [100, 200],
         "learning_rate": [0.03, 0.1],
         "num_leaves": [15, 31],
-        "subsample": [0.8, 1.0],
     },
     "LogisticReg": {
         "lr__C": [0.1, 1.0, 10.0],
     },
     "EBM": {
         "learning_rate": [0.01, 0.05],
-        "max_bins": [128, 256],
+        "max_bins": [32, 64],
+        "interactions": [0, 5],
     },
-    # RuleFit and GAM APIs vary across installations. They are intentionally
-    # left unregistered so the benchmark runner fits them once with estimator
+    "RuleFit": {
+        "n_estimators": [50, 100],
+        "max_rules": [50, 100],
+        "tree_size": [5, 10],
+    },
+    # GAM APIs vary across installations. They are intentionally left
+    # unregistered so the benchmark runner fits them once with estimator
     # defaults.
 }
 

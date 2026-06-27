@@ -65,7 +65,9 @@ TransactionDataCpp prepare_transactions_cpp(
     const py::array_t<uint8_t, py::array::forcecast>& is_int_arr,
     std::vector<bool>                     is_precoded_in,
     std::vector<std::vector<std::string>> cat_raw_strs,
-    std::vector<std::vector<bool>>        cat_raw_valid)
+    std::vector<std::vector<bool>>        cat_raw_valid,
+    const std::vector<int>*               eu_pair_left,
+    const std::vector<int>*               eu_pair_right)
 {
     auto Xb   = X_num_arr.unchecked<2>();
     auto yb   = y_arr.unchecked<1>();
@@ -126,6 +128,59 @@ TransactionDataCpp prepare_transactions_cpp(
     if (n_cls < 2)
         throw std::invalid_argument(
             "y must contain at least 2 distinct classes, got " + std::to_string(n_cls));
+
+    // ── External-utility (eu) override for interaction-survivor pairs ───────
+    // v1.1.15 joint-correlation EU gating for interaction-survivor pairs.
+    // The override is computed per survivor pair and later combined with
+    // the marginal EU according to the fitted model's application rule.
+    std::vector<double> eu_override(p, 0.0);
+    bool has_eu_override = false;
+    if (eu_pair_left && eu_pair_right &&
+        eu_pair_left->size() == eu_pair_right->size() && !eu_pair_left->empty()) {
+        std::vector<double> yf_all(n);
+        for (int r = 0; r < n; r++) yf_all[r] = static_cast<double>(y_vec[r]);
+
+        for (size_t k = 0; k < eu_pair_left->size(); k++) {
+            int li = (*eu_pair_left)[k];
+            int ri = (*eu_pair_right)[k];
+            if (li < 0 || li >= p || ri < 0 || ri >= p || li == ri) continue;
+
+            double sum_l = 0.0, sum_r = 0.0;
+            int cnt = 0;
+            for (int r = 0; r < n; r++) {
+                double vl = Xb(r, li), vr = Xb(r, ri);
+                if (std::isfinite(vl) && std::isfinite(vr)) {
+                    sum_l += vl;
+                    sum_r += vr;
+                    cnt++;
+                }
+            }
+            if (cnt < 10) continue;
+            double mean_l = sum_l / cnt;
+            double mean_r = sum_r / cnt;
+            std::vector<double> prod_centered(cnt), prod_raw(cnt), yf(cnt);
+            int m = 0;
+            for (int r = 0; r < n; r++) {
+                double vl = Xb(r, li), vr = Xb(r, ri);
+                if (std::isfinite(vl) && std::isfinite(vr)) {
+                    prod_centered[m] = (vl - mean_l) * (vr - mean_r);
+                    prod_raw[m]      = vl * vr;
+                    yf[m]            = yf_all[r];
+                    m++;
+                }
+            }
+            double joint_score = std::max(
+                std::abs(pearson_cpp(prod_centered, yf)),
+                std::abs(pearson_cpp(prod_raw, yf))
+            );
+
+            joint_score = std::max(joint_score, 1e-6);
+            eu_override[li] = std::max(eu_override[li], joint_score);
+            eu_override[ri] = std::max(eu_override[ri], joint_score);
+            has_eu_override = true;
+        }
+    }
+    const std::vector<double>* eu_override_ptr = has_eu_override ? &eu_override : nullptr;
 
     // ── Column names ─────────────────────────────────────────────────────────
     std::vector<std::string> names(p);
@@ -369,6 +424,10 @@ TransactionDataCpp prepare_transactions_cpp(
             cv.push_back(pearson_cpp(df, yf));
 
             double eu = std::abs(cv.back());
+            if (eu_override_ptr && j < static_cast<int>(eu_override_ptr->size()) &&
+                (*eu_override_ptr)[j] > 0.0) {
+                eu = std::max(eu, (*eu_override_ptr)[j]);
+            }
             std::vector<int> code_to_bname(nb_act, -1);
             bool any_item = false;
             for (int bi = 1; bi <= nb_act; bi++) {
@@ -438,6 +497,10 @@ TransactionDataCpp prepare_transactions_cpp(
             cv.push_back(pearson_cpp(df2, yf2));
 
             double eu = std::abs(cv.back());
+            if (eu_override_ptr && j < static_cast<int>(eu_override_ptr->size()) &&
+                (*eu_override_ptr)[j] > 0.0) {
+                eu = std::max(eu, (*eu_override_ptr)[j]);
+            }
             std::vector<int> code_to_bname(nb_act, -1);
             bool any_item = false;
             std::vector<double> ber_j(nb_act, 1.0 / std::max(nb_act, 1));
@@ -516,6 +579,10 @@ TransactionDataCpp prepare_transactions_cpp(
             cv.push_back(pearson_cpp(df, yf));
 
             double eu = std::abs(cv.back());
+            if (eu_override_ptr && j < static_cast<int>(eu_override_ptr->size()) &&
+                (*eu_override_ptr)[j] > 0.0) {
+                eu = std::max(eu, (*eu_override_ptr)[j]);
+            }
             std::vector<int> code_to_bname(nb_act, -1);
             bool any_item = false;
             for (int bi = 1; bi <= nb_act; bi++) {

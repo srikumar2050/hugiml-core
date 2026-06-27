@@ -4,6 +4,19 @@ All notable changes to hugiml-core are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
+## [1.1.15] - 2026-06-27
+
+### Added
+
+- Added a no-pattern fallback for pattern-only fits, returning a deterministic constant-prior classifier instead of failing on null, tiny, or very strict mining runs.
+- Added serialization support for fallback state so saved models keep the same predictions after load.
+
+### Changed
+
+- Strengthened interaction-relaxed mining by allowing survivor-pair joint evidence to help admit weak-marginal interaction features into native mining.
+- Refreshed benchmark grids with compact EBM settings and a registered RuleFit grid for broader interpretable-baseline comparisons.
+
+---
 ## [1.1.14] - 2026-06-25
 
 ### Changed

@@ -42,3 +42,9 @@ Recommended workflow
 --------------------
 
 Use audit mode during development, validation, governance review, and documentation. Save the audit-mode artifact for traceability. Use production mode for deployed scoring services when the model has already passed review and the retained training matrices are not needed in the live prediction object.
+
+
+Fallback state
+--------------
+
+In v1.1.15, ``patterns_only`` models that mine no HUG patterns retain a deterministic constant-prior prediction path. This state is part of the versioned model artifact, so audit and production save/load paths preserve the same fallback predictions.

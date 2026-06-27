@@ -44,15 +44,33 @@ if SOURCE_ROOT is not None and (SOURCE_ROOT / "src").exists():
 
 import numpy as np
 import pandas as pd
-import statsmodels.api as sm
-from lightgbm import LGBMClassifier
 from pandas.api.types import (
     is_bool_dtype,
-    is_categorical_dtype,
     is_numeric_dtype,
     is_object_dtype,
     is_string_dtype,
 )
+
+# is_categorical_dtype was removed in pandas 2.2+; provide a safe fallback.
+try:
+    from pandas.api.types import is_categorical_dtype as _is_categorical_dtype
+except ImportError:
+    def _is_categorical_dtype(arr_or_dtype) -> bool:
+        try:
+            return isinstance(getattr(arr_or_dtype, "dtype", arr_or_dtype), pd.CategoricalDtype)
+        except Exception:
+            return False
+is_categorical_dtype = _is_categorical_dtype
+
+try:
+    import statsmodels.api as sm
+except ImportError:
+    sm = None
+
+try:
+    from lightgbm import LGBMClassifier
+except ImportError:
+    LGBMClassifier = None
 from scipy.stats import friedmanchisquare, rankdata, wilcoxon
 from sklearn.compose import ColumnTransformer, make_column_selector
 from sklearn.datasets import (
@@ -71,7 +89,21 @@ from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
 from sklearn.model_selection import ParameterGrid, train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder
-from xgboost import XGBClassifier
+
+try:
+    from xgboost import XGBClassifier
+except ImportError:
+    XGBClassifier = None
+
+try:
+    from interpret.glassbox import ExplainableBoostingClassifier
+except Exception:  # pragma: no cover - optional benchmark dependency
+    ExplainableBoostingClassifier = None
+
+try:
+    from imodels import RuleFitClassifier
+except Exception:  # pragma: no cover - optional benchmark dependency
+    RuleFitClassifier = None
 
 import hugiml as _hugiml_pkg
 from hugiml import HUGIMLClassifierNative
@@ -210,16 +242,30 @@ except Exception:
     DEFAULT_HUGIML_GRID_NAME = "performance"
 
     def get_hugiml_grid(name: str = DEFAULT_HUGIML_GRID_NAME) -> dict[str, list[Any]]:
-        if name != DEFAULT_HUGIML_GRID_NAME:
-            raise KeyError(name)
-        return {
-            "B": [-1],
-            "adaptive_binning": [True],
-            "L": [1, 2],
-            "topK": [50, 100],
-            "feature_mode": ["original_plus_patterns"],
-            "G": [0.01, 0.001],
+        grids = {
+            "performance": {
+                "B": [-1],
+                "adaptive_binning": [True],
+                "L": [1, 2],
+                "topK": [50, 100],
+                "feature_mode": ["original_plus_patterns"],
+                "G": [0.01, 0.001],
+            },
+            "interpretability": {
+                "B": [-1],
+                "adaptive_binning": [True],
+                "L": [1, 2],
+                "topK": [50, 100],
+                "feature_mode": ["patterns_only"],
+                "G": [0.01, 0.001],
+                "interaction_relaxed_mining": [True],
+                "augmented_pair_transforms": [False],
+            },
         }
+        resolved = name or DEFAULT_HUGIML_GRID_NAME
+        if resolved not in grids:
+            raise KeyError(resolved)
+        return {k: list(v) for k, v in grids[resolved].items()}
 
     def get_baseline_grid(model: str) -> dict[str, list[Any]]:
         grids = {
@@ -227,25 +273,33 @@ except Exception:
                 "n_estimators": [100, 200],
                 "max_depth": [3, 4],
                 "learning_rate": [0.03, 0.1],
-                "subsample": [0.8, 1.0],
             },
             "LightGBM": {
                 "n_estimators": [100, 200],
                 "learning_rate": [0.03, 0.1],
                 "num_leaves": [15, 31],
-                "subsample": [0.8, 1.0],
             },
             "RandomForest": {
                 "n_estimators": [200, 400],
                 "max_depth": [4, 8, None],
                 "min_samples_leaf": [1, 5],
             },
+            "EBM": {
+                "learning_rate": [0.01, 0.05],
+                "max_bins": [32, 64],
+                "interactions": [0, 5],
+            },
+            "RuleFit": {
+                "n_estimators": [50, 100],
+                "max_rules": [50, 100],
+                "tree_size": [5, 10],
+            },
         }
         return grids[model]
 
 
 RANDOM_STATE = 2026
-BUDGET = 300.0
+BUDGET = 100.0
 MODEL_ORDER = [
     "HUGIML",
     "XGB standard",
@@ -254,7 +308,35 @@ MODEL_ORDER = [
     "LightGBM complexity-budgeted",
     "RandomForest standard",
     "RandomForest complexity-budgeted",
+    "EBM",
+    "RuleFit",
 ]
+
+# HUGIML is evaluated in two selectable dashboard scenarios while every
+# non-HUGIML baseline is shared across scenarios. The dashboard keeps the
+# visible model label as plain "HUGIML" so each selected scenario can be
+# compared against the same baseline panel without changing the layout.
+HUGIML_SCENARIOS: dict[str, dict[str, Any]] = {
+    "augmented_pair": {
+        "label": "Augmented pair path",
+        "description": "Current augmented-pair path using the performance grid",
+        "grid_name": "performance",
+        "overrides": {
+            "augmented_pair_transforms": [True],
+            "interaction_relaxed_mining": [False],
+        },
+    },
+    "interaction_relaxed": {
+        "label": "Interaction-relaxed mining",
+        "description": "Interaction-relaxed mining path using the interpretability grid",
+        "grid_name": "interpretability",
+        "overrides": {
+            "interaction_relaxed_mining": [True],
+            "augmented_pair_transforms": [False],
+        },
+    },
+}
+DEFAULT_DASHBOARD_HUGIML_SCENARIO = "augmented_pair"
 # A comprehensive benchmark panel with 30 public real-world datasets and
 # 20 deterministic synthetic cases that stress different inductive biases.
 DATASET_NAMES = [
@@ -1078,6 +1160,43 @@ def hug_complexity(model):
     return None
 
 
+def ebm_complexity(model):
+    """Count active finite nonzero EBM cells across all additive/interaction terms."""
+    model = _unwrap_model(model)
+    try:
+        total = 0
+        for scores in getattr(model, "term_scores_", []) or []:
+            arr = np.asarray(scores, dtype=float)
+            total += int(np.sum(np.isfinite(arr) & (np.abs(arr) > 1e-12)))
+        return total
+    except Exception:
+        try:
+            return int(len(getattr(model, "term_names_", []) or []))
+        except Exception:
+            return None
+
+
+def rulefit_complexity(model):
+    """Count active nonzero RuleFit leaf/rule terms, excluding linear terms."""
+    model = _unwrap_model(model)
+    try:
+        rules = getattr(model, "rules_", []) or []
+        coefs = []
+        for rule in rules:
+            args = getattr(rule, "args", None)
+            if args is not None and len(args):
+                coefs.append(float(args[0]))
+        if coefs:
+            return int(np.sum(np.abs(np.asarray(coefs, dtype=float)) > 1e-12))
+        return int(len(rules))
+    except Exception:
+        try:
+            val = getattr(model, "complexity_", None)
+            return None if val is None else int(val)
+        except Exception:
+            return None
+
+
 def fit_select(
     candidates, builder, X_train, y_train, X_val, y_val, complexity_fn=None, budget=None
 ):
@@ -1113,9 +1232,33 @@ def fit_final(builder, params, X_fit, y_fit):
     return clf, time.perf_counter() - t0
 
 
-def get_model_spec(model: str, *, hugiml_max_fit_seconds: float | None = None):
+def _hugiml_grid_for_scenario(hugiml_scenario: str | None) -> tuple[str, list[dict[str, Any]]]:
+    scenario = hugiml_scenario or DEFAULT_DASHBOARD_HUGIML_SCENARIO
+    if scenario not in HUGIML_SCENARIOS:
+        raise ValueError(
+            f"Unknown HUGIML scenario {scenario!r}. Allowed: {list(HUGIML_SCENARIOS)}"
+        )
+    spec = HUGIML_SCENARIOS[scenario]
+    grid_dict = get_hugiml_grid(str(spec["grid_name"]))
+    for key, values in dict(spec.get("overrides", {})).items():
+        grid_dict[key] = list(values)
+    return str(spec["grid_name"]), list(ParameterGrid(grid_dict))
+
+
+def _hugiml_scenario_label(scenario: str | None) -> str | None:
+    if scenario is None:
+        return None
+    return str(HUGIML_SCENARIOS.get(scenario, {}).get("label", scenario))
+
+
+def get_model_spec(
+    model: str,
+    *,
+    hugiml_scenario: str | None = None,
+    hugiml_max_fit_seconds: float | None = None,
+):
     if model == "HUGIML":
-        grid = list(ParameterGrid(get_hugiml_grid(DEFAULT_HUGIML_GRID_NAME)))
+        _, grid = _hugiml_grid_for_scenario(hugiml_scenario)
 
         def builder(params):
             pp = dict(params)
@@ -1130,6 +1273,8 @@ def get_model_spec(model: str, *, hugiml_max_fit_seconds: float | None = None):
     xgb_grid = list(ParameterGrid(get_baseline_grid("XGBoost")))
     lgb_grid = list(ParameterGrid(get_baseline_grid("LightGBM")))
     rf_grid = list(ParameterGrid(get_baseline_grid("RandomForest")))
+    ebm_grid = list(ParameterGrid(get_baseline_grid("EBM") or {})) or [{}]
+    rulefit_grid = list(ParameterGrid(get_baseline_grid("RuleFit") or {})) or [{}]
     xgb_budget_grid = list(
         ParameterGrid(
             {
@@ -1174,6 +1319,23 @@ def get_model_spec(model: str, *, hugiml_max_fit_seconds: float | None = None):
     def rf_builder(params):
         return RandomForestClassifier(n_jobs=1, random_state=RANDOM_STATE, **params)
 
+    def ebm_builder(params):
+        if ExplainableBoostingClassifier is None:
+            raise ImportError("interpret.glassbox.ExplainableBoostingClassifier is required for EBM")
+        pp = dict(params)
+        pp.setdefault("random_state", RANDOM_STATE)
+        pp.setdefault("n_jobs", 1)
+        pp.setdefault("outer_bags", 4)
+        pp.setdefault("max_rounds", 5000)
+        return ExplainableBoostingClassifier(**pp)
+
+    def rulefit_builder(params):
+        if RuleFitClassifier is None:
+            raise ImportError("imodels.RuleFitClassifier is required for RuleFit")
+        pp = dict(params)
+        pp.setdefault("random_state", RANDOM_STATE)
+        return RuleFitClassifier(**pp)
+
     specs = {
         "XGB standard": (xgb_grid, xgb_builder, xgb_complexity, None),
         "LightGBM standard": (lgb_grid, lgb_builder, lgb_complexity, None),
@@ -1181,6 +1343,8 @@ def get_model_spec(model: str, *, hugiml_max_fit_seconds: float | None = None):
         "XGB complexity-budgeted": (xgb_budget_grid, xgb_builder, xgb_complexity, BUDGET),
         "LightGBM complexity-budgeted": (lgb_budget_grid, lgb_builder, lgb_complexity, BUDGET),
         "RandomForest complexity-budgeted": (rf_budget_grid, rf_builder, rf_complexity, BUDGET),
+        "EBM": (ebm_grid, ebm_builder, ebm_complexity, None),
+        "RuleFit": (rulefit_grid, rulefit_builder, rulefit_complexity, None),
     }
     return specs[model]
 
@@ -1189,6 +1353,7 @@ def run_pair(
     dataset: str,
     model: str,
     *,
+    hugiml_scenario: str | None = None,
     row_cap: int | None = -1,
     hugiml_max_fit_seconds: float | None = None,
 ) -> dict[str, Any]:
@@ -1219,7 +1384,9 @@ def run_pair(
     y_fit = np.array(np.concatenate([y_train, y_val]), dtype=int, copy=True)
 
     grid, builder, complexity_fn, budget = get_model_spec(
-        model, hugiml_max_fit_seconds=hugiml_max_fit_seconds
+        model,
+        hugiml_scenario=hugiml_scenario,
+        hugiml_max_fit_seconds=hugiml_max_fit_seconds,
     )
 
     preprocess_select_seconds = 0.0
@@ -1315,6 +1482,9 @@ def run_pair(
             "dataset": dataset,
             "dataset_group": group,
             "model": model,
+            "hugiml_scenario": hugiml_scenario if model == "HUGIML" else None,
+            "hugiml_scenario_label": _hugiml_scenario_label(hugiml_scenario) if model == "HUGIML" else None,
+            "hugiml_grid_name": HUGIML_SCENARIOS[hugiml_scenario or DEFAULT_DASHBOARD_HUGIML_SCENARIO]["grid_name"] if model == "HUGIML" else None,
             "raw_features": raw_features,
             "model_features": model_features,
             "categorical_features": native_categorical_features,
@@ -1367,12 +1537,22 @@ def _safe_jsonable(obj):
 
 def grid_snapshot() -> dict[str, Any]:
     return {
-        "hugiml_grid_name": DEFAULT_HUGIML_GRID_NAME,
-        "hugiml_grid": get_hugiml_grid(DEFAULT_HUGIML_GRID_NAME),
+        "hugiml_dashboard_scenarios": {
+            key: {
+                "label": spec["label"],
+                "description": spec["description"],
+                "grid_name": spec["grid_name"],
+                "grid": {**get_hugiml_grid(str(spec["grid_name"])), **dict(spec.get("overrides", {}))},
+            }
+            for key, spec in HUGIML_SCENARIOS.items()
+        },
+        "default_hugiml_dashboard_scenario": DEFAULT_DASHBOARD_HUGIML_SCENARIO,
         "baseline_grids": {
             "XGBoost": get_baseline_grid("XGBoost"),
             "LightGBM": get_baseline_grid("LightGBM"),
             "RandomForest": get_baseline_grid("RandomForest"),
+            "EBM": get_baseline_grid("EBM"),
+            "RuleFit": get_baseline_grid("RuleFit"),
         },
         "execution_mode_base_setting": "production",
     }
@@ -1401,12 +1581,35 @@ def save_checkpoint(path: Path, payload: dict[str, Any]) -> None:
     tmp.replace(path)
 
 
-def pair_plan(datasets: list[str], models: list[str]) -> list[tuple[str, str]]:
-    return [(d, m) for d in datasets for m in models]
+def _hugiml_scenario_for_row(row: dict[str, Any]) -> str | None:
+    if row.get("model") != "HUGIML":
+        return None
+    # Backward compatibility: older checkpoints had one HUGIML row and no
+    # scenario column. Treat those rows as the original/default augmented path.
+    return str(row.get("hugiml_scenario") or DEFAULT_DASHBOARD_HUGIML_SCENARIO)
 
 
-def completed_keys(payload: dict[str, Any]) -> set[tuple[str, str]]:
-    return {(r.get("dataset"), r.get("model")) for r in payload.get("results", [])}
+def _pair_key(dataset: str, model: str, hugiml_scenario: str | None = None) -> tuple[str, str, str | None]:
+    return (dataset, model, hugiml_scenario if model == "HUGIML" else None)
+
+
+def pair_plan(datasets: list[str], models: list[str]) -> list[tuple[str, str, str | None]]:
+    pairs: list[tuple[str, str, str | None]] = []
+    for d in datasets:
+        for m in models:
+            if m == "HUGIML":
+                for scenario in HUGIML_SCENARIOS:
+                    pairs.append((d, m, scenario))
+            else:
+                pairs.append((d, m, None))
+    return pairs
+
+
+def completed_keys(payload: dict[str, Any]) -> set[tuple[str, str, str | None]]:
+    return {
+        _pair_key(str(r.get("dataset")), str(r.get("model")), _hugiml_scenario_for_row(r))
+        for r in payload.get("results", [])
+    }
 
 
 def _scope_label_for_dataset(dataset: str, dataset_group: str | None = None) -> str:
@@ -1570,7 +1773,7 @@ def _build_scope_summaries(df: pd.DataFrame) -> dict[str, Any]:
     return {"summary_by_scope": flat_rows, "scope_tests": scope_tests}
 
 
-def make_data(details: list[dict[str, Any]]) -> dict[str, Any]:
+def _make_data_single(details: list[dict[str, Any]]) -> dict[str, Any]:
     df = pd.DataFrame(details)
     df = df[df["model"].isin(MODEL_ORDER) & df["dataset"].isin(DATASET_NAMES)].copy()
     order = {d: i for i, d in enumerate(DATASET_NAMES)}
@@ -1829,6 +2032,71 @@ def make_data(details: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def _scenario_details_for_dashboard(df: pd.DataFrame, scenario: str) -> list[dict[str, Any]]:
+    baseline = df[df["model"] != "HUGIML"].copy()
+    hug = df[df["model"] == "HUGIML"].copy()
+    if "hugiml_scenario" not in hug.columns:
+        hug["hugiml_scenario"] = DEFAULT_DASHBOARD_HUGIML_SCENARIO
+    hug["hugiml_scenario"] = hug["hugiml_scenario"].fillna(DEFAULT_DASHBOARD_HUGIML_SCENARIO)
+    hug = hug[hug["hugiml_scenario"].astype(str) == scenario].copy()
+    details = pd.concat([hug, baseline], axis=0, ignore_index=True)
+    return details.to_dict(orient="records")
+
+
+def make_data(details: list[dict[str, Any]]) -> dict[str, Any]:
+    """Build dashboard data with selectable HUGIML path scenarios.
+
+    The active data object has the same shape as the legacy dashboard data, so
+    existing charts/tables continue to work. When both HUGIML scenarios are
+    present in the checkpoint, a ``dashboard_scenarios`` array is embedded; the
+    HTML dropdown swaps between those data objects client-side.
+    """
+    df = pd.DataFrame(details)
+    if df.empty or "hugiml_scenario" not in df.columns:
+        return _make_data_single(details)
+
+    available: list[dict[str, Any]] = []
+    shared_profiles: dict[str, Any] | None = None
+    shared_catalog: list[dict[str, Any]] | None = None
+    for scenario, spec in HUGIML_SCENARIOS.items():
+        scenario_details = _scenario_details_for_dashboard(df, scenario)
+        if not any(r.get("model") == "HUGIML" for r in scenario_details):
+            continue
+        scenario_data = _make_data_single(scenario_details)
+        scenario_data["active_hugiml_scenario"] = scenario
+        scenario_data["active_hugiml_scenario_label"] = spec["label"]
+        scenario_data["active_hugiml_grid_name"] = spec["grid_name"]
+        if shared_profiles is None:
+            shared_profiles = scenario_data.get("dataset_profiles", {})
+            shared_catalog = scenario_data.get("dataset_catalog", [])
+        else:
+            scenario_data["dataset_profiles"] = shared_profiles
+            scenario_data["dataset_catalog"] = shared_catalog
+        available.append(
+            {
+                "id": scenario,
+                "label": spec["label"],
+                "description": spec["description"],
+                "grid_name": spec["grid_name"],
+                "data": scenario_data,
+            }
+        )
+
+    if not available:
+        return _make_data_single(details)
+
+    default_entry = next(
+        (s for s in available if s["id"] == DEFAULT_DASHBOARD_HUGIML_SCENARIO), available[0]
+    )
+    data = copy.deepcopy(default_entry["data"])
+    data["dashboard_scenarios"] = available
+    data["default_hugiml_scenario"] = default_entry["id"]
+    data["active_hugiml_scenario"] = default_entry["id"]
+    data["active_hugiml_scenario_label"] = default_entry["label"]
+    data["active_hugiml_grid_name"] = default_entry["grid_name"]
+    return data
+
+
 def extract_original_data(html_path: Path) -> dict[str, Any]:
     text = html_path.read_text(errors="ignore")
     start = text.index("const DATA=") + len("const DATA=")
@@ -1926,7 +2194,7 @@ def _ensure_dashboard_scope_summary_ui(text: str) -> str:
   <div id="scopeSummaryTables"></div>
 </section>
 """
-    js = """
+    js = r"""
 <script>
 (function(){
   function esc(v){return String(v ?? '').replace(/[&<>"']/g, ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));}
@@ -2047,6 +2315,149 @@ def _ensure_dashboard_complexity_rendering(text: str) -> str:
     return _inject_before_body_end(text, js)
 
 
+def _ensure_dashboard_scenario_ui(text: str, data: dict[str, Any]) -> str:
+    scenarios = data.get("dashboard_scenarios") or []
+    if len(scenarios) < 2:
+        return text
+
+    # Keep the existing dashboard theme/layout, but make the header controls
+    # read as a right-aligned control group: theme buttons first, then the
+    # HUGIML path dropdown as the rightmost control. This avoids stacking both
+    # controls from the same left edge while preserving the original header.
+    scenario_css = (
+        '.theme-switcher{display:flex;gap:10px;flex-wrap:wrap;justify-content:flex-end;'
+        'align-items:flex-end;min-width:min(620px,100%);margin-left:auto}\n'
+        '.theme-switcher .theme-btn{order:1}\n'
+        '.theme-switcher .scenario-control{order:2;width:270px;max-width:270px;'
+        'min-width:240px;text-align:left}\n'
+        '@media(max-width:760px){.theme-switcher{width:100%;justify-content:flex-start}'
+        '.theme-switcher .scenario-control{width:100%;max-width:none}}'
+    )
+    old_theme_css = '.theme-switcher{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}'
+    if scenario_css not in text:
+        if old_theme_css in text:
+            text = text.replace(old_theme_css, scenario_css, 1)
+        elif '</style>' in text:
+            text = text.replace('</style>', scenario_css + '\n</style>', 1)
+
+    if 'id="hugimlScenarioSelect"' not in text:
+        options = "".join(
+            f'<option value="{str(s.get("id", ""))}">{str(s.get("label", s.get("id", "")))}</option>'
+            for s in scenarios
+        )
+        selector = (
+            '<div class="control scenario-control">'
+            '<label>HUGIML path</label>'
+            f'<select id="hugimlScenarioSelect">{options}</select>'
+            '</div>'
+        )
+        if '<div class="theme-switcher">' in text:
+            text = text.replace('<div class="theme-switcher">', '<div class="theme-switcher">' + selector, 1)
+        elif '<section class="hero">' in text:
+            text = text.replace('<section class="hero">', '<section class="hero">' + selector, 1)
+
+    scenario_script_re = (
+        r"\n<script>\s*\(function\(\)\{\s*"
+        r"if \(typeof DASHBOARD_SCENARIOS === 'undefined'.*?"
+        r"document\.getElementById\('hugimlScenarioSelect'\);.*?"
+        r"\}\)\(\);\s*</script>\s*"
+    )
+    text = re.sub(scenario_script_re, "\n", text, flags=re.S)
+
+    js = r"""
+<script>
+(function(){
+  if (typeof DASHBOARD_SCENARIOS === 'undefined' || !Array.isArray(DASHBOARD_SCENARIOS) || DASHBOARD_SCENARIOS.length < 2) return;
+  window.DATA = DATA;
+  function clone(obj){ return JSON.parse(JSON.stringify(obj)); }
+  function fmt(v,d=4){
+    const n=Number(v);
+    if(v==null || !Number.isFinite(n)) return '';
+    if(Math.abs(n)>0 && Math.abs(n)<Math.pow(10,-d)) return n.toExponential(2);
+    return n.toFixed(d).replace(/0+$/,'').replace(/\.$/,'');
+  }
+  function setStat(label,value,sub){
+    document.querySelectorAll('.card.stat').forEach(card=>{
+      const lab=card.querySelector('.label');
+      if(lab && lab.textContent.trim()===label){
+        const val=card.querySelector('.value'); const s=card.querySelector('.sub');
+        if(val) val.textContent=value; if(s) s.textContent=sub;
+      }
+    });
+  }
+  function significantCount(rows){return (rows||[]).filter(r=>r.significant_holm_0_05).length;}
+  function setSignificantPairsMeta(){
+    const rows=DATA.pairwise_all||[];
+    const sig=significantCount(rows);
+    document.querySelectorAll('.section-title').forEach(section=>{
+      const h2=section.querySelector('h2');
+      const meta=section.querySelector('.meta');
+      if(h2 && meta && h2.textContent.trim()==='Significant all-pair comparisons'){
+        meta.textContent=`${sig} significant pair(s) after Holm correction across all ${rows.length} pairwise tests`;
+      }
+    });
+  }
+  function updateNarrative(){
+    const overall=(DATA.overall||[]).slice();
+    if(!overall.length) return;
+    const best=overall.slice().sort((a,b)=>(Number(b.mean_auc||-1)-Number(a.mean_auc||-1))||(Number(a.mean_rank||999)-Number(b.mean_rank||999)))[0];
+    const hug=overall.find(r=>r.model==='HUGIML')||{};
+    const bestRank=overall.slice().sort((a,b)=>(Number(a.mean_rank||999)-Number(b.mean_rank||999))||(Number(b.mean_auc||-1)-Number(a.mean_auc||-1)))[0];
+    const p=Number((((DATA.global||[])[0]||{}).p_value));
+    const budgetOver=(DATA.budget||[]).reduce((s,r)=>s+Number(r.n_over_budget||0),0);
+    const vsRows=DATA.vs_hugiml||[];
+    const sig=significantCount(vsRows);
+    setStat('Best mean AUC',fmt(best.mean_auc),best.model||'');
+    setStat('HUGIML mean AUC',fmt(hug.mean_auc),`mean complexity: ${fmt(hug.mean_complexity,1)} patterns`);
+    setStat('Best mean rank',fmt(bestRank.mean_rank,2),bestRank.model||'');
+    setStat('Global rank test',fmt(p),Number.isFinite(p)&&p<0.05?'Significant global rank differences among models':'No significant global rank difference detected');
+    setStat('Pairwise vs HUGIML',sig ? `${sig} significant` : 'None significant',`HUGIML vs ${vsRows.length} baselines, Holm-adjusted`);
+    setStat('Budget violations',String(budgetOver),'budgeted tree fits exceeded 100 leaves');
+    document.querySelectorAll('.chip').forEach(chip=>{
+      if(chip.textContent.includes('Friedman p-value:')) chip.textContent='Friedman p-value: '+fmt(p);
+    });
+    document.querySelectorAll('.callout').forEach(c=>{
+      if(c.textContent.includes('Global comparison:')) c.innerHTML='<strong>Global comparison:</strong> The Friedman test shows '+(Number.isFinite(p)&&p<0.05?'significant global rank differences among models':'no significant global rank difference at alpha 0.05')+'. It is a global rank test and does not identify which model pairs differ.';
+      if(c.textContent.includes('HUGIML-specific comparison:')) c.innerHTML='<strong>HUGIML-specific comparison:</strong> '+(sig ? `${sig} of ${vsRows.length} HUGIML-vs-baseline comparisons are significant after Holm correction.` : `No HUGIML-vs-baseline comparison is significant after Holm correction across the ${vsRows.length} focused tests.`);
+    });
+    setSignificantPairsMeta();
+  }
+  function rerender(){
+    updateNarrative();
+    if(typeof refreshAll==='function') refreshAll();
+    if(typeof renderScopeSummary==='function') renderScopeSummary();
+    if(typeof renderProfiles==='function') renderProfiles();
+    if(typeof renderDatasetProfile==='function') renderDatasetProfile();
+    if(typeof adjustComplexityCharts==='function') setTimeout(adjustComplexityCharts,0);
+  }
+  function applyScenario(id){
+    const entry=DASHBOARD_SCENARIOS.find(s=>s.id===id) || DASHBOARD_SCENARIOS[0];
+    Object.keys(DATA).forEach(k=>delete DATA[k]);
+    Object.assign(DATA, clone(entry.data));
+    DATA.dashboard_scenarios = DASHBOARD_SCENARIOS;
+    DATA.active_hugiml_scenario = entry.id;
+    DATA.active_hugiml_scenario_label = entry.label;
+    DATA.active_hugiml_grid_name = entry.grid_name;
+    window.DATA = DATA;
+    rerender();
+  }
+  const select=document.getElementById('hugimlScenarioSelect');
+  if(select){
+    const desired=DATA.default_hugiml_scenario || DATA.active_hugiml_scenario || DASHBOARD_SCENARIOS[0].id;
+    select.value=desired;
+    select.addEventListener('change',()=>applyScenario(select.value));
+    if(DATA.active_hugiml_scenario !== desired) applyScenario(desired); else updateNarrative();
+  } else {
+    updateNarrative();
+  }
+})();
+</script>
+"""
+    if "DASHBOARD_SCENARIOS" in text and "function applyScenario" not in text:
+        text = _inject_before_body_end(text, js)
+    return text
+
+
 def render_html(template_html: Path, data: dict[str, Any], out_html: Path) -> None:
     text = (
         template_html.read_text(errors="ignore")
@@ -2058,8 +2469,30 @@ def render_html(template_html: Path, data: dict[str, Any], out_html: Path) -> No
     start = text.index("const DATA=")
     end = text.index(";\nconst MODEL_ORDER", start)
     safe_data = _safe_jsonable(data)
+    scenario_payload = safe_data.get("dashboard_scenarios", []) if isinstance(safe_data, dict) else []
     new_blob = "const DATA=" + json.dumps(safe_data, separators=(",", ":"), allow_nan=False)
+    if scenario_payload:
+        new_blob += ";\nconst DASHBOARD_SCENARIOS=" + json.dumps(
+            scenario_payload, separators=(",", ":"), allow_nan=False
+        )
     text = text[:start] + new_blob + text[end:]
+
+    text = text.replace(
+        "function fmt(v,d=4){return v==null||Number.isNaN(v)?'':Number(v).toFixed(d)}",
+        "function fmt(v,d=4){const n=Number(v);if(v==null||!Number.isFinite(n))return '';if(Math.abs(n)>0&&Math.abs(n)<Math.pow(10,-d))return n.toExponential(2);return n.toFixed(d).replace(/0+$/,'').replace(/\\.$/,'')}",
+    )
+
+    # Keep the JavaScript model list aligned with the Python benchmark model order.
+    mo_start = text.find("const MODEL_ORDER=")
+    if mo_start >= 0:
+        mo_end = text.find(";", mo_start)
+        if mo_end >= 0:
+            text = (
+                text[:mo_start]
+                + "const MODEL_ORDER="
+                + json.dumps(MODEL_ORDER, separators=(",", ":"))
+                + text[mo_end:]
+            )
 
     overall = pd.DataFrame(data["overall"])
     best = overall.sort_values(["mean_auc", "mean_rank"], ascending=[False, True]).iloc[0]
@@ -2107,10 +2540,24 @@ def render_html(template_html: Path, data: dict[str, Any], out_html: Path) -> No
         r'<div class="label">Best mean rank</div><div class="value">[^<]+</div><div class="sub">[^<]+</div>': f'<div class="label">Best mean rank</div><div class="value">{best_rank.mean_rank:.2f}</div><div class="sub">{best_rank.model}</div>',
         r'<div class="label">Global rank test</div><div class="value">[^<]+</div><div class="sub">[^<]+</div>': f'<div class="label">Global rank test</div><div class="value">{p_text}</div><div class="sub">{global_text}</div>',
         r'<div class="label">Pairwise vs HUGIML</div><div class="value small">[^<]+</div><div class="sub">[^<]+</div>': f'<div class="label">Pairwise vs HUGIML</div><div class="value small">{vs_text}</div><div class="sub">{vs_sub}</div>',
-        r'<div class="label">Budget violations</div><div class="value">[^<]+</div><div class="sub">[^<]+</div>': f'<div class="label">Budget violations</div><div class="value">{budget_over}</div><div class="sub">budgeted tree fits exceeded 300 leaves</div>',
+        r'<div class="label">Budget violations</div><div class="value">[^<]+</div><div class="sub">[^<]+</div>': f'<div class="label">Budget violations</div><div class="value">{budget_over}</div><div class="sub">budgeted tree fits exceeded 100 leaves</div>',
         r"<strong>Global comparison:</strong>[^<]+</div>": f"<strong>Global comparison:</strong> The Friedman test shows {interp}. It is a global rank test and does not identify which model pairs differ.</div>",
         r"<strong>HUGIML-specific comparison:</strong>[^<]+</div>": f"<strong>HUGIML-specific comparison:</strong> {hug_interp}</div>",
     }
+    # Refresh static dashboard copy that predates the scenario/baseline additions.
+    static_replacements = {
+        "A 40-dataset tabular classification benchmark comparing HUGIML with tuned XGBoost,\n        LightGBM, and RandomForest baselines.":
+            "A 50-dataset tabular classification benchmark comparing HUGIML with tuned XGBoost,\n        LightGBM, RandomForest, EBM, and RuleFit baselines.",
+        "HUGIML topK: 30 / 50 / 100": "HUGIML topK: 50 / 100",
+        "Models: 7": f"Models: {len(MODEL_ORDER)}",
+        "Leaves for tree ensembles; selected patterns for HUGIML":
+            "Leaves for tree ensembles and RuleFit rules; EBM active cells; selected patterns for HUGIML",
+        "Mean model complexity (leaves or patterns)":
+            "Mean model complexity (leaves, rules, active cells, or patterns)",
+    }
+    for old, new in static_replacements.items():
+        text = text.replace(old, new)
+
     for pat, repl in replacements.items():
         text = re.sub(pat, repl, text)
 
@@ -2158,6 +2605,7 @@ def render_html(template_html: Path, data: dict[str, Any], out_html: Path) -> No
     text = _ensure_dashboard_scope_summary_ui(text)
     text = _ensure_dashboard_profile_ui(text)
     text = _ensure_dashboard_complexity_rendering(text)
+    text = _ensure_dashboard_scenario_ui(text, data)
     out_html.parent.mkdir(parents=True, exist_ok=True)
     out_html.write_text(text)
 
@@ -2167,18 +2615,27 @@ def assemble_outputs(checkpoint: Path, out_dir: Path, template_html: Path) -> di
     details = payload.get("results", [])
     order = {d: i for i, d in enumerate(DATASET_NAMES)}
     mo = {m: i for i, m in enumerate(MODEL_ORDER)}
+    so = {s: i for i, s in enumerate(HUGIML_SCENARIOS)}
     details = sorted(
-        details, key=lambda r: (order.get(r.get("dataset"), 999), mo.get(r.get("model"), 999))
+        details,
+        key=lambda r: (
+            order.get(r.get("dataset"), 999),
+            mo.get(r.get("model"), 999),
+            so.get(_hugiml_scenario_for_row(r), 999),
+        ),
     )
-    expected = len(DATASET_NAMES) * len(MODEL_ORDER)
-    if len({(r.get("dataset"), r.get("model")) for r in details}) != expected:
-        missing = [
-            (d, m)
-            for d, m in pair_plan(DATASET_NAMES, MODEL_ORDER)
-            if (d, m) not in {(r.get("dataset"), r.get("model")) for r in details}
-        ]
+    expected_keys = set(pair_plan(DATASET_NAMES, MODEL_ORDER))
+    actual_keys = {
+        _pair_key(str(r.get("dataset")), str(r.get("model")), _hugiml_scenario_for_row(r))
+        for r in details
+    }
+    if actual_keys != expected_keys:
+        missing = sorted(expected_keys - actual_keys, key=lambda x: (order.get(x[0], 999), mo.get(x[1], 999), so.get(x[2], 999)))
+        extra = sorted(actual_keys - expected_keys, key=lambda x: (order.get(x[0], 999), mo.get(x[1], 999), so.get(x[2], 999)))
         raise RuntimeError(
-            f"checkpoint is incomplete: {len(details)} rows, missing {len(missing)} pairs, first missing={missing[:5]}"
+            f"checkpoint is incomplete or contains unexpected rows: {len(details)} rows, "
+            f"missing {len(missing)} pairs, extra {len(extra)} pairs, "
+            f"first missing={missing[:5]}, first extra={extra[:5]}"
         )
     data = make_data(details)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -2336,6 +2793,28 @@ def main(argv=None) -> int:
     assert grid.get("topK") == [50, 100]
     assert grid.get("L") == [1, 2]
     assert grid.get("G") == [0.01, 0.001]
+    interpretability_grid = get_hugiml_grid("interpretability")
+    assert interpretability_grid.get("feature_mode") == ["patterns_only"]
+    assert interpretability_grid.get("interaction_relaxed_mining") == [True]
+    assert interpretability_grid.get("augmented_pair_transforms") == [False]
+    ebm_grid = get_baseline_grid("EBM")
+    assert ebm_grid.get("learning_rate") == [0.01, 0.05]
+    assert ebm_grid.get("max_bins") == [32, 64]
+    assert ebm_grid.get("interactions") == [0, 5]
+    xgb_grid = get_baseline_grid("XGBoost")
+    assert xgb_grid.get("n_estimators") == [100, 200]
+    assert xgb_grid.get("max_depth") == [3, 4]
+    assert xgb_grid.get("learning_rate") == [0.03, 0.1]
+    assert "subsample" not in xgb_grid
+    lgb_grid = get_baseline_grid("LightGBM")
+    assert lgb_grid.get("n_estimators") == [100, 200]
+    assert lgb_grid.get("learning_rate") == [0.03, 0.1]
+    assert lgb_grid.get("num_leaves") == [15, 31]
+    assert "subsample" not in lgb_grid
+    rulefit_grid = get_baseline_grid("RuleFit")
+    assert rulefit_grid.get("n_estimators") == [50, 100]
+    assert rulefit_grid.get("max_rules") == [50, 100]
+    assert rulefit_grid.get("tree_size") == [5, 10]
 
     payload = load_checkpoint(checkpoint)
     payload["metadata"].update(
@@ -2344,6 +2823,8 @@ def main(argv=None) -> int:
             "row_cap": args.row_cap,
             "hugiml_max_fit_seconds": args.hugiml_max_fit_seconds,
             "grid_snapshot": grid_snapshot(),
+            "hugiml_dashboard_scenarios": HUGIML_SCENARIOS,
+            "default_hugiml_dashboard_scenario": DEFAULT_DASHBOARD_HUGIML_SCENARIO,
             "out_dir": str(out_dir),
             "checkpoint": str(checkpoint),
             "template_html": str(template_html),
@@ -2351,20 +2832,26 @@ def main(argv=None) -> int:
     )
     done = completed_keys(payload) if args.resume else set()
 
-    for dataset, model in plan:
-        if (dataset, model) in done:
-            print(f"skip {dataset} :: {model}", flush=True)
+    for dataset, model, hugiml_scenario in plan:
+        key = _pair_key(dataset, model, hugiml_scenario)
+        scenario_suffix = f" :: {hugiml_scenario}" if model == "HUGIML" else ""
+        if key in done:
+            print(f"skip {dataset} :: {model}{scenario_suffix}", flush=True)
             continue
-        print(f"run {dataset} :: {model}", flush=True)
+        print(f"run {dataset} :: {model}{scenario_suffix}", flush=True)
         started = time.perf_counter()
         row = run_pair(
-            dataset, model, row_cap=args.row_cap, hugiml_max_fit_seconds=args.hugiml_max_fit_seconds
+            dataset,
+            model,
+            hugiml_scenario=hugiml_scenario,
+            row_cap=args.row_cap,
+            hugiml_max_fit_seconds=args.hugiml_max_fit_seconds,
         )
         row["pair_seconds"] = float(time.perf_counter() - started)
         payload["results"] = [
             r
             for r in payload["results"]
-            if not (r.get("dataset") == dataset and r.get("model") == model)
+            if _pair_key(str(r.get("dataset")), str(r.get("model")), _hugiml_scenario_for_row(r)) != key
         ]
         payload["results"].append(row)
         save_checkpoint(checkpoint, payload)
@@ -2373,6 +2860,7 @@ def main(argv=None) -> int:
                 {
                     "dataset": dataset,
                     "model": model,
+                    "hugiml_scenario": hugiml_scenario,
                     "auc": row.get("auc"),
                     "complexity": row.get("complexity"),
                     "seconds": row.get("pair_seconds"),
