@@ -259,6 +259,7 @@ TransactionDataCpp prepare_transactions_cpp(
     struct ColDesc {
         int              col_idx;       // original column index j
         std::vector<int> code_to_bname; // code 0-based → bname, -1 = no item
+        std::vector<int> code_to_iid;   // code 0-based → item id, 0 = no item
         // For categorical columns: label-string → integer code.
         // Built once in Phase 1 and reused across all stripes.
         std::unordered_map<std::string, int> label2int;
@@ -620,6 +621,19 @@ TransactionDataCpp prepare_transactions_cpp(
         }
     }
 
+    // Materialize code→item-id lookups once so Phase 2 does not perform a
+    // hash-map lookup for every observed active cell.  This is exactly derived
+    // from bn2id and preserves the same admission semantics.
+    for (auto& cd : active_cols) {
+        cd.code_to_iid.assign(cd.code_to_bname.size(), 0);
+        for (size_t code = 0; code < cd.code_to_bname.size(); ++code) {
+            int bname = cd.code_to_bname[code];
+            if (bname < 0) continue;
+            auto it = bn2id.find(bname);
+            if (it != bn2id.end()) cd.code_to_iid[code] = it->second;
+        }
+    }
+
     // ── Normalise utility per class ───────────────────────────────────────────
     for (auto& kv : tu) {
         int yi = static_cast<int>(kv.first % key_stride);
@@ -808,9 +822,9 @@ TransactionDataCpp prepare_transactions_cpp(
                 int64_t txk = static_cast<int64_t>(bname) * key_stride + yi;
                 if (tu.find(txk) == tu.end()) continue;
 
-                auto bn_it = bn2id.find(bname);
-                if (bn_it == bn2id.end()) continue;
-                int iid = bn_it->second;
+                int iid = (bname_idx < static_cast<int>(cd.code_to_iid.size()))
+                    ? cd.code_to_iid[static_cast<size_t>(bname_idx)]
+                    : 0;
                 if (iid <= 0 || static_cast<size_t>(iid - 1) >= item_iu.size()) continue;
                 double iu = item_iu[static_cast<size_t>(iid - 1)];
                 trans.push_back(iid);
@@ -841,7 +855,22 @@ TransactionDataCpp prepare_transactions_cpp(
     td.item_col        = std::move(item_col);
     td.disc_n          = n;
     td.disc_p          = p;
+    // Dense bin→item lookup for prediction and downstream native matrix
+    // construction.  Keep bn2id as the source of truth for compatibility and
+    // serialization wrappers; bin_item_id is a derived exact cache.
+    std::vector<std::vector<int>> bin_item_id(p);
+    for (int j = 0; j < p; ++j) {
+        int nb = (j < static_cast<int>(nb_col.size())) ? nb_col[j] : 0;
+        if (nb <= 0) continue;
+        bin_item_id[static_cast<size_t>(j)].assign(static_cast<size_t>(nb + 1), 0);
+        for (int bi = 1; bi <= nb; ++bi) {
+            auto it = bn2id.find(bk(bi, j));
+            if (it != bn2id.end())
+                bin_item_id[static_cast<size_t>(j)][static_cast<size_t>(bi)] = it->second;
+        }
+    }
     td.bn2id           = std::move(bn2id);
+    td.bin_item_id     = std::move(bin_item_id);
     td.nb_col          = std::move(nb_col);
     td.ber             = std::move(ber);
     td.cv              = std::move(cv);

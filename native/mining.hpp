@@ -86,6 +86,35 @@ public:
     int    K, L;
     double G, minU = 0.0;
     std::vector<PatternEntry> heap;
+
+    // Dense EUCS cache for admitted items.  When enabled, it stores the
+    // pair co-occurrence transaction utility upper bound in sorted-item order.
+    // It is built only under a cell cap; when absent, mining falls back to the
+    // original utility-list search without EUCS pruning.
+    bool eucs_enabled = false;
+    int eucs_m = 0;
+    std::vector<int> eucs_pos_for_item;
+    std::vector<double> eucs_twu;
+
+    size_t eucs_index_from_pos(int left_pos, int right_pos) const {
+        if (left_pos > right_pos) std::swap(left_pos, right_pos);
+        return static_cast<size_t>(left_pos) * static_cast<size_t>(eucs_m)
+            - (static_cast<size_t>(left_pos) * static_cast<size_t>(left_pos + 1)) / 2
+            + static_cast<size_t>(right_pos - left_pos - 1);
+    }
+
+    bool eucs_lookup(int item_a, int item_b, double& twu) const {
+        if (!eucs_enabled || item_a <= 0 || item_b <= 0) return false;
+        if (static_cast<size_t>(item_a) >= eucs_pos_for_item.size()
+            || static_cast<size_t>(item_b) >= eucs_pos_for_item.size()) return false;
+        int pa = eucs_pos_for_item[static_cast<size_t>(item_a)];
+        int pb = eucs_pos_for_item[static_cast<size_t>(item_b)];
+        if (pa < 0 || pb < 0 || pa == pb) return false;
+        const size_t idx = eucs_index_from_pos(pa, pb);
+        if (idx >= eucs_twu.size()) return false;
+        twu = eucs_twu[idx];
+        return true;
+    }
     // item_col[item_id - 1] gives the original feature for each item.
     // When present, mining enforces the exact mutual-exclusion constraint
     // that a pattern cannot contain two bins/categories from the same feature.
@@ -147,7 +176,8 @@ public:
 
     void save(const std::vector<int>& items, const UL& ul);
     void save_by_ig(const std::vector<int>& items, const UL& ul);
-    UL   child_ul(const UL* prefix_ul, const UL& px_ul, const UL& py_ul);
+    UL   child_ul(const UL* prefix_ul, const UL& px_ul, const UL& py_ul,
+                  bool allow_utility_abandon = true);
     void mine(const TransList& transactions,
               const std::vector<double>& item_twu,
               const std::vector<int>& ytrain, int n_cls,

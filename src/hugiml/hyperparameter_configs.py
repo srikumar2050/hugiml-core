@@ -104,7 +104,7 @@ def list_hugiml_grids() -> list[str]:
 BASELINE_MODEL_GRIDS: dict[str, dict[str, list]] = {
     "RandomForest": {
         "n_estimators": [200, 400],
-        "max_depth": [4, 8, None],
+        "max_depth": [4, 8],
         "min_samples_leaf": [1, 5],
     },
     "XGBoost": {
@@ -124,6 +124,7 @@ BASELINE_MODEL_GRIDS: dict[str, dict[str, list]] = {
         "learning_rate": [0.01, 0.05],
         "max_bins": [32, 64],
         "interactions": [0, 5],
+        "max_rounds": [500]
     },
     "RuleFit": {
         "n_estimators": [50, 100],

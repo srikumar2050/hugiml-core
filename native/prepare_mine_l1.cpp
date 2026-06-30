@@ -55,6 +55,20 @@ static double l1_entropy_ln(const std::vector<int>& counts, int total) {
     return std::max(h, 0.0);
 }
 
+static double l1_entropy_ln_ptr(const int* counts, int n_cls, int total) {
+    if (total <= 0) return 0.0;
+    double h = 0.0;
+    const double inv = 1.0 / static_cast<double>(total);
+    for (int k = 0; k < n_cls; k++) {
+        const int c = counts[k];
+        if (c > 0) {
+            double p = static_cast<double>(c) * inv;
+            h -= p * std::log(p);
+        }
+    }
+    return std::max(h, 0.0);
+}
+
 /// Compute IG for a singleton item.  Matches compute_ig(parent=nullptr).
 static double l1_ig(const std::vector<int>& cnt_global,
                     const int*              cnt_in_ptr,
@@ -69,6 +83,24 @@ static double l1_ig(const std::vector<int>& cnt_global,
     double base = l1_entropy_ln(cnt_global, n_train);
     double ce   = (static_cast<double>(n_in)  / n_train * l1_entropy_ln(cnt_in,  n_in)
                  + static_cast<double>(n_out) / n_train * l1_entropy_ln(cnt_out, n_out));
+    return base - ce;
+}
+
+static double l1_ig_scratch(const std::vector<int>& cnt_global,
+                            const int*              cnt_in_ptr,
+                            int n_in, int n_train, int n_cls,
+                            int* cnt_out_scratch) {
+    int n_out = n_train - n_in;
+    if (n_out == 0) return std::numeric_limits<double>::quiet_NaN();
+
+    for (int k = 0; k < n_cls; k++)
+        cnt_out_scratch[k] = cnt_global[k] - cnt_in_ptr[k];
+
+    double base = l1_entropy_ln(cnt_global, n_train);
+    double ce   = (static_cast<double>(n_in)  / n_train *
+                       l1_entropy_ln_ptr(cnt_in_ptr, n_cls, n_in)
+                 + static_cast<double>(n_out) / n_train *
+                       l1_entropy_ln_ptr(cnt_out_scratch, n_cls, n_out));
     return base - ce;
 }
 
@@ -1045,20 +1077,29 @@ static L1FitResult prepare_and_mine_l1_cpp_impl(
     std::vector<PatternEntry> heap;
     heap.reserve(static_cast<size_t>(K) + 1);
 
-    // Iterate items in descending RIU order to tighten minU quickly
+    // Iterate items in the same effective order as the generic L=1 miner:
+    // descending utility/TWU, and descending item ID for exact ties because
+    // the generic top-level list is sorted ascending and explored in reverse.
+    // The heap replacement is strict (utility > minU), so tie order can affect
+    // boundary membership when many equal-utility singletons compete for K.
     std::vector<int> iid_order(n_items);
     std::iota(iid_order.begin(), iid_order.end(), 0);
     std::sort(iid_order.begin(), iid_order.end(),
-              [&](int a, int b) { return td.RIU[a] > td.RIU[b]; });
+              [&](int a, int b) {
+                  const double ua = td.RIU[a];
+                  const double ub = td.RIU[b];
+                  return (ua > ub) || (ua == ub && a > b);
+              });
 
+    std::vector<int> cnt_out_scratch(n_cls, 0);
     for (int idx : iid_order) {
         double utility = td.RIU[idx];
         if (utility < minU || utility <= 0.0) continue;
         int n_in = item_n_in[idx];
         if (n_in == 0) continue;
 
-        double ig = l1_ig(cnt_global, item_cls_cnt[idx].data(),
-                          n_in, n, n_cls);
+        double ig = l1_ig_scratch(cnt_global, item_cls_cnt[idx].data(),
+                                  n_in, n, n_cls, cnt_out_scratch.data());
         if (!(ig > G)) continue;   // NaN > G is false — correct
 
         l1_save(heap, minU, K, idx + 1, utility, ig);
@@ -1589,13 +1630,20 @@ static L1FitResult prepare_and_mine_l1_fixed_numeric_cpp_impl(
     heap.reserve(static_cast<size_t>(K) + 1);
     std::vector<int> iid_order(n_items);
     std::iota(iid_order.begin(), iid_order.end(), 0);
-    std::sort(iid_order.begin(), iid_order.end(), [&](int a, int b){ return td.RIU[a] > td.RIU[b]; });
+    std::sort(iid_order.begin(), iid_order.end(),
+              [&](int a, int b) {
+                  const double ua = td.RIU[a];
+                  const double ub = td.RIU[b];
+                  return (ua > ub) || (ua == ub && a > b);
+              });
+    std::vector<int> cnt_out_scratch(n_cls, 0);
     for (int idx : iid_order) {
         double utility = td.RIU[idx];
         if (utility < minU || utility <= 0.0) continue;
         int n_in = item_n_in[idx];
         if (n_in == 0) continue;
-        double ig = l1_ig(cnt_global, item_cls_cnt[idx].data(), n_in, n, n_cls);
+        double ig = l1_ig_scratch(cnt_global, item_cls_cnt[idx].data(),
+                                  n_in, n, n_cls, cnt_out_scratch.data());
         if (!(ig > G)) continue;
         l1_save(heap, minU, K, idx + 1, utility, ig);
     }

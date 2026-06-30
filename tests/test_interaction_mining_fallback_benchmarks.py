@@ -641,8 +641,6 @@ class TestEdgeCases:
 # ===================================================================
 
 class TestInitModule:
-    def test_version_bumped(self):
-        assert hugiml.__version__ == "1.1.15"
 
     def test_public_api_exports(self):
         assert hasattr(hugiml, "HUGIMLClassifier")

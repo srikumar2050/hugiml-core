@@ -12,7 +12,9 @@
 #include <cstdint>
 #include <limits>
 #include <map>
+#include <array>
 #include <numeric>
+#include <queue>
 #include <random>
 #include <string>
 #include <unordered_set>
@@ -98,7 +100,13 @@ std::vector<double> quantile_edges(const std::vector<double>& sorted_values, int
     return edges;
 }
 
-std::pair<double, py::object> adaptive_numeric_ig(
+
+struct NumericIgResult {
+    double score = 0.0;
+    std::vector<double> edges;
+};
+
+NumericIgResult adaptive_numeric_ig_native(
     const std::vector<double>& values,
     const int64_t* y,
     py::ssize_t n,
@@ -106,19 +114,18 @@ std::pair<double, py::object> adaptive_numeric_ig(
     double base_entropy,
     int max_bins
 ) {
+    NumericIgResult result;
     std::vector<double> finite_vals;
     finite_vals.reserve(values.size());
     for (double v : values) {
         if (finite_double(v)) finite_vals.push_back(v);
     }
-    if (finite_vals.size() < 3) return {0.0, py::none()};
+    if (finite_vals.size() < 3) return result;
     std::sort(finite_vals.begin(), finite_vals.end());
     finite_vals.erase(std::unique(finite_vals.begin(), finite_vals.end()), finite_vals.end());
-    if (finite_vals.size() < 2) return {0.0, py::none()};
+    if (finite_vals.size() < 2) return result;
 
     const int max_q = std::min(max_bins, static_cast<int>(finite_vals.size()));
-    double best_score = 0.0;
-    std::vector<double> best_edges;
     std::vector<int32_t> z(static_cast<size_t>(n), 0);
     for (int q = 2; q <= max_q; ++q) {
         std::vector<double> edges = quantile_edges(finite_vals, q);
@@ -133,13 +140,278 @@ std::pair<double, py::object> adaptive_numeric_ig(
             }
         }
         const double score = discrete_ig(z, y, n, n_classes, base_entropy);
-        if (score > best_score) {
-            best_score = score;
-            best_edges = std::move(edges);
+        if (score > result.score) {
+            result.score = score;
+            result.edges = std::move(edges);
         }
     }
-    if (best_edges.empty()) return {best_score, py::none()};
-    return {best_score, py::cast(best_edges)};
+    return result;
+}
+
+struct PairCandidateRecord {
+    int64_t left = -1;
+    int64_t right = -1;
+    int8_t op = 0;
+    double transform_ig = 0.0;
+    std::vector<double> transform_bin_edges;
+    int64_t eligible_count = 0;
+    double eligible_rate = 0.0;
+    double missing_pair_rate = 1.0;
+    double reference_raw_value = 0.0;
+};
+
+constexpr int kPairOpCount = 4;
+constexpr int8_t kOpProduct = 0;
+constexpr int8_t kOpAbsoluteDifference = 1;
+constexpr int8_t kOpSum = 2;
+constexpr int8_t kOpSignedDifference = 3;
+
+std::string pair_operation_name(int8_t op) {
+    if (op == kOpProduct) return "product";
+    if (op == kOpAbsoluteDifference) return "absolute_difference";
+    if (op == kOpSum) return "sum";
+    if (op == kOpSignedDifference) return "signed_difference";
+    return "unknown";
+}
+
+std::string pair_name_start(int8_t op) {
+    if (op == kOpProduct) return "augmented_pair_prod__";
+    if (op == kOpAbsoluteDifference) return "augmented_pair_absdiff__";
+    if (op == kOpSum) return "augmented_pair_sum__";
+    if (op == kOpSignedDifference) return "augmented_pair_diff__";
+    return "augmented_pair_unknown__";
+}
+
+std::string pair_candidate_name(
+    const PairCandidateRecord& rec,
+    const std::vector<std::string>& col_names
+) {
+    return pair_name_start(rec.op)
+        + col_names[static_cast<size_t>(rec.left)]
+        + "__"
+        + col_names[static_cast<size_t>(rec.right)];
+}
+
+std::string pair_candidate_formula(
+    const PairCandidateRecord& rec,
+    const std::vector<std::string>& col_names
+) {
+    const std::string& a = col_names[static_cast<size_t>(rec.left)];
+    const std::string& b = col_names[static_cast<size_t>(rec.right)];
+    if (rec.op == kOpProduct) return a + " * " + b;
+    if (rec.op == kOpAbsoluteDifference) return "abs(" + a + " - " + b + ")";
+    if (rec.op == kOpSum) return a + " + " + b;
+    if (rec.op == kOpSignedDifference) return a + " - " + b;
+    return a + " ? " + b;
+}
+
+bool pair_candidate_better(
+    const PairCandidateRecord& lhs,
+    const PairCandidateRecord& rhs,
+    const std::vector<std::string>& col_names
+) {
+    if (lhs.transform_ig != rhs.transform_ig) return lhs.transform_ig > rhs.transform_ig;
+    return pair_candidate_name(lhs, col_names) < pair_candidate_name(rhs, col_names);
+}
+
+struct PairWorstFirstComparator {
+    const std::vector<std::string>* col_names = nullptr;
+    bool operator()(const PairCandidateRecord& lhs, const PairCandidateRecord& rhs) const {
+        // std::priority_queue places the element for which comparator is false
+        // against all others at top. Returning "lhs is better" therefore makes
+        // the top element the current worst retained candidate.
+        return pair_candidate_better(lhs, rhs, *col_names);
+    }
+};
+
+py::dict pair_candidate_to_dict(
+    const PairCandidateRecord& rec,
+    const std::vector<std::string>& col_names,
+    py::ssize_t n
+) {
+    py::dict d;
+    d["name"] = pair_candidate_name(rec, col_names);
+    d["operation"] = pair_operation_name(rec.op);
+    d["inputs"] = py::make_tuple(
+        col_names[static_cast<size_t>(rec.left)],
+        col_names[static_cast<size_t>(rec.right)]
+    );
+    d["formula"] = pair_candidate_formula(rec, col_names);
+    d["transform_ig"] = rec.transform_ig;
+    if (rec.transform_bin_edges.empty()) {
+        d["transform_bin_edges"] = py::none();
+    } else {
+        d["transform_bin_edges"] = py::cast(rec.transform_bin_edges);
+    }
+    d["eligible_count"] = rec.eligible_count;
+    d["eligible_rate"] = rec.eligible_rate;
+    d["missing_pair_rate"] = rec.missing_pair_rate;
+    d["reference_raw_value"] = rec.reference_raw_value;
+    d["pair_missing_policy"] = "reference_value_for_unavailable_pair";
+    return d;
+}
+
+std::pair<std::vector<PairCandidateRecord>, int64_t> compute_pair_candidates_native(
+    const double* X,
+    const int64_t* y,
+    py::ssize_t n,
+    py::ssize_t p,
+    int64_t n_classes,
+    const std::vector<std::string>& col_names,
+    int64_t top_k,
+    bool sort_records
+) {
+    const bool bounded = top_k >= 0;
+    const int64_t max_candidates = (static_cast<int64_t>(p) * (static_cast<int64_t>(p) - 1) / 2) * kPairOpCount;
+    const size_t reserve_n = bounded
+        ? static_cast<size_t>(std::min<int64_t>(top_k, std::max<int64_t>(0, max_candidates)))
+        : static_cast<size_t>(std::max<int64_t>(0, max_candidates));
+
+    std::vector<PairCandidateRecord> all;
+    all.reserve(reserve_n);
+    PairWorstFirstComparator cmp{&col_names};
+    std::priority_queue<PairCandidateRecord, std::vector<PairCandidateRecord>, PairWorstFirstComparator> heap(cmp);
+
+    std::array<std::vector<double>, kPairOpCount> vals_by_op;
+    std::array<std::vector<int64_t>, kPairOpCount> y_by_op;
+    std::array<double, kPairOpCount> sum_raw_by_op{};
+    for (int op = 0; op < kPairOpCount; ++op) {
+        vals_by_op[static_cast<size_t>(op)].reserve(static_cast<size_t>(n));
+        y_by_op[static_cast<size_t>(op)].reserve(static_cast<size_t>(n));
+    }
+
+    auto push_candidate_value = [&](int op, double raw, int64_t cls) {
+        if (!finite_double(raw)) return;
+        vals_by_op[static_cast<size_t>(op)].push_back(raw);
+        y_by_op[static_cast<size_t>(op)].push_back(cls);
+        sum_raw_by_op[static_cast<size_t>(op)] += raw;
+    };
+
+    auto retain_candidate = [&](PairCandidateRecord rec) {
+        if (!bounded) {
+            all.push_back(std::move(rec));
+        } else if (top_k <= 0) {
+            // Count candidates exactly, but retain none.
+        } else if (static_cast<int64_t>(heap.size()) < top_k) {
+            heap.push(std::move(rec));
+        } else if (pair_candidate_better(rec, heap.top(), col_names)) {
+            heap.pop();
+            heap.push(std::move(rec));
+        }
+    };
+
+    int64_t total_candidates = 0;
+
+    for (py::ssize_t a = 0; a < p; ++a) {
+        for (py::ssize_t b = a + 1; b < p; ++b) {
+            for (int op = 0; op < kPairOpCount; ++op) {
+                vals_by_op[static_cast<size_t>(op)].clear();
+                y_by_op[static_cast<size_t>(op)].clear();
+                sum_raw_by_op[static_cast<size_t>(op)] = 0.0;
+            }
+
+            for (py::ssize_t i = 0; i < n; ++i) {
+                const size_t row = static_cast<size_t>(i) * static_cast<size_t>(p);
+                const double xl = X[row + static_cast<size_t>(a)];
+                const double xr = X[row + static_cast<size_t>(b)];
+                if (!finite_double(xl) || !finite_double(xr)) continue;
+                const int64_t cls = y[i];
+
+                push_candidate_value(kOpProduct, xl * xr, cls);
+
+                const double delta = xl - xr;
+                if (finite_double(delta)) {
+                    push_candidate_value(kOpAbsoluteDifference, std::fabs(delta), cls);
+                    push_candidate_value(kOpSignedDifference, delta, cls);
+                }
+
+                push_candidate_value(kOpSum, xl + xr, cls);
+
+            }
+
+            // Preserve the legacy operation order for the unbounded API while still
+            // sharing the row scan and common a-b delta computation above.
+            for (int op = 0; op < kPairOpCount; ++op) {
+                const auto& vals = vals_by_op[static_cast<size_t>(op)];
+                const auto& y_eligible = y_by_op[static_cast<size_t>(op)];
+                const py::ssize_t m = static_cast<py::ssize_t>(vals.size());
+                if (m < 3) continue;
+                ++total_candidates;
+                const double reference_raw_value = sum_raw_by_op[static_cast<size_t>(op)] / static_cast<double>(m);
+                const double base_entropy = entropy_labels(y_eligible.data(), m, n_classes);
+                NumericIgResult scored = adaptive_numeric_ig_native(
+                    vals, y_eligible.data(), m, n_classes, base_entropy, 12
+                );
+                PairCandidateRecord rec;
+                rec.left = static_cast<int64_t>(a);
+                rec.right = static_cast<int64_t>(b);
+                rec.op = static_cast<int8_t>(op);
+                rec.transform_ig = scored.score;
+                rec.transform_bin_edges = std::move(scored.edges);
+                rec.eligible_count = static_cast<int64_t>(m);
+                rec.eligible_rate = static_cast<double>(m) / static_cast<double>(std::max<py::ssize_t>(n, 1));
+                rec.missing_pair_rate = 1.0 - rec.eligible_rate;
+                rec.reference_raw_value = reference_raw_value;
+                retain_candidate(std::move(rec));
+            }
+        }
+    }
+
+    if (bounded && top_k > 0) {
+        all.reserve(heap.size());
+        while (!heap.empty()) {
+            all.push_back(heap.top());
+            heap.pop();
+        }
+    }
+    if (sort_records) {
+        std::sort(all.begin(), all.end(), [&](const PairCandidateRecord& lhs, const PairCandidateRecord& rhs) {
+            return pair_candidate_better(lhs, rhs, col_names);
+        });
+    }
+    return {std::move(all), total_candidates};
+}
+
+
+py::tuple score_pair_candidates_bounded(
+    py::array_t<double, py::array::c_style | py::array::forcecast> X_arr,
+    py::array_t<int64_t, py::array::c_style | py::array::forcecast> y_arr,
+    const std::vector<std::string>& col_names,
+    int64_t top_k
+) {
+    auto X_info = X_arr.request();
+    auto y_info = y_arr.request();
+    if (X_info.ndim != 2) throw std::invalid_argument("X must be a 2D array.");
+    if (y_info.ndim != 1) throw std::invalid_argument("y must be a 1D array.");
+    const py::ssize_t n = static_cast<py::ssize_t>(X_info.shape[0]);
+    const py::ssize_t p = static_cast<py::ssize_t>(X_info.shape[1]);
+    if (static_cast<py::ssize_t>(y_info.shape[0]) != n) throw std::invalid_argument("X and y row counts do not match.");
+    if (static_cast<py::ssize_t>(col_names.size()) != p) throw std::invalid_argument("col_names length does not match X columns.");
+    const double* X = static_cast<const double*>(X_info.ptr);
+    const int64_t* y = static_cast<const int64_t*>(y_info.ptr);
+
+    int64_t n_classes = 0;
+    for (py::ssize_t i = 0; i < n; ++i) {
+        if (y[i] >= n_classes) n_classes = y[i] + 1;
+    }
+    if (n_classes <= 0) n_classes = 1;
+
+    std::vector<PairCandidateRecord> records;
+    int64_t total_candidates = 0;
+    {
+        py::gil_scoped_release release;
+        auto computed = compute_pair_candidates_native(
+            X, y, n, p, n_classes, col_names, top_k, true
+        );
+        records = std::move(computed.first);
+        total_candidates = computed.second;
+    }
+
+    py::list out;
+    for (const auto& rec : records) {
+        out.append(pair_candidate_to_dict(rec, col_names, n));
+    }
+    return py::make_tuple(out, total_candidates);
 }
 
 py::list score_pair_candidates(
@@ -147,92 +419,39 @@ py::list score_pair_candidates(
     py::array_t<int64_t, py::array::c_style | py::array::forcecast> y_arr,
     const std::vector<std::string>& col_names
 ) {
-    auto X = X_arr.unchecked<2>();
-    auto y = y_arr.unchecked<1>();
-    const py::ssize_t n = X.shape(0);
-    const py::ssize_t p = X.shape(1);
-    if (y.shape(0) != n) throw std::invalid_argument("X and y row counts do not match.");
+    auto X_info = X_arr.request();
+    auto y_info = y_arr.request();
+    if (X_info.ndim != 2) throw std::invalid_argument("X must be a 2D array.");
+    if (y_info.ndim != 1) throw std::invalid_argument("y must be a 1D array.");
+    const py::ssize_t n = static_cast<py::ssize_t>(X_info.shape[0]);
+    const py::ssize_t p = static_cast<py::ssize_t>(X_info.shape[1]);
+    if (static_cast<py::ssize_t>(y_info.shape[0]) != n) throw std::invalid_argument("X and y row counts do not match.");
     if (static_cast<py::ssize_t>(col_names.size()) != p) throw std::invalid_argument("col_names length does not match X columns.");
+    const double* X = static_cast<const double*>(X_info.ptr);
+    const int64_t* y = static_cast<const int64_t*>(y_info.ptr);
 
     int64_t n_classes = 0;
     for (py::ssize_t i = 0; i < n; ++i) {
-        if (y(i) >= n_classes) n_classes = y(i) + 1;
+        if (y[i] >= n_classes) n_classes = y[i] + 1;
     }
     if (n_classes <= 0) n_classes = 1;
 
+    std::vector<PairCandidateRecord> records;
+    {
+        py::gil_scoped_release release;
+        auto computed = compute_pair_candidates_native(
+            X, y, n, p, n_classes, col_names, -1, false
+        );
+        records = std::move(computed.first);
+    }
+
     py::list out;
-    std::vector<double> vals;
-    std::vector<int64_t> y_eligible;
-    vals.reserve(static_cast<size_t>(n));
-    y_eligible.reserve(static_cast<size_t>(n));
-    for (py::ssize_t a = 0; a < p; ++a) {
-        for (py::ssize_t b = a + 1; b < p; ++b) {
-            for (int op = 0; op < 4; ++op) {
-                vals.clear();
-                y_eligible.clear();
-                double sum_raw = 0.0;
-                for (py::ssize_t i = 0; i < n; ++i) {
-                    const double xl = X(i, a);
-                    const double xr = X(i, b);
-                    if (!finite_double(xl) || !finite_double(xr)) continue;
-                    double raw;
-                    if (op == 0) {
-                        raw = xl * xr;
-                    } else if (op == 1) {
-                        raw = std::fabs(xl - xr);
-                    } else if (op == 2) {
-                        raw = xl + xr;
-                    } else {
-                        raw = xl - xr;
-                    }
-                    if (!finite_double(raw)) continue;
-                    vals.push_back(raw);
-                    y_eligible.push_back(y(i));
-                    sum_raw += raw;
-                }
-                const py::ssize_t m = static_cast<py::ssize_t>(vals.size());
-                if (m < 3) continue;
-                const double reference_raw_value = sum_raw / static_cast<double>(m);
-                const double base_entropy = entropy_labels(y_eligible.data(), m, n_classes);
-                auto scored = adaptive_numeric_ig(vals, y_eligible.data(), m, n_classes, base_entropy, 12);
-                std::string operation;
-                std::string prefix;
-                std::string formula;
-                if (op == 0) {
-                    operation = "product";
-                    prefix = "augmented_pair_prod__";
-                    formula = col_names[static_cast<size_t>(a)] + " * " + col_names[static_cast<size_t>(b)];
-                } else if (op == 1) {
-                    operation = "absolute_difference";
-                    prefix = "augmented_pair_absdiff__";
-                    formula = "abs(" + col_names[static_cast<size_t>(a)] + " - " + col_names[static_cast<size_t>(b)] + ")";
-                } else if (op == 2) {
-                    operation = "sum";
-                    prefix = "augmented_pair_sum__";
-                    formula = col_names[static_cast<size_t>(a)] + " + " + col_names[static_cast<size_t>(b)];
-                } else {
-                    operation = "signed_difference";
-                    prefix = "augmented_pair_diff__";
-                    formula = col_names[static_cast<size_t>(a)] + " - " + col_names[static_cast<size_t>(b)];
-                }
-                py::dict d;
-                d["name"] = prefix + col_names[static_cast<size_t>(a)] + "__" + col_names[static_cast<size_t>(b)];
-                d["operation"] = operation;
-                d["inputs"] = py::make_tuple(col_names[static_cast<size_t>(a)], col_names[static_cast<size_t>(b)]);
-                d["formula"] = formula;
-                d["transform_ig"] = scored.first;
-                d["transform_bin_edges"] = scored.second;
-                d["eligible_count"] = static_cast<int64_t>(m);
-                d["eligible_rate"] = static_cast<double>(m) / static_cast<double>(std::max<py::ssize_t>(n, 1));
-                d["missing_pair_rate"] = 1.0 - (static_cast<double>(m) / static_cast<double>(std::max<py::ssize_t>(n, 1)));
-                d["reference_raw_value"] = reference_raw_value;
-                d["pair_missing_policy"] = "reference_value_for_unavailable_pair";
-                out.append(std::move(d));
-            }
-        }
+    for (const auto& rec : records) {
+        out.append(pair_candidate_to_dict(rec, col_names, n));
     }
     return out;
 }
+
 
 py::array_t<float> transform_pair_features(
     py::array_t<double, py::array::c_style | py::array::forcecast> X_arr,
@@ -243,54 +462,133 @@ py::array_t<float> transform_pair_features(
     py::array_t<double, py::array::c_style | py::array::forcecast> mean_arr,
     py::array_t<double, py::array::c_style | py::array::forcecast> scale_arr
 ) {
-    auto X = X_arr.unchecked<2>();
-    auto left = left_arr.unchecked<1>();
-    auto right = right_arr.unchecked<1>();
-    auto ops = ops_arr.unchecked<1>();
-    auto refs = reference_arr.unchecked<1>();
-    auto means = mean_arr.unchecked<1>();
-    auto scales = scale_arr.unchecked<1>();
-    const py::ssize_t n = X.shape(0);
-    const py::ssize_t p = X.shape(1);
-    const py::ssize_t k = left.shape(0);
-    if (right.shape(0) != k || ops.shape(0) != k || refs.shape(0) != k || means.shape(0) != k || scales.shape(0) != k) {
+    auto X_info = X_arr.request();
+    auto left_info = left_arr.request();
+    auto right_info = right_arr.request();
+    auto ops_info = ops_arr.request();
+    auto ref_info = reference_arr.request();
+    auto mean_info = mean_arr.request();
+    auto scale_info = scale_arr.request();
+    if (X_info.ndim != 2) throw std::invalid_argument("X must be a 2D array.");
+    const py::ssize_t n = static_cast<py::ssize_t>(X_info.shape[0]);
+    const py::ssize_t p = static_cast<py::ssize_t>(X_info.shape[1]);
+    const py::ssize_t k = static_cast<py::ssize_t>(left_info.shape[0]);
+    if (left_info.ndim != 1 || right_info.ndim != 1 || ops_info.ndim != 1
+        || ref_info.ndim != 1 || mean_info.ndim != 1 || scale_info.ndim != 1) {
+        throw std::invalid_argument("Pair transform metadata arrays must be 1D.");
+    }
+    if (static_cast<py::ssize_t>(right_info.shape[0]) != k
+        || static_cast<py::ssize_t>(ops_info.shape[0]) != k
+        || static_cast<py::ssize_t>(ref_info.shape[0]) != k
+        || static_cast<py::ssize_t>(mean_info.shape[0]) != k
+        || static_cast<py::ssize_t>(scale_info.shape[0]) != k) {
         throw std::invalid_argument("Array lengths do not match.");
     }
-    py::array_t<float> out({n, k});
-    auto Z = out.mutable_unchecked<2>();
+
+    const double* X = static_cast<const double*>(X_info.ptr);
+    const int64_t* left = static_cast<const int64_t*>(left_info.ptr);
+    const int64_t* right = static_cast<const int64_t*>(right_info.ptr);
+    const int8_t* ops = static_cast<const int8_t*>(ops_info.ptr);
+    const double* refs = static_cast<const double*>(ref_info.ptr);
+    const double* means = static_cast<const double*>(mean_info.ptr);
+    const double* scales = static_cast<const double*>(scale_info.ptr);
+
     for (py::ssize_t t = 0; t < k; ++t) {
-        const int64_t a = left(t);
-        const int64_t b = right(t);
+        const int64_t a = left[t];
+        const int64_t b = right[t];
         if (a < 0 || b < 0 || a >= p || b >= p) throw std::out_of_range("Pair index out of bounds.");
-        double sc = scales(t);
+        if (ops[t] < 0 || ops[t] >= kPairOpCount) throw std::invalid_argument("Unknown augmented pair op code.");
+    }
+
+    py::array_t<float> out({n, k});
+    auto out_info = out.request();
+    float* Z = static_cast<float*>(out_info.ptr);
+
+    struct TransformGroup {
+        int64_t left = -1;
+        int64_t right = -1;
+        std::vector<py::ssize_t> columns;
+        std::array<bool, kPairOpCount> needs{};
+    };
+    std::vector<TransformGroup> groups;
+    groups.reserve(static_cast<size_t>(k));
+    std::map<std::pair<int64_t, int64_t>, size_t> group_pos;
+    for (py::ssize_t t = 0; t < k; ++t) {
+        const auto key = std::make_pair(left[t], right[t]);
+        auto it = group_pos.find(key);
+        if (it == group_pos.end()) {
+            TransformGroup g;
+            g.left = left[t];
+            g.right = right[t];
+            groups.push_back(std::move(g));
+            const size_t idx = groups.size() - 1;
+            group_pos.emplace(key, idx);
+            it = group_pos.find(key);
+        }
+        TransformGroup& g = groups[it->second];
+        g.columns.push_back(t);
+        g.needs[static_cast<size_t>(ops[t])] = true;
+    }
+
+    std::vector<double> clean_refs(static_cast<size_t>(k));
+    std::vector<double> clean_scales(static_cast<size_t>(k));
+    for (py::ssize_t t = 0; t < k; ++t) {
+        double sc = scales[t];
         if (!finite_double(sc) || sc == 0.0) sc = 1.0;
-        double ref = refs(t);
-        if (!finite_double(ref)) ref = means(t);
+        clean_scales[static_cast<size_t>(t)] = sc;
+        double ref = refs[t];
+        if (!finite_double(ref)) ref = means[t];
         if (!finite_double(ref)) ref = 0.0;
+        clean_refs[static_cast<size_t>(t)] = ref;
+    }
+
+    {
+        py::gil_scoped_release release;
         for (py::ssize_t i = 0; i < n; ++i) {
-            const double xl = X(i, a);
-            const double xr = X(i, b);
-            double raw = ref;
-            if (finite_double(xl) && finite_double(xr)) {
-                const int8_t op = ops(t);
-                if (op == 0) {
-                    raw = xl * xr;
-                } else if (op == 1) {
-                    raw = std::fabs(xl - xr);
-                } else if (op == 2) {
-                    raw = xl + xr;
-                } else if (op == 3) {
-                    raw = xl - xr;
-                } else {
-                    throw std::invalid_argument("Unknown augmented pair op code.");
+            const size_t row_offset = static_cast<size_t>(i) * static_cast<size_t>(p);
+            const size_t out_offset = static_cast<size_t>(i) * static_cast<size_t>(k);
+            for (const TransformGroup& g : groups) {
+                const double xl = X[row_offset + static_cast<size_t>(g.left)];
+                const double xr = X[row_offset + static_cast<size_t>(g.right)];
+                std::array<double, kPairOpCount> raw_values{};
+                std::array<bool, kPairOpCount> available{};
+                if (finite_double(xl) && finite_double(xr)) {
+                    if (g.needs[static_cast<size_t>(kOpProduct)]) {
+                        const double raw = xl * xr;
+                        if (finite_double(raw)) { raw_values[static_cast<size_t>(kOpProduct)] = raw; available[static_cast<size_t>(kOpProduct)] = true; }
+                    }
+                    if (g.needs[static_cast<size_t>(kOpAbsoluteDifference)] || g.needs[static_cast<size_t>(kOpSignedDifference)]) {
+                        const double delta = xl - xr;
+                        if (finite_double(delta)) {
+                            if (g.needs[static_cast<size_t>(kOpAbsoluteDifference)]) {
+                                raw_values[static_cast<size_t>(kOpAbsoluteDifference)] = std::fabs(delta);
+                                available[static_cast<size_t>(kOpAbsoluteDifference)] = true;
+                            }
+                            if (g.needs[static_cast<size_t>(kOpSignedDifference)]) {
+                                raw_values[static_cast<size_t>(kOpSignedDifference)] = delta;
+                                available[static_cast<size_t>(kOpSignedDifference)] = true;
+                            }
+                        }
+                    }
+                    if (g.needs[static_cast<size_t>(kOpSum)]) {
+                        const double raw = xl + xr;
+                        if (finite_double(raw)) { raw_values[static_cast<size_t>(kOpSum)] = raw; available[static_cast<size_t>(kOpSum)] = true; }
+                    }
                 }
-                if (!finite_double(raw)) raw = ref;
+                for (py::ssize_t t : g.columns) {
+                    const int8_t op = ops[t];
+                    double raw = clean_refs[static_cast<size_t>(t)];
+                    if (available[static_cast<size_t>(op)]) {
+                        raw = raw_values[static_cast<size_t>(op)];
+                    }
+                    Z[out_offset + static_cast<size_t>(t)] = static_cast<float>((raw - means[t]) / clean_scales[static_cast<size_t>(t)]);
+                }
             }
-            Z(i, t) = static_cast<float>((raw - means(t)) / sc);
         }
     }
     return out;
 }
+
 
 
 std::vector<int32_t> continuous_to_quantile_codes_fixed(const std::vector<double>& values, int max_bins) {
@@ -1032,6 +1330,159 @@ py::dict select_pair_aware_adaptive_bins(
     return out;
 }
 
+
+
+std::string array_digest_key(const py::buffer_info& info) {
+    if (info.ptr == nullptr) return "null";
+    size_t n_items = 1;
+    std::string key = "ndim=" + std::to_string(static_cast<int64_t>(info.ndim))
+        + ";itemsize=" + std::to_string(static_cast<int64_t>(info.itemsize))
+        + ";shape=";
+    for (auto dim : info.shape) {
+        key += std::to_string(static_cast<int64_t>(dim));
+        key += ',';
+        n_items *= static_cast<size_t>(std::max<py::ssize_t>(dim, 0));
+    }
+    const size_t n_bytes = n_items * static_cast<size_t>(info.itemsize);
+    const auto* bytes = static_cast<const unsigned char*>(info.ptr);
+
+    // Two independent 64-bit FNV-1a streams.  This avoids retaining a full
+    // byte copy of X/y in the cache key while still making false hits
+    // astronomically unlikely for the fold-scoped cache use case.
+    uint64_t h1 = 1469598103934665603ULL;
+    uint64_t h2 = 1099511628211ULL ^ 0x9e3779b97f4a7c15ULL;
+    constexpr uint64_t prime = 1099511628211ULL;
+    for (size_t i = 0; i < n_bytes; ++i) {
+        const uint64_t b = static_cast<uint64_t>(bytes[i]);
+        h1 ^= b;
+        h1 *= prime;
+        h2 ^= (b + 0x9e3779b97f4a7c15ULL + (h2 << 6) + (h2 >> 2));
+        h2 *= prime;
+    }
+    key += ";nbytes=" + std::to_string(static_cast<uint64_t>(n_bytes))
+        + ";digest_a=" + std::to_string(h1)
+        + ";digest_b=" + std::to_string(h2);
+    return key;
+}
+
+std::string join_col_key(const std::vector<std::string>& col_names) {
+    std::string key;
+    key.reserve(col_names.size() * 16);
+    for (const auto& name : col_names) {
+        key += std::to_string(name.size());
+        key += ':';
+        key += name;
+        key += '|';
+    }
+    return key;
+}
+
+std::string partner_size_key(py::object obj) {
+    if (obj.is_none()) return "none";
+    return std::to_string(py::cast<int64_t>(obj));
+}
+
+class AugmentedPairCache {
+public:
+    AugmentedPairCache() = default;
+
+    py::list select_interaction_information_features_cached(
+        py::array_t<double, py::array::c_style | py::array::forcecast> X_arr,
+        py::array_t<int64_t, py::array::c_style | py::array::forcecast> y_arr,
+        const std::vector<std::string>& col_names,
+        int64_t aug_feature_size,
+        py::object ii_partner_size_obj
+    ) {
+        auto X_info = X_arr.request();
+        auto y_info = y_arr.request();
+        if (X_info.ndim != 2) throw std::invalid_argument("X must be a 2D array.");
+        if (y_info.ndim != 1) throw std::invalid_argument("y must be a 1D array.");
+        const std::string key = "select|n=" + std::to_string(static_cast<int64_t>(X_info.shape[0]))
+            + "|p=" + std::to_string(static_cast<int64_t>(X_info.shape[1]))
+            + "|ysize=" + std::to_string(static_cast<int64_t>(y_info.shape[0]))
+            + "|xbytes=" + array_digest_key(X_info)
+            + "|ybytes=" + array_digest_key(y_info)
+            + "|aug=" + std::to_string(aug_feature_size)
+            + "|partner=" + partner_size_key(ii_partner_size_obj)
+            + "|cols=" + join_col_key(col_names);
+        ++select_requests_;
+        auto it = select_cache_.find(key);
+        if (it != select_cache_.end()) {
+            ++select_hits_;
+            return py::reinterpret_borrow<py::list>(it->second);
+        }
+        ++select_misses_;
+        py::list selected = select_interaction_information_features(
+            X_arr, y_arr, col_names, aug_feature_size, ii_partner_size_obj
+        );
+        select_cache_[key] = py::reinterpret_borrow<py::object>(selected);
+        return selected;
+    }
+
+    py::tuple score_pair_candidates_cached(
+        py::array_t<double, py::array::c_style | py::array::forcecast> X_arr,
+        py::array_t<int64_t, py::array::c_style | py::array::forcecast> y_arr,
+        const std::vector<std::string>& col_names,
+        int64_t top_k
+    ) {
+        auto X_info = X_arr.request();
+        auto y_info = y_arr.request();
+        if (X_info.ndim != 2) throw std::invalid_argument("X must be a 2D array.");
+        if (y_info.ndim != 1) throw std::invalid_argument("y must be a 1D array.");
+        const std::string key = "score|n=" + std::to_string(static_cast<int64_t>(X_info.shape[0]))
+            + "|p=" + std::to_string(static_cast<int64_t>(X_info.shape[1]))
+            + "|ysize=" + std::to_string(static_cast<int64_t>(y_info.shape[0]))
+            + "|xbytes=" + array_digest_key(X_info)
+            + "|ybytes=" + array_digest_key(y_info)
+            + "|top=" + std::to_string(top_k)
+            + "|cols=" + join_col_key(col_names);
+        ++score_requests_;
+        auto it = score_cache_.find(key);
+        if (it != score_cache_.end()) {
+            ++score_hits_;
+            return py::reinterpret_borrow<py::tuple>(it->second);
+        }
+        ++score_misses_;
+        py::tuple scored = score_pair_candidates_bounded(X_arr, y_arr, col_names, top_k);
+        score_cache_[key] = py::reinterpret_borrow<py::object>(scored);
+        return scored;
+    }
+
+    void clear() {
+        select_cache_.clear();
+        score_cache_.clear();
+        select_requests_ = 0;
+        select_hits_ = 0;
+        select_misses_ = 0;
+        score_requests_ = 0;
+        score_hits_ = 0;
+        score_misses_ = 0;
+    }
+
+    py::dict stats() const {
+        py::dict d;
+        d["select_requests"] = select_requests_;
+        d["select_hits"] = select_hits_;
+        d["select_misses"] = select_misses_;
+        d["select_entries"] = static_cast<int64_t>(select_cache_.size());
+        d["score_requests"] = score_requests_;
+        d["score_hits"] = score_hits_;
+        d["score_misses"] = score_misses_;
+        d["score_entries"] = static_cast<int64_t>(score_cache_.size());
+        return d;
+    }
+
+private:
+    std::map<std::string, py::object> select_cache_;
+    std::map<std::string, py::object> score_cache_;
+    int64_t select_requests_ = 0;
+    int64_t select_hits_ = 0;
+    int64_t select_misses_ = 0;
+    int64_t score_requests_ = 0;
+    int64_t score_hits_ = 0;
+    int64_t score_misses_ = 0;
+};
+
 } // namespace
 
 void bind_augmented_pair(py::module_& m)
@@ -1043,6 +1494,17 @@ void bind_augmented_pair(py::module_& m)
         py::arg("y"),
         py::arg("col_names"),
         "Score product/absolute-difference/sum/signed-difference pair candidates on observed source pairs with adaptive-binned IG."
+    );
+    m.def(
+        "score_pair_candidates_bounded",
+        &score_pair_candidates_bounded,
+        py::arg("X"),
+        py::arg("y"),
+        py::arg("col_names"),
+        py::arg("top_k") = -1,
+        "Score pair candidates natively and return (candidates, total_candidate_count). "
+        "When top_k >= 0, every candidate is still scored exactly, but only the "
+        "same sorted top-k candidates are materialized as Python dictionaries."
     );
     m.def(
         "transform_pair_features",
@@ -1083,6 +1545,30 @@ void bind_augmented_pair(py::module_& m)
         "scores candidate bin counts per column by joint information against its known "
         "best-partner column(s) instead of purely marginal information against the target."
     );
+
+    py::class_<AugmentedPairCache>(m, "AugmentedPairCache")
+        .def(py::init<>())
+        .def(
+            "select_interaction_information_features",
+            &AugmentedPairCache::select_interaction_information_features_cached,
+            py::arg("X"),
+            py::arg("y"),
+            py::arg("col_names"),
+            py::arg("aug_feature_size"),
+            py::arg("ii_partner_size") = py::none(),
+            "Dataset/fold-scoped native cache for interaction-information source selection."
+        )
+        .def(
+            "score_pair_candidates",
+            &AugmentedPairCache::score_pair_candidates_cached,
+            py::arg("X"),
+            py::arg("y"),
+            py::arg("col_names"),
+            py::arg("top_k") = -1,
+            "Dataset/fold-scoped native cache for exact bounded pair-candidate scoring."
+        )
+        .def("clear", &AugmentedPairCache::clear)
+        .def("stats", &AugmentedPairCache::stats);
 
     m.def(
         "strict_topk_filter_dense",

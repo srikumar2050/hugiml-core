@@ -127,3 +127,30 @@ Dashboard modules
 .. automodule:: hugiml.dashboard.components.governance_evidence
    :members:
    :show-inheritance:
+
+LLM assistant add-on
+-------------------
+
+.. automodule:: hugiml.llm.schemas
+   :members:
+   :show-inheritance:
+
+.. automodule:: hugiml.llm.dataset_registry
+   :members:
+   :show-inheritance:
+
+.. automodule:: hugiml.llm.runtime
+   :members:
+   :show-inheritance:
+
+.. automodule:: hugiml.llm.planner
+   :members:
+   :show-inheritance:
+
+.. automodule:: hugiml.llm.orchestrator
+   :members:
+   :show-inheritance:
+
+.. automodule:: hugiml.llm.cli
+   :members:
+   :show-inheritance:

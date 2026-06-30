@@ -19,15 +19,106 @@
  */
 
 #include "mining.hpp"
+#include "mining_l1.hpp"
 #include "mining_l2.hpp"
 #include "math.hpp"
 
 #include <algorithm>
+#include <cctype>
+#include <cstdlib>
 #include <set>
 #include <stdexcept>
 #include <limits>
+#include <string>
+#include <cmath>
 
 namespace hugiml {
+
+namespace {
+
+constexpr size_t kEucsMaxCellsDefault = 6000000ULL;
+constexpr int kEucsMinItemsDefault = 32;
+constexpr double kEucsMaxDensityDefault = 0.20;
+
+static std::string eucs_env_lower(const char* value) {
+    std::string out(value ? value : "");
+    std::transform(out.begin(), out.end(), out.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return out;
+}
+
+static bool eucs_env_enabled() {
+    const char* raw = std::getenv("HUGIML_EUCS_ENABLE");
+    if (!raw) raw = std::getenv("HUGIML_EUCS_ENABLED");
+    if (!raw || !*raw) return true;
+    const std::string value = eucs_env_lower(raw);
+    if (value == "0" || value == "false" || value == "no" || value == "off" ||
+        value == "disable" || value == "disabled") {
+        return false;
+    }
+    if (value == "1" || value == "true" || value == "yes" || value == "on" ||
+        value == "enable" || value == "enabled") {
+        return true;
+    }
+    // Invalid values preserve the default rather than surprising the caller.
+    return true;
+}
+
+static int eucs_env_int(const char* name, int fallback, int min_value) {
+    const char* raw = std::getenv(name);
+    if (!raw || !*raw) return fallback;
+    try {
+        size_t idx = 0;
+        long value = std::stol(raw, &idx, 10);
+        if (idx != std::string(raw).size() || value < min_value ||
+            value > static_cast<long>(std::numeric_limits<int>::max())) {
+            return fallback;
+        }
+        return static_cast<int>(value);
+    } catch (...) {
+        return fallback;
+    }
+}
+
+static size_t eucs_env_size(const char* name, size_t fallback) {
+    const char* raw = std::getenv(name);
+    if (!raw || !*raw) return fallback;
+    try {
+        size_t idx = 0;
+        unsigned long long value = std::stoull(raw, &idx, 10);
+        if (idx != std::string(raw).size()) return fallback;
+        return static_cast<size_t>(value);
+    } catch (...) {
+        return fallback;
+    }
+}
+
+static double eucs_env_double(const char* name, double fallback, double min_value) {
+    const char* raw = std::getenv(name);
+    if (!raw || !*raw) return fallback;
+    try {
+        size_t idx = 0;
+        double value = std::stod(raw, &idx);
+        if (idx != std::string(raw).size() || value < min_value) return fallback;
+        return value;
+    } catch (...) {
+        return fallback;
+    }
+}
+
+static int eucs_min_items_config() {
+    return eucs_env_int("HUGIML_EUCS_MIN_ITEMS", kEucsMinItemsDefault, 0);
+}
+
+static size_t eucs_max_cells_config() {
+    return eucs_env_size("HUGIML_EUCS_MAX_CELLS", kEucsMaxCellsDefault);
+}
+
+static double eucs_max_density_config() {
+    return eucs_env_double("HUGIML_EUCS_MAX_DENSITY", kEucsMaxDensityDefault, 0.0);
+}
+
+}  // namespace
 
 // ── UL methods ───────────────────────────────────────────────────────────────
 
@@ -80,6 +171,34 @@ static double entropy_from_counts(const std::vector<int>& counts, int total) {
         }
     }
     return std::max(h, 0.0);
+}
+
+static double information_gain_from_child_parent_counts(
+    const std::vector<int>& child_counts,
+    int child_total,
+    const std::vector<int>& parent_counts,
+    int parent_total
+) {
+    if (child_total <= 0 || parent_total <= 0 || child_total > parent_total) {
+        return 0.0;
+    }
+    const int n_out = parent_total - child_total;
+    if (n_out == 0) {
+        // Match UL::compute_ig: a pattern covering the complete parent
+        // population is not considered informative for the G gate.
+        return std::numeric_limits<double>::quiet_NaN();
+    }
+    std::vector<int> out_counts(parent_counts.size(), 0);
+    for (size_t k = 0; k < parent_counts.size(); ++k) {
+        const int child = (k < child_counts.size()) ? child_counts[k] : 0;
+        out_counts[k] = parent_counts[k] - child;
+    }
+    const double base = entropy_from_counts(parent_counts, parent_total);
+    const double cond = (static_cast<double>(child_total) / parent_total)
+            * entropy_from_counts(child_counts, child_total)
+        + (static_cast<double>(n_out) / parent_total)
+            * entropy_from_counts(out_counts, n_out);
+    return base - cond;
 }
 
 void UL::compute_ig(const UL* parent,
@@ -187,11 +306,12 @@ void THUIsl::save_by_ig(const std::vector<int>& items, const UL& ul) {
     }
 }
 
-UL THUIsl::child_ul(const UL* prefix_ul, const UL& px_ul, const UL& py_ul) {
+UL THUIsl::child_ul(const UL* prefix_ul, const UL& px_ul, const UL& py_ul,
+                         bool allow_utility_abandon) {
     // Construct the utility list for Pxy from utility lists for Px and Py.
     // For a 2-item extension (P is empty), utility is u(x)+u(y).
-    // For deeper extensions, subtract the shared prefix utility u(P), Without this subtraction,
-    // every prefix item is double-counted for L >= 3.
+    // For deeper extensions, subtract the shared prefix utility u(P) so the
+    // already-counted prefix is not added twice.
     UL c(py_ul.item);
     if (px_ul.tid_arr.empty() || py_ul.tid_arr.empty()) return c;
 
@@ -203,21 +323,36 @@ UL THUIsl::child_ul(const UL* prefix_ul, const UL& px_ul, const UL& py_ul) {
     c_iu.reserve(c_tid.capacity());
     c_ru.reserve(c_tid.capacity());
 
-    size_t xi = 0, yi = 0;
+    // LA-style early abandonment: when Px entries are skipped because Py is
+    // absent, the remaining upper bound for any Pxy descendant falls by
+    // iu(Px,t)+ru(Px,t).  Once that bound is below the current utility floor,
+    // this child cannot produce a retained pattern.  Relaxed-root branches opt
+    // out because their separate IG-ranked track intentionally ignores minU.
+    double remaining_bound = px_ul.sI + px_ul.sR;
+    auto drop_px_entry = [&](size_t pos) -> bool {
+        if (!allow_utility_abandon) return false;
+        remaining_bound -= px_ul.iu_arr[pos] + px_ul.ru_arr[pos];
+        return remaining_bound < minU;
+    };
+
+    size_t xi = 0, yi = 0, pi = 0;
+    const auto* pt = prefix_ul ? &prefix_ul->tid_arr : nullptr;
     while (xi < xt.size() && yi < yt.size()) {
-        if (xt[xi] < yt[yi]) { ++xi; continue; }
+        if (xt[xi] < yt[yi]) {
+            if (drop_px_entry(xi)) return UL(py_ul.item);
+            ++xi;
+            continue;
+        }
         if (yt[yi] < xt[xi]) { ++yi; continue; }
 
         const int32_t tid = xt[xi];
         double prefix_iu = 0.0;
         if (prefix_ul != nullptr) {
-            auto pit = std::lower_bound(prefix_ul->tid_arr.begin(),
-                                        prefix_ul->tid_arr.end(), tid);
-            if (pit == prefix_ul->tid_arr.end() || *pit != tid) {
+            while (pi < pt->size() && (*pt)[pi] < tid) ++pi;
+            if (pi == pt->size() || (*pt)[pi] != tid) {
                 ++xi; ++yi;
                 continue;
             }
-            const size_t pi = static_cast<size_t>(pit - prefix_ul->tid_arr.begin());
             prefix_iu = prefix_ul->iu_arr[pi];
         }
 
@@ -225,6 +360,10 @@ UL THUIsl::child_ul(const UL* prefix_ul, const UL& px_ul, const UL& py_ul) {
         c_iu.push_back(px_ul.iu_arr[xi] + py_ul.iu_arr[yi] - prefix_iu);
         c_ru.push_back(py_ul.ru_arr[yi]);
         ++xi; ++yi;
+    }
+    while (xi < xt.size()) {
+        if (drop_px_entry(xi)) return UL(py_ul.item);
+        ++xi;
     }
     if (c_tid.empty()) return c;
     c.seal_from_arrays(std::move(c_tid), std::move(c_iu), std::move(c_ru));
@@ -278,25 +417,30 @@ void THUIsl::mine(const TransList& transactions,
     minIg = -std::numeric_limits<double>::infinity();
     _explore_calls = 0;
     int  n_items  = static_cast<int>(item_twu.size());
-    // EUCS (Extended Utility Co-occurrence Structure) is disabled by default.
-    // It builds a quadratic-in-active-items map during the transaction scan
-    // which causes O(w²) memory overhead per transaction row for wide datasets
-    // (w = active items per row).  For large datasets this easily exhausts
-    // available RAM before mining starts.  The pruning benefit EUCS provides
-    // is outweighed by the memory cost on typical wide tabular data.
-    //
-    // To re-enable: replace the line below with:
-    //     bool use_eucs = (L != 1);
-    // Note that doing so will restore the quadratic memory behaviour.
-    bool use_eucs = false;
-    bool use_leaf = (L == -1 || L == 0);   
+    bool use_eucs = (L != 1);
+    const int maxd_for_leaf = (L == -1 || L == 0) ? 99 : L;
+    const bool use_leaf_lb = (L == -1 || L == 0);
+    // LIU-Exact is safe in classifier mining only after the contiguous
+    // candidate is validated against the same source-feature, relaxed-root,
+    // and information-gain gates that the utility-list search will apply.
+    // LIU-LB remains restricted to legacy leaf/pure-utility mode because a
+    // lower-bound descendant does not carry exact coverage for the IG gate.
+    bool use_leaf = (L != 1);
 
     FMap fmap;
 
-    // leaf_map[end_pos][start_pos] = cumulative utility of the consecutive
-    // item run [start_pos .. end_pos) in sorted_items order.
-    using LeafMap = std::unordered_map<int, std::unordered_map<int, double>>;
-    LeafMap leaf_map;
+    struct LeafInfo {
+        double utility = 0.0;
+        int support = 0;
+        std::vector<int> class_counts;
+    };
+
+    // leaf_map_by_end[end_pos][start_pos] stores exact utility and coverage
+    // counts for the consecutive item run [start_pos .. end_pos] in
+    // sorted_items order.  A vector for the outer dimension avoids hashing the
+    // leaf endpoint on every transaction-row update.
+    using LeafMapByEnd = std::vector<std::unordered_map<int, LeafInfo>>;
+    LeafMapByEnd leaf_map_by_end;
 
     // Build utility-list map for items that pass the initial threshold.
     // interaction_relaxed_mining: items whose column is in relaxed_cols are
@@ -321,18 +465,58 @@ void THUIsl::mine(const TransList& transactions,
 
     // pre-compute item_rank[id] = position in sorted_items.
     // Built unconditionally because it replaces the per-transaction TWU sort
-    // comparator (O(1) lookup vs O(1) array access — same complexity but
-    // avoids two floating-point loads and a conditional inside every comparison).
-    // item_to_pos serves the leaf-map update (built only when use_leaf).
-    std::vector<int> item_rank(static_cast<size_t>(n_items) + 1, 0);
+    // comparator with a dense integer lookup.
+    std::vector<int> item_rank(static_cast<size_t>(n_items) + 1, -1);
     for (int pos = 0; pos < static_cast<int>(sorted_items.size()); pos++)
-        item_rank[sorted_items[pos]] = pos;
+        item_rank[static_cast<size_t>(sorted_items[pos])] = pos;
 
-    std::unordered_map<int, int> item_to_pos;
-    if (use_leaf) {
-        item_to_pos.reserve(sorted_items.size());
-        for (int pos = 0; pos < static_cast<int>(sorted_items.size()); pos++)
-            item_to_pos[sorted_items[pos]] = pos;
+    if (use_leaf) leaf_map_by_end.resize(sorted_items.size());
+
+    // EUCS is quadratic in the number of admitted items and pays off when the
+    // pair co-occurrence space is sparse enough to prune many intersections.
+    // Gate it by both cell count and observed active-item density so dense
+    // workloads keep the original utility-list path without the extra O(|T|^2)
+    // scan work.  Skipping EUCS never changes completeness.
+    eucs_enabled = false;
+    eucs_m = static_cast<int>(sorted_items.size());
+    eucs_pos_for_item.assign(static_cast<size_t>(n_items) + 1, -1);
+    eucs_twu.clear();
+    if (use_eucs && eucs_env_enabled() && eucs_m > 1) {
+        const int eucs_min_items = eucs_min_items_config();
+        const size_t eucs_max_cells = eucs_max_cells_config();
+        const double eucs_max_density = eucs_max_density_config();
+        if (eucs_m <= eucs_min_items) {
+            // Leave EUCS disabled: small item universes are already cheap to
+            // intersect, and the density probe/cache build can dominate.
+        } else {
+            size_t active_total = 0;
+            size_t active_rows = 0;
+            for (const Trans& trans : transactions) {
+                if (trans.size() == 1 && trans[0] == -1) continue;
+                size_t active_count = 0;
+                for (int it : trans) {
+                    if (it > 0 && static_cast<size_t>(it) < item_rank.size()
+                        && item_rank[static_cast<size_t>(it)] >= 0) {
+                        ++active_count;
+                    }
+                }
+                if (active_count > 0) {
+                    active_total += active_count;
+                    ++active_rows;
+                }
+            }
+            const double active_density = (active_rows == 0)
+                ? 1.0
+                : (static_cast<double>(active_total) / static_cast<double>(active_rows))
+                    / static_cast<double>(eucs_m);
+            const size_t cells = (static_cast<size_t>(eucs_m) * static_cast<size_t>(eucs_m - 1)) / 2;
+            if (cells <= eucs_max_cells && active_density <= eucs_max_density) {
+                for (int pos = 0; pos < eucs_m; ++pos)
+                    eucs_pos_for_item[static_cast<size_t>(sorted_items[static_cast<size_t>(pos)])] = pos;
+                eucs_twu.assign(cells, 0.0);
+                eucs_enabled = true;
+            }
+        }
     }
 
     // Single pass: populate ULs and EUCS map
@@ -381,36 +565,44 @@ void THUIsl::mine(const TransList& transactions,
             int it = active[i].first;
             double u = active[i].second;
             ul_map.at(it).add(tid, u, rem);
-            if (use_eucs) {
-                auto& fm = fmap[it];
+            if (eucs_enabled) {
+                const int it_pos = item_rank[static_cast<size_t>(it)];
                 for (int j2 = i + 1; j2 < static_cast<int>(active.size()); j2++) {
                     int oj = active[j2].first;
-                    double ou = active[j2].second;
-                    if (oj != it && !same_feature(it, oj)) {
-                        fm[oj].first  += new_twu;
-                        fm[oj].second += u + ou;
-                    }
+                    if (oj == it || same_feature(it, oj)) continue;
+                    const int oj_pos = item_rank[static_cast<size_t>(oj)];
+                    if (it_pos < 0 || oj_pos < 0 || it_pos == oj_pos) continue;
+                    const size_t idx = eucs_index_from_pos(it_pos, oj_pos);
+                    eucs_twu[idx] += new_twu;
                 }
             }
             // ── Leaf-map update ──────────────────────
             // For each item, walk backward through the transaction's active
-            // items that are CONSECUTIVE in sorted_items order, accumulating
-            // cumulative utilities.  Only the consecutive run is tracked
+            // items that are consecutive in sorted_items order, accumulating
+            // cumulative utilities.  Only the consecutive run is tracked.
             if (use_leaf) {
-                auto pos_it = item_to_pos.find(it);
-                if (pos_it != item_to_pos.end()) {
-                    int end_pos = pos_it->second;
-                    auto& leaf_entry = leaf_map[end_pos];
+                int end_pos = item_rank[static_cast<size_t>(it)];
+                const int lbl = (static_cast<size_t>(tid) < ytrain.size())
+                    ? ytrain[static_cast<size_t>(tid)]
+                    : -1;
+                const bool lbl_valid = (lbl >= 0 && lbl < n_cls);
+                if (end_pos >= 0 && static_cast<size_t>(end_pos) < leaf_map_by_end.size()) {
+                    auto& leaf_entry = leaf_map_by_end[static_cast<size_t>(end_pos)];
                     double cutil = u;
                     int follow_pos = end_pos;
                     for (int j = i - 1; j >= 0; j--) {
                         int prec = active[j].first;
-                        auto pit = item_to_pos.find(prec);
-                        if (pit == item_to_pos.end()) break;
-                        if (pit->second != follow_pos - 1) break;
-                        follow_pos = pit->second;
+                        int prec_pos = item_rank[static_cast<size_t>(prec)];
+                        if (prec_pos != follow_pos - 1) break;
+                        follow_pos = prec_pos;
                         cutil += active[j].second;
-                        leaf_entry[follow_pos] += cutil;
+                        auto& info = leaf_entry[follow_pos];
+                        info.utility += cutil;
+                        info.support += 1;
+                        if (lbl_valid) {
+                            if (info.class_counts.empty()) info.class_counts.assign(n_cls, 0);
+                            info.class_counts[static_cast<size_t>(lbl)] += 1;
+                        }
                     }
                 }
             }
@@ -418,37 +610,6 @@ void THUIsl::mine(const TransList& transactions,
         }
     }
 
-    // ── CUD raise  ────────────────────────
-    // Active only when use_eucs (L != 1).  Scans EUCS pair utilities,
-    // maintains a K-sized min-heap, and raises minU to the K-th largest
-    // pair utility if it exceeds the current floor.  Then removes EUCS
-    // entries whose co-occurrence TWU is now below the raised minU
-    if (use_eucs && !fmap.empty()) {
-        std::vector<double> top_utils;
-        top_utils.reserve(static_cast<size_t>(K) + 1);
-        for (auto& [a, inner] : fmap) {
-            for (auto& [b, vals] : inner) {
-                double util = vals.second;          // util_sum
-                if (util < minU) continue;
-                top_utils.push_back(util);
-                std::push_heap(top_utils.begin(), top_utils.end(),
-                               std::greater<double>{});
-                if (static_cast<int>(top_utils.size()) > K) {
-                    std::pop_heap(top_utils.begin(), top_utils.end(),
-                                  std::greater<double>{});
-                    top_utils.pop_back();
-                }
-            }
-        }
-        if (static_cast<int>(top_utils.size()) >= K &&
-                top_utils.front() > minU)
-            minU = top_utils.front();
-
-        // Remove EUCS entries below new threshold 
-        for (auto& [a, inner] : fmap)
-            for (auto it = inner.begin(); it != inner.end(); )
-                it = (it->second.first < minU) ? inner.erase(it) : ++it;
-    }
 
     // Seal all 1-item ULs, compute IG, then release transient els buffers.
     // compute_ig uses tid_arr, so recursive child IG remains correct after release.
@@ -459,12 +620,15 @@ void THUIsl::mine(const TransList& transactions,
     }
 
     // ── Leaf raise ───────────────────────────────
-    // Active only when use_leaf (L == -1).  Three sources feed the K-sized
-    // min-heap: LIU-Exact (direct leaf_map entries), LIU-LB (sub-run estimates
-    // obtained by subtracting individual item utilities from exact entries), and
-    // all 1-item actual utilities.  minU is raised to the K-th largest value
-    // found if it exceeds the current floor.
-    if (use_leaf && !leaf_map.empty()) {
+    // LIU-Exact can safely raise the ordinary utility floor only with exact
+    // candidates that would pass the same classifier gates as the recursive
+    // utility-list search.  For bounded L>=2 classifier mining, this block
+    // therefore checks same-source conflicts, relaxed-root routing, singleton
+    // IG gates, and the exact contiguous-prefix IG gates before contributing a
+    // LIU value to the K-sized threshold heap.  LIU-LB is kept only for the
+    // legacy leaf/pure-utility mode because lower-bound descendants do not
+    // carry exact coverage information for the classifier IG gate.
+    if (use_leaf && !leaf_map_by_end.empty()) {
         std::vector<double> leaf_utils;
         leaf_utils.reserve(static_cast<size_t>(K) + 1);
 
@@ -480,41 +644,144 @@ void THUIsl::mine(const TransList& transactions,
             }
         };
 
-        // LIU-Exact
-        for (auto& [end_pos, inner] : leaf_map)
-            for (auto& [start_pos, val] : inner)
-                add_to_leaf(val);
+        std::vector<int> global_counts(n_cls, 0);
+        for (int lbl : ytrain)
+            if (lbl >= 0 && lbl < n_cls) global_counts[static_cast<size_t>(lbl)]++;
+        const int global_support = static_cast<int>(ytrain.size());
 
-        // LIU-LB: subtract intermediate-item utilities to get lower bounds
-        int n_sorted = static_cast<int>(sorted_items.size());
-        for (auto& [end_pos, inner] : leaf_map) {
-            for (auto& [start_pos, val] : inner) {
-                if (val < minU) continue;
-                for (int i = start_pos + 1; i < end_pos - 1; i++) {
-                    if (i >= n_sorted) break;
-                    double v1 = val - ul_map.at(sorted_items[i]).sI;
-                    add_to_leaf(v1);
-                    for (int j = i + 1; j < end_pos - 1; j++) {
-                        if (j >= n_sorted) break;
-                        double v2 = v1 - ul_map.at(sorted_items[j]).sI;
-                        add_to_leaf(v2);
-                        for (int k = j + 1; k + 1 < end_pos - 1; k++) {
-                            if (k >= n_sorted) break;
-                            add_to_leaf(v2 - ul_map.at(sorted_items[k]).sI);
-                        }
-                    }
+        std::vector<std::vector<int>> singleton_counts(sorted_items.size(), std::vector<int>(n_cls, 0));
+        std::vector<int> singleton_support(sorted_items.size(), 0);
+        for (int pos = 0; pos < static_cast<int>(sorted_items.size()); ++pos) {
+            const int iid = sorted_items[static_cast<size_t>(pos)];
+            const UL& ul = ul_map.at(iid);
+            singleton_support[static_cast<size_t>(pos)] = static_cast<int>(ul.tid_arr.size());
+            for (int32_t tid : ul.tid_arr) {
+                if (tid >= 0 && static_cast<size_t>(tid) < ytrain.size()) {
+                    const int lbl = ytrain[static_cast<size_t>(tid)];
+                    if (lbl >= 0 && lbl < n_cls)
+                        singleton_counts[static_cast<size_t>(pos)][static_cast<size_t>(lbl)]++;
                 }
             }
         }
 
-        // All 1-item actual utilities
-        for (auto& kv : ul_map) add_to_leaf(kv.second.sI);
+        auto leaf_info = [&](int start_pos, int end_pos) -> const LeafInfo* {
+            if (end_pos < 0 || start_pos < 0) return nullptr;
+            if (static_cast<size_t>(end_pos) >= leaf_map_by_end.size()) return nullptr;
+            const auto& by_start = leaf_map_by_end[static_cast<size_t>(end_pos)];
+            auto it = by_start.find(start_pos);
+            if (it == by_start.end()) return nullptr;
+            return &it->second;
+        };
 
-        if (static_cast<int>(leaf_utils.size()) >= K &&
-                leaf_utils.front() > minU)
+        std::unordered_map<long long, double> liu_ig_cache;
+        auto liu_key = [](int start_pos, int end_pos) -> long long {
+            return (static_cast<long long>(start_pos) << 32)
+                ^ static_cast<unsigned int>(end_pos);
+        };
+
+        auto liu_ig = [&](int start_pos, int end_pos) -> double {
+            const long long key = liu_key(start_pos, end_pos);
+            auto cached = liu_ig_cache.find(key);
+            if (cached != liu_ig_cache.end()) return cached->second;
+            const LeafInfo* child = leaf_info(start_pos, end_pos);
+            if (!child) {
+                liu_ig_cache[key] = 0.0;
+                return 0.0;
+            }
+            const int length = end_pos - start_pos + 1;
+            double out = 0.0;
+            if (length == 2) {
+                out = information_gain_from_child_parent_counts(
+                    child->class_counts, child->support, global_counts, global_support);
+            } else if (length == 3) {
+                out = information_gain_from_child_parent_counts(
+                    child->class_counts,
+                    child->support,
+                    singleton_counts[static_cast<size_t>(start_pos)],
+                    singleton_support[static_cast<size_t>(start_pos)]);
+            } else if (length > 3) {
+                const LeafInfo* parent = leaf_info(start_pos, end_pos - 2);
+                if (parent) {
+                    out = information_gain_from_child_parent_counts(
+                        child->class_counts, child->support,
+                        parent->class_counts, parent->support);
+                }
+            }
+            liu_ig_cache[key] = out;
+            return out;
+        };
+
+        auto sequence_has_source_conflict = [&](int start_pos, int end_pos) -> bool {
+            for (int a = start_pos; a <= end_pos; ++a)
+                for (int b = a + 1; b <= end_pos; ++b)
+                    if (same_feature(sorted_items[static_cast<size_t>(a)],
+                                     sorted_items[static_cast<size_t>(b)]))
+                        return true;
+            return false;
+        };
+
+        auto sequence_passes_classifier_gates = [&](int start_pos, int end_pos) -> bool {
+            const int length = end_pos - start_pos + 1;
+            if (length < 2 || length > maxd_for_leaf) return false;
+            if (sequence_has_source_conflict(start_pos, end_pos)) return false;
+            if (is_relaxed_root(sorted_items[static_cast<size_t>(start_pos)])) return false;
+            for (int pos = start_pos; pos <= end_pos; ++pos) {
+                const UL& ul = ul_map.at(sorted_items[static_cast<size_t>(pos)]);
+                if (!(ul.ig > G)) return false;
+            }
+            for (int prefix_end = start_pos + 1; prefix_end <= end_pos; ++prefix_end) {
+                const double ig = liu_ig(start_pos, prefix_end);
+                if (!(ig > G)) return false;
+            }
+            return true;
+        };
+
+        // LIU-Exact for bounded classifier mining and legacy utility mode.
+        for (int end_pos = 0; end_pos < static_cast<int>(leaf_map_by_end.size()); ++end_pos) {
+            for (auto& kv : leaf_map_by_end[static_cast<size_t>(end_pos)]) {
+                const int start_pos = kv.first;
+                const LeafInfo& info = kv.second;
+                if (use_leaf_lb || sequence_passes_classifier_gates(start_pos, end_pos)) {
+                    add_to_leaf(info.utility);
+                }
+            }
+        }
+
+        // LIU-LB: legacy leaf/pure-utility mode only.  These lower bounds are
+        // utility-safe but do not have exact IG coverage, so they are not used
+        // to raise minU for bounded classifier paths.
+        if (use_leaf_lb) {
+            int n_sorted = static_cast<int>(sorted_items.size());
+            for (int end_pos = 0; end_pos < static_cast<int>(leaf_map_by_end.size()); ++end_pos) {
+                for (auto& kv : leaf_map_by_end[static_cast<size_t>(end_pos)]) {
+                    const int start_pos = kv.first;
+                    const double val = kv.second.utility;
+                    if (val < minU) continue;
+                    for (int i = start_pos + 1; i < end_pos - 1; i++) {
+                        if (i >= n_sorted) break;
+                        double v1 = val - ul_map.at(sorted_items[static_cast<size_t>(i)]).sI;
+                        add_to_leaf(v1);
+                        for (int j = i + 1; j < end_pos - 1; j++) {
+                            if (j >= n_sorted) break;
+                            double v2 = v1 - ul_map.at(sorted_items[static_cast<size_t>(j)]).sI;
+                            add_to_leaf(v2);
+                            for (int k = j + 1; k + 1 < end_pos - 1; k++) {
+                                if (k >= n_sorted) break;
+                                add_to_leaf(v2 - ul_map.at(sorted_items[static_cast<size_t>(k)]).sI);
+                            }
+                        }
+                    }
+                }
+            }
+
+            // All 1-item actual utilities, legacy leaf/pure-utility mode only.
+            for (auto& kv : ul_map) add_to_leaf(kv.second.sI);
+        }
+
+        if (static_cast<int>(leaf_utils.size()) >= K && leaf_utils.front() > minU)
             minU = leaf_utils.front();
 
-        leaf_map.clear();   
+        leaf_map_by_end.clear();
     }
 
     // Build the top-level UL list without a post-raise sI+sR filter.
@@ -615,7 +882,6 @@ void THUIsl::explore(std::vector<int>  prefix,
         if ((ux_is_relaxed_root_at_depth0 || prefix_rooted_in_relaxed) &&
             ux->sI <= 0.0) continue;
 
-        if (L != 1 && !fmap.empty() && fmap.find(ux->item) == fmap.end()) continue;
 
         std::vector<std::unique_ptr<UL>> ext_owned;
         std::vector<UL*>                 ext;
@@ -644,8 +910,18 @@ void THUIsl::explore(std::vector<int>  prefix,
             if (candidate_conflicts_with_prefix(prefix, ux->item, uy->item))
                 continue;
             if (uy->ig <= G) continue;
+            const bool utility_floor_applies =
+                !(ux_is_relaxed_root_at_depth0 || prefix_rooted_in_relaxed);
+            if (utility_floor_applies && L != 1 && eucs_enabled) {
+                double eucs_twu_val = 0.0;
+                if (!eucs_lookup(ux->item, uy->item, eucs_twu_val)
+                    || eucs_twu_val < minU) {
+                    continue;
+                }
+            }
 
-            auto ch = std::make_unique<UL>(child_ul(prefix_ul, *ux, *uy));
+            const bool allow_utility_abandon = utility_floor_applies;
+            auto ch = std::make_unique<UL>(child_ul(prefix_ul, *ux, *uy, allow_utility_abandon));
             if (!ch->tid_arr.empty()) {
                 ch->compute_ig(prefix_ul, y_arr, n_cls);
                 if (ch->ig <= G) continue;
@@ -718,6 +994,8 @@ std::vector<PatternEntry> mine_patterns_cpp(
     const std::vector<int>&   ytrain,
     int n_cls, int K, int L, double G,
     double timeout_s) {
+    if (L == 1)
+        return mine_patterns_l1_cpp(td, ytrain, n_cls, K, G, timeout_s);
     if (L == 2)
         return mine_patterns_l2_cpp(td, ytrain, n_cls, K, G, timeout_s);
     return mine_patterns_generic_cpp(td, ytrain, n_cls, K, L, G, timeout_s);

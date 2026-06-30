@@ -29,10 +29,13 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cctype>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <limits>
+#include <functional>
 #include <stdexcept>
 #include <unordered_set>
 #include <vector>
@@ -40,6 +43,87 @@
 namespace hugiml {
 
 namespace {
+
+constexpr size_t kL2EucsMaxCellsDefault = 6000000ULL;
+constexpr int kL2EucsMinItemsDefault = 32;
+constexpr double kL2EucsMaxDensityDefault = 0.20;
+
+static std::string l2_eucs_env_lower(const char* value) {
+    std::string out(value ? value : "");
+    std::transform(out.begin(), out.end(), out.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return out;
+}
+
+static bool l2_eucs_env_enabled() {
+    const char* raw = std::getenv("HUGIML_EUCS_ENABLE");
+    if (!raw) raw = std::getenv("HUGIML_EUCS_ENABLED");
+    if (!raw || !*raw) return true;
+    const std::string value = l2_eucs_env_lower(raw);
+    if (value == "0" || value == "false" || value == "no" || value == "off" ||
+        value == "disable" || value == "disabled") {
+        return false;
+    }
+    if (value == "1" || value == "true" || value == "yes" || value == "on" ||
+        value == "enable" || value == "enabled") {
+        return true;
+    }
+    return true;
+}
+
+static int l2_eucs_env_int(const char* name, int fallback, int min_value) {
+    const char* raw = std::getenv(name);
+    if (!raw || !*raw) return fallback;
+    try {
+        size_t idx = 0;
+        long value = std::stol(raw, &idx, 10);
+        if (idx != std::string(raw).size() || value < min_value ||
+            value > static_cast<long>(std::numeric_limits<int>::max())) {
+            return fallback;
+        }
+        return static_cast<int>(value);
+    } catch (...) {
+        return fallback;
+    }
+}
+
+static size_t l2_eucs_env_size(const char* name, size_t fallback) {
+    const char* raw = std::getenv(name);
+    if (!raw || !*raw) return fallback;
+    try {
+        size_t idx = 0;
+        unsigned long long value = std::stoull(raw, &idx, 10);
+        if (idx != std::string(raw).size()) return fallback;
+        return static_cast<size_t>(value);
+    } catch (...) {
+        return fallback;
+    }
+}
+
+static double l2_eucs_env_double(const char* name, double fallback, double min_value) {
+    const char* raw = std::getenv(name);
+    if (!raw || !*raw) return fallback;
+    try {
+        size_t idx = 0;
+        double value = std::stod(raw, &idx);
+        if (idx != std::string(raw).size() || value < min_value) return fallback;
+        return value;
+    } catch (...) {
+        return fallback;
+    }
+}
+
+static int l2_eucs_min_items_config() {
+    return l2_eucs_env_int("HUGIML_EUCS_MIN_ITEMS", kL2EucsMinItemsDefault, 0);
+}
+
+static size_t l2_eucs_max_cells_config() {
+    return l2_eucs_env_size("HUGIML_EUCS_MAX_CELLS", kL2EucsMaxCellsDefault);
+}
+
+static double l2_eucs_max_density_config() {
+    return l2_eucs_env_double("HUGIML_EUCS_MAX_DENSITY", kL2EucsMaxDensityDefault, 0.0);
+}
 
 static double l2_entropy(const std::vector<int>& counts, int total) {
     if (total <= 0) return 0.0;
@@ -168,6 +252,89 @@ static bool same_feature_l2(const std::vector<int>& item_col, int item_a, int it
     return item_col[ia] == item_col[ib];
 }
 
+static size_t l2_eucs_index(int left_pos, int right_pos, int m) {
+    if (left_pos > right_pos) std::swap(left_pos, right_pos);
+    return static_cast<size_t>(left_pos) * static_cast<size_t>(m)
+        - (static_cast<size_t>(left_pos) * static_cast<size_t>(left_pos + 1)) / 2
+        + static_cast<size_t>(right_pos - left_pos - 1);
+}
+
+static bool l2_configure_eucs(const TransList& transactions,
+                              const std::vector<int>& ci_for_item,
+                              int m,
+                              std::vector<double>& eucs_twu,
+                              std::vector<double>& eucs_pair_utility) {
+    eucs_twu.clear();
+    eucs_pair_utility.clear();
+    if (m <= 1) return false;
+    if (!l2_eucs_env_enabled()) return false;
+
+    const int eucs_min_items = l2_eucs_min_items_config();
+    const size_t eucs_max_cells = l2_eucs_max_cells_config();
+    const double eucs_max_density = l2_eucs_max_density_config();
+
+    if (m <= eucs_min_items) {
+        // Small item universes are already cheap to intersect.  Building the
+        // quadratic cache usually costs more than it saves.
+        return false;
+    }
+
+    size_t active_total = 0;
+    size_t active_rows = 0;
+    for (const Trans& trans : transactions) {
+        if (trans.size() == 1 && trans[0] == -1) continue;
+        size_t active_count = 0;
+        for (int it : trans) {
+            if (it > 0 && static_cast<size_t>(it) < ci_for_item.size()
+                && ci_for_item[static_cast<size_t>(it)] >= 0) {
+                ++active_count;
+            }
+        }
+        if (active_count > 0) {
+            active_total += active_count;
+            ++active_rows;
+        }
+    }
+
+    const double active_density = (active_rows == 0)
+        ? 1.0
+        : (static_cast<double>(active_total) / static_cast<double>(active_rows))
+            / static_cast<double>(m);
+    const size_t cells = (static_cast<size_t>(m) * static_cast<size_t>(m - 1)) / 2;
+    if (cells > eucs_max_cells || active_density > eucs_max_density) return false;
+
+    eucs_twu.assign(cells, 0.0);
+    eucs_pair_utility.assign(cells, 0.0);
+    return true;
+}
+
+static void l2_update_eucs_for_active(const std::vector<std::pair<int, double>>& active,
+                                      const std::vector<int>& ci_for_item,
+                                      const std::vector<int>& item_col,
+                                      int m,
+                                      std::vector<double>& eucs_twu,
+                                      std::vector<double>& eucs_pair_utility) {
+    if (eucs_twu.empty() || eucs_pair_utility.empty()) return;
+    double transaction_utility = 0.0;
+    for (const auto& item : active) transaction_utility += item.second;
+
+    for (int ai = 0; ai < static_cast<int>(active.size()); ++ai) {
+        const int item_a = active[static_cast<size_t>(ai)].first;
+        const int pos_a = ci_for_item[static_cast<size_t>(item_a)];
+        if (pos_a < 0) continue;
+        for (int bi = ai + 1; bi < static_cast<int>(active.size()); ++bi) {
+            const int item_b = active[static_cast<size_t>(bi)].first;
+            if (item_a == item_b || same_feature_l2(item_col, item_a, item_b)) continue;
+            const int pos_b = ci_for_item[static_cast<size_t>(item_b)];
+            if (pos_b < 0 || pos_a == pos_b) continue;
+            const size_t idx = l2_eucs_index(pos_a, pos_b, m);
+            eucs_twu[idx] += transaction_utility;
+            eucs_pair_utility[idx] += active[static_cast<size_t>(ai)].second
+                                    + active[static_cast<size_t>(bi)].second;
+        }
+    }
+}
+
 } // namespace
 
 std::vector<PatternEntry> mine_patterns_l2_cpp(
@@ -217,6 +384,11 @@ std::vector<PatternEntry> mine_patterns_l2_cpp(
     for (int pos = 0; pos < m; pos++)
         ci_for_item[static_cast<size_t>(sorted_items[pos])] = pos;
 
+    std::vector<double> eucs_twu;
+    std::vector<double> eucs_pair_utility;
+    const bool eucs_enabled = l2_configure_eucs(
+        td.transactions, ci_for_item, m, eucs_twu, eucs_pair_utility);
+
     std::vector<L2UL> uls(static_cast<size_t>(m));
     for (int ci = 0; ci < m; ci++) uls[static_cast<size_t>(ci)].item = sorted_items[ci];
 
@@ -261,6 +433,11 @@ std::vector<PatternEntry> mine_patterns_l2_cpp(
                    ci_for_item[static_cast<size_t>(b.first)];
         });
 
+        if (eucs_enabled) {
+            l2_update_eucs_for_active(
+                active, ci_for_item, td.item_col, m, eucs_twu, eucs_pair_utility);
+        }
+
         double rem = 0.0;
         const int lbl = (tid < static_cast<int>(ytrain.size())) ? ytrain[static_cast<size_t>(tid)] : -1;
         const bool lbl_valid = (lbl >= 0 && lbl < n_cls);
@@ -279,6 +456,7 @@ std::vector<PatternEntry> mine_patterns_l2_cpp(
             rem += u;
         }
     }
+
 
     // ── Phase 2: IG computation (serial) ──────────────────────────────────
     for (int ci = 0; ci < m; ci++) {
@@ -362,6 +540,16 @@ std::vector<PatternEntry> mine_patterns_l2_cpp(
             if (same_feature_l2(td.item_col, ux.item, uy.item))
                 continue;
             if (uy.ig <= G) continue;
+            if (eucs_enabled) {
+                const size_t eidx = l2_eucs_index(i, j, m);
+                // For terminal L=2 ordinary pairs, exact pair utility is a
+                // correctness-preserving stronger skip than the TWU upper
+                // bound: a pair below the current utility floor cannot enter
+                // this utility-ranked local heap.  Descendant paths do not
+                // exist in this hot path.
+                if (eucs_twu[eidx] < local_minU || eucs_pair_utility[eidx] < local_minU)
+                    continue;
+            }
             if (ux.tid.empty() || uy.tid.empty()) continue;
 
             // Sorted-merge intersection — build c_tid, accumulate c_sI and
@@ -473,6 +661,12 @@ std::vector<PatternEntry> mine_patterns_l2_cpp(
             if (same_feature_l2(td.item_col, ux.item, uy.item))
                 continue;
             if (uy.ig <= G) continue;
+            if (eucs_enabled) {
+                const size_t eidx = l2_eucs_index(i, j, m);
+                // Same terminal-pair exact-utility skip as the OpenMP path.
+                if (eucs_twu[eidx] < minU || eucs_pair_utility[eidx] < minU)
+                    continue;
+            }
             if (ux.tid.empty() || uy.tid.empty()) continue;
 
             std::vector<int32_t> c_tid;
@@ -648,6 +842,11 @@ AugmentedPatternsResult mine_patterns_l2_augmented_patterns_cpp(
     for (int pos = 0; pos < m; pos++)
         ci_for_item[static_cast<size_t>(sorted_items[pos])] = pos;
 
+    std::vector<double> eucs_twu;
+    std::vector<double> eucs_pair_utility;
+    const bool eucs_enabled = l2_configure_eucs(
+        td.transactions, ci_for_item, m, eucs_twu, eucs_pair_utility);
+
     std::vector<L2UL> uls(static_cast<size_t>(m));
     for (int ci = 0; ci < m; ci++) uls[static_cast<size_t>(ci)].item = sorted_items[ci];
 
@@ -688,6 +887,11 @@ AugmentedPatternsResult mine_patterns_l2_augmented_patterns_cpp(
             return ci_for_item[static_cast<size_t>(a.first)] <
                    ci_for_item[static_cast<size_t>(b.first)];
         });
+
+        if (eucs_enabled) {
+            l2_update_eucs_for_active(
+                active, ci_for_item, td.item_col, m, eucs_twu, eucs_pair_utility);
+        }
 
         double rem = 0.0;
         const int lbl = (tid < static_cast<int>(ytrain.size())) ? ytrain[static_cast<size_t>(tid)] : -1;
@@ -778,7 +982,16 @@ AugmentedPatternsResult mine_patterns_l2_augmented_patterns_cpp(
             if (same_feature_l2(td.item_col, ux.item, uy.item))
                 continue;
             const bool uy_relaxed = relaxed(uy.item);
+            const bool pair_relaxed = ux_relaxed || uy_relaxed;
             if (!(uy.ig > G) && !uy_relaxed) continue;
+            if (eucs_enabled && !pair_relaxed) {
+                const size_t eidx = l2_eucs_index(i, j, m);
+                // Safe only for ordinary terminal pairs: relaxed pairs are
+                // IG-ranked and may be retained below the ordinary utility
+                // floor, so they deliberately bypass this utility skip.
+                if (eucs_twu[eidx] < minU || eucs_pair_utility[eidx] < minU)
+                    continue;
+            }
             if (ux.tid.empty() || uy.tid.empty()) continue;
 
             std::vector<int32_t> c_tid;
@@ -803,7 +1016,6 @@ AugmentedPatternsResult mine_patterns_l2_augmented_patterns_cpp(
 
             const double c_ig = l2_ig_global(
                 cnt_global, cnt_pair, static_cast<int>(c_tid.size()), n_train, n_cls);
-            const bool pair_relaxed = ux_relaxed || uy_relaxed;
             // Pair gate: relaxed if EITHER source item is a relaxed survivor.
             // This is the key relaxation that lets a near-zero-marginal-IG
             // interaction survivor combine with any partner and still be
@@ -934,6 +1146,11 @@ std::vector<PatternEntry> mine_patterns_l2_augmented_patterns_v2_cpp(
     for (int pos = 0; pos < m; pos++)
         ci_for_item[static_cast<size_t>(sorted_items[pos])] = pos;
 
+    std::vector<double> eucs_twu;
+    std::vector<double> eucs_pair_utility;
+    const bool eucs_enabled = l2_configure_eucs(
+        td.transactions, ci_for_item, m, eucs_twu, eucs_pair_utility);
+
     std::vector<L2UL> uls(static_cast<size_t>(m));
     for (int ci = 0; ci < m; ci++) uls[static_cast<size_t>(ci)].item = sorted_items[ci];
 
@@ -974,6 +1191,11 @@ std::vector<PatternEntry> mine_patterns_l2_augmented_patterns_v2_cpp(
             return ci_for_item[static_cast<size_t>(a.first)] <
                    ci_for_item[static_cast<size_t>(b.first)];
         });
+
+        if (eucs_enabled) {
+            l2_update_eucs_for_active(
+                active, ci_for_item, td.item_col, m, eucs_twu, eucs_pair_utility);
+        }
 
         double rem = 0.0;
         const int lbl = (tid < static_cast<int>(ytrain.size())) ? ytrain[static_cast<size_t>(tid)] : -1;
@@ -1063,7 +1285,16 @@ std::vector<PatternEntry> mine_patterns_l2_augmented_patterns_v2_cpp(
             if (same_feature_l2(td.item_col, ux.item, uy.item))
                 continue;
             const bool uy_relaxed = relaxed(uy.item);
+            const bool pair_relaxed = ux_relaxed || uy_relaxed;
             if (!(uy.ig > G) && !uy_relaxed) continue;
+            if (eucs_enabled && !pair_relaxed) {
+                const size_t eidx = l2_eucs_index(i, j, m);
+                // Safe only for ordinary terminal pairs: relaxed pairs are
+                // IG-ranked and may be retained below the ordinary utility
+                // floor, so they deliberately bypass this utility skip.
+                if (eucs_twu[eidx] < minU || eucs_pair_utility[eidx] < minU)
+                    continue;
+            }
             if (ux.tid.empty() || uy.tid.empty()) continue;
 
             std::vector<int32_t> c_tid;
@@ -1088,7 +1319,6 @@ std::vector<PatternEntry> mine_patterns_l2_augmented_patterns_v2_cpp(
 
             const double c_ig = l2_ig_global(
                 cnt_global, cnt_pair, static_cast<int>(c_tid.size()), n_train, n_cls);
-            const bool pair_relaxed = ux_relaxed || uy_relaxed;
             if (!(c_ig > G) && !pair_relaxed) continue;
 
             const size_t h = fnv1a_tids(c_tid);

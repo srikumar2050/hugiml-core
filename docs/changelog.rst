@@ -6,6 +6,14 @@ The canonical release notes live in ``CHANGELOG.md`` at the repository root. Kee
 Recent releases
 ---------------
 
+1.1.16 — 2026-06-30
+~~~~~~~~~~~~~~~~~~~~~
+
+* Added the optional HUGIML LLM assistant with Streamlit and CLI entry points, built-in demo datasets, deterministic fast mode, and optional Ollama-backed thinking mode.
+* Improved augmented-pair adaptive path reuse so repeated tuning and scoring flows can reuse prepared path state more efficiently.
+* Expanded native HUIM pruning behavior around LIU, LA, and gated EUCS, with documented EUCS environment controls.
+* Refreshed Sphinx documentation, Read the Docs navigation, and static benchmark/scalability outputs for the new release.
+
 1.1.15 — 2026-06-27
 ~~~~~~~~~~~~~~~~~~~
 

@@ -64,8 +64,11 @@ is_categorical_dtype = _is_categorical_dtype
 
 try:
     import statsmodels.api as sm
-except ImportError:
+except Exception as exc:
     sm = None
+    STATSMODELS_IMPORT_ERROR = exc
+else:
+    STATSMODELS_IMPORT_ERROR = None
 
 try:
     from lightgbm import LGBMClassifier
@@ -85,8 +88,15 @@ from sklearn.datasets import (
 )
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.impute import SimpleImputer
-from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
-from sklearn.model_selection import ParameterGrid, train_test_split
+from sklearn.metrics import (
+    accuracy_score,
+    average_precision_score,
+    balanced_accuracy_score,
+    brier_score_loss,
+    f1_score,
+    roc_auc_score,
+)
+from sklearn.model_selection import GridSearchCV, ParameterGrid, StratifiedKFold, train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder
 
@@ -281,13 +291,14 @@ except Exception:
             },
             "RandomForest": {
                 "n_estimators": [200, 400],
-                "max_depth": [4, 8, None],
+                "max_depth": [4, 8],
                 "min_samples_leaf": [1, 5],
             },
             "EBM": {
                 "learning_rate": [0.01, 0.05],
                 "max_bins": [32, 64],
                 "interactions": [0, 5],
+                "max_rounds": [500]
             },
             "RuleFit": {
                 "n_estimators": [50, 100],
@@ -298,7 +309,7 @@ except Exception:
         return grids[model]
 
 
-RANDOM_STATE = 2026
+RANDOM_STATE = 42
 BUDGET = 100.0
 MODEL_ORDER = [
     "HUGIML",
@@ -481,7 +492,18 @@ def _model_feature_count(model, fallback: int) -> int:
 
 
 def _statsmodels_df(name: str) -> pd.DataFrame:
-    return getattr(sm.datasets, name).load_pandas().data.reset_index(drop=False)
+    if sm is None:
+        raise RuntimeError(
+            "statsmodels is required for this dataset. Install statsmodels or exclude "
+            "statsmodels-backed datasets from --datasets."
+        ) from STATSMODELS_IMPORT_ERROR
+    try:
+        dataset_obj = getattr(sm.datasets, name)
+    except AttributeError as exc:
+        raise RuntimeError(
+            f"statsmodels dataset {name!r} is not available in this statsmodels version."
+        ) from exc
+    return dataset_obj.load_pandas().data.reset_index(drop=False)
 
 
 def _synthetic_frame(
@@ -1112,6 +1134,380 @@ def metric_row(clf, X_test, y_test, fit_seconds, valid_auc, params, complexity, 
     }
 
 
+def _metric_value(fn, *args, **kwargs) -> float:
+    try:
+        value = float(fn(*args, **kwargs))
+        return value if math.isfinite(value) else float("nan")
+    except Exception:
+        return float("nan")
+
+
+def _runner_style_metrics(y_true, proba) -> dict[str, float]:
+    pred = (np.asarray(proba) >= 0.5).astype(int)
+    return {
+        "accuracy": _metric_value(accuracy_score, y_true, pred),
+        "balanced_accuracy": _metric_value(balanced_accuracy_score, y_true, pred),
+        "roc_auc": _metric_value(roc_auc_score, y_true, proba),
+        "avg_precision": _metric_value(average_precision_score, y_true, proba),
+        "brier": _metric_value(brier_score_loss, y_true, proba),
+        "f1": _metric_value(f1_score, y_true, pred, zero_division=0),
+    }
+
+
+def _validated_stratified_splits(y: np.ndarray, requested: int, *, label: str) -> int:
+    """Return a safe StratifiedKFold split count for binary benchmark data."""
+    y_arr = np.asarray(y)
+    classes, counts = np.unique(y_arr, return_counts=True)
+    if classes.size < 2:
+        raise ValueError(f"{label} requires at least two target classes.")
+    min_count = int(np.min(counts))
+    if min_count < 2:
+        raise ValueError(
+            f"{label} needs at least two samples in every class; smallest class has {min_count}."
+        )
+    return max(2, min(int(requested), min_count))
+
+
+def _prefix_grid_for_wrapped_model(grid: dict[str, list[Any]] | None) -> dict[str, list[Any]] | None:
+    if not grid:
+        return grid
+    return {f"model__{k}": list(v) for k, v in grid.items()}
+
+
+def _strip_model_prefix(params: dict[str, Any] | None) -> dict[str, Any]:
+    out: dict[str, Any] = {}
+    for key, value in dict(params or {}).items():
+        out[str(key).replace("model__", "", 1)] = value
+    return out
+
+
+def _finite_positive_ms(value: Any) -> float | None:
+    """Return a finite positive millisecond value, or None when unavailable."""
+    try:
+        out = float(value)
+    except Exception:
+        return None
+    if not math.isfinite(out) or out <= 0.0:
+        return None
+    return out
+
+
+def _model_fit_ms_from_metadata(model: Any) -> float | None:
+    """Read a fitted estimator's own final-fit timing metadata when present."""
+    metadata = getattr(model, "fit_metadata_", None)
+    if isinstance(metadata, dict):
+        for key in ("total_fit_ms", "fit_ms", "fit_time_ms"):
+            val = _finite_positive_ms(metadata.get(key))
+            if val is not None:
+                return val
+    for key in ("total_fit_ms", "fit_ms", "fit_time_ms"):
+        val = _finite_positive_ms(getattr(metadata, key, None))
+        if val is not None:
+            return val
+    return None
+
+
+def _final_refit_ms_from_info(model: Any, info: dict[str, Any] | None = None) -> float:
+    """Final estimator refit time for tuned runs, never tune/run elapsed time.
+
+    The tuning helpers return already-refit estimators. Older benchmark code left
+    fit_ms at 0.0 in that path. This helper populates fit_ms only when the
+    final refit itself is timed or exposed by estimator metadata; it deliberately
+    does not fall back to tune_ms or pair_seconds.
+    """
+    info = info or {}
+    val = _finite_positive_ms(info.pop("_final_refit_ms", None))
+    if val is not None:
+        return float(val)
+    val = _model_fit_ms_from_metadata(model)
+    return 0.0 if val is None else float(val)
+
+
+def _apply_row_cap(
+    X: pd.DataFrame,
+    y: np.ndarray,
+    *,
+    row_cap: int | None,
+    random_state: int,
+) -> tuple[pd.DataFrame, np.ndarray]:
+    if row_cap is not None and row_cap > 0 and len(y) > row_cap:
+        idx = np.arange(len(y))
+        keep, _ = train_test_split(idx, train_size=row_cap, stratify=y, random_state=random_state)
+        keep = np.sort(keep)
+        return X.iloc[keep].reset_index(drop=True), np.asarray(y, dtype=int)[keep]
+    return X.reset_index(drop=True), np.asarray(y, dtype=int, copy=True)
+
+
+def _hugiml_base_params_from_grid(
+    grid_dict: dict[str, list[Any]],
+    *,
+    hugiml_max_fit_seconds: float | None,
+) -> dict[str, Any]:
+    base_params: dict[str, Any] = {}
+    for key, values in grid_dict.items():
+        if len(values) == 1:
+            base_params[key] = copy.deepcopy(values[0])
+    base_params.setdefault("execution_mode", "production")
+    base_params.setdefault("n_jobs", 1)
+    if hugiml_max_fit_seconds is not None:
+        base_params.setdefault("max_fit_seconds", float(hugiml_max_fit_seconds))
+    return base_params
+
+
+def _tune_hugiml_inner_cv(
+    candidates: list[dict[str, Any]],
+    X_tr: pd.DataFrame,
+    y_tr: np.ndarray,
+    *,
+    inner_splits: int,
+    random_state: int,
+    hugiml_max_fit_seconds: float | None,
+) -> tuple[Any, dict[str, Any], float, float, dict[str, Any]]:
+    inner_splits = _validated_stratified_splits(y_tr, inner_splits, label="Inner HUGIML tuning CV")
+    if not hasattr(HUGIMLClassifierNative, "tune"):
+        raise RuntimeError("HUGIMLClassifierNative.tune is required for inner-CV tuning.")
+    grid_dict = _candidate_grid_dict(candidates)
+    base_params = _hugiml_base_params_from_grid(
+        grid_dict, hugiml_max_fit_seconds=hugiml_max_fit_seconds
+    )
+    t0 = time.perf_counter()
+    result = HUGIMLClassifierNative.tune(
+        X_tr,
+        y_tr,
+        cv=inner_splits,
+        shuffle=True,
+        random_state=random_state,
+        scoring="roc_auc",
+        param_grid=grid_dict,
+        base_params=base_params,
+        refit=True,
+        use_fast_path=True,
+    )
+    tune_ms = (time.perf_counter() - t0) * 1000.0
+    final_refit_ms = _model_fit_ms_from_metadata(getattr(result, "best_estimator_", None))
+    info = {
+        "_final_refit_ms": final_refit_ms,
+        "hugiml_fast_path_requested": True,
+        "hugiml_fast_path_used": bool(getattr(result, "fast_path_used_", True)),
+        "hugiml_tune_elapsed_seconds": getattr(result, "elapsed_seconds_", None),
+        "hugiml_tune_n_splits": getattr(result, "n_splits_", inner_splits),
+    }
+    return (
+        result.best_estimator_,
+        dict(getattr(result, "best_params_", {}) or {}),
+        float(getattr(result, "best_score_", float("nan"))),
+        tune_ms,
+        info,
+    )
+
+
+def _tune_pipeline_gridsearch(
+    candidates: list[dict[str, Any]],
+    builder,
+    X_tr: pd.DataFrame,
+    y_tr: np.ndarray,
+    *,
+    inner_splits: int,
+    random_state: int,
+) -> tuple[Any, dict[str, Any], float, float, dict[str, Any]]:
+    inner_splits = _validated_stratified_splits(y_tr, inner_splits, label="Inner tuning CV")
+    grid_dict = _candidate_grid_dict(candidates)
+    clf0 = _wrap_non_hugiml_pipeline(builder({}))
+    if not grid_dict:
+        t0 = time.perf_counter()
+        clf0.fit(X_tr, y_tr)
+        fit_ms = (time.perf_counter() - t0) * 1000.0
+        return clf0, {"static": True}, float("nan"), fit_ms, {"_final_refit_ms": fit_ms}
+    cv = StratifiedKFold(n_splits=inner_splits, shuffle=True, random_state=random_state)
+    search = GridSearchCV(
+        clf0,
+        _prefix_grid_for_wrapped_model(grid_dict),
+        scoring="roc_auc",
+        cv=cv,
+        n_jobs=-1,
+        refit=True,
+        error_score=np.nan,
+    )
+    t0 = time.perf_counter()
+    search.fit(X_tr, y_tr)
+    tune_ms = (time.perf_counter() - t0) * 1000.0
+    final_refit_ms = None
+    if hasattr(search, "refit_time_"):
+        final_refit_ms = float(search.refit_time_) * 1000.0
+    info = {"_final_refit_ms": final_refit_ms}
+    return search.best_estimator_, dict(search.best_params_), float(search.best_score_), tune_ms, info
+
+
+def _tune_budgeted_pipeline_inner_cv(
+    candidates: list[dict[str, Any]],
+    builder,
+    complexity_fn,
+    X_tr: pd.DataFrame,
+    y_tr: np.ndarray,
+    *,
+    budget: float,
+    inner_splits: int,
+    random_state: int,
+) -> tuple[Any, dict[str, Any], float, float, dict[str, Any]]:
+    inner_splits = _validated_stratified_splits(y_tr, inner_splits, label="Inner budgeted tuning CV")
+    cv = StratifiedKFold(n_splits=inner_splits, shuffle=True, random_state=random_state)
+    scored: list[tuple[float, float, dict[str, Any]]] = []
+    errors: list[str] = []
+    t0 = time.perf_counter()
+    for params in candidates:
+        fold_scores: list[float] = []
+        fold_complexities: list[float] = []
+        for tr_idx, va_idx in cv.split(X_tr, y_tr):
+            X_i_tr = X_tr.iloc[tr_idx] if isinstance(X_tr, pd.DataFrame) else X_tr[tr_idx]
+            X_i_va = X_tr.iloc[va_idx] if isinstance(X_tr, pd.DataFrame) else X_tr[va_idx]
+            y_i_tr, y_i_va = y_tr[tr_idx], y_tr[va_idx]
+            try:
+                clf = _wrap_non_hugiml_pipeline(builder(params))
+                clf.fit(X_i_tr, y_i_tr)
+                fold_scores.append(safe_auc(y_i_va, probas(clf, X_i_va)))
+                comp = complexity_fn(clf) if complexity_fn else None
+                if comp is not None:
+                    fold_complexities.append(float(comp))
+            except Exception as exc:
+                errors.append(repr(exc))
+                fold_scores.append(float("nan"))
+        score = float(np.nanmean(fold_scores)) if fold_scores else float("nan")
+        mean_comp = float(np.nanmean(fold_complexities)) if fold_complexities else float("inf")
+        scored.append((score, mean_comp, copy.deepcopy(params)))
+    scored.sort(key=lambda item: ((-1.0 if math.isnan(item[0]) else item[0]), -item[1]), reverse=True)
+    viable = [item for item in scored if math.isfinite(item[1]) and item[1] <= float(budget)]
+    ordered = viable or scored
+    last_error = None
+    for score, _, params in ordered:
+        try:
+            clf = _wrap_non_hugiml_pipeline(builder(params))
+            t_fit = time.perf_counter()
+            clf.fit(X_tr, y_tr)
+            final_refit_ms = (time.perf_counter() - t_fit) * 1000.0
+            comp = complexity_fn(clf) if complexity_fn else None
+            if viable and comp is not None and comp > budget:
+                continue
+            tune_ms = (time.perf_counter() - t0) * 1000.0
+            info = {"budgeted_inner_cv_errors": len(errors), "_final_refit_ms": final_refit_ms}
+            return clf, copy.deepcopy(params), float(score), tune_ms, info
+        except Exception as exc:
+            last_error = repr(exc)
+    raise RuntimeError(last_error or "No budgeted candidate completed inner-CV tuning.")
+
+
+def _fit_default_model(
+    model: str,
+    builder,
+    X_tr: pd.DataFrame,
+    y_tr: np.ndarray,
+) -> tuple[Any, float, float]:
+    clf = builder({}) if model == "HUGIML" else _wrap_non_hugiml_pipeline(builder({}))
+    t0 = time.perf_counter()
+    clf.fit(X_tr, y_tr)
+    fit_ms = (time.perf_counter() - t0) * 1000.0
+    return clf, fit_ms, 0.0
+
+
+def _evaluate_outer_fold(
+    clf,
+    X_te,
+    y_te,
+    *,
+    fold: int,
+    fit_ms: float,
+    tune_ms: float,
+    best_params: dict[str, Any],
+    best_inner_score: float,
+    complexity,
+    complexity_budget,
+    tuned: bool,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    t0 = time.perf_counter()
+    p = probas(clf, X_te)
+    predict_ms = (time.perf_counter() - t0) * 1000.0
+    row = _runner_style_metrics(y_te, p)
+    row.update(
+        {
+            "fold": int(fold),
+            "auc": row["roc_auc"],
+            "valid_auc": None
+            if best_inner_score is None or math.isnan(float(best_inner_score))
+            else float(best_inner_score),
+            "best_inner_score": None
+            if best_inner_score is None or math.isnan(float(best_inner_score))
+            else float(best_inner_score),
+            "best_params": json.dumps(best_params or {}, sort_keys=True, default=str),
+            "best_params_json": json.dumps(best_params or {}, sort_keys=True, default=str),
+            "complexity": None if complexity is None else float(complexity),
+            "complexity_budget": None if complexity_budget is None else float(complexity_budget),
+            "fit_ms": float(fit_ms),
+            "predict_ms": float(predict_ms),
+            "tune_ms": float(tune_ms),
+            "fit_seconds": float(fit_ms) / 1000.0,
+            "predict_seconds": float(predict_ms) / 1000.0,
+            "tune_seconds": float(tune_ms) / 1000.0,
+            "tuned": bool(tuned),
+        }
+    )
+    if extra:
+        row.update(extra)
+    return row
+
+
+def _mean_or_none(values: pd.Series) -> float | None:
+    nums = pd.to_numeric(values, errors="coerce").dropna()
+    return None if nums.empty else float(nums.mean())
+
+
+def _std_or_none(values: pd.Series) -> float | None:
+    nums = pd.to_numeric(values, errors="coerce").dropna()
+    return None if len(nums) < 2 else float(nums.std(ddof=1))
+
+
+def _aggregate_fold_rows(fold_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    df = pd.DataFrame(fold_rows)
+    row: dict[str, Any] = {}
+    mean_cols = [
+        "roc_auc",
+        "auc",
+        "accuracy",
+        "balanced_accuracy",
+        "avg_precision",
+        "brier",
+        "f1",
+        "valid_auc",
+        "best_inner_score",
+        "complexity",
+        "complexity_budget",
+        "fit_ms",
+        "predict_ms",
+        "tune_ms",
+        "fit_seconds",
+        "predict_seconds",
+        "tune_seconds",
+    ]
+    for col in mean_cols:
+        if col in df:
+            row[col] = _mean_or_none(df[col])
+    for col in ["roc_auc", "accuracy", "balanced_accuracy", "avg_precision", "brier", "f1"]:
+        if col in df:
+            row[f"std_{col}"] = _std_or_none(df[col])
+    if "best_params_json" in df and not df["best_params_json"].dropna().empty:
+        row["best_params_json"] = str(df["best_params_json"].dropna().iloc[0])
+    else:
+        row["best_params_json"] = "{}"
+    row["best_params_by_fold_json"] = json.dumps(
+        [r.get("best_params_json", "{}") for r in fold_rows], default=str
+    )
+    row["fold_rows_json"] = json.dumps(_safe_jsonable(fold_rows), default=str)
+    row["outer_folds_completed"] = int(len(fold_rows))
+    row["error_count"] = int(sum(int(r.get("error_count", 0) or 0) for r in fold_rows))
+    errors = [str(r.get("last_error")) for r in fold_rows if r.get("last_error")]
+    row["last_error"] = errors[-1] if errors else None
+    return row
+
+
 def xgb_complexity(model):
     model = _unwrap_model(model)
     try:
@@ -1225,6 +1621,128 @@ def fit_select(
     return best or fallback, errors
 
 
+def _candidate_grid_dict(candidates: list[dict[str, Any]]) -> dict[str, list[Any]]:
+    """Reconstruct the compact sklearn-style grid used to create candidates.
+
+    The benchmark stores model specs as an expanded ``ParameterGrid`` list.  The
+    HUGIML cached tuner accepts the original dict-of-lists representation, so
+    this helper rebuilds it while preserving first-seen value order.
+    """
+    keys: list[str] = []
+    seen_keys: set[str] = set()
+    for cand in candidates:
+        for key in cand:
+            if key not in seen_keys:
+                seen_keys.add(key)
+                keys.append(key)
+    grid: dict[str, list[Any]] = {}
+    for key in keys:
+        vals: list[Any] = []
+        seen_vals: set[str] = set()
+        for cand in candidates:
+            if key not in cand:
+                continue
+            val = cand[key]
+            marker = repr(val)
+            if marker not in seen_vals:
+                seen_vals.add(marker)
+                vals.append(copy.deepcopy(val))
+        grid[key] = vals
+    return grid
+
+
+def fit_select_hugiml_fast(
+    candidates, builder, X_train, y_train, X_val, y_val, complexity_fn=None, budget=None
+):
+    """Select HUGIML params through ``fast_grid_tune`` when the grid is eligible.
+
+    This keeps benchmark semantics aligned with the ordinary validation split:
+    select on train/validation, then let ``run_pair`` perform the same final
+    train+validation refit used for all models.  If the grid is not eligible for
+    the exact cached path, callers can fall back to the ordinary ``fit_select``.
+    """
+    errors: list[str] = []
+    info: dict[str, Any] = {"hugiml_fast_tune_used": False}
+    try:
+        if budget is not None:
+            raise RuntimeError("HUGIML fast tune path is not used with a complexity budget.")
+        if not hasattr(HUGIMLClassifierNative, "fast_grid_tune"):
+            raise RuntimeError("Installed HUGIML does not expose fast_grid_tune.")
+
+        param_grid = _candidate_grid_dict(list(candidates))
+        base_params: dict[str, Any] = {}
+        for key, vals in param_grid.items():
+            if len(vals) == 1:
+                base_params[key] = copy.deepcopy(vals[0])
+        base_params.setdefault("execution_mode", "production")
+        base_params.setdefault("n_jobs", 1)
+
+        t0 = time.perf_counter()
+        result = HUGIMLClassifierNative.fast_grid_tune(
+            X_train,
+            y_train,
+            X_val,
+            y_val,
+            param_grid=param_grid,
+            base_params=base_params,
+            scoring="roc_auc",
+            refit_full=False,
+            return_results=True,
+        )
+        elapsed = time.perf_counter() - t0
+
+        best_model = result["best_model"]
+        best_params = dict(base_params)
+        best_params.update(result.get("best_params") or {})
+        # ``builder`` owns benchmark-level defaults such as n_jobs and possible
+        # runtime caps.  Round-trip the selected params through it so the final
+        # refit receives the same normalized parameter dictionary as the ordinary
+        # path.
+        normalized = builder(best_params).get_params(deep=False)
+        for key, val in best_params.items():
+            normalized[key] = val
+        comp = complexity_fn(best_model) if complexity_fn else None
+        selected = (
+            float(result["best_score"]),
+            -float(comp or 0),
+            float(elapsed),
+            best_model,
+            copy.deepcopy(best_params),
+            comp,
+        )
+        info.update(
+            {
+                "hugiml_fast_tune_used": True,
+                "hugiml_fast_tune_method": result.get("method"),
+                "hugiml_fast_tune_elapsed_seconds": float(result.get("elapsed_seconds", elapsed)),
+                "hugiml_fast_tune_cache_fit_seconds_json": json.dumps(
+                    result.get("cache_fit_seconds_by_G_L_topK", {}),
+                    sort_keys=True,
+                    default=str,
+                ),
+                "hugiml_fast_tune_augmented_pair_cache_stats_json": json.dumps(
+                    result.get("native_augmented_pair_cache_stats"),
+                    sort_keys=True,
+                    default=str,
+                ),
+                "hugiml_fast_tune_validation_cache_entries": result.get(
+                    "validation_cache_entries"
+                ),
+                "hugiml_fast_tune_transaction_cache_entries": result.get(
+                    "transaction_cache_entries"
+                ),
+            }
+        )
+        return selected, errors, info
+    except Exception as exc:
+        errors.append(f"fast_grid_tune fallback: {type(exc).__name__}: {exc}")
+        selected, ordinary_errors = fit_select(
+            candidates, builder, X_train, y_train, X_val, y_val, complexity_fn, budget
+        )
+        errors.extend(ordinary_errors)
+        return selected, errors, info
+
+
 def fit_final(builder, params, X_fit, y_fit):
     clf = builder(params)
     t0 = time.perf_counter()
@@ -1326,7 +1844,7 @@ def get_model_spec(
         pp.setdefault("random_state", RANDOM_STATE)
         pp.setdefault("n_jobs", 1)
         pp.setdefault("outer_bags", 4)
-        pp.setdefault("max_rounds", 5000)
+        pp.setdefault("max_rounds", 500)
         return ExplainableBoostingClassifier(**pp)
 
     def rulefit_builder(params):
@@ -1356,8 +1874,14 @@ def run_pair(
     hugiml_scenario: str | None = None,
     row_cap: int | None = -1,
     hugiml_max_fit_seconds: float | None = None,
+    n_splits: int = 5,
+    inner_splits: int = 3,
+    tune: bool = True,
+    random_state: int | None = None,
 ) -> dict[str, Any]:
+    random_state = RANDOM_STATE if random_state is None else int(random_state)
     X, y, group = load_dataset(dataset)
+    X, y = _apply_row_cap(X, y, row_cap=row_cap, random_state=random_state)
     raw_features = int(X.shape[1])
     native_categorical_features = _categorical_columns(X)
 
@@ -1368,115 +1892,141 @@ def run_pair(
                 f"Saw columns={list(X.columns)} dtypes={X.dtypes.astype(str).to_dict()}"
             )
 
-    X_train, X_val, X_test, y_train, y_val, y_test = split_data(X, y, row_cap=row_cap)
-    # Preserve native categoricals, but force independent writable column storage
-    # for every model.  This prevents read-only ndarray/categorical-code views
-    # from leaking out of data generators or train_test_split slices.
-    X_train_native = _force_writable_frame(X_train.reset_index(drop=True))
-    X_val_native = _force_writable_frame(X_val.reset_index(drop=True))
-    X_test_native = _force_writable_frame(X_test.reset_index(drop=True))
-    X_fit_native = _force_writable_frame(
-        pd.concat([X_train_native, X_val_native], axis=0).reset_index(drop=True)
-    )
-    y_train = np.array(y_train, dtype=int, copy=True)
-    y_val = np.array(y_val, dtype=int, copy=True)
-    y_test = np.array(y_test, dtype=int, copy=True)
-    y_fit = np.array(np.concatenate([y_train, y_val]), dtype=int, copy=True)
-
     grid, builder, complexity_fn, budget = get_model_spec(
         model,
         hugiml_scenario=hugiml_scenario,
         hugiml_max_fit_seconds=hugiml_max_fit_seconds,
     )
+    n_splits = _validated_stratified_splits(y, n_splits, label="Outer benchmark CV")
+    cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
+    fold_rows: list[dict[str, Any]] = []
+    model_feature_counts: list[int] = []
 
-    preprocess_select_seconds = 0.0
-    preprocess_final_seconds = 0.0
-    preprocessing_policy = "HUGIML native categorical"
-    model_features = raw_features
+    for fold_idx, (tr_idx, te_idx) in enumerate(cv.split(X, y)):
+        X_train_native = _force_writable_frame(X.iloc[tr_idx].reset_index(drop=True))
+        X_test_native = _force_writable_frame(X.iloc[te_idx].reset_index(drop=True))
+        y_train = np.asarray(y[tr_idx], dtype=int, copy=True)
+        y_test = np.asarray(y[te_idx], dtype=int, copy=True)
+        params: dict[str, Any] = {}
+        best_inner_score = float("nan")
+        tune_ms = 0.0
+        fit_ms = 0.0
+        selection_info: dict[str, Any] = {}
+        error_count = 0
+        last_error = None
 
-    if model == "HUGIML":
-        X_train_model, X_val_model = X_train_native, X_val_native
-        X_fit_model, X_test_model = X_fit_native, X_test_native
-        final_prep = None
-    else:
-        # Fair + optimized baseline path:
-        #   * HUGIML's fit_seconds includes its internal preprocessing.
-        #   * Non-HUGIML fit_seconds includes one final OHE fit/transform plus
-        #     the selected estimator fit.
-        #   * Pair/grid time avoids unfair repeated OHE fitting by fitting OHE
-        #     once for validation selection and once for the final train+val fit.
-        X_train_model, X_val_model, select_prep, preprocess_select_seconds = (
-            _fit_transform_non_hugiml(X_train_native, X_val_native)
-        )
-        X_fit_model, X_test_model, final_prep, preprocess_final_seconds = _fit_transform_non_hugiml(
-            X_fit_native, X_test_native
-        )
-        model_features = _preprocessor_feature_count(final_prep, raw_features)
-        preprocessing_policy = "non-HUGIML train-fitted OHE, fitted once per split"
-
-    selected, errors = fit_select(
-        grid, builder, X_train_model, y_train, X_val_model, y_val, complexity_fn, budget
-    )
-    if selected is None:
-        row = {
-            "auc": None,
-            "f1": None,
-            "accuracy": None,
-            "valid_auc": None,
-            "complexity": None,
-            "complexity_budget": None if budget is None else float(budget),
-            "fit_seconds": None,
-            "model_fit_seconds": None,
-            "preprocess_fit_transform_seconds": preprocess_final_seconds,
-            "selection_preprocess_seconds": preprocess_select_seconds,
-            "best_params_json": "{}",
-            "error_count": len(errors),
-            "last_error": errors[-1] if errors else None,
-        }
-    else:
-        vauc, _, _, _, params, _ = selected
-        clf, model_fit_s = fit_final(builder, params, X_fit_model, y_fit)
-        fit_s = float(model_fit_s + (preprocess_final_seconds if model != "HUGIML" else 0.0))
-        comp = complexity_fn(clf)
-        if budget is not None and comp is not None and comp > budget:
-            viable = []
-            for params2 in grid:
-                try:
-                    # Rank by the original train/validation selection split, but
-                    # keep the final model trained on train+validation.
-                    clf_sel, _ = fit_final(builder, params2, X_train_model, y_train)
-                    vauc2 = safe_auc(y_val, probas(clf_sel, X_val_model))
-                    clf2, fs2 = fit_final(builder, params2, X_fit_model, y_fit)
-                    comp2 = complexity_fn(clf2)
-                    if comp2 is not None and comp2 <= budget:
-                        viable.append(
-                            (
-                                vauc2,
-                                comp2,
-                                float(
-                                    fs2 + (preprocess_final_seconds if model != "HUGIML" else 0.0)
-                                ),
-                                clf2,
-                                copy.deepcopy(params2),
+        try:
+            if model == "HUGIML":
+                X_train_model, X_test_model = X_train_native, X_test_native
+                if tune:
+                    clf, params, best_inner_score, tune_ms, selection_info = _tune_hugiml_inner_cv(
+                        grid,
+                        X_train_model,
+                        y_train,
+                        inner_splits=inner_splits,
+                        random_state=random_state,
+                        hugiml_max_fit_seconds=hugiml_max_fit_seconds,
+                    )
+                    fit_ms = _final_refit_ms_from_info(clf, selection_info)
+                else:
+                    clf, fit_ms, tune_ms = _fit_default_model(model, builder, X_train_model, y_train)
+                    selection_info = {"hugiml_fast_path_requested": False, "hugiml_fast_path_used": False}
+            else:
+                X_train_model, X_test_model = X_train_native, X_test_native
+                if tune:
+                    if budget is None:
+                        clf, params, best_inner_score, tune_ms, selection_info = _tune_pipeline_gridsearch(
+                            grid,
+                            builder,
+                            X_train_model,
+                            y_train,
+                            inner_splits=inner_splits,
+                            random_state=random_state,
+                        )
+                        fit_ms = _final_refit_ms_from_info(clf, selection_info)
+                    else:
+                        clf, params, best_inner_score, tune_ms, selection_info = (
+                            _tune_budgeted_pipeline_inner_cv(
+                                grid,
+                                builder,
+                                complexity_fn,
+                                X_train_model,
+                                y_train,
+                                budget=float(budget),
+                                inner_splits=inner_splits,
+                                random_state=random_state,
                             )
                         )
-                except Exception:
-                    pass
-            if viable:
-                viable.sort(key=lambda z: (z[0], -z[1]), reverse=True)
-                vauc, comp, fit_s, clf, params = viable[0]
-                model_fit_s = max(
-                    0.0, float(fit_s - (preprocess_final_seconds if model != "HUGIML" else 0.0))
-                )
-        effective_budget = params.get("topK") if model == "HUGIML" else budget
-        row = metric_row(
-            clf, X_test_model, y_test, fit_s, vauc, params, complexity_fn(clf), effective_budget
+                        fit_ms = _final_refit_ms_from_info(clf, selection_info)
+                else:
+                    clf, fit_ms, tune_ms = _fit_default_model(model, builder, X_train_model, y_train)
+
+            complexity = complexity_fn(clf) if complexity_fn else None
+            model_feature_counts.append(_model_feature_count(clf, raw_features))
+            effective_budget = params.get("topK") if model == "HUGIML" else budget
+            fold_row = _evaluate_outer_fold(
+                clf,
+                X_test_model,
+                y_test,
+                fold=fold_idx,
+                fit_ms=fit_ms,
+                tune_ms=tune_ms,
+                best_params=params,
+                best_inner_score=best_inner_score,
+                complexity=complexity,
+                complexity_budget=effective_budget,
+                tuned=tune,
+                extra=selection_info,
+            )
+        except Exception as exc:
+            error_count = 1
+            last_error = f"{type(exc).__name__}: {exc}"
+            fold_row = {
+                "fold": int(fold_idx),
+                "accuracy": None,
+                "balanced_accuracy": None,
+                "roc_auc": None,
+                "auc": None,
+                "avg_precision": None,
+                "brier": None,
+                "f1": None,
+                "valid_auc": None,
+                "best_inner_score": None,
+                "complexity": None,
+                "complexity_budget": None if budget is None else float(budget),
+                "fit_ms": None,
+                "predict_ms": None,
+                "tune_ms": None,
+                "fit_seconds": None,
+                "predict_seconds": None,
+                "tune_seconds": None,
+                "best_params": "{}",
+                "best_params_json": "{}",
+                "tuned": bool(tune),
+            }
+
+        fold_row.update(
+            {
+                "dataset": dataset,
+                "model": model,
+                "hugiml_scenario": hugiml_scenario if model == "HUGIML" else None,
+                "outer_n_splits": int(n_splits),
+                "inner_n_splits": int(inner_splits) if tune else None,
+                "random_state": int(random_state),
+                "error_count": error_count,
+                "last_error": last_error,
+            }
         )
-        row["model_fit_seconds"] = float(model_fit_s)
-        row["preprocess_fit_transform_seconds"] = float(preprocess_final_seconds)
-        row["selection_preprocess_seconds"] = float(preprocess_select_seconds)
-        row["error_count"] = len(errors)
-        row["last_error"] = errors[-1] if errors else None
+        fold_rows.append(fold_row)
+
+    row = _aggregate_fold_rows(fold_rows)
+    model_features = int(round(float(np.nanmean(model_feature_counts)))) if model_feature_counts else raw_features
+    preprocessing_policy = (
+        "HUGIML native categorical"
+        if model == "HUGIML"
+        else "runner-compatible Pipeline preprocessing fitted inside CV"
+    )
+    protocol = "outer_cv_inner_cv_tuning" if tune else "outer_cv_no_inner_tuning"
     row.update(
         {
             "dataset": dataset,
@@ -1493,10 +2043,20 @@ def run_pair(
             "source_root": str(SOURCE_ROOT) if SOURCE_ROOT is not None else "installed_package",
             "hugiml_imported_from": HUGIML_IMPORTED_FROM,
             "preprocessing_policy": preprocessing_policy,
+            "evaluation_protocol": protocol,
+            "outer_n_splits": int(n_splits),
+            "inner_n_splits": int(inner_splits) if tune else None,
+            "random_state": int(random_state),
+            "scoring": "roc_auc",
+            "tuned": bool(tune),
         }
     )
+    if model == "HUGIML":
+        row.setdefault("hugiml_fast_path_requested", bool(tune))
+        if tune and "hugiml_fast_path_used" not in row:
+            used = [r.get("hugiml_fast_path_used") for r in fold_rows if r.get("hugiml_fast_path_used") is not None]
+            row["hugiml_fast_path_used"] = bool(used and all(bool(v) for v in used))
     return row
-
 
 def _json_default(obj):
     if isinstance(obj, (np.integer,)):
@@ -1773,7 +2333,69 @@ def _build_scope_summaries(df: pd.DataFrame) -> dict[str, Any]:
     return {"summary_by_scope": flat_rows, "scope_tests": scope_tests}
 
 
+
+def _safe_number_or_none(value: Any) -> float | None:
+    """Return a finite float for numeric values, otherwise None."""
+    try:
+        if value is None:
+            return None
+        number = float(value)
+        return number if math.isfinite(number) else None
+    except Exception:
+        return None
+
+
+def _infer_complexity_budget(row: dict[str, Any]) -> float | None:
+    """Infer the aggregate complexity budget for older checkpoints.
+
+    Older checkpoint files stored ``complexity_budget`` only inside
+    ``fold_rows_json``.  Assembly builds a dataframe from top-level aggregate
+    rows, so normalize the schema before dataframe construction.
+    """
+    direct = _safe_number_or_none(row.get("complexity_budget"))
+    if direct is not None:
+        return direct
+
+    fold_rows_raw = row.get("fold_rows_json")
+    if fold_rows_raw:
+        try:
+            fold_rows = json.loads(fold_rows_raw) if isinstance(fold_rows_raw, str) else fold_rows_raw
+        except Exception:
+            fold_rows = []
+        budgets = [
+            value
+            for value in (_safe_number_or_none(fr.get("complexity_budget")) for fr in fold_rows)
+            if value is not None
+        ]
+        if budgets:
+            return float(np.mean(budgets))
+
+    # Last-resort fallbacks for very old rows without fold-level details.
+    # HUGIML's effective budget is the selected topK; budgeted baselines use
+    # the global benchmark budget.
+    try:
+        params = json.loads(row.get("best_params_json") or "{}")
+    except Exception:
+        params = {}
+    if row.get("model") == "HUGIML":
+        return _safe_number_or_none(params.get("topK"))
+    if "complexity-budgeted" in str(row.get("model", "")):
+        return float(BUDGET)
+    return None
+
+
+def _normalize_detail_rows_for_assembly(details: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Ensure older checkpoints expose fields required by dashboard assembly."""
+    normalized: list[dict[str, Any]] = []
+    for row in details:
+        item = dict(row)
+        if "complexity_budget" not in item or _safe_number_or_none(item.get("complexity_budget")) is None:
+            item["complexity_budget"] = _infer_complexity_budget(item)
+        normalized.append(item)
+    return normalized
+
 def _make_data_single(details: list[dict[str, Any]]) -> dict[str, Any]:
+    details = _normalize_detail_rows_for_assembly(details)
     df = pd.DataFrame(details)
     df = df[df["model"].isin(MODEL_ORDER) & df["dataset"].isin(DATASET_NAMES)].copy()
     order = {d: i for i, d in enumerate(DATASET_NAMES)}
@@ -1990,8 +2612,8 @@ def _make_data_single(details: list[dict[str, Any]]) -> dict[str, Any]:
                 if pd.isna(r["complexity"])
                 else int(r["complexity"]),
                 "complexity_budget": None
-                if pd.isna(r["complexity_budget"])
-                else float(r["complexity_budget"]),
+                if pd.isna(r.get("complexity_budget"))
+                else float(r.get("complexity_budget")),
                 "feature_mode": params.get("feature_mode"),
                 "topK": params.get("topK"),
                 "L": params.get("L"),
@@ -2051,6 +2673,7 @@ def make_data(details: list[dict[str, Any]]) -> dict[str, Any]:
     present in the checkpoint, a ``dashboard_scenarios`` array is embedded; the
     HTML dropdown swaps between those data objects client-side.
     """
+    details = _normalize_detail_rows_for_assembly(details)
     df = pd.DataFrame(details)
     if df.empty or "hugiml_scenario" not in df.columns:
         return _make_data_single(details)
@@ -2610,6 +3233,8 @@ def render_html(template_html: Path, data: dict[str, Any], out_html: Path) -> No
     out_html.write_text(text)
 
 
+
+
 def assemble_outputs(checkpoint: Path, out_dir: Path, template_html: Path) -> dict[str, Path]:
     payload = load_checkpoint(checkpoint)
     details = payload.get("results", [])
@@ -2754,6 +3379,10 @@ def main(argv=None) -> int:
         default=-1,
         help="Cap rows per dataset. Use -1 for the full dataset, which is the default",
     )
+    ap.add_argument("--n-splits", type=int, default=5, help="Outer StratifiedKFold split count")
+    ap.add_argument("--inner-splits", type=int, default=3, help="Inner tuning StratifiedKFold split count")
+    ap.add_argument("--random-state", type=int, default=42, help="Random seed for data generation and CV")
+    ap.add_argument("--no-tune", action="store_true", help="Disable inner-CV hyperparameter tuning")
     ap.add_argument(
         "--hugiml-max-fit-seconds",
         type=float,
@@ -2761,6 +3390,9 @@ def main(argv=None) -> int:
         help="Optional base parameter for constrained environments",
     )
     args = ap.parse_args(argv)
+
+    global RANDOM_STATE
+    RANDOM_STATE = int(args.random_state)
 
     out_dir = _resolve_output_dir(args.out_dir)
     checkpoint = _resolve_checkpoint(args.checkpoint, out_dir)
@@ -2821,6 +3453,10 @@ def main(argv=None) -> int:
         {
             "random_state": RANDOM_STATE,
             "row_cap": args.row_cap,
+            "n_splits": args.n_splits,
+            "inner_splits": args.inner_splits,
+            "tune": not args.no_tune,
+            "evaluation_protocol": "outer_cv_inner_cv_tuning" if not args.no_tune else "outer_cv_no_inner_tuning",
             "hugiml_max_fit_seconds": args.hugiml_max_fit_seconds,
             "grid_snapshot": grid_snapshot(),
             "hugiml_dashboard_scenarios": HUGIML_SCENARIOS,
@@ -2846,6 +3482,10 @@ def main(argv=None) -> int:
             hugiml_scenario=hugiml_scenario,
             row_cap=args.row_cap,
             hugiml_max_fit_seconds=args.hugiml_max_fit_seconds,
+            n_splits=args.n_splits,
+            inner_splits=args.inner_splits,
+            tune=not args.no_tune,
+            random_state=args.random_state,
         )
         row["pair_seconds"] = float(time.perf_counter() - started)
         payload["results"] = [
@@ -2862,6 +3502,8 @@ def main(argv=None) -> int:
                     "model": model,
                     "hugiml_scenario": hugiml_scenario,
                     "auc": row.get("auc"),
+                    "roc_auc": row.get("roc_auc"),
+                    "best_inner_score": row.get("best_inner_score"),
                     "complexity": row.get("complexity"),
                     "seconds": row.get("pair_seconds"),
                 },

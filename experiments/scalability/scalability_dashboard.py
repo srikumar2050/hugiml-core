@@ -3,9 +3,7 @@ from __future__ import annotations
 
 import argparse
 import csv
-import html
 import json
-import os
 import platform
 import shutil
 import subprocess
@@ -24,18 +22,53 @@ DATASETS = ("sparse_nonlinear", "threshold_grid")
 MODEL_SPECS: dict[str, dict[str, Any]] = {
     "hug_op_adaptive_full": {"family": "hug", "feature_mode": "original_plus_patterns", "scenario": "adaptive_full", "label": "HUG OP adaptive full"},
     "hug_op_adaptive_s20": {"family": "hug", "feature_mode": "original_plus_patterns", "scenario": "adaptive_s20", "label": "HUG OP adaptive 20%"},
-    "hug_op_b8": {"family": "hug", "feature_mode": "original_plus_patterns", "scenario": "B8", "label": "HUG OP B=8"},
     "hug_po_adaptive_full": {"family": "hug", "feature_mode": "patterns_only", "scenario": "adaptive_full", "label": "HUG PO adaptive full"},
     "hug_po_adaptive_s20": {"family": "hug", "feature_mode": "patterns_only", "scenario": "adaptive_s20", "label": "HUG PO adaptive 20%"},
-    "hug_po_b8": {"family": "hug", "feature_mode": "patterns_only", "scenario": "B8", "label": "HUG PO B=8"},
     "xgb": {"family": "xgb", "feature_mode": "baseline", "scenario": "baseline", "label": "XGBoost"},
     "lgb": {"family": "lgb", "feature_mode": "baseline", "scenario": "baseline", "label": "LightGBM"},
 }
 MODELS = tuple(MODEL_SPECS.keys())
 
+# The second dataset has 10x predictors in n-scaling (p=200 vs p=20).
+# When --max-n is supplied, cap its n-scaling sweep at 1/10th of the
+# first dataset's cap so a request such as --max-n 10Mn runs:
+#   sparse_nonlinear <= 10,000,000 and threshold_grid <= 1,000,000.
+N_SCALING_MAX_N_FRACTION: dict[str, float] = {
+    DATASETS[0]: 1.0,
+    DATASETS[1]: 0.1,
+}
+
 N_SCALING = {
-    "sparse_nonlinear": [(10_000, 20), (50_000, 20), (100_000, 20), (500_000, 20), (1_000_000, 20), (3_000_000, 20), (5_000_000, 20), (10_000_000, 20)],
-    "threshold_grid": [(1_000, 200), (5_000, 200), (10_000, 200), (50_000, 200), (100_000, 200), (300_000, 200), (500_000, 200), (1_000_000, 200)],
+    "sparse_nonlinear": [
+        (10_000, 20),
+        (50_000, 20),
+        (100_000, 20),
+        (500_000, 20),
+        (1_000_000, 20),
+        (3_000_000, 20),
+        (5_000_000, 20),
+        (10_000_000, 20),
+        (50_000_000, 20),
+        (100_000_000, 20),
+        (500_000_000, 20),
+        (1_000_000_000, 20),
+    ],
+    "threshold_grid": [
+        # 10x predictor count versus sparse_nonlinear n-scaling, so keep the
+        # sample-size ladder at roughly 1/10th of the first dataset ladder.
+        (1_000, 200),
+        (5_000, 200),
+        (10_000, 200),
+        (50_000, 200),
+        (100_000, 200),
+        (300_000, 200),
+        (500_000, 200),
+        (1_000_000, 200),
+        (5_000_000, 200),
+        (10_000_000, 200),
+        (50_000_000, 200),
+        (100_000_000, 200),
+    ],
 }
 P_SCALING = {
     "sparse_nonlinear": [(50_000, 20), (100_000, 100), (10_000, 1_000), (5_000, 2_000), (2_500, 4_000), (2_000, 5_000), (1_000, 10_000)],
@@ -71,6 +104,82 @@ def temp_path_for(path: Path) -> Path:
 def resolve_outdir(raw: str | None) -> Path:
     return Path(raw).expanduser().resolve() if raw else DEFAULT_OUTDIR
 
+
+def parse_size_count(raw: str | int | None) -> int | None:
+    """Parse counts with optional k, m, mn, b, or bn suffixes."""
+    if raw is None:
+        return None
+    if isinstance(raw, int):
+        return raw
+    text = str(raw).strip().lower().replace(",", "").replace("_", "")
+    if text in {"", "none", "all", "-1"}:
+        return None
+    multipliers = {
+        "k": 1_000,
+        "m": 1_000_000,
+        "mn": 1_000_000,
+        "b": 1_000_000_000,
+        "bn": 1_000_000_000,
+    }
+    for suffix, multiplier in sorted(multipliers.items(), key=lambda item: -len(item[0])):
+        if text.endswith(suffix):
+            number = text[: -len(suffix)]
+            if not number:
+                raise argparse.ArgumentTypeError(f"invalid count: {raw!r}")
+            return int(float(number) * multiplier)
+    try:
+        return int(float(text))
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(f"invalid count: {raw!r}") from exc
+
+
+def effective_max_n_for_task(t: dict[str, Any], max_n: int | None) -> int | None:
+    """Return the effective --max-n cap for a task.
+
+    The high-p threshold_grid n-scaling experiment uses 10x predictors, so its
+    n-scaling cap is intentionally 1/10th of the global cap. Other sections keep
+    the user-supplied cap unchanged.
+    """
+    if max_n is None or int(max_n) <= 0:
+        return None
+    cap = int(max_n)
+    if t.get("section") == "n_scaling":
+        frac = float(N_SCALING_MAX_N_FRACTION.get(str(t.get("dataset")), 1.0))
+        cap = max(1, int(cap * frac))
+    return cap
+
+
+def apply_size_caps(
+    tasks: list[dict[str, Any]],
+    *,
+    max_n: int | None = None,
+    max_p: int | None = None,
+) -> list[dict[str, Any]]:
+    """Return tasks whose configured sample and feature counts are within limits."""
+    out = tasks
+    if max_n is not None and int(max_n) > 0:
+        out = [t for t in out if int(t.get("n", 0)) <= int(effective_max_n_for_task(t, max_n) or max_n)]
+    if max_p is not None and int(max_p) > 0:
+        out = [t for t in out if int(t.get("p", 0)) <= int(max_p)]
+    return out
+
+
+def task_filter_summary(tasks: list[dict[str, Any]]) -> dict[str, Any]:
+    ns = [int(t["n"]) for t in tasks]
+    ps = [int(t["p"]) for t in tasks]
+    sections = sorted({str(t["section"]) for t in tasks})
+    datasets = sorted({str(t["dataset"]) for t in tasks})
+    models = sorted({str(t["model"]) for t in tasks})
+    return {
+        "task_count": len(tasks),
+        "min_n": min(ns) if ns else None,
+        "max_n": max(ns) if ns else None,
+        "min_p": min(ps) if ps else None,
+        "max_p": max(ps) if ps else None,
+        "sections": sections,
+        "datasets": datasets,
+        "models": models,
+    }
 
 
 def get_total_memory_mb() -> int | None:
@@ -223,10 +332,7 @@ def hug_params_for(model: str, sweep_name: str | None = None, sweep_value: Any =
         "topk_budget_strict": spec["feature_mode"] == "original_plus_patterns",
     }
     scenario = spec["scenario"]
-    if scenario == "B8":
-        p.update({"adaptive_binning": False, "B": 8})
-        p.pop("b_candidates", None)
-    elif scenario == "adaptive_s20":
+    if scenario == "adaptive_s20":
         p["adaptive_binning_sample_frac"] = 0.20
 
     if sweep_name == "B":
@@ -552,15 +658,35 @@ def run_all(args: argparse.Namespace) -> None:
         "sweeps": SWEEP,
         "primary_memory_metric": "peak process-tree RSS during the full worker task",
         "fit_memory_metric": "peak RSS during clf.fit minus RSS immediately before clf.fit",
+        "task_limits": {
+            "max_n": args.max_n,
+            "max_p": args.max_p,
+            "n_scaling_max_n_fraction": N_SCALING_MAX_N_FRACTION,
+            "include_sweeps": not args.no_sweeps,
+            "only_section": args.only_section,
+            "only_dataset": args.only_dataset,
+            "only_model": args.only_model,
+        },
     }
     done = {r["key"] for r in ckpt.get("results", []) if r.get("status") == "ok"}
     tasks = make_tasks(include_sweeps=not args.no_sweeps)
+    tasks = apply_size_caps(tasks, max_n=args.max_n, max_p=args.max_p)
     if args.only_section:
         tasks = [t for t in tasks if t["section"] == args.only_section]
     if args.only_dataset:
         tasks = [t for t in tasks if t["dataset"] == args.only_dataset]
     if args.only_model:
         tasks = [t for t in tasks if t["model"] == args.only_model]
+    selected_task_summary = task_filter_summary(tasks)
+    ckpt["metadata"]["selected_task_summary"] = selected_task_summary
+    print(
+        "selected "
+        f"{selected_task_summary['task_count']} tasks "
+        f"with n<= {args.max_n if args.max_n else 'all'} "
+        f"and p<= {args.max_p if args.max_p else 'all'}",
+        flush=True,
+    )
+    save_ckpt(ckpt_path, ckpt)
     if getattr(args, "start_task", 0):
         tasks = tasks[int(args.start_task):]
     if args.max_tasks is not None:
@@ -588,7 +714,18 @@ def numeric(value: Any) -> float | None:
 def flatten_results(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for r in results:
+        # Drop rows from retired scenarios (for example the removed HUG OP/PO B=8
+        # cases) so resumed/assembled dashboards do not reintroduce them from an
+        # older checkpoint.
+        if r.get("model") not in MODEL_SPECS:
+            continue
         mem = r.get("memory_mb") or {}
+        fit_s = r.get("fit_s") if r.get("fit_s") is not None else r.get("fit_seconds")
+        predict_s = r.get("predict_s") if r.get("predict_s") is not None else r.get("predict_seconds")
+        auc = r.get("auc") if r.get("auc") is not None else r.get("roc_auc")
+        peak_rss_mb = r.get("peak_process_tree_rss_mb")
+        if peak_rss_mb is None:
+            peak_rss_mb = mem.get("peak_fit_window")
         rows.append({
             "dataset": r.get("dataset"),
             "section": r.get("section"),
@@ -602,15 +739,15 @@ def flatten_results(results: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "n": r.get("n"),
             "p": r.get("p"),
             "status": r.get("status"),
-            "fit_s": r.get("fit_s"),
-            "predict_s": r.get("predict_s"),
-            "auc": r.get("auc"),
+            "fit_s": fit_s,
+            "predict_s": predict_s,
+            "auc": auc,
             "patterns": r.get("patterns"),
             "fit_delta_from_before_fit_mb": mem.get("fit_delta_from_before_fit"),
             "fit_delta_from_after_data_mb": mem.get("fit_delta_from_after_data"),
-            "peak_process_tree_rss_mb": r.get("peak_process_tree_rss_mb"),
-            "memory_plot_mb": r.get("peak_process_tree_rss_mb"),
-            "memory_plot_gb": (float(r.get("peak_process_tree_rss_mb")) / 1024.0) if r.get("peak_process_tree_rss_mb") is not None else None,
+            "peak_process_tree_rss_mb": peak_rss_mb,
+            "memory_plot_mb": peak_rss_mb,
+            "memory_plot_gb": (float(peak_rss_mb) / 1024.0) if peak_rss_mb is not None else None,
             "error": r.get("error"),
         })
     return rows
@@ -771,6 +908,8 @@ function fA(v){const n=num(v);return n==null?'—':n.toFixed(4);}
 function fGB(v){const n=num(v);return n==null?'—':n.toLocaleString(undefined,{maximumFractionDigits:n>=10?1:2})+' GB';}
 function fRaw(v){return v==null?'—':String(v);}
 function dsLabel(ds){return ds==='sparse_nonlinear'?'Sparse nonlinear':'Threshold grid';}
+function dsPredictorCount(ds){return ds==='threshold_grid'?200:20;}
+function dsScaleLabel(ds){const maxN=latestX(ds,'n_scaling','n'); return dsLabel(ds)+' — '+fN(maxN)+' × '+fP(dsPredictorCount(ds));}
 function currentDs(){return document.getElementById('dsSel').value || (payload.datasets||[])[0];}
 function rowsFor(ds,section){return allRows.filter(r=>r.dataset===ds && r.section===section && modelOrder.includes(r.model));}
 function sweepRows(ds,name){return allRows.filter(r=>r.dataset===ds && (r.sweep_name===name || r.section==='parameter_sweep_'+name));}
@@ -793,7 +932,7 @@ function slopeNote(ds,section,metric,fmt){const xKey=section==='n_scaling'?'n':'
 function fillTable(id,ds,section){const xKey=section==='n_scaling'?'n':'p';const xs=valuesFor(ds,section,xKey);let html='';for(const m of modelOrder){const rows=xs.map(x=>rowsAt(ds,section,xKey,x).find(r=>r.model===m)).filter(Boolean);if(rows.length===0)continue;html+=`<details style="margin-bottom:10px;padding:8px;border:1px solid var(--ln);border-radius:6px"><summary style="cursor:pointer;font-weight:700">${labels[m]}</summary><table style="width:100%;margin-top:8px;font-size:11px"><thead><tr><th style="padding:4px">${xKey}</th><th class="r">Fit</th><th class="r">AUC</th><th class="r">Peak RSS</th><th class="r">Patterns</th></tr></thead><tbody>${rows.map(r=>`<tr><td style="padding:4px">${xKey==='n'?fN(r[xKey]):fP(r[xKey])}</td><td class="r">${fS(r.fit_s)}</td><td class="r">${fA(r.auc)}</td><td class="r">${r.memory_plot_gb!=null?r.memory_plot_gb.toFixed(1):'-'} GB</td><td class="r">${r.patterns??'—'}</td></tr>`).join('')}</tbody></table></details>`;}document.getElementById(id).innerHTML=html;}
 function fillMemoryTable(id,ds,section){const xKey=section==='n_scaling'?'n':'p'; const xs=valuesFor(ds,section,xKey); let head='<thead><tr><th>'+xKey+'</th>'+modelOrder.map(m=>'<th class="r">'+esc(labels[m])+'</th>').join('')+'</tr></thead>'; const rowsHtml=xs.map(x=>'<tr><td>'+esc(xKey==='n'?fN(x):fP(x))+'</td>'+modelOrder.map(m=>{const r=rowsAt(ds,section,xKey,x).find(rr=>rr.model===m);return '<td class="r">'+fGB(r&&r.memory_plot_gb)+'</td>';}).join('')+'</tr>').join(''); document.getElementById(id).innerHTML=head+'<tbody>'+rowsHtml+'</tbody>';}
 function snapshot(ds){const n=latestX(ds,'n_scaling','n'); const rs=rowsAt(ds,'n_scaling','n',n).sort((a,b)=>modelOrder.indexOf(a.model)-modelOrder.indexOf(b.model)); document.getElementById('snapshot_title').textContent='Latest n-scaling snapshot at n='+fN(n); const bf=bestRow(rs,'fit_s'), ba=bestRow(rs,'auc','max'), bm=bestRow(rs,'memory_plot_gb'); document.getElementById('snapshot_note').textContent=rs.length?`Fastest fit: ${labels[bf.model]} (${fS(bf.fit_s)}). Best AUC: ${labels[ba.model]} (${fA(ba.auc)}). Lowest peak memory: ${labels[bm.model]} (${fGB(bm.memory_plot_gb)}).`:'No completed rows.'; document.getElementById('snapshot_tbl').innerHTML='<thead><tr><th>Model</th><th>Scenario</th><th class="r">Fit</th><th class="r">Predict</th><th class="r">AUC</th><th class="r">Peak RSS</th><th class="r">Patterns</th></tr></thead><tbody>'+rs.map(r=>'<tr><td>'+modelTag(r.model)+'</td><td>'+esc(r.scenario)+'</td><td class="r">'+fS(r.fit_s)+'</td><td class="r">'+fS(r.predict_s)+'</td><td class="r">'+fA(r.auc)+'</td><td class="r">'+fGB(r.memory_plot_gb)+'</td><td class="r">'+(r.patterns??'—')+'</td></tr>').join('')+'</tbody>';}
-function updateOverview(){const ds=currentDs(); const ns=rowsFor(ds,'n_scaling'); const ps=rowsFor(ds,'p_scaling'); const maxN=latestX(ds,'n_scaling','n'); const maxP=latestX(ds,'p_scaling','p'); const nModels=uniq(allRows.map(r=>r.model)).length;const nDatasets=uniq(allRows.map(r=>r.dataset)).length;document.getElementById('sideSub').textContent=nModels+' models, '+nDatasets+' datasets'; document.getElementById('dsNote').textContent=ds==='sparse_nonlinear'?'Dense nonlinear signal with n-scaling to '+fN(maxN)+'.':'Threshold and local-interaction signal with n-scaling to '+fN(maxN)+'.'; document.getElementById('ov_title').textContent=dsLabel(ds)+' scalability'; document.getElementById('ov_desc').textContent='End-to-end comparison of eight model scenarios across sample-size scaling, feature-count scaling, peak task memory, and HUGIML hyperparameter sweeps.'; document.getElementById('ov_chips').innerHTML=['Complete coverage',modelOrder.length+' model variants','n up to '+fN(maxN),'p up to '+fP(maxP)].map(x=>'<span class="chip">'+esc(x)+'</span>').join(''); const latest=rowsAt(ds,'n_scaling','n',maxN); const bf=bestRow(latest,'fit_s'), ba=bestRow(latest,'auc','max'), bm=bestRow(latest,'memory_plot_gb'), bp=bestRow(latest,'patterns','max'); const kpis=[['Largest completed n',fN(maxN),latest.length+' model rows'],['Fastest fit',bf?labels[bf.model]:'—',bf?fS(bf.fit_s):'—'],['Best AUC',ba?labels[ba.model]:'—',ba?fA(ba.auc):'—'],['Lowest peak RSS',bm?labels[bm.model]:'—',bm?fGB(bm.memory_plot_gb):'—']]; document.getElementById('kpi_row').innerHTML=kpis.map((k,i)=>'<div class="card kpi"><div class="kl">'+esc(k[0])+'</div><div class="kv">'+esc(k[1])+'</div><div class="ks">'+esc(k[2])+'</div></div>').join(''); document.getElementById('ov_fit_ni').textContent=sectionNote(ds,'n_scaling','fit_s','shortest fit time',fS,'min'); document.getElementById('ov_auc_ni').textContent=sectionNote(ds,'n_scaling','auc','highest test AUC',fA,'max'); document.getElementById('ov_mem_ni').textContent=sectionNote(ds,'n_scaling','memory_plot_gb','lowest peak task RSS',fGB,'min'); const bf2=bestRow(rowsFor(ds,'n_scaling'),'fit_s');const ba2=bestRow(rowsFor(ds,'n_scaling'),'auc','max');const pRows=rowsAt(ds,'p_scaling','p',maxP);const nsAucRows=rowsFor(ds,'n_scaling');const nsAucVals=nsAucRows.map(r=>r.auc).filter(v=>v!=null);const auc_range=nsAucVals.length?`${fA(Math.min(...nsAucVals))} to ${fA(Math.max(...nsAucVals))}`:'-';document.getElementById('ov_insights').innerHTML=[bf2?`${labels[bf2.model]} dominates fit performance at ${fS(bf2.fit_s)}, remaining competitive on accuracy across all data sizes.`:'',ba2?`${labels[ba2.model]} delivers best test AUC (${fA(ba2.auc)}); full range across models is ${auc_range}.`:'',`Strong scaling invariance: fit time and accuracy stable from n=${fN(latestX(ds,'n_scaling','n'))} to n=${fN(latestX(ds,'n_scaling','n'))}; no model degradation at scale.`,`${pRows.length}/${modelOrder.length} models scale to maximum feature count (p=${fP(maxP)}); parameter sweeps reveal sensitivity to hyperparameter tuning choices.`].filter(Boolean).map(x=>'<div>'+esc(x)+'</div>').join(''); snapshot(ds); lineChart('ovFit',ds,'n_scaling','n','fit_s',{legendId:'legend_ov_fit',logY:true}); lineChart('ovAuc',ds,'n_scaling','n','auc',{legendId:'legend_ov_auc'}); lineChart('ovMem',ds,'n_scaling','n','memory_plot_gb',{legendId:'legend_ov_mem'});}
+function updateOverview(){const ds=currentDs(); const ns=rowsFor(ds,'n_scaling'); const ps=rowsFor(ds,'p_scaling'); const maxN=latestX(ds,'n_scaling','n'); const maxP=latestX(ds,'p_scaling','p'); const nModels=uniq(allRows.map(r=>r.model)).length;const nDatasets=uniq(allRows.map(r=>r.dataset)).length;document.getElementById('sideSub').textContent=nModels+' models, '+nDatasets+' datasets'; document.getElementById('dsNote').textContent=ds==='sparse_nonlinear'?'Dense nonlinear signal: completed to '+fN(maxN)+' × 20.':'Threshold/local-interaction signal: completed to '+fN(maxN)+' × 200.'; document.getElementById('ov_title').textContent=dsLabel(ds)+' scalability'; document.getElementById('ov_desc').textContent='End-to-end comparison of the active model scenarios across sample-size scaling, feature-count scaling, peak task memory, and HUGIML hyperparameter sweeps.'; document.getElementById('ov_chips').innerHTML=['Complete coverage',modelOrder.length+' model variants','n up to '+fN(maxN),'p up to '+fP(maxP)].map(x=>'<span class="chip">'+esc(x)+'</span>').join(''); const latest=rowsAt(ds,'n_scaling','n',maxN); const bf=bestRow(latest,'fit_s'), ba=bestRow(latest,'auc','max'), bm=bestRow(latest,'memory_plot_gb'), bp=bestRow(latest,'patterns','max'); const kpis=[['Largest completed n',fN(maxN),latest.length+' model rows'],['Fastest fit',bf?labels[bf.model]:'—',bf?fS(bf.fit_s):'—'],['Best AUC',ba?labels[ba.model]:'—',ba?fA(ba.auc):'—'],['Lowest peak RSS',bm?labels[bm.model]:'—',bm?fGB(bm.memory_plot_gb):'—']]; document.getElementById('kpi_row').innerHTML=kpis.map((k,i)=>'<div class="card kpi"><div class="kl">'+esc(k[0])+'</div><div class="kv">'+esc(k[1])+'</div><div class="ks">'+esc(k[2])+'</div></div>').join(''); document.getElementById('ov_fit_ni').textContent=sectionNote(ds,'n_scaling','fit_s','shortest fit time',fS,'min'); document.getElementById('ov_auc_ni').textContent=sectionNote(ds,'n_scaling','auc','highest test AUC',fA,'max'); document.getElementById('ov_mem_ni').textContent=sectionNote(ds,'n_scaling','memory_plot_gb','lowest peak task RSS',fGB,'min'); const bf2=bestRow(rowsFor(ds,'n_scaling'),'fit_s');const ba2=bestRow(rowsFor(ds,'n_scaling'),'auc','max');const pRows=rowsAt(ds,'p_scaling','p',maxP);const nsAucRows=rowsFor(ds,'n_scaling');const nsAucVals=nsAucRows.map(r=>r.auc).filter(v=>v!=null);const auc_range=nsAucVals.length?`${fA(Math.min(...nsAucVals))} to ${fA(Math.max(...nsAucVals))}`:'-';document.getElementById('ov_insights').innerHTML=[bf2?`${labels[bf2.model]} dominates fit performance at ${fS(bf2.fit_s)}, remaining competitive on accuracy across all data sizes.`:'',ba2?`${labels[ba2.model]} delivers best test AUC (${fA(ba2.auc)}); full range across models is ${auc_range}.`:'',`Strong scaling invariance: fit time and accuracy stable from n=${fN(latestX(ds,'n_scaling','n'))} to n=${fN(latestX(ds,'n_scaling','n'))}; no model degradation at scale.`,`${pRows.length}/${modelOrder.length} models scale to maximum feature count (p=${fP(maxP)}); parameter sweeps reveal sensitivity to hyperparameter tuning choices.`].filter(Boolean).map(x=>'<div>'+esc(x)+'</div>').join(''); snapshot(ds); lineChart('ovFit',ds,'n_scaling','n','fit_s',{legendId:'legend_ov_fit',logY:true}); lineChart('ovAuc',ds,'n_scaling','n','auc',{legendId:'legend_ov_auc'}); lineChart('ovMem',ds,'n_scaling','n','memory_plot_gb',{legendId:'legend_ov_mem'});}
 function updateScaling(){const ds=currentDs(); const maxN=latestX(ds,'n_scaling','n'), maxP=latestX(ds,'p_scaling','p'); document.getElementById('ns_hero').textContent='Sample size varies while p is fixed for each dataset. Charts use log scaling for fit time to keep small and large runs readable.'; document.getElementById('ps_hero').textContent='Feature count varies while n is adjusted by the configured grid. Ratio view divides each model fit time by XGBoost at the same p.'; document.getElementById('ns_fit_ni').textContent=sectionNote(ds,'n_scaling','fit_s','shortest fit time',fS,'min'); document.getElementById('ns_auc_ni').textContent=sectionNote(ds,'n_scaling','auc','highest test AUC',fA,'max'); document.getElementById('ns_mem_ni').textContent=sectionNote(ds,'n_scaling','memory_plot_gb','lowest peak task RSS',fGB,'min')+' '+slopeNote(ds,'n_scaling','memory_plot_gb',fGB); document.getElementById('ns_pat_ni').textContent=sectionNote(ds,'n_scaling','patterns','highest pattern count',v=>String(v)+' patterns','max'); document.getElementById('ps_fit_ni').textContent=sectionNote(ds,'p_scaling','fit_s','shortest fit time',fS,'min'); document.getElementById('ps_auc_ni').textContent=sectionNote(ds,'p_scaling','auc','highest test AUC',fA,'max'); document.getElementById('ps_mem_ni').textContent=sectionNote(ds,'p_scaling','memory_plot_gb','lowest peak task RSS',fGB,'min'); document.getElementById('ps_ratio_ni').textContent=`At the largest completed p (${fP(maxP)}), values below 1.0 mean the scenario fits faster than XGBoost on the same data.`; lineChart('nsFit',ds,'n_scaling','n','fit_s',{legendId:'legend_ns_fit',logY:true}); lineChart('nsAuc',ds,'n_scaling','n','auc',{legendId:'legend_ns_auc'}); lineChart('nsMem',ds,'n_scaling','n','memory_plot_gb',{legendId:'legend_ns_mem'}); lineChart('nsPat',ds,'n_scaling','n','patterns',{legendId:'legend_ns_pat'}); lineChart('psFit',ds,'p_scaling','p','fit_s',{legendId:'legend_ps_fit',logY:true}); ratioChart(ds); lineChart('psAuc',ds,'p_scaling','p','auc',{legendId:'legend_ps_auc'}); lineChart('psMem',ds,'p_scaling','p','memory_plot_gb',{legendId:'legend_ps_mem'}); fillTable('nsTbl',ds,'n_scaling'); fillTable('psTbl',ds,'p_scaling');}
 function updateMemory(){const ds=currentDs(); document.getElementById('mem_n_ni').textContent=sectionNote(ds,'n_scaling','memory_plot_gb','lowest peak task RSS',fGB,'min')+' '+slopeNote(ds,'n_scaling','memory_plot_gb',fGB); document.getElementById('mem_p_ni').textContent=sectionNote(ds,'p_scaling','memory_plot_gb','lowest peak task RSS',fGB,'min')+' '+slopeNote(ds,'p_scaling','memory_plot_gb',fGB); lineChart('memN',ds,'n_scaling','n','memory_plot_gb',{legendId:'legend_mem_n'}); lineChart('memP',ds,'p_scaling','p','memory_plot_gb',{legendId:'legend_mem_p'}); fillMemoryTable('memTblN',ds,'n_scaling'); fillMemoryTable('memTblP',ds,'p_scaling');}
 function sweepNames(ds){return uniq(allRows.filter(r=>r.dataset===ds && String(r.section||'').startsWith('parameter_sweep_')).map(r=>String(r.sweep_name||r.section.replace('parameter_sweep_','')))).sort();}
@@ -801,7 +940,7 @@ function sweepChart(id,rs,metric){const data=rs.filter(r=>num(r[metric])!=null).
 function updateSweeps(){const ds=currentDs();const names=sweepNames(ds);const sel=document.getElementById('swSel');const oldVal=sel.value;sel.innerHTML=names.map(n=>'<option value="'+esc(n)+'" '+(n===oldVal?'selected':'')+'>'+esc(n)+'</option>').join('');const sw=sel.value||names[0];const rs=sweepRows(ds,sw);const el=document.getElementById('sw_area');if(!el||rs.length===0){el.innerHTML='<div class="ni">No sweep data.</div>';return;}document.getElementById('sw_hero').textContent='Parameter: '+sw;let html='';if(sw==='B'){html=`<div class="g2"><div class="cc"><h3>B sweep — fit (n=${fN(rs[0].n)}, p=${rs[0].p})</h3><div class="ni">Fit time nearly flat. B chosen on accuracy.</div><div class="ch" style="height:220px"><canvas id="sw_bFit"></canvas></div></div><div class="cc"><h3>B sweep — AUC & patterns</h3><div class="ni">AUC peaks near B=5. Use B=5 as default.</div><div class="ch" style="height:220px"><canvas id="sw_bAuc"></canvas></div></div></div>`;el.innerHTML=html;setTimeout(()=>{const sr=rs.slice().sort((a,b)=>a.sweep_value-b.sweep_value);sweepChart('sw_bFit',sr,'fit_s');const a=sr.map(r=>r.auc),p=sr.map(r=>r.patterns||0),aMn=Math.max(0.5,Math.floor((Math.min(...a)-0.02)*20)/20),aMx=Math.min(1.0,Math.ceil((Math.max(...a)+0.01)*20)/20);chart('sw_bAuc',{type:'line',data:{labels:sr.map(r=>String(r.sweep_value)),datasets:[{label:'AUC',data:a,borderColor:'#2563eb',backgroundColor:'#2563eb22',yAxisID:'y',tension:.3,borderWidth:2.5,pointRadius:5},{label:'Patterns',data:p,borderColor:'#d97706',yAxisID:'y1',tension:.3,borderWidth:2,borderDash:[4,3],pointRadius:5}]},options:{responsive:true,maintainAspectRatio:false,interaction:{mode:'index'},plugins:{legend:{display:true}},scales:{x:{ticks:{color:textColor()}},y:{min:aMn,max:aMx,title:{display:true,text:'AUC'},ticks:{color:textColor(),callback:v=>typeof v==='number'?v.toFixed(2):v}},y1:{position:'right',title:{display:true,text:'Patterns'},ticks:{color:textColor()}}}}});},50);}else if(sw==='G'){html=`<div class="g2"><div class="cc"><h3>G sweep — AUC & patterns (n=${fN(rs[0].n)}, p=${rs[0].p})</h3><div class="ni">Lower G mines more patterns. G=0.01 is default.</div><div class="ch" style="height:230px"><canvas id="sw_gAuc"></canvas></div></div><div class="cc"><h3>G sweep — fit</h3><div class="ni">Fit nearly flat despite pattern changes.</div><div class="ch" style="height:230px"><canvas id="sw_gFit"></canvas></div></div></div>`;el.innerHTML=html;setTimeout(()=>{const sr=rs.slice().sort((a,b)=>b.sweep_value-a.sweep_value);sweepChart('sw_gFit',sr,'fit_s');const a=sr.map(r=>r.auc),p=sr.map(r=>r.patterns||0),aMn=Math.max(0.5,Math.floor((Math.min(...a)-0.02)*20)/20),aMx=Math.min(1.0,Math.ceil((Math.max(...a)+0.01)*20)/20);chart('sw_gAuc',{type:'line',data:{labels:sr.map(r=>String(r.sweep_value)),datasets:[{label:'AUC',data:a,borderColor:'#2563eb',backgroundColor:'#2563eb22',yAxisID:'y',tension:.3,borderWidth:2.5,pointRadius:5},{label:'Patterns',data:p,borderColor:'#d97706',yAxisID:'y1',tension:.3,borderWidth:2,borderDash:[4,3],pointRadius:5}]},options:{responsive:true,maintainAspectRatio:false,interaction:{mode:'index'},plugins:{legend:{display:true}},scales:{x:{ticks:{color:textColor()}},y:{min:aMn,max:aMx,title:{display:true,text:'AUC'},ticks:{color:textColor(),callback:v=>typeof v==='number'?v.toFixed(2):v}},y1:{position:'right',title:{display:true,text:'Patterns'},ticks:{color:textColor()}}}}});},50);}else if(sw==='topK'){html=`<div class="cc" style="max-width:620px"><h3>topK sweep (n=${fN(rs[0].n)}, p=${rs[0].p})</h3><div class="ni">topK caps pattern budget. Binding at lower G.</div><div class="ch" style="height:270px"><canvas id="sw_topk"></canvas></div></div>`;el.innerHTML=html;setTimeout(()=>{const sr=rs.slice().sort((a,b)=>a.sweep_value-b.sweep_value);const a=sr.map(r=>r.auc),p=sr.map(r=>r.patterns||0),f=sr.map(r=>r.fit_s),aMn=Math.max(0.5,Math.floor((Math.min(...a)-0.02)*20)/20),aMx=Math.min(1.0,Math.ceil((Math.max(...a)+0.01)*20)/20);chart('sw_topk',{type:'line',data:{labels:sr.map(r=>String(r.sweep_value)),datasets:[{label:'AUC',data:a,borderColor:'#2563eb',backgroundColor:'#2563eb22',yAxisID:'y',pointRadius:5,tension:.3,borderWidth:2.5},{label:'Patterns',data:p,borderColor:'#d97706',yAxisID:'y1',pointRadius:5,tension:.3,borderWidth:2,borderDash:[4,3]},{label:'Fit',data:f,borderColor:'#16a34a',yAxisID:'y2',pointRadius:4,tension:.3,borderWidth:1.5,borderDash:[2,3]}]},options:{responsive:true,maintainAspectRatio:false,interaction:{mode:'index'},plugins:{legend:{display:true}},scales:{x:{ticks:{color:textColor()}},y:{min:aMn,max:aMx,title:{display:true,text:'AUC'},ticks:{color:textColor(),callback:v=>typeof v==='number'?v.toFixed(2):v}},y1:{position:'right',title:{display:true,text:'Patterns'},ticks:{color:textColor()}},y2:{display:false}}}});},50);}else if(sw==='L'){const sr=rs.slice().sort((a,b)=>a.sweep_value-b.sweep_value);const hasMem=sr.some(r=>r.memory_plot_gb!=null);html=`<div class="g2"><div class="card"><h3 style="font-size:12.5px;font-weight:800;margin-bottom:8px">L=1 vs L=2 (n=${fN(rs[0].n)}, p=${fP(rs[0].p)})</h3>${sr.map(r=>`<div style="border:1px solid var(--ln);border-radius:9px;padding:10px;margin-bottom:7px"><div style="font-size:14px;font-weight:900;color:var(--opp)">L = ${r.sweep_value}</div><div style="display:grid;grid-template-columns:repeat(${hasMem?4:3},1fr);gap:7px;margin-top:8px"><div><div style="font-size:9.5px;color:var(--mu)">Fit</div><div style="font-weight:800">${r.fit_s!=null?r.fit_s.toFixed(3)+'s':'—'}</div></div><div><div style="font-size:9.5px;color:var(--mu)">Patterns</div><div style="font-weight:800">${r.patterns??'—'}</div></div><div><div style="font-size:9.5px;color:var(--mu)">AUC</div><div style="font-weight:800">${r.auc!=null?r.auc.toFixed(4):'—'}</div></div>${hasMem?'<div><div style="font-size:9.5px;color:var(--mu)">Mem Δ</div><div style="font-weight:800">'+(r.memory_plot_gb!=null?r.memory_plot_gb.toFixed(1)+' MB':'—')+'</div></div>':''}</div></div>`).join('')}</div><div class="card"><h3 style="font-size:12.5px;font-weight:800;margin-bottom:8px">When to use L=2</h3><div style="font-size:11.5px;color:var(--mu);line-height:1.9">L=2 adds interactions. AUC gain <0.5%, fit 4.5× slower, patterns double. Prefer L=1 unless validated.</div></div></div>`;el.innerHTML=html;}else if(sw==='avf'){const sr=rs.slice().sort((a,b)=>(a.sweep_value===true||a.sweep_value===1?-1:1));const hasMem=sr.some(r=>r.memory_plot_gb!=null);html=`<div class="g2"><div class="card"><h3 style="font-size:12.5px;font-weight:800;margin-bottom:8px">Adaptive vs Fixed (n=${fN(rs[0].n)}, p=${fP(rs[0].p)})</h3>${sr.map((r,i)=>`<div style="border:1px solid var(--ln);border-radius:9px;padding:10px;margin-bottom:7px"><div style="font-size:13px;font-weight:900;color:var(--${i===0?'opp':'po'})">${r.sweep_value===true||r.sweep_value===1?'Adaptive':'Fixed B=5'}</div><div style="display:grid;grid-template-columns:repeat(${hasMem?4:3},1fr);gap:7px;margin-top:8px"><div><div style="font-size:9.5px;color:var(--mu)">Fit</div><div style="font-weight:800">${r.fit_s!=null?r.fit_s.toFixed(3)+'s':'—'}</div></div><div><div style="font-size:9.5px;color:var(--mu)">Patterns</div><div style="font-weight:800">${r.patterns??'—'}</div></div><div><div style="font-size:9.5px;color:var(--mu)">AUC</div><div style="font-weight:800">${r.auc!=null?r.auc.toFixed(4):'—'}</div></div>${hasMem?'<div><div style="font-size:9.5px;color:var(--mu)">Mem Δ</div><div style="font-weight:800">'+(r.memory_plot_gb!=null?r.memory_plot_gb.toFixed(1)+' MB':'—')+'</div></div>':''}</div></div>`).join('')}</div><div class="card"><h3 style="font-size:12.5px;font-weight:800;margin-bottom:8px">Choosing</h3><div style="font-size:11.5px;color:var(--mu);line-height:1.9"><strong style="color:var(--opp)">Adaptive:</strong> Info gain. Heterogeneous scales. AUC priority.</div><div style="height:1px;background:var(--ln);margin:10px 0"></div><div style="font-size:11.5px;color:var(--mu);line-height:1.9"><strong style="color:var(--po)">Fixed:</strong> Faster, reproducible. Large p. Uniform distributions.</div></div></div>`;el.innerHTML=html;}else{html=`<div class="cc"><h3>${esc(sw)}</h3><div class="ni">Data.</div></div>`;el.innerHTML=html;}}
 function methodology(){const m=payload.metadata||{}, sys=m.system||{}; const env=[['Python',sys.python],['Platform',sys.platform],['Logical CPUs',sys.cpu_count_logical||sys.logical_cpus],['System RAM',sys.system_memory_mb?fGB(sys.system_memory_mb/1024):undefined],['Threads',m.threads],['Train/test split','75% / 25%, stratified'],['Metric','Test-set ROC AUC'],['Dashboard memory','Peak task RSS in GB']]; document.getElementById('envTable').innerHTML='<table><tbody>'+env.map(([k,v])=>'<tr><td>'+esc(k)+'</td><td class="r">'+esc(v??'not recorded')+'</td></tr>').join('')+'</tbody></table>'; document.getElementById('modelTable').innerHTML='<table><thead><tr><th>Model</th><th>Family</th><th>Feature mode</th><th>Scenario</th></tr></thead><tbody>'+modelOrder.map(k=>{const v=models[k]||{};return '<tr><td>'+modelTag(k)+'</td><td>'+esc(v.family)+'</td><td>'+esc(v.feature_mode)+'</td><td>'+esc(v.scenario)+'</td></tr>';}).join('')+'</tbody></table>'; document.getElementById('protocolBox').innerHTML=['Two synthetic binary-classification datasets are generated with deterministic seeds.','Each benchmark row uses a single stratified holdout split.','Fit time measures classifier training only; prediction and AUC time are tracked separately.','Peak memory is measured from the parent process as process-tree RSS across the worker task.'].map(x=>'<div>'+esc(x)+'</div>').join(''); const sweeps=m.sweeps||{}; const sr=[]; for(const [ds,cfg] of Object.entries(sweeps)){for(const [name,c] of Object.entries(cfg||{})){sr.push([dsLabel(ds),name,c.n,c.p,(c.values||[]).join(', ')]);}} document.getElementById('sweepTable').innerHTML='<table><thead><tr><th>Dataset</th><th>Sweep</th><th>n</th><th>p</th><th>Values</th></tr></thead><tbody>'+sr.map(r=>'<tr>'+r.map(x=>'<td>'+esc(x)+'</td>').join('')+'</tr>').join('')+'</tbody></table>';}
 function updateAll(){updateOverview(); updateScaling(); updateMemory(); updateSweeps();}
-function init(){const dsSel=document.getElementById('dsSel'); const dss=(payload.datasets||uniq(allRows.map(r=>r.dataset))).filter(ds=>allRows.some(r=>r.dataset===ds)); dsSel.innerHTML=dss.map(ds=>'<option value="'+esc(ds)+'">'+esc(dsLabel(ds))+'</option>').join(''); dsSel.addEventListener('change',updateAll); document.getElementById('swSel').addEventListener('change',updateSweeps); document.querySelectorAll('[data-th]').forEach(b=>b.addEventListener('click',()=>{document.querySelectorAll('[data-th]').forEach(x=>x.classList.remove('on')); b.classList.add('on'); document.body.dataset.t=b.dataset.th; updateAll();})); document.querySelectorAll('.nb').forEach(b=>b.addEventListener('click',()=>{document.querySelectorAll('.nb').forEach(x=>x.classList.remove('on')); document.querySelectorAll('.sec').forEach(x=>x.classList.remove('on')); b.classList.add('on'); document.getElementById(b.dataset.s).classList.add('on'); setTimeout(updateAll,40);})); document.querySelectorAll('.tab').forEach(b=>b.addEventListener('click',()=>{const sec=b.closest('.sec'); sec.querySelectorAll('.tab').forEach(x=>x.classList.remove('on')); sec.querySelectorAll('.tc').forEach(x=>x.classList.remove('on')); b.classList.add('on'); document.getElementById(b.dataset.tab).classList.add('on'); setTimeout(updateAll,40);})); methodology(); updateAll();}
+function init(){const dsSel=document.getElementById('dsSel'); const dss=(payload.datasets||uniq(allRows.map(r=>r.dataset))).filter(ds=>allRows.some(r=>r.dataset===ds)); dsSel.innerHTML=dss.map(ds=>'<option value="'+esc(ds)+'">'+esc(dsScaleLabel(ds))+'</option>').join(''); dsSel.addEventListener('change',updateAll); document.getElementById('swSel').addEventListener('change',updateSweeps); document.querySelectorAll('[data-th]').forEach(b=>b.addEventListener('click',()=>{document.querySelectorAll('[data-th]').forEach(x=>x.classList.remove('on')); b.classList.add('on'); document.body.dataset.t=b.dataset.th; updateAll();})); document.querySelectorAll('.nb').forEach(b=>b.addEventListener('click',()=>{document.querySelectorAll('.nb').forEach(x=>x.classList.remove('on')); document.querySelectorAll('.sec').forEach(x=>x.classList.remove('on')); b.classList.add('on'); document.getElementById(b.dataset.s).classList.add('on'); setTimeout(updateAll,40);})); document.querySelectorAll('.tab').forEach(b=>b.addEventListener('click',()=>{const sec=b.closest('.sec'); sec.querySelectorAll('.tab').forEach(x=>x.classList.remove('on')); sec.querySelectorAll('.tc').forEach(x=>x.classList.remove('on')); b.classList.add('on'); document.getElementById(b.dataset.tab).classList.add('on'); setTimeout(updateAll,40);})); methodology(); updateAll();}
 init();
 })();
 </script>
@@ -844,6 +983,18 @@ def main() -> None:
     p.add_argument("--start-task", type=int, default=0)
     p.add_argument("--max-tasks", type=int)
     p.add_argument("--no-sweeps", action="store_true")
+    p.add_argument(
+        "--max-n",
+        type=parse_size_count,
+        default=None,
+        help="Run tasks with n less than or equal to this value. Supports k, M, Mn, B, and Bn suffixes.",
+    )
+    p.add_argument(
+        "--max-p",
+        type=parse_size_count,
+        default=None,
+        help="Run tasks with p less than or equal to this value. Supports k, M, Mn, B, and Bn suffixes.",
+    )
     p.add_argument("--sweep-name", default=None)
     p.add_argument("--sweep-value-json", default=None)
     p.add_argument("--task-timeout", type=float, default=3600)

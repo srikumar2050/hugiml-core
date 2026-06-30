@@ -123,7 +123,7 @@ For ``L=1`` fits, the native hot path fuses transaction preparation, singleton p
 
 Transaction construction is performed in row-stripe chunks on the non-fused path, and materialized native transactions now store compact item ids with shared item-level utility lookup. The resulting model is intended to match the previous transaction semantics while reducing repeated utility storage and making memory use less bursty. This is most useful for wide data, large batches, and cross-validation loops.
 
-For interaction mining, structured constraints are applied exactly. EUCS pruning is disabled by default because aggressive pair-level pruning can remove valid higher-order patterns in edge cases. Prefer controlling complexity with ``L``, ``G``, and ``topK`` first.
+For interaction mining, structured constraints are applied exactly. In v1.1.16, EUCS is enabled for eligible ``L > 1`` native paths but only after workload gates confirm that the pair cache is likely to be useful. Prefer controlling complexity with ``L``, ``G``, and ``topK`` first; see :doc:`mining_pruning` for EUCS parameters and native pruning behavior.
 
 Operational stability controls
 ------------------------------

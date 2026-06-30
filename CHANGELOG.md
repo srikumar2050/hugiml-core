@@ -4,6 +4,20 @@ All notable changes to hugiml-core are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
+## [1.1.16] - 2026-06-30
+
+### Added
+
+- Added the optional HUGIML LLM assistant with Streamlit and CLI entry points, built-in demo datasets, deterministic fast mode, and optional Ollama-backed thinking mode.
+- Added documentation for native HUIM pruning behavior, including LIU, LA, gated EUCS activation, and EUCS environment controls.
+
+### Changed
+
+- Improved augmented-pair adaptive path reuse so repeated tuning and scoring flows can reuse prepared path state more efficiently.
+- Expanded native compound-pattern mining pruning with LIU, LA, and gated EUCS paths while preserving public model behavior.
+- Refreshed Sphinx documentation, Read the Docs navigation, and static benchmark/scalability outputs for the new release.
+
+---
 ## [1.1.15] - 2026-06-27
 
 ### Added

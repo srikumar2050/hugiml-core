@@ -63,6 +63,11 @@ struct TransactionDataCpp {
     // colnew_set has been removed; bn2id alone is sufficient for
     // Pass 3 filtering via a single find() instead of a set-find + map-at pair.
     std::unordered_map<int, int>                     bn2id;
+    // Dense per-column bin→item lookup. bin_item_id[j][bi] returns the
+    // registered item id for 1-based bin/category index bi, or 0 when the
+    // bin was not admitted. This is a transient exact lookup cache derived
+    // from bn2id; it does not change the model schema or public semantics.
+    std::vector<std::vector<int>>                    bin_item_id;
 
     std::vector<int>                                 nb_col;
     std::vector<std::vector<double>>                 ber;
@@ -86,6 +91,15 @@ struct TransactionDataCpp {
 
     int bkey(int bi, int j) const { return bi * bkey_stride + j; }
 
+    int item_id_for_bin(int bi, int j) const {
+        if (j >= 0 && static_cast<size_t>(j) < bin_item_id.size() &&
+            bi >= 0 && static_cast<size_t>(bi) < bin_item_id[static_cast<size_t>(j)].size()) {
+            return bin_item_id[static_cast<size_t>(j)][static_cast<size_t>(bi)];
+        }
+        auto it = bn2id.find(bkey(bi, j));
+        return (it == bn2id.end()) ? 0 : it->second;
+    }
+
     /// Estimate the memory footprint of this object in bytes.
     size_t memory_usage_bytes() const {
         size_t total = sizeof(*this);
@@ -94,6 +108,9 @@ struct TransactionDataCpp {
             total += sizeof(Trans) + t.capacity() * sizeof(TItem);
         total += transactions.capacity() * sizeof(Trans);
         // vectors
+        for (auto& lut : bin_item_id)
+            total += sizeof(std::vector<int>) + lut.capacity() * sizeof(int);
+        total += bin_item_id.capacity() * sizeof(std::vector<int>);
         total += item_twu.capacity() * sizeof(double);
         total += RIU.capacity() * sizeof(double);
         total += item_iu.capacity() * sizeof(double);

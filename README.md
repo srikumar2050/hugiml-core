@@ -38,24 +38,26 @@ checking_status=no_checking          coef= +1.12     support=0.39
 5. [Execution Modes](#execution-modes)
 6. [Hyperparameter Search](#hyperparameter-search)
 7. [Governance Studio Dashboard](#governance-studio-dashboard)
-8. [Augmented Pair Features](#augmented-pair-features)
-9. [Adaptive Binning](#adaptive-binning)
-10. [Missing Value Handling](#missing-value-handling)
-11. [Model Explanation and Visualisations](#model-explanation-and-visualisations)
-12. [Pattern Pruning](#pattern-pruning)
-13. [Interpretability Metrics](#interpretability-metrics)
-14. [Multiclass, Imbalanced Data, High-Cardinality](#multiclass-imbalanced-data-high-cardinality)
-15. [Drift Detection & Monitoring](#drift-detection--monitoring)
-16. [Calibration](#calibration)
-17. [Serialisation](#serialisation)
-18. [Governance & Model Cards](#governance--model-cards)
-19. [Benchmark Suite](#benchmark-suite)
-20. [Validation Highlights](#validation-highlights)
-21. [Inference Server](#inference-server)
-22. [CI / CD](#ci--cd)
-23. [Repository Structure](#repository-structure)
-24. [License](#license)
-25. [Citation](#citation)
+8. [LLM Assistant](#llm-assistant)
+9. [Augmented Pair Features](#augmented-pair-features)
+10. [Adaptive Binning](#adaptive-binning)
+11. [Missing Value Handling](#missing-value-handling)
+12. [Model Explanation and Visualisations](#model-explanation-and-visualisations)
+13. [Native Mining Pruning Controls](#native-mining-pruning-controls)
+14. [Pattern Pruning](#pattern-pruning)
+15. [Interpretability Metrics](#interpretability-metrics)
+16. [Multiclass, Imbalanced Data, High-Cardinality](#multiclass-imbalanced-data-high-cardinality)
+17. [Drift Detection & Monitoring](#drift-detection--monitoring)
+18. [Calibration](#calibration)
+19. [Serialisation](#serialisation)
+20. [Governance & Model Cards](#governance--model-cards)
+21. [Benchmark Suite](#benchmark-suite)
+22. [Validation Highlights](#validation-highlights)
+23. [Inference Server](#inference-server)
+24. [CI / CD](#ci--cd)
+25. [Repository Structure](#repository-structure)
+26. [License](#license)
+27. [Citation](#citation)
 
 ---
 
@@ -82,7 +84,7 @@ pip install hugiml-core
 # With profile plots
 pip install "hugiml-core[plots]"
 
-# With Governance Studio dashboard
+# With Streamlit UIs: Governance Studio dashboard and HUGIML LLM Assistant
 pip install "hugiml-core[dashboard]"
 
 # With benchmark comparison suite
@@ -470,6 +472,103 @@ Numeric two-value columns are treated as categorical indicators during HUGIML pr
 
 ---
 
+## LLM Assistant
+
+The **HUGIML LLM Assistant** is a chat-first Streamlit interface for working with HUGIML models and documentation from one place. It is designed for model-review workflows where a user asks natural-language questions, sees a structured answer, and then continues with follow-up questions in the same review session.
+
+Unlike a general chatbot, the assistant grounds its responses in two HUGIML-specific sources:
+
+| Query type | Grounding source | Typical output |
+|---|---|---|
+| **Model/run questions** | The fitted classifier, run artifacts, pattern inventory, validation metrics, pruning state, and governance metadata | Decision-maker summaries, key model drivers, risk/audit checks, and next actions |
+| **API/documentation questions** | The local Sphinx/API documentation index, with fallback to package README and public API docstrings | Condensed API guidance, usage examples, parameter notes, and caveats |
+| **Mixed questions** | Both model artifacts and documentation | Practical guidance that explains what the current model shows and which API or governance action applies |
+
+### Launch
+
+```bash
+# Installed console script
+hugiml-llm
+
+# Source-tree development
+python -m streamlit run src/hugiml/llm/ui_app.py
+```
+
+The UI uses a single Q&A-style view. The session appears as a chronological transcript, the follow-up input stays inline below the latest answer, and quick model/run details are available in expandable panes below the chat.
+
+### Local model policy
+
+The assistant can run in deterministic mode, or use a supported local Ollama model as a writer/synthesis layer over retrieved HUGIML evidence. The default policy favours small models that work on modest local machines, while still exposing larger configured models when they are installed and memory is available.
+
+| Role | Model | Purpose |
+|---|---|---|
+| **Default** | `qwen3:1.7b` | Primary local writer for grounded API and model-review answers |
+| **Light mode** | `gemma3:1b` | Lower-memory local response generation |
+| **Fallback** | `llama3.2:1b` | Retry model before falling back to deterministic routing |
+| **Deterministic router** | built in | Always available when no supported local model is selected or available |
+
+Additional configured Ollama models remain visible in the selector when available:
+
+| Model | Profile |
+|---|---|
+| `llama3.2:3b` | Minimum larger LLM |
+| `qwen3:4b` | Balanced local LLM |
+| `gemma3:4b` | Balanced alternative |
+| `qwen3:8b` | Stronger local LLM |
+| `gemma3:12b` | Large-context local LLM |
+
+The selector uses available system memory as a safety check. These thresholds are available-RAM requirements, not model file sizes:
+
+| Model | Role / profile | Minimum available RAM |
+|---|---|---:|
+| `qwen3:1.7b` | Default local LLM | 5.0 GB |
+| `gemma3:1b` | Light mode | 3.5 GB |
+| `llama3.2:1b` | Fallback before deterministic routing | 3.5 GB |
+| `llama3.2:3b` | Minimum larger LLM | 6.0 GB |
+| `qwen3:4b` | Balanced local LLM | 10.0 GB |
+| `gemma3:4b` | Balanced alternative | 10.0 GB |
+| `qwen3:8b` | Stronger local LLM | 16.0 GB |
+| `gemma3:12b` | Large-context local LLM | 32.0 GB |
+
+Supported tiny models are shown explicitly. Other extra small Ollama models that are not part of the configured policy are omitted from the selector, while deterministic routing remains available without Ollama.
+
+Install the preferred Ollama models before launching the assistant:
+
+```bash
+ollama pull qwen3:1.7b
+ollama pull gemma3:1b
+ollama pull llama3.2:1b
+```
+
+Optional larger models can also be installed and selected when the local machine has enough available memory:
+
+```bash
+ollama pull llama3.2:3b
+ollama pull qwen3:4b
+ollama pull gemma3:4b
+ollama pull qwen3:8b
+ollama pull gemma3:12b
+```
+
+Only configured supported models are listed in the UI. Extra experimental or unsupported small Ollama models that may be installed locally are omitted from the selector.
+
+### Documentation-aware answers
+
+For API questions such as “what hyperparameters should I tune?”, “how does pruning work?”, or “what governance artifacts are created?”, the deterministic runner builds a lightweight local index over the Sphinx documentation and package docs. It retrieves the relevant sections internally, then presents a concise, structured response with the API details needed to act.
+
+### Model-review answers
+
+For run-specific questions such as “summarize findings”, “what changed after pruning?”, or “is this model ready for governance review?”, the assistant analyzes the active classifier outputs and produces a structured decision summary covering performance, main evidence drivers, interpretability constraints, audit concerns, and recommended next steps.
+
+### Static examples
+
+These GitHub Pages examples show the intended Q&A-style review flow:
+
+- [LLM lending credit-risk example](https://srikumar2050.github.io/hugiml-core/LLM/examples/lending_credit_risk.html)
+- [LLM card default example](https://srikumar2050.github.io/hugiml-core/LLM/examples/card_default_taiwan.html)
+
+---
+
 ## Augmented Pair Features
 
 For interaction-oriented models, HUGIML can add native augmented-pair features to the downstream estimator. These are continuous product or absolute-difference transforms built from informative numeric features, for example:
@@ -626,6 +725,29 @@ plotter.plot_feature_combinations("age").show()             # Feature-combinatio
 plotter.plot_top_patterns(top_n=20).show()                  # Top patterns by importance
 plotter.plot_active_patterns(X_test, sample_idx=0).show()   # Local explanation for one sample
 ```
+
+---
+
+## Native Mining Pruning Controls
+
+This section covers native HUIM search pruning, which is different from the user-facing [Pattern Pruning](#pattern-pruning) workflow below. Native pruning controls how the C++ miner avoids unnecessary candidate work during `fit()` while preserving the same public model outputs.
+
+| Pruning path | When it is active | What it does | User-facing controls |
+|---|---|---|---|
+| **LIU** | Active for compound-pattern mining (`L > 1`, including the `L=2` hot path). Bounded classifier mining uses exact candidate evidence before raising the utility floor. | Raises the utility threshold from locally strong candidate sequences so low-utility branches can be skipped earlier. | Tune `L`, `G`, and `topK`; there is no separate public LIU switch. |
+| **LA** | Active during generic utility-list child construction when the current branch uses the ordinary utility-ranked path. | Stops building a child utility list once the remaining upper bound can no longer pass the current utility floor. | Tune `topK` and `G`; relaxed-root interaction branches bypass this utility-floor shortcut where needed. |
+| **EUCS** | Considered for `L > 1` after the admitted item set is known. It is skipped for small, dense, or very wide pair spaces where the cache would not pay off. | Builds a pair co-occurrence utility cache and skips pair intersections whose pair-level utility cannot enter the retained set. | Environment variables below. |
+
+EUCS is enabled by default for eligible `L > 1` native mining paths, but it has safety gates so small or dense workloads continue without the extra cache. The relevant environment variables are:
+
+| Variable | Default | Meaning |
+|---|---:|---|
+| `HUGIML_EUCS_ENABLE` or `HUGIML_EUCS_ENABLED` | enabled | Set to `0`, `false`, `no`, `off`, `disable`, or `disabled` to disable EUCS. Set to `1`, `true`, `yes`, `on`, `enable`, or `enabled` to enable it. Invalid values keep the default. |
+| `HUGIML_EUCS_MIN_ITEMS` | `32` | EUCS is skipped when the admitted item universe is this size or smaller. |
+| `HUGIML_EUCS_MAX_CELLS` | `6000000` | Maximum pair-cache cells allowed before EUCS is skipped. |
+| `HUGIML_EUCS_MAX_DENSITY` | `0.20` | Maximum observed active-item density allowed before EUCS is skipped. |
+
+Typical users should leave these settings at their defaults and tune model-level parameters first: `L` for maximum pattern length, `G` for the information-gain gate, and `topK` for the retained pattern budget. EUCS controls are mainly useful when benchmarking native mining behavior or diagnosing a workload whose pair space is unusually sparse or dense.
 
 ---
 
@@ -1072,8 +1194,8 @@ Kubernetes manifests are in [`kubernetes/deployment.yaml`](kubernetes/deployment
 
 ```text
 hugiml-core/
+├── native/                      C++ extension sources
 ├── src/
-│   ├── _native/                 C++ extension sources
 │   └── hugiml/
 │       ├── classifier.py        HUGIMLClassifier / HUGIMLClassifierNative
 │       ├── calibration.py       ECE, Brier, reliability diagrams
@@ -1093,9 +1215,24 @@ hugiml-core/
 │       │   ├── runner.py        Model training and scoring helpers
 │       │   ├── components/      Individual evidence-view renderers
 │       │   └── ...
+│       ├── llm/                 LLM Assistant package and runtime
+│       │   ├── cli.py           hugiml-llm console entry point
+│       │   ├── ui_app.py        Streamlit chat interface
+│       │   ├── orchestrator.py  Evidence routing and answer assembly
+│       │   ├── docs_index.py    Local documentation index
+│       │   ├── assets/          Packaged configs and demo datasets
+│       │   └── ...
 │       └── benchmarks/          CV comparison suite
+├── LLM/                         Static assistant assets and GitHub Pages examples
+│   ├── config/                  Assistant model policy config
+│   ├── datasets/                Built-in and user dataset folders
+│   ├── examples/                Static demo pages and source data
+│   ├── prompts/                 Assistant prompt templates
+│   └── ui/                      Standalone chat UI helpers
 ├── notebooks/                   Worked examples (12 domain folders)
 ├── tests/                       Pytest suite
+│   ├── dashboard/               Dashboard component tests
+│   └── llm/                     Optional LLM Assistant tests
 ├── benchmarks/                  Micro-benchmarks and regression gate
 ├── experiments/                 Reproducible dashboard-generation workflows
 │   ├── benchmark/               Benchmark analysis runner, checkpointing, CSV summaries, HTML assembly
@@ -1103,7 +1240,7 @@ hugiml-core/
 ├── docker/                      Dockerfile + FastAPI inference server
 ├── kubernetes/                  Deployment manifests
 ├── scripts/                     Build and utility scripts
-├── docs/                        Sphinx documentation and model-card templates
+├── docs/                        Sphinx documentation, LLM assistant docs, and model-card templates
 ├── .github/workflows/           CI/CD pipelines
 ├── pyproject.toml
 └── setup.py

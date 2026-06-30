@@ -342,6 +342,8 @@ class NativeAugmentedPairTransformBlock:
         budget_topK: int | None = None,
         min_source_ig: float | None = None,
         unbounded_cap: int = DEFAULT_AUGMENTED_PAIR_UNBOUNDED_CAP,
+        native_cache: Any | None = None,
+        score_topK: int | None = None,
     ) -> None:
         self.augmented_pair_mode = str(augmented_pair_mode)
         self.aug_feature_size = int(aug_feature_size)
@@ -350,6 +352,23 @@ class NativeAugmentedPairTransformBlock:
         self.budget_topK = None if budget_topK is None else int(budget_topK)
         self.min_source_ig = None if min_source_ig is None else float(min_source_ig)
         self.unbounded_cap = int(unbounded_cap)
+        self.native_cache = native_cache
+        self.score_topK = None if score_topK is None else int(score_topK)
+
+    def __getstate__(self) -> dict[str, Any]:
+        state = self.__dict__.copy()
+        # Fit-time only acceleration objects must never become part of pickle
+        # or versioned model state. The fitted transform catalog, indices,
+        # reference values, and scaler arrays are sufficient for prediction,
+        # explanations, and save/load reconstruction.
+        state.pop("native_cache", None)
+        state.pop("_fit_Z_cache_", None)
+        state.pop("_consume_fit_cache_", None)
+        return state
+
+    def __setstate__(self, state: dict[str, Any]) -> None:
+        self.__dict__.update(state)
+        self.native_cache = None
 
     def _as_frame(
         self, X: Any, cols: list[str], full_feature_names: list[str] | None = None
@@ -450,6 +469,7 @@ class NativeAugmentedPairTransformBlock:
 
         min_ig = max(1e-12, float(self.min_source_ig or 0.0))
         self.min_source_ig_ = min_ig
+        y_codes = np.asarray(pd.factorize(np.asarray(y), sort=True)[0], dtype=np.int64)
 
         # Augmented-pair source selection supports two transparent scoring
         # policies. ``marginal_ig`` ranks individual numeric columns by their
@@ -465,13 +485,23 @@ class NativeAugmentedPairTransformBlock:
                     "_hugiml_core.select_interaction_information_features."
                 )
             X_all_numeric = self._selected_numeric_matrix(X, list(numeric_cols))
-            selected = _core.select_interaction_information_features(
-                X_all_numeric,
-                np.asarray(pd.factorize(np.asarray(y), sort=True)[0], dtype=np.int64),
-                list(numeric_cols),
-                int(self.aug_feature_size),
-                self.ii_partner_size,
-            )
+            cache = getattr(self, "native_cache", None)
+            if cache is not None and hasattr(cache, "select_interaction_information_features"):
+                selected = cache.select_interaction_information_features(
+                    X_all_numeric,
+                    y_codes,
+                    list(numeric_cols),
+                    int(self.aug_feature_size),
+                    self.ii_partner_size,
+                )
+            else:
+                selected = _core.select_interaction_information_features(
+                    X_all_numeric,
+                    y_codes,
+                    list(numeric_cols),
+                    int(self.aug_feature_size),
+                    self.ii_partner_size,
+                )
             scored: list[tuple[float, str]] = [
                 (float(item["score"]), str(item["name"])) for item in selected
             ]
@@ -517,6 +547,7 @@ class NativeAugmentedPairTransformBlock:
             self.scaler_mean_ = np.zeros(0, dtype=np.float64)
             self.scaler_scale_ = np.zeros(0, dtype=np.float64)
             self.pair_reference_values_ = np.zeros(0, dtype=np.float64)
+            self.native_cache = None
             return self
 
         observed_medians = np.nanmedian(
@@ -532,16 +563,37 @@ class NativeAugmentedPairTransformBlock:
         self.numeric_medians_array_ = observed_medians
         self.numeric_medians_ = dict(self.source_observed_medians_)
 
-        y_codes, _ = pd.factorize(np.asarray(y), sort=True)
-        native_specs = _core.score_pair_candidates(
-            X_selected,
-            np.asarray(y_codes, dtype=np.int64),
-            list(self.selected_aug_features_),
+        score_top_k = (
+            -1
+            if self.budget_topK is None
+            else max(0, int(max(int(self.budget_topK), int(self.score_topK or 0))))
         )
+        cache = getattr(self, "native_cache", None)
+        if cache is not None and hasattr(cache, "score_pair_candidates"):
+            native_specs, candidate_count = cache.score_pair_candidates(
+                X_selected,
+                y_codes,
+                list(self.selected_aug_features_),
+                int(score_top_k),
+            )
+        elif hasattr(_core, "score_pair_candidates_bounded"):
+            native_specs, candidate_count = _core.score_pair_candidates_bounded(
+                X_selected,
+                y_codes,
+                list(self.selected_aug_features_),
+                int(score_top_k),
+            )
+        else:
+            native_specs = _core.score_pair_candidates(
+                X_selected,
+                y_codes,
+                list(self.selected_aug_features_),
+            )
+            candidate_count = len(native_specs)
         self.augmented_pair_native_used_ = True
         candidates = list(native_specs)
         candidates.sort(key=lambda item: (-float(item["transform_ig"]), str(item["name"])))
-        self.candidate_count_ = len(candidates)
+        self.candidate_count_ = int(candidate_count)
         keep_n = (
             len(candidates)
             if self.budget_topK is None
@@ -572,6 +624,16 @@ class NativeAugmentedPairTransformBlock:
             self.scaler_scale_ = np.where(np.isfinite(scale) & (scale > 0), scale, 1.0).astype(
                 np.float64, copy=False
             )
+            Z_train = _core.transform_pair_features(
+                X_selected,
+                left,
+                right,
+                ops,
+                pair_refs,
+                self.scaler_mean_,
+                self.scaler_scale_,
+            )
+            self._fit_Z_cache_ = _dense_full_csr(np.asarray(Z_train, dtype=np.float32))
             self.left_indices_ = left
             self.right_indices_ = right
             self.op_codes_ = ops
@@ -583,12 +645,18 @@ class NativeAugmentedPairTransformBlock:
             self.op_codes_ = np.zeros(0, dtype=np.int8)
             self.pair_reference_values_ = np.zeros(0, dtype=np.float64)
         self.augmented_pair_transforms_ = self._build_catalog()
+        self.native_cache = None
         return self
 
     def transform(self, X: Any) -> csr_matrix:
         n_rows = len(X) if hasattr(X, "__len__") else 0
         if not getattr(self, "kept_specs_", []):
             return csr_matrix((n_rows, 0), dtype=np.float32)
+        if hasattr(self, "_fit_Z_cache_") and getattr(self, "_consume_fit_cache_", False):
+            Z = self._fit_Z_cache_
+            delattr(self, "_fit_Z_cache_")
+            self._consume_fit_cache_ = False
+            return Z
         X_selected = self._selected_numeric_matrix(
             X, list(getattr(self, "selected_aug_features_", []))
         )
@@ -1422,6 +1490,8 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
     def __getstate__(self) -> dict:
         state = self.__dict__.copy()
         state.pop("_fit_lock", None)
+        state.pop("_native_augmented_pair_cache_", None)
+        state.pop("_native_augmented_pair_score_topK_", None)
         # Remove instance-level methods set by instrument_classifier():\n        # these closures are not picklable.
         state.pop("predict_proba", None)
         state.pop("predict", None)
@@ -3377,6 +3447,15 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             _core.openmp_set_num_threads(n_threads)
         actual_threads = _core.openmp_get_max_threads()
 
+        # fast_grid_tune can pass a precomputed adaptive-binning context for
+        # cache-building fits.  This is strictly fit-local and never becomes
+        # persisted estimator state.  It is only used when the caller has
+        # already selected bins on the exact same training fold with the same
+        # adaptive parameters; mining still runs independently for each exact
+        # (G, L, topK) tuple, so pattern budgets and rankings are unchanged.
+        _fast_tune_adaptive_context = getattr(self, "_fast_tune_adaptive_context", None)
+        _fast_tune_has_adaptive_context = isinstance(_fast_tune_adaptive_context, dict)
+
         # Preserve raw input if the downstream mode needs original features,
         # or if L>1 will create internal augmented_pair_transforms. This remains
         # an internal operation; no public hyperparameter is added.
@@ -3394,6 +3473,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             and self.use_hotpath
             and _CORE_AVAILABLE
             and self.L == 1
+            and not _fast_tune_has_adaptive_context
             and hasattr(_core, "prepare_and_mine_l1_adaptive")
         )
 
@@ -3405,7 +3485,36 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         # preferred because it produces identical outputs with no conflicts.
         # Python _apply_adaptive_binning is kept as a fallback for
         # environments where the C++ extension is absent.
-        if self.adaptive_binning and not _use_fused_adaptive_l1:
+        if (
+            self.adaptive_binning
+            and _fast_tune_has_adaptive_context
+            and "X_pre" in _fast_tune_adaptive_context
+        ):
+            _ctx = _fast_tune_adaptive_context
+            _ctx_attrs = dict(_ctx.get("attrs", {}))
+            for _name, _value in _ctx_attrs.items():
+                # Shallow copies are enough for dict/list/set/ndarray metadata and
+                # prevent accidental mutation from one candidate leaking into the
+                # next.  The pre-binned X object itself is immutable-by-contract
+                # inside fast_grid_tune cache fits.
+                if isinstance(_value, dict):
+                    _value = dict(_value)
+                elif isinstance(_value, set):
+                    _value = set(_value)
+                elif isinstance(_value, list):
+                    _value = list(_value)
+                elif isinstance(_value, np.ndarray):
+                    _value = _value.copy()
+                setattr(self, _name, _value)
+            X_train = _ctx["X_pre"]
+            stage_times["adaptive_binning"] = 0.0
+            stage_times["adaptive_binning_cache_hit"] = 1.0
+            if self.verbose:
+                logger.info(
+                    "  adaptive binning: reused fast_grid_tune context, %d features pre-binned",
+                    len(getattr(self, "_bin_edges_", {})),
+                )
+        elif self.adaptive_binning and not _use_fused_adaptive_l1:
             self._resolve_col_meta(X_train)  # prime cat_cols_mask_ first
             _y_for_ig = self._safe_cast_y(y_train)
             _use_pair_aware_adaptive = bool(
@@ -3424,6 +3533,36 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                     min(self.per_feature_b_.values(), default=0),
                     max(self.per_feature_b_.values(), default=0),
                 )
+            if _fast_tune_has_adaptive_context and "X_pre" not in _fast_tune_adaptive_context:
+                _attrs: dict[str, Any] = {}
+                for _name in (
+                    "cat_cols_mask_",
+                    "is_int_mask_",
+                    "feature_names_in_",
+                    "binary_categorical_cols_",
+                    "_bin_edges_",
+                    "_missing_col_edges_",
+                    "_adaptive_code_label_map_",
+                    "_adaptive_precoded_features_",
+                    "per_feature_b_",
+                    "ig_scores_",
+                ):
+                    if hasattr(self, _name):
+                        _value = getattr(self, _name)
+                        if isinstance(_value, dict):
+                            _value = dict(_value)
+                        elif isinstance(_value, set):
+                            _value = set(_value)
+                        elif isinstance(_value, list):
+                            _value = list(_value)
+                        elif isinstance(_value, np.ndarray):
+                            _value = _value.copy()
+                        _attrs[_name] = _value
+                _fast_tune_adaptive_context["X_pre"] = X_train
+                _fast_tune_adaptive_context["attrs"] = _attrs
+                _fast_tune_adaptive_context["misses"] = int(
+                    _fast_tune_adaptive_context.get("misses", 0)
+                ) + 1
         # ─────────────────────────────────────────────────────────────────
 
         # ── Constant-B non-finite handling (non-adaptive path) ───────────────
@@ -3553,6 +3692,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                 self.use_hotpath
                 and _CORE_AVAILABLE
                 and self.L == 1
+                and not _fast_tune_has_adaptive_context
                 and hasattr(_core, "prepare_and_mine_l1")
             )
 
@@ -3656,6 +3796,12 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                         compute_original_scores=(self.feature_mode != "patterns_only"),
                     )
                 self.td_ = _l1_result.td
+                stage_times["l1_fused_hotpath"] = 1.0
+                stage_times[
+                    "l1_fused_adaptive_hotpath"
+                    if self.adaptive_binning
+                    else "l1_fused_fixed_hotpath"
+                ] = 1.0
                 if self.feature_mode != "patterns_only":
                     native_orig_names = [
                         f"orig:{name}"
@@ -3779,17 +3925,53 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                 if _eu_pair_left is not None and _eu_pair_right is not None:
                     _tx_kwargs["eu_pair_left"] = _eu_pair_left
                     _tx_kwargs["eu_pair_right"] = _eu_pair_right
-                try:
-                    self.td_ = _core.prepare_transactions(*_tx_args, **_tx_kwargs)
-                except TypeError:
-                    # Retry without pair kwargs when the active native backend
-                    # does not expose eu_pair inputs; the marginal-correlation
-                    # path remains the compatible behavior.
-                    if _tx_kwargs:
-                        self.td_ = _core.prepare_transactions(*_tx_args)
-                    else:
-                        raise
-                stage_times["prepare_transactions"] = t.ms
+                _tx_cache = getattr(self, "_fast_tune_transaction_cache", None)
+                _tx_cache_key = None
+                if isinstance(_tx_cache, dict):
+                    # Transaction preparation depends on the pre-binned X/y/schema
+                    # and the relaxed-pair override arrays, but not on G or topK.
+                    # The cache is created inside one fast_grid_tune call/fold and
+                    # receives the same immutable pre-binned X object, so using the
+                    # adaptive context id avoids hashing or copying n×p data.
+                    _tx_cache_key = (
+                        id(getattr(self, "_fast_tune_adaptive_context", None)),
+                        tuple(X_num.shape),
+                        str(X_num.dtype),
+                        tuple(map(str, col_names)),
+                        bytes(np.asarray(is_cat_np, dtype=np.uint8)),
+                        bytes(np.asarray(is_int_np, dtype=np.uint8)),
+                        bytes(np.asarray(is_precoded_np, dtype=np.uint8))
+                        if is_precoded_np is not None
+                        else b"",
+                        tuple(np.asarray(_eu_pair_left, dtype=np.int32).tolist())
+                        if _eu_pair_left is not None
+                        else (),
+                        tuple(np.asarray(_eu_pair_right, dtype=np.int32).tolist())
+                        if _eu_pair_right is not None
+                        else (),
+                    )
+                    _cached_td = _tx_cache.get(_tx_cache_key)
+                else:
+                    _cached_td = None
+                if _cached_td is not None:
+                    self.td_ = _cached_td
+                    stage_times["prepare_transactions"] = 0.0
+                    stage_times["prepare_transactions_cache_hit"] = 1.0
+                else:
+                    try:
+                        self.td_ = _core.prepare_transactions(*_tx_args, **_tx_kwargs)
+                    except TypeError:
+                        # Retry without pair kwargs when the active native backend
+                        # does not expose eu_pair inputs; the marginal-correlation
+                        # path remains the compatible behavior.
+                        if _tx_kwargs:
+                            self.td_ = _core.prepare_transactions(*_tx_args)
+                        else:
+                            raise
+                    if isinstance(_tx_cache, dict) and _tx_cache_key is not None:
+                        _tx_cache[_tx_cache_key] = self.td_
+                    stage_times["prepare_transactions"] = t.ms
+                    stage_times["prepare_transactions_cache_hit"] = 0.0
                 cpp_mem_bytes = self.td_.memory_usage_bytes()
 
                 n_items = len(self.td_.item_twu)
@@ -3836,6 +4018,8 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                 raw_patterns = self._mine_with_fallback(
                     y_train, n_cls, K_mine, fit_deadline, relaxed_cols=relaxed_cols
                 )
+                if self.L == 1 and _CORE_AVAILABLE and not bool(relaxed_cols):
+                    stage_times["l1_mining_dispatch_hotpath"] = 1.0
                 self.raw_patterns_ = sorted(
                     raw_patterns, key=lambda pe: (-pe.utility, tuple(pe.items))
                 )
@@ -3991,8 +4175,14 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         rss_delta_mb = (_get_peak_rss_kb() - rss_before) / 1024
         n_compound = sum(1 for pe in self.patterns_ if len(pe.items) > 1)
         n_pats_final = len(self.patterns_)
-        n_train_final = self.x_train_hup_.shape[0]
-        nnz = self.x_train_hup_.nnz
+        x_hup_for_metadata = getattr(self, "x_train_hup_", None)
+        if x_hup_for_metadata is not None:
+            n_train_final = int(x_hup_for_metadata.shape[0])
+            nnz = int(x_hup_for_metadata.nnz)
+        else:
+            shape = tuple(getattr(self, "_training_pattern_matrix_shape_", (len(y_train), n_pats_final)))
+            n_train_final = int(shape[0]) if shape else int(len(y_train))
+            nnz = int(getattr(self, "_training_pattern_matrix_nnz_", 0))
         density = (
             nnz / (n_train_final * n_pats_final) if (n_train_final * n_pats_final) > 0 else 0.0
         )
@@ -5407,17 +5597,22 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             max_pair_features=self.max_pair_features,
             budget_topK=pair_budget,
             min_source_ig=self.G,
+            native_cache=getattr(self, "_native_augmented_pair_cache_", None),
+            score_topK=getattr(self, "_native_augmented_pair_score_topK_", None),
         )
-        block.fit(
-            X_original,
-            y,
-            getattr(self, "ig_scores_", {}) or {},
-            getattr(self, "_bin_edges_", {}) or {},
-            self._numeric_feature_names_for_augmented_pairs(),
-            budget_topK=pair_budget,
-            min_source_ig=self.G,
-            full_feature_names=list(getattr(self, "feature_names_in_", []) or []),
-        )
+        try:
+            block.fit(
+                X_original,
+                y,
+                getattr(self, "ig_scores_", {}) or {},
+                getattr(self, "_bin_edges_", {}) or {},
+                self._numeric_feature_names_for_augmented_pairs(),
+                budget_topK=pair_budget,
+                min_source_ig=self.G,
+                full_feature_names=list(getattr(self, "feature_names_in_", []) or []),
+            )
+        finally:
+            block.native_cache = None
         self._augmented_pair_block_ = block
         self.augmented_pair_transforms_ = list(block.augmented_pair_transforms_)
         self.augmented_pair_selected_features_ = list(block.selected_aug_features_)
@@ -5448,6 +5643,8 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         block = getattr(self, "_augmented_pair_block_", None)
         if block is None:
             return csr_matrix((len(X_original), 0), dtype=np.float32)
+        if fit and hasattr(block, "_fit_Z_cache_"):
+            block._consume_fit_cache_ = True
         return block.transform(X_original)
 
     def get_augmented_pair_transforms(self) -> list[dict[str, Any]]:
@@ -7274,6 +7471,8 @@ def _hugiml_prepare_candidate_from_cached_base(
     topK_value: int,
     feature_mode: str,
     execution_mode: str = "audit",
+    native_augmented_pair_cache: Any | None = None,
+    native_augmented_pair_score_topK: int | None = None,
 ) -> HUGIMLClassifierNative:
     """Build and fit one exact candidate from a max-topK cached base model."""
     cand = _hugiml_shallow_candidate_from_base(base)
@@ -7324,7 +7523,15 @@ def _hugiml_prepare_candidate_from_cached_base(
         return cand
 
     cand._setup_feature_mode_metadata()
-    cand._setup_augmented_pair_transforms(X_train_original, y_train, fit=True)
+    cand._native_augmented_pair_cache_ = native_augmented_pair_cache
+    cand._native_augmented_pair_score_topK_ = native_augmented_pair_score_topK
+    try:
+        cand._setup_augmented_pair_transforms(X_train_original, y_train, fit=True)
+    finally:
+        if hasattr(cand, "_native_augmented_pair_cache_"):
+            delattr(cand, "_native_augmented_pair_cache_")
+        if hasattr(cand, "_native_augmented_pair_score_topK_"):
+            delattr(cand, "_native_augmented_pair_score_topK_")
     cand._current_y_for_downstream_topk_ = y_train
     try:
         X_down = cand._make_downstream_features(X_train_original, cand.x_train_hup_, fit=True)
@@ -7341,6 +7548,62 @@ def _hugiml_prepare_candidate_from_cached_base(
     # returned best_model is immediately usable for prediction; call fit() on the
     # selected params if full production metadata/drift baseline is required.
     return cand
+
+
+
+def _hugiml_build_fast_tune_adaptive_context(
+    cls,
+    X_train: Any,
+    y_train: Any,
+    params: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Build a fold-local adaptive pre-binning context for fast_grid_tune.
+
+    This cache is exact only when adaptive binning is ordinary per-feature
+    adaptive binning.  It is intentionally disabled for interaction-relaxed
+    pair-aware adaptive binning, where L>1 can change the selected adaptive
+    pairs.  The returned object is passed only to internal cache-building fits
+    and is not attached to any fitted model returned to users.
+    """
+    if not bool(params.get("adaptive_binning", True)):
+        return None
+    if bool(params.get("interaction_relaxed_mining", False)):
+        return None
+
+    builder = cls(**params)
+    builder._validate_params()
+    builder._resolve_col_meta(X_train)
+    y_arr = cls._safe_cast_y(y_train)
+    if _CORE_AVAILABLE and hasattr(_core, "select_adaptive_bins"):
+        X_pre = builder._apply_adaptive_binning_cpp(X_train, y_arr)
+    else:
+        X_pre = builder._apply_adaptive_binning(X_train, y_arr)
+
+    attrs: dict[str, Any] = {}
+    for name in (
+        "cat_cols_mask_",
+        "is_int_mask_",
+        "feature_names_in_",
+        "binary_categorical_cols_",
+        "_bin_edges_",
+        "_missing_col_edges_",
+        "_adaptive_code_label_map_",
+        "_adaptive_precoded_features_",
+        "per_feature_b_",
+        "ig_scores_",
+    ):
+        if hasattr(builder, name):
+            value = getattr(builder, name)
+            if isinstance(value, dict):
+                value = dict(value)
+            elif isinstance(value, set):
+                value = set(value)
+            elif isinstance(value, list):
+                value = list(value)
+            elif isinstance(value, np.ndarray):
+                value = value.copy()
+            attrs[name] = value
+    return {"X_pre": X_pre, "attrs": attrs}
 
 
 def _hugiml_fast_grid_tune(
@@ -7437,6 +7700,21 @@ def _hugiml_fast_grid_tune(
     y_val_arr = np.asarray(y_val)
     X_train_original = cls(**params0)._copy_input_for_downstream(X_train)
 
+    disable_prep_cache = os.environ.get("HUGIML_FAST_TUNE_DISABLE_PREP_CACHE", "0") == "1"
+    disable_validation_cache = (
+        os.environ.get("HUGIML_FAST_TUNE_DISABLE_VALIDATION_CACHE", "0") == "1"
+    )
+    t_adapt_ctx = time.perf_counter()
+    adaptive_context = None
+    if not disable_prep_cache and not bool(params0.get("interaction_relaxed_mining", False)):
+        # Lazy fold-local context. The first eligible L>1 cache fit performs
+        # ordinary adaptive binning and stores its exact pre-binned output;
+        # later L>1 cache fits reuse it. This avoids an extra up-front
+        # adaptive pass and keeps L=1 on the native fused adaptive path.
+        adaptive_context = {"misses": 0}
+    adaptive_context_seconds = time.perf_counter() - t_adapt_ctx
+    transaction_cache: dict[Any, Any] = {}
+
     # Correctness note: topK is NOT derived by mining max(topK) once and slicing.
     # Empirically, the native miner can return additional valid patterns when a
     # larger topK is requested, so a smaller standalone topK run is not always
@@ -7479,12 +7757,34 @@ def _hugiml_fast_grid_tune(
         t_fit = time.perf_counter()
         base = cls(**base_fit_params)
         base._fast_tune_cache_only = True
-        base.fit(X_train, y_train_arr)
-        base.__dict__.pop("_fast_tune_cache_only", None)
+        # Reuse pre-binning and transaction preparation for the non-fused L>1
+        # cache fits.  L=1 keeps the native fused adaptive path unchanged so
+        # ordinary fast_grid_tune remains bit-for-bit aligned with base 1.1.15.
+        if adaptive_context is not None and int(L_value) > 1:
+            base._fast_tune_adaptive_context = adaptive_context
+            base._fast_tune_transaction_cache = transaction_cache
+        try:
+            base.fit(X_train, y_train_arr)
+        finally:
+            base.__dict__.pop("_fast_tune_cache_only", None)
+            base.__dict__.pop("_fast_tune_adaptive_context", None)
+            base.__dict__.pop("_fast_tune_transaction_cache", None)
         cache_fit_seconds[f"G={float(G_value):.12g},L={int(L_value)},topK={int(topK_value)}"] = (
             time.perf_counter() - t_fit
         )
         base_by_G_L_topK[(float(G_value), int(L_value), int(topK_value))] = base
+
+    native_augmented_pair_cache = (
+        _core.AugmentedPairCache()
+        if _CORE_AVAILABLE and hasattr(_core, "AugmentedPairCache")
+        else None
+    )
+    native_augmented_pair_score_topK = max(
+        [int(c.get("topK", params0.get("topK", 30))) for c in candidates if int(c.get("L", 1)) > 1]
+        or [0]
+    )
+
+    validation_cache: dict[Any, Any] | None = None if disable_validation_cache else {}
 
     rows: list[dict[str, Any]] = []
     best_score = -np.inf
@@ -7510,8 +7810,12 @@ def _hugiml_fast_grid_tune(
                 topK_value,
                 feature_mode,
                 requested_execution_mode,
+                native_augmented_pair_cache,
+                native_augmented_pair_score_topK,
             )
-            score = _hugiml_score_model_for_tune(model, X_val, y_val_arr, scoring)
+            score = _hugiml_score_model_for_tune(
+                model, X_val, y_val_arr, scoring, validation_cache
+            )
             if np.isfinite(score) and score > best_score:
                 best_score = float(score)
                 best_model = model
@@ -7563,6 +7867,24 @@ def _hugiml_fast_grid_tune(
         "cv_results": rows if return_results else None,
         "cache_fit_seconds_by_G_L_topK": cache_fit_seconds,
         "cache_topK_strategy": "exact_per_G_L_topK_utility_ordered",
+        "native_augmented_pair_cache_stats": (
+            native_augmented_pair_cache.stats() if native_augmented_pair_cache is not None else None
+        ),
+        "adaptive_context_seconds": float(adaptive_context_seconds),
+        "adaptive_context_used": bool(adaptive_context is not None and "X_pre" in adaptive_context),
+        "adaptive_context_misses": (
+            int(adaptive_context.get("misses", 0)) if isinstance(adaptive_context, dict) else 0
+        ),
+        "adaptive_context_hits": (
+            max(0, sum(1 for _g, _l, _k in needed_cache_keys if int(_l) > 1)
+                - int(adaptive_context.get("misses", 0)))
+            if isinstance(adaptive_context, dict) and "X_pre" in adaptive_context
+            else 0
+        ),
+        "transaction_cache_entries": len(transaction_cache),
+        "validation_cache_entries": len(validation_cache) if validation_cache is not None else 0,
+        "prep_cache_disabled": bool(disable_prep_cache),
+        "validation_cache_disabled": bool(disable_validation_cache),
         "elapsed_seconds": time.perf_counter() - t_start,
         "method": "exact_cached_adaptive_grid",
         "scoring": str(scoring),
@@ -7622,15 +7944,51 @@ def _hugiml_score_model_for_tune(
     X_val: Any,
     y_val: Any,
     scoring: str,
+    validation_cache: dict[Any, Any] | None = None,
 ) -> float:
     """Score one fitted model for HUGIMLClassifier.tune()."""
     from sklearn.metrics import accuracy_score, balanced_accuracy_score, f1_score
 
     scoring_norm = str(scoring).lower()
+    pred = None
+    proba = None
+    if (
+        validation_cache is not None
+        and getattr(model, "max_predict_ms", None) is None
+        and not model._is_constant_prior_fallback_active()
+    ):
+        try:
+            X_original = X_val
+            X_for_hug = X_val
+            if getattr(model, "adaptive_binning", False) and getattr(model, "_bin_edges_", None):
+                pre_key = ("prebin", id(getattr(model, "td_", None)))
+                X_for_hug = validation_cache.get(pre_key)
+                if X_for_hug is None:
+                    X_for_hug = model._prebin_for_predict(X_val)
+                    validation_cache[pre_key] = X_for_hug
+            pat_sig = tuple(tuple(int(x) for x in getattr(p, "items", [])) for p in getattr(model, "patterns_", []))
+            z_key = ("hup", id(getattr(model, "td_", None)), pat_sig)
+            Z_val = validation_cache.get(z_key)
+            if Z_val is None:
+                Z_val = model._build_test_hup(X_for_hug)
+                validation_cache[z_key] = Z_val
+            X_downstream = model._make_downstream_features(X_original, Z_val, fit=False)
+            X_downstream = model._apply_strict_topk_budget_transform(X_downstream)
+            if scoring_norm in {"roc_auc", "auc"}:
+                proba = np.asarray(model.model_.predict_proba(X_downstream))
+            else:
+                pred = np.asarray(model.model_.predict(X_downstream))
+        except Exception:
+            # Scoring cache is an optimization only.  Fall back to the public
+            # prediction API so correctness follows the existing contract.
+            pred = None
+            proba = None
     if scoring_norm in {"roc_auc", "auc"}:
-        proba = model.predict_proba(X_val)
+        if proba is None:
+            proba = model.predict_proba(X_val)
         return _hugiml_auc_score_for_fast_grid(y_val, proba, model.classes_)
-    pred = model.predict(X_val)
+    if pred is None:
+        pred = model.predict(X_val)
     if scoring_norm == "accuracy":
         return float(accuracy_score(y_val, pred))
     if scoring_norm == "balanced_accuracy":

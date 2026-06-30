@@ -66,11 +66,16 @@ namespace hugiml {
 
 // Shannon entropy from integer class counts (natural-log scale).
 // Mirrors the static entropy_from_counts() in mining.cpp exactly.
-static double l1_entropy(const std::vector<int>& counts, int total) {
+// Takes a raw pointer + length (rather than std::vector<int>&) so callers
+// can pass a view into a flat buffer (cnt_item row, or a scratch cnt_out
+// buffer) without allocating/copying a vector per call. Same arithmetic,
+// same iteration order, same result as the vector-based original.
+static double l1_entropy(const int* counts, int n_cls, int total) {
     if (total <= 0) return 0.0;
     double h = 0.0;
     const double inv = 1.0 / static_cast<double>(total);
-    for (int c : counts) {
+    for (int k = 0; k < n_cls; k++) {
+        int c = counts[k];
         if (c > 0) {
             double p = static_cast<double>(c) * inv;
             h -= p * std::log(p);
@@ -87,24 +92,28 @@ static double l1_entropy(const std::vector<int>& counts, int total) {
 //   n_in        — number of rows where this item appeared
 //   n_train     — total training rows (= ytrain.size())
 //   n_cls       — number of classes
-static double l1_ig(const std::vector<int>& cnt_global,
-                    const std::vector<int>& cnt_in,
-                    int n_in, int n_train, int n_cls) {
+//   cnt_out_buf — caller-owned scratch buffer of length >= n_cls, reused
+//                 across the whole candidate loop. Avoids allocating a new
+//                 vector<int> on every call (previously: one heap alloc per
+//                 surviving candidate, since this is called once per item
+//                 in mine_patterns_l1_cpp's top-K loop).
+static double l1_ig(const int* cnt_global, const int* cnt_in,
+                    int n_in, int n_train, int n_cls,
+                    int* cnt_out_buf) {
     int n_out = n_train - n_in;
 
     // n_out == 0: item covers entire population — matches NaN branch in compute_ig.
     if (n_out == 0)
         return std::numeric_limits<double>::quiet_NaN();
 
-    double base = l1_entropy(cnt_global, n_train);
+    double base = l1_entropy(cnt_global, n_cls, n_train);
 
     // cnt_out = cnt_global - cnt_in  (identical to mining.cpp's cnt_out computation)
-    std::vector<int> cnt_out(n_cls);
     for (int k = 0; k < n_cls; k++)
-        cnt_out[k] = cnt_global[k] - cnt_in[k];
+        cnt_out_buf[k] = cnt_global[k] - cnt_in[k];
 
-    double ce = (static_cast<double>(n_in)  / n_train * l1_entropy(cnt_in,  n_in)
-               + static_cast<double>(n_out) / n_train * l1_entropy(cnt_out, n_out));
+    double ce = (static_cast<double>(n_in)  / n_train * l1_entropy(cnt_in,      n_cls, n_in)
+               + static_cast<double>(n_out) / n_train * l1_entropy(cnt_out_buf, n_cls, n_out));
     return base - ce;
 }
 
@@ -173,6 +182,18 @@ std::vector<PatternEntry> mine_patterns_l1_cpp(
 
     if (candidates.empty())
         return {};
+
+    // Match the generic miner exactly: top-level ULs are sorted by ascending
+    // TWU, with item ID as the deterministic tie-breaker, and then explored
+    // in reverse order.  The heap uses strict utility replacement, so the
+    // order in which equal-utility singletons are offered affects tie
+    // membership at the K boundary.
+    std::sort(candidates.begin(), candidates.end(),
+              [&](int a, int b) {
+                  const double ta = td.item_twu[static_cast<size_t>(a - 1)];
+                  const double tb = td.item_twu[static_cast<size_t>(b - 1)];
+                  return (ta < tb) || (ta == tb && a < b);
+              });
 
     // ── Build item → dense index map for the count matrix ────────────────────
     // Map surviving item IDs to [0, m) for compact 2-D storage.
@@ -250,6 +271,11 @@ std::vector<PatternEntry> mine_patterns_l1_cpp(
     std::vector<PatternEntry> heap;
     heap.reserve(static_cast<size_t>(K) + 1);
 
+    // Scratch buffer for l1_ig's cnt_out computation, allocated once and
+    // reused across every candidate (was: one vector<int> allocated fresh
+    // inside l1_ig per call). Sized n_cls, same as every cnt_item row.
+    std::vector<int> cnt_out_scratch(n_cls);
+
     // candidates is in ascending TWU order (mirroring sorted_items).
     // Iterate in reverse to process highest TWU first.
     for (int ci = m - 1; ci >= 0; --ci) {
@@ -264,11 +290,14 @@ std::vector<PatternEntry> mine_patterns_l1_cpp(
         const int ni = n_in_item[ci];
         if (ni == 0) continue;  // item never appeared (shouldn't happen if utility > 0)
 
-        // Build cnt_in view from the flat matrix row.
-        std::vector<int> cnt_in(cnt_item.data() + static_cast<size_t>(ci) * n_cls,
-                                cnt_item.data() + static_cast<size_t>(ci) * n_cls + n_cls);
+        // View into the flat matrix row — no copy. cnt_item is row-major
+        // [m × n_cls]; row ci starts at offset ci * n_cls. (Previously this
+        // copied the row into a freshly heap-allocated vector<int> on every
+        // iteration; the data is already contiguous, so a pointer suffices.)
+        const int* cnt_in = cnt_item.data() + static_cast<size_t>(ci) * n_cls;
 
-        const double ig = l1_ig(cnt_global, cnt_in, ni, n_train, n_cls);
+        const double ig = l1_ig(cnt_global.data(), cnt_in, ni, n_train, n_cls,
+                                 cnt_out_scratch.data());
 
         // NaN ig (n_out == 0) and ig <= G are both skipped — NaN > G is false
         // in IEEE 754, matching explore()'s ux->ig > G guard exactly.

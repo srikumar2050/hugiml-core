@@ -231,9 +231,8 @@ COO build_test_matrix_cpp(
                 bi = static_cast<int>(it - (edges.begin() + 1)) + 1;
                 bi = std::max(1, std::min(bi, nb));
             }
-            int bname = td.bkey(bi, j);
-            auto it   = td.bn2id.find(bname);
-            if (it != td.bn2id.end()) row.push_back(it->second);
+            int iid = td.item_id_for_bin(bi, j);
+            if (iid > 0) row.push_back(iid);
         }
         test_trans[r] = row.empty() ? Trans{-1} : row;
     }
