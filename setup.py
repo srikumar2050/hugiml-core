@@ -100,22 +100,95 @@ if is_windows:
     _opt_bind = ["/Od", "/W3"]
     _opt_debug = ["/Od", "/Zi", "/DHUGIML_DEBUG"]
 elif is_macos:
+    import re
     import subprocess
 
-    try:
-        libomp_prefix = (
-            subprocess.check_output(["brew", "--prefix", "libomp"], stderr=subprocess.DEVNULL)
-            .decode()
-            .strip()
-        )
-    except Exception:
-        libomp_prefix = os.environ.get("HUGIML_LIBOMP_ROOT", "").strip()
+    def _env_bool(name: str, *, default: bool = False) -> bool:
+        raw = os.environ.get(name)
+        if raw is None:
+            return default
+        return raw.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+    def _version_tuple(value: str) -> tuple[int, ...]:
+        parts = []
+        for piece in value.split("."):
+            if not piece.isdigit():
+                break
+            parts.append(int(piece))
+        return tuple(parts or [0])
+
+    def _macos_dylib_minos(dylib: str) -> str:
+        """Return the LC_BUILD_VERSION minos value for a dylib, or ''."""
+        try:
+            output = subprocess.check_output(
+                ["otool", "-l", dylib],
+                stderr=subprocess.DEVNULL,
+                text=True,
+            )
+        except Exception:
+            return ""
+        match = re.search(r"\bminos\s+(\d+(?:\.\d+)*)", output)
+        return match.group(1) if match else ""
+
+    def _candidate_libomp_prefix() -> str:
+        # CI-safe override.  This must win over Homebrew so cibuildwheel can point
+        # at a deployment-target-compatible OpenMP runtime.
+        explicit = os.environ.get("HUGIML_LIBOMP_ROOT", "").strip()
+        if explicit:
+            return explicit
+
+        # Homebrew bottles can be built for the runner OS.  On newer macOS runners
+        # that can produce a libomp.dylib with minos newer than the wheel tag
+        # (e.g. libomp minos 26.0 inside a macosx_15_0 wheel), which delocate
+        # rejects.  Make Homebrew fallback opt-out-able and validate it below.
+        if _env_bool("HUGIML_NO_BREW_LIBOMP"):
+            return ""
+
+        try:
+            return (
+                subprocess.check_output(["brew", "--prefix", "libomp"], stderr=subprocess.DEVNULL)
+                .strip()
+                .decode()
+            )
+        except Exception:
+            return ""
+
+    libomp_prefix = _candidate_libomp_prefix()
     if libomp_prefix:
+        deployment_target = os.environ.get("MACOSX_DEPLOYMENT_TARGET", "").strip()
+        libomp_dylib = os.path.join(libomp_prefix, "lib", "libomp.dylib")
+        libomp_minos = _macos_dylib_minos(libomp_dylib) if os.path.exists(libomp_dylib) else ""
+
+        if (
+            deployment_target
+            and libomp_minos
+            and _version_tuple(libomp_minos) > _version_tuple(deployment_target)
+            and not _env_bool("HUGIML_ALLOW_INCOMPATIBLE_LIBOMP")
+        ):
+            # Do not silently create a wheel that delocate will later reject.
+            raise RuntimeError(
+                "Selected libomp.dylib is newer than the requested macOS deployment "
+                f"target: {libomp_dylib} has minos {libomp_minos}, but "
+                f"MACOSX_DEPLOYMENT_TARGET={deployment_target}. "
+                "Use HUGIML_LIBOMP_ROOT to point at a compatible libomp build, "
+                "set HUGIML_NO_BREW_LIBOMP=1 to build the macOS wheel without "
+                "OpenMP, or intentionally raise MACOSX_DEPLOYMENT_TARGET."
+            )
+
         omp_compile = [f"-I{libomp_prefix}/include", "-Xpreprocessor", "-fopenmp"]
         omp_link = [f"-L{libomp_prefix}/lib", "-lomp", f"-Wl,-rpath,{libomp_prefix}/lib"]
+    elif _env_bool("HUGIML_NO_BREW_LIBOMP"):
+        # Serial macOS build: avoids adding any libomp dependency to the wheel.
+        # The native code already guards OpenMP-only calls with _OPENMP.
+        omp_compile = []
+        omp_link = []
     else:
+        # Last-resort local-source build path.  This may work when the compiler
+        # toolchain already knows where libomp lives; CI wheels should prefer
+        # HUGIML_LIBOMP_ROOT or HUGIML_NO_BREW_LIBOMP=1.
         omp_compile = ["-Xpreprocessor", "-fopenmp"]
         omp_link = ["-lomp"]
+
     _opt_release = ["-O2", "-Wall", "-Wextra", "-Wno-unused-parameter"]
     _opt_fast = ["-O1", "-Wall", "-Wno-unused-parameter"]
     _opt_bind = ["-O0", "-g0", "-Wall", "-Wno-unused-parameter"]
