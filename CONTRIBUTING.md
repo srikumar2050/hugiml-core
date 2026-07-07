@@ -47,26 +47,28 @@ cd hugiml-core
 python -m venv .venv && source .venv/bin/activate
 
 # Install in editable mode with all dev extras
-pip install -e ".[dev]"
+python -m pip install -e ".[dev]"
 
-# Build the C++ extension (requires a C++17 compiler)
-python setup.py build_ext --inplace
+# Build the C++ extension with conservative batching defaults
+python scripts/build_batched.py --inplace
 ```
+
+`python setup.py build_ext --inplace` remains supported for environments that already have local build requirements installed. Prefer `python -m pip install .` for isolated package builds, and avoid `--no-build-isolation` unless `pybind11`, `setuptools`, and `wheel` are already installed in the active environment.
 
 ---
 
 ## Running the Test Suite
 
 ```bash
-# Fast unit tests (no native extension required for pure-Python paths)
-pytest tests/ -v -m "not integration and not stress"
+# Default validation: deterministic pytest file batches with per-batch logs
+python scripts/run_pytest_batches.py
 
-# Full suite including real-dataset integration tests
-pytest tests/ -v
-
-# Stress tests (memory, concurrency)
-pytest tests/test_stress.py -v -m stress
+# Optional narrower runs
+python scripts/run_pytest_batches.py --pytest-args -q -m "not integration and not stress"
+python scripts/run_pytest_batches.py tests/test_stress.py --pytest-args -q -m stress
 ```
+
+The batch runner writes logs and `summary.json` under `build/pytest_batches/`, reruns timed-out batches file-by-file by default, and exits nonzero on any failed unit. Direct `pytest tests/ -v` remains available for unconstrained local machines.
 
 Coverage must stay at or above **80%**. Check locally with:
 
@@ -80,7 +82,7 @@ pytest --cov=hugiml --cov-report=term-missing tests/
 
 ```bash
 # Linting
-ruff check src/ tests/ benchmarks/
+ruff check .
 
 # Type checking
 mypy src/hugiml/

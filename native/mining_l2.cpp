@@ -33,6 +33,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <limits>
 #include <functional>
@@ -138,21 +139,57 @@ static double l2_entropy(const std::vector<int>& counts, int total) {
     return std::max(h, 0.0);
 }
 
-static double l2_ig_global(const std::vector<int>& cnt_global,
-                           const std::vector<int>& cnt_in,
-                           int n_in, int n_train, int n_cls) {
+// Entropy from a class-count buffer given as pointer + length, for callers
+// that already have a contiguous row (a flat cnt_item matrix row, or a
+// freshly-built pair candidate's count array) and would otherwise have to
+// copy it into a std::vector just to call the overload above.
+static double l2_entropy_ptr(const int* counts, int n_cls, int total) {
+    if (total <= 0) return 0.0;
+    double h = 0.0;
+    const double inv = 1.0 / static_cast<double>(total);
+    for (int k = 0; k < n_cls; k++) {
+        const int c = counts[k];
+        if (c > 0) {
+            const double p = static_cast<double>(c) * inv;
+            h -= p * std::log(p);
+        }
+    }
+    return std::max(h, 0.0);
+}
+
+// IG of a candidate (singleton or pair) against the fixed global/parent
+// class distribution. base_global (= entropy of cnt_global over n_train)
+// is identical on *every* call within a single mine_patterns_l2_*
+// invocation -- callers compute it once (see each function's `base_global`
+// local) and pass it in here, rather than this function recomputing the
+// same O(n_cls) entropy (with n_cls std::log calls) on every one of the
+// O(m) singleton and O(m^2) pair candidates that reach it. cnt_in is taken
+// as pointer+length (not std::vector<int>&) so callers reading a row out
+// of a flat matrix don't need to copy it into a temporary vector first,
+// and the cnt_out term is accumulated inline instead of being materialised
+// into its own temporary vector on every call.
+static double l2_ig_global(double base_global,
+                           const std::vector<int>& cnt_global,
+                           const int* cnt_in, int n_in,
+                           int n_train, int n_cls) {
     const int n_out = n_train - n_in;
     if (n_out == 0)
         return std::numeric_limits<double>::quiet_NaN();
 
-    double base = l2_entropy(cnt_global, n_train);
-    std::vector<int> cnt_out(n_cls);
-    for (int k = 0; k < n_cls; k++)
-        cnt_out[k] = cnt_global[k] - cnt_in[k];
+    double h_out = 0.0;
+    const double inv_out = 1.0 / static_cast<double>(n_out);
+    for (int k = 0; k < n_cls; k++) {
+        const int out_c = cnt_global[static_cast<size_t>(k)] - cnt_in[k];
+        if (out_c > 0) {
+            const double p = static_cast<double>(out_c) * inv_out;
+            h_out -= p * std::log(p);
+        }
+    }
+    h_out = std::max(h_out, 0.0);
 
-    double ce = (static_cast<double>(n_in)  / n_train * l2_entropy(cnt_in,  n_in)
-               + static_cast<double>(n_out) / n_train * l2_entropy(cnt_out, n_out));
-    return base - ce;
+    const double ce = (static_cast<double>(n_in)  / n_train) * l2_entropy_ptr(cnt_in, n_cls, n_in)
+                     + (static_cast<double>(n_out) / n_train) * h_out;
+    return base_global - ce;
 }
 
 struct L2MinHeapCmp {
@@ -218,6 +255,19 @@ static size_t fnv1a_tids(const std::vector<int32_t>& v) {
         }
     }
     return h;
+}
+
+// Coverage-hash membership check for the small per-root dedup buffers below
+// (typically a handful to a few dozen live entries: bounded by how many
+// candidate partners survive the IG/EUCS gates at that branch). A flat
+// vector + linear scan avoids the per-element heap allocation an
+// unordered_set node incurs, at these sizes without a meaningful lookup
+// cost penalty. Semantics unchanged: still just an O(1)-amortized
+// pre-filter ahead of the existing full tid-vector equality check.
+static inline bool l2_vec_contains(const std::vector<size_t>& v, size_t h) {
+    for (size_t existing : v)
+        if (existing == h) return true;
+    return false;
 }
 
 // Opt-B: ru vector removed; only the scalar sR is retained for the
@@ -308,29 +358,64 @@ static bool l2_configure_eucs(const TransList& transactions,
     return true;
 }
 
+// This runs once per transaction and is O(active^2) internally -- the
+// dominant cost of Phase 1 for wide item universes (confirmed by profiling:
+// on a p=60/n_bins=8 stress config this loop alone accounted for ~70% of
+// the whole transaction-scan phase). The original re-derived item_a's
+// source column from item_col on every one of the O(A^2) (ai, bi) pairs
+// via same_feature_l2(...), even though it only depends on ai. pos_scratch
+// / col_scratch are precomputed once per transaction (O(A)) and reused
+// across the O(A^2) inner loop; both buffers are owned by the caller and
+// reused across the whole Phase 1 scan (resized, never freed, so this adds
+// no additional per-transaction heap allocation over the original).
+constexpr int kL2NoColumn = -1;
+
 static void l2_update_eucs_for_active(const std::vector<std::pair<int, double>>& active,
                                       const std::vector<int>& ci_for_item,
                                       const std::vector<int>& item_col,
                                       int m,
                                       std::vector<double>& eucs_twu,
-                                      std::vector<double>& eucs_pair_utility) {
+                                      std::vector<double>& eucs_pair_utility,
+                                      std::vector<int>& pos_scratch,
+                                      std::vector<int>& col_scratch) {
     if (eucs_twu.empty() || eucs_pair_utility.empty()) return;
+    const int A = static_cast<int>(active.size());
     double transaction_utility = 0.0;
     for (const auto& item : active) transaction_utility += item.second;
 
-    for (int ai = 0; ai < static_cast<int>(active.size()); ++ai) {
-        const int item_a = active[static_cast<size_t>(ai)].first;
-        const int pos_a = ci_for_item[static_cast<size_t>(item_a)];
+    if (pos_scratch.size() < static_cast<size_t>(A)) pos_scratch.resize(static_cast<size_t>(A));
+    if (col_scratch.size() < static_cast<size_t>(A)) col_scratch.resize(static_cast<size_t>(A));
+
+    // Same fallback semantics as the original same_feature_l2 guards,
+    // evaluated once per active item instead of once per (ai, bi) pair:
+    // item_col.empty(), item <= 0, or an out-of-range index all map to
+    // kL2NoColumn, which never equals a real (>= 0) column id, so those
+    // items are correctly treated as "not the same feature" as anything.
+    for (int k = 0; k < A; ++k) {
+        const int item = active[static_cast<size_t>(k)].first;
+        pos_scratch[static_cast<size_t>(k)] = ci_for_item[static_cast<size_t>(item)];
+        const size_t idx = static_cast<size_t>(item - 1);
+        col_scratch[static_cast<size_t>(k)] =
+            (!item_col.empty() && item > 0 && idx < item_col.size())
+            ? item_col[idx] : kL2NoColumn;
+    }
+
+    for (int ai = 0; ai < A; ++ai) {
+        const int pos_a = pos_scratch[static_cast<size_t>(ai)];
         if (pos_a < 0) continue;
-        for (int bi = ai + 1; bi < static_cast<int>(active.size()); ++bi) {
+        const int col_a = col_scratch[static_cast<size_t>(ai)];
+        const int item_a = active[static_cast<size_t>(ai)].first;
+        const double u_a = active[static_cast<size_t>(ai)].second;
+
+        for (int bi = ai + 1; bi < A; ++bi) {
             const int item_b = active[static_cast<size_t>(bi)].first;
-            if (item_a == item_b || same_feature_l2(item_col, item_a, item_b)) continue;
-            const int pos_b = ci_for_item[static_cast<size_t>(item_b)];
+            if (item_a == item_b) continue;
+            if (col_a != kL2NoColumn && col_a == col_scratch[static_cast<size_t>(bi)]) continue;
+            const int pos_b = pos_scratch[static_cast<size_t>(bi)];
             if (pos_b < 0 || pos_a == pos_b) continue;
             const size_t idx = l2_eucs_index(pos_a, pos_b, m);
             eucs_twu[idx] += transaction_utility;
-            eucs_pair_utility[idx] += active[static_cast<size_t>(ai)].second
-                                    + active[static_cast<size_t>(bi)].second;
+            eucs_pair_utility[idx] += u_a + active[static_cast<size_t>(bi)].second;
         }
     }
 }
@@ -388,6 +473,11 @@ std::vector<PatternEntry> mine_patterns_l2_cpp(
     std::vector<double> eucs_pair_utility;
     const bool eucs_enabled = l2_configure_eucs(
         td.transactions, ci_for_item, m, eucs_twu, eucs_pair_utility);
+    // Reused across the whole Phase 1 transaction scan by
+    // l2_update_eucs_for_active (see its definition for why): avoids a
+    // fresh per-transaction allocation for these O(active-size) buffers.
+    std::vector<int> eucs_pos_scratch;
+    std::vector<int> eucs_col_scratch;
 
     std::vector<L2UL> uls(static_cast<size_t>(m));
     for (int ci = 0; ci < m; ci++) uls[static_cast<size_t>(ci)].item = sorted_items[ci];
@@ -395,6 +485,9 @@ std::vector<PatternEntry> mine_patterns_l2_cpp(
     std::vector<int> cnt_global(n_cls, 0);
     for (int lbl : ytrain)
         if (lbl >= 0 && lbl < n_cls) cnt_global[static_cast<size_t>(lbl)]++;
+    // Computed once per mine_patterns_l2_* call; l2_ig_global takes it
+    // as a parameter instead of recomputing it on every candidate.
+    const double base_global = l2_entropy(cnt_global, n_train);
 
     std::vector<int> loop_counts(static_cast<size_t>(m), 0);
     std::vector<int> cnt_item(static_cast<size_t>(m) * static_cast<size_t>(n_cls), 0);
@@ -435,7 +528,8 @@ std::vector<PatternEntry> mine_patterns_l2_cpp(
 
         if (eucs_enabled) {
             l2_update_eucs_for_active(
-                active, ci_for_item, td.item_col, m, eucs_twu, eucs_pair_utility);
+                active, ci_for_item, td.item_col, m, eucs_twu, eucs_pair_utility,
+                eucs_pos_scratch, eucs_col_scratch);
         }
 
         double rem = 0.0;
@@ -460,11 +554,9 @@ std::vector<PatternEntry> mine_patterns_l2_cpp(
 
     // ── Phase 2: IG computation (serial) ──────────────────────────────────
     for (int ci = 0; ci < m; ci++) {
-        std::vector<int> cnt_in(
-            cnt_item.data() + static_cast<size_t>(ci) * static_cast<size_t>(n_cls),
-            cnt_item.data() + static_cast<size_t>(ci + 1) * static_cast<size_t>(n_cls));
+        const int* cnt_in = cnt_item.data() + static_cast<size_t>(ci) * static_cast<size_t>(n_cls);
         uls[static_cast<size_t>(ci)].ig = l2_ig_global(
-            cnt_global, cnt_in, loop_counts[static_cast<size_t>(ci)], n_train, n_cls);
+            base_global, cnt_global, cnt_in, loop_counts[static_cast<size_t>(ci)], n_train, n_cls);
     }
 
     // ── Singleton save (serial) ────────────────────────────────────────────
@@ -533,7 +625,11 @@ std::vector<PatternEntry> mine_patterns_l2_cpp(
         //        The tid list is a local variable used for the FNV1a duplicate
         //        check and discarded immediately after.
         std::vector<L2Child>   ext;
-        std::unordered_set<size_t> ext_cov_hashes;
+        std::vector<size_t> ext_cov_hashes;
+        // Reused across every j in this i-iteration instead of a fresh
+        // heap allocation per candidate pair (was: allocated inside the
+        // j-loop even for candidates rejected moments later).
+        std::vector<int> cnt_pair_scratch(static_cast<size_t>(n_cls), 0);
 
         for (int j = i + 1; j < m; j++) {
             const L2UL& uy = uls[static_cast<size_t>(j)];
@@ -555,7 +651,8 @@ std::vector<PatternEntry> mine_patterns_l2_cpp(
             // Sorted-merge intersection — build c_tid, accumulate c_sI and
             // cnt_pair.  c_tid is local to this j-iteration (Opt-C).
             std::vector<int32_t> c_tid;
-            std::vector<int> cnt_pair(n_cls, 0);
+            std::fill(cnt_pair_scratch.begin(), cnt_pair_scratch.end(), 0);
+            std::vector<int>& cnt_pair = cnt_pair_scratch;
             double c_sI = 0.0;
             c_tid.reserve(std::min(ux.tid.size(), uy.tid.size()));
 
@@ -575,14 +672,14 @@ std::vector<PatternEntry> mine_patterns_l2_cpp(
             if (c_tid.empty()) continue;
 
             const double c_ig = l2_ig_global(
-                cnt_global, cnt_pair, static_cast<int>(c_tid.size()), n_train, n_cls);
+                base_global, cnt_global, cnt_pair.data(), static_cast<int>(c_tid.size()), n_train, n_cls);
             if (!(c_ig > G)) continue;
 
             // FNV1a duplicate-coverage check (Opt-C: done here before ext push,
             // using the stack-local c_tid; no tid copy stored in ext).
             const size_t h = fnv1a_tids(c_tid);
             bool duplicate_tids = false;
-            if (ext_cov_hashes.count(h)) {
+            if (l2_vec_contains(ext_cov_hashes, h)) {
                 // Hash collision: need the full tid list.  Re-run the merge to
                 // reconstruct c_tid for each existing ext entry that hashed the same.
                 // In practice hash collisions are extremely rare; this branch is cold.
@@ -612,7 +709,7 @@ std::vector<PatternEntry> mine_patterns_l2_cpp(
                 }
             }
             if (duplicate_tids) continue;
-            ext_cov_hashes.insert(h);
+            ext_cov_hashes.push_back(h);
 
             // Opt-C: push only the four scalar fields — no tid vector copy.
             ext.push_back({c_sI, c_ig, ux.item, uy.item});
@@ -651,7 +748,11 @@ std::vector<PatternEntry> mine_patterns_l2_cpp(
 
         // Opt-C: compact ext — no tid vector in L2Child.
         std::vector<L2Child>       ext;
-        std::unordered_set<size_t> ext_cov_hashes;
+        std::vector<size_t> ext_cov_hashes;
+        // Reused across every j in this i-iteration instead of a fresh
+        // heap allocation per candidate pair (was: allocated inside the
+        // j-loop even for candidates rejected moments later).
+        std::vector<int> cnt_pair_scratch(static_cast<size_t>(n_cls), 0);
 
         for (int j = i + 1; j < m; j++) {
             if (has_deadline && ((++loop_ctr & (CHECK_INTERVAL - 1)) == 0) && timed_out())
@@ -670,7 +771,8 @@ std::vector<PatternEntry> mine_patterns_l2_cpp(
             if (ux.tid.empty() || uy.tid.empty()) continue;
 
             std::vector<int32_t> c_tid;
-            std::vector<int> cnt_pair(n_cls, 0);
+            std::fill(cnt_pair_scratch.begin(), cnt_pair_scratch.end(), 0);
+            std::vector<int>& cnt_pair = cnt_pair_scratch;
             double c_sI = 0.0;
             c_tid.reserve(std::min(ux.tid.size(), uy.tid.size()));
 
@@ -690,12 +792,12 @@ std::vector<PatternEntry> mine_patterns_l2_cpp(
             if (c_tid.empty()) continue;
 
             const double c_ig = l2_ig_global(
-                cnt_global, cnt_pair, static_cast<int>(c_tid.size()), n_train, n_cls);
+                base_global, cnt_global, cnt_pair.data(), static_cast<int>(c_tid.size()), n_train, n_cls);
             if (!(c_ig > G)) continue;
 
             const size_t h = fnv1a_tids(c_tid);
             bool duplicate_tids = false;
-            if (ext_cov_hashes.count(h)) {
+            if (l2_vec_contains(ext_cov_hashes, h)) {
                 // Re-derive tids for hash-collision check (cold path).
                 for (const L2Child& existing : ext) {
                     const int ey = existing.item_y;
@@ -716,7 +818,7 @@ std::vector<PatternEntry> mine_patterns_l2_cpp(
                 }
             }
             if (duplicate_tids) continue;
-            ext_cov_hashes.insert(h);
+            ext_cov_hashes.push_back(h);
 
             ext.push_back({c_sI, c_ig, ux.item, uy.item});
         }
@@ -846,6 +948,11 @@ AugmentedPatternsResult mine_patterns_l2_augmented_patterns_cpp(
     std::vector<double> eucs_pair_utility;
     const bool eucs_enabled = l2_configure_eucs(
         td.transactions, ci_for_item, m, eucs_twu, eucs_pair_utility);
+    // Reused across the whole Phase 1 transaction scan by
+    // l2_update_eucs_for_active (see its definition for why): avoids a
+    // fresh per-transaction allocation for these O(active-size) buffers.
+    std::vector<int> eucs_pos_scratch;
+    std::vector<int> eucs_col_scratch;
 
     std::vector<L2UL> uls(static_cast<size_t>(m));
     for (int ci = 0; ci < m; ci++) uls[static_cast<size_t>(ci)].item = sorted_items[ci];
@@ -853,6 +960,9 @@ AugmentedPatternsResult mine_patterns_l2_augmented_patterns_cpp(
     std::vector<int> cnt_global(n_cls, 0);
     for (int lbl : ytrain)
         if (lbl >= 0 && lbl < n_cls) cnt_global[static_cast<size_t>(lbl)]++;
+    // Computed once per mine_patterns_l2_* call; l2_ig_global takes it
+    // as a parameter instead of recomputing it on every candidate.
+    const double base_global = l2_entropy(cnt_global, n_train);
 
     std::vector<int> loop_counts(static_cast<size_t>(m), 0);
     std::vector<int> cnt_item(static_cast<size_t>(m) * static_cast<size_t>(n_cls), 0);
@@ -890,7 +1000,8 @@ AugmentedPatternsResult mine_patterns_l2_augmented_patterns_cpp(
 
         if (eucs_enabled) {
             l2_update_eucs_for_active(
-                active, ci_for_item, td.item_col, m, eucs_twu, eucs_pair_utility);
+                active, ci_for_item, td.item_col, m, eucs_twu, eucs_pair_utility,
+                eucs_pos_scratch, eucs_col_scratch);
         }
 
         double rem = 0.0;
@@ -913,11 +1024,9 @@ AugmentedPatternsResult mine_patterns_l2_augmented_patterns_cpp(
     }
 
     for (int ci = 0; ci < m; ci++) {
-        std::vector<int> cnt_in(
-            cnt_item.data() + static_cast<size_t>(ci) * static_cast<size_t>(n_cls),
-            cnt_item.data() + static_cast<size_t>(ci + 1) * static_cast<size_t>(n_cls));
+        const int* cnt_in = cnt_item.data() + static_cast<size_t>(ci) * static_cast<size_t>(n_cls);
         uls[static_cast<size_t>(ci)].ig = l2_ig_global(
-            cnt_global, cnt_in, loop_counts[static_cast<size_t>(ci)], n_train, n_cls);
+            base_global, cnt_global, cnt_in, loop_counts[static_cast<size_t>(ci)], n_train, n_cls);
     }
 
     std::vector<PatternEntry> heap;
@@ -972,7 +1081,11 @@ AugmentedPatternsResult mine_patterns_l2_augmented_patterns_cpp(
         if (ux_relaxed && ux.sI <= 0.0) continue;
 
         std::vector<L2Child>       ext;
-        std::unordered_set<size_t> ext_cov_hashes;
+        std::vector<size_t> ext_cov_hashes;
+        // Reused across every j in this i-iteration instead of a fresh
+        // heap allocation per candidate pair (was: allocated inside the
+        // j-loop even for candidates rejected moments later).
+        std::vector<int> cnt_pair_scratch(static_cast<size_t>(n_cls), 0);
 
         for (int j = i + 1; j < m; j++) {
             if (has_deadline && ((++loop_ctr & (CHECK_INTERVAL - 1)) == 0) && timed_out())
@@ -995,7 +1108,8 @@ AugmentedPatternsResult mine_patterns_l2_augmented_patterns_cpp(
             if (ux.tid.empty() || uy.tid.empty()) continue;
 
             std::vector<int32_t> c_tid;
-            std::vector<int> cnt_pair(n_cls, 0);
+            std::fill(cnt_pair_scratch.begin(), cnt_pair_scratch.end(), 0);
+            std::vector<int>& cnt_pair = cnt_pair_scratch;
             double c_sI = 0.0;
             c_tid.reserve(std::min(ux.tid.size(), uy.tid.size()));
 
@@ -1015,7 +1129,7 @@ AugmentedPatternsResult mine_patterns_l2_augmented_patterns_cpp(
             if (c_tid.empty()) continue;
 
             const double c_ig = l2_ig_global(
-                cnt_global, cnt_pair, static_cast<int>(c_tid.size()), n_train, n_cls);
+                base_global, cnt_global, cnt_pair.data(), static_cast<int>(c_tid.size()), n_train, n_cls);
             // Pair gate: relaxed if EITHER source item is a relaxed survivor.
             // This is the key relaxation that lets a near-zero-marginal-IG
             // interaction survivor combine with any partner and still be
@@ -1025,7 +1139,7 @@ AugmentedPatternsResult mine_patterns_l2_augmented_patterns_cpp(
 
             const size_t h = fnv1a_tids(c_tid);
             bool duplicate_tids = false;
-            if (ext_cov_hashes.count(h)) {
+            if (l2_vec_contains(ext_cov_hashes, h)) {
                 for (const L2Child& existing : ext) {
                     const int ey = existing.item_y;
                     if (ey <= 0 || ey > n_items) continue;
@@ -1045,7 +1159,7 @@ AugmentedPatternsResult mine_patterns_l2_augmented_patterns_cpp(
                 }
             }
             if (duplicate_tids) continue;
-            ext_cov_hashes.insert(h);
+            ext_cov_hashes.push_back(h);
 
             ext.push_back({c_sI, c_ig, ux.item, uy.item});
         }
@@ -1150,6 +1264,11 @@ std::vector<PatternEntry> mine_patterns_l2_augmented_patterns_v2_cpp(
     std::vector<double> eucs_pair_utility;
     const bool eucs_enabled = l2_configure_eucs(
         td.transactions, ci_for_item, m, eucs_twu, eucs_pair_utility);
+    // Reused across the whole Phase 1 transaction scan by
+    // l2_update_eucs_for_active (see its definition for why): avoids a
+    // fresh per-transaction allocation for these O(active-size) buffers.
+    std::vector<int> eucs_pos_scratch;
+    std::vector<int> eucs_col_scratch;
 
     std::vector<L2UL> uls(static_cast<size_t>(m));
     for (int ci = 0; ci < m; ci++) uls[static_cast<size_t>(ci)].item = sorted_items[ci];
@@ -1157,6 +1276,9 @@ std::vector<PatternEntry> mine_patterns_l2_augmented_patterns_v2_cpp(
     std::vector<int> cnt_global(n_cls, 0);
     for (int lbl : ytrain)
         if (lbl >= 0 && lbl < n_cls) cnt_global[static_cast<size_t>(lbl)]++;
+    // Computed once per mine_patterns_l2_* call; l2_ig_global takes it
+    // as a parameter instead of recomputing it on every candidate.
+    const double base_global = l2_entropy(cnt_global, n_train);
 
     std::vector<int> loop_counts(static_cast<size_t>(m), 0);
     std::vector<int> cnt_item(static_cast<size_t>(m) * static_cast<size_t>(n_cls), 0);
@@ -1194,7 +1316,8 @@ std::vector<PatternEntry> mine_patterns_l2_augmented_patterns_v2_cpp(
 
         if (eucs_enabled) {
             l2_update_eucs_for_active(
-                active, ci_for_item, td.item_col, m, eucs_twu, eucs_pair_utility);
+                active, ci_for_item, td.item_col, m, eucs_twu, eucs_pair_utility,
+                eucs_pos_scratch, eucs_col_scratch);
         }
 
         double rem = 0.0;
@@ -1217,11 +1340,9 @@ std::vector<PatternEntry> mine_patterns_l2_augmented_patterns_v2_cpp(
     }
 
     for (int ci = 0; ci < m; ci++) {
-        std::vector<int> cnt_in(
-            cnt_item.data() + static_cast<size_t>(ci) * static_cast<size_t>(n_cls),
-            cnt_item.data() + static_cast<size_t>(ci + 1) * static_cast<size_t>(n_cls));
+        const int* cnt_in = cnt_item.data() + static_cast<size_t>(ci) * static_cast<size_t>(n_cls);
         uls[static_cast<size_t>(ci)].ig = l2_ig_global(
-            cnt_global, cnt_in, loop_counts[static_cast<size_t>(ci)], n_train, n_cls);
+            base_global, cnt_global, cnt_in, loop_counts[static_cast<size_t>(ci)], n_train, n_cls);
     }
 
     // Both pools run at FULL capacity K -- this is the only budget
@@ -1269,7 +1390,11 @@ std::vector<PatternEntry> mine_patterns_l2_augmented_patterns_v2_cpp(
         if (ux_relaxed && ux.sI <= 0.0) continue;
 
         std::vector<L2Child>       ext;
-        std::unordered_set<size_t> ext_cov_hashes;
+        std::vector<size_t> ext_cov_hashes;
+        // Reused across every j in this i-iteration instead of a fresh
+        // heap allocation per candidate pair (was: allocated inside the
+        // j-loop even for candidates rejected moments later).
+        std::vector<int> cnt_pair_scratch(static_cast<size_t>(n_cls), 0);
 
         for (int j = i + 1; j < m; j++) {
             if (has_deadline && ((++loop_ctr & (CHECK_INTERVAL - 1)) == 0) && timed_out()) {
@@ -1298,7 +1423,8 @@ std::vector<PatternEntry> mine_patterns_l2_augmented_patterns_v2_cpp(
             if (ux.tid.empty() || uy.tid.empty()) continue;
 
             std::vector<int32_t> c_tid;
-            std::vector<int> cnt_pair(n_cls, 0);
+            std::fill(cnt_pair_scratch.begin(), cnt_pair_scratch.end(), 0);
+            std::vector<int>& cnt_pair = cnt_pair_scratch;
             double c_sI = 0.0;
             c_tid.reserve(std::min(ux.tid.size(), uy.tid.size()));
 
@@ -1318,12 +1444,12 @@ std::vector<PatternEntry> mine_patterns_l2_augmented_patterns_v2_cpp(
             if (c_tid.empty()) continue;
 
             const double c_ig = l2_ig_global(
-                cnt_global, cnt_pair, static_cast<int>(c_tid.size()), n_train, n_cls);
+                base_global, cnt_global, cnt_pair.data(), static_cast<int>(c_tid.size()), n_train, n_cls);
             if (!(c_ig > G) && !pair_relaxed) continue;
 
             const size_t h = fnv1a_tids(c_tid);
             bool duplicate_tids = false;
-            if (ext_cov_hashes.count(h)) {
+            if (l2_vec_contains(ext_cov_hashes, h)) {
                 for (const L2Child& existing : ext) {
                     const int ey = existing.item_y;
                     if (ey <= 0 || ey > n_items) continue;
@@ -1343,7 +1469,7 @@ std::vector<PatternEntry> mine_patterns_l2_augmented_patterns_v2_cpp(
                 }
             }
             if (duplicate_tids) continue;
-            ext_cov_hashes.insert(h);
+            ext_cov_hashes.push_back(h);
 
             ext.push_back({c_sI, c_ig, ux.item, uy.item});
         }

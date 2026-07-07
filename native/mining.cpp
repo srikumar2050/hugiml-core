@@ -21,6 +21,7 @@
 #include "mining.hpp"
 #include "mining_l1.hpp"
 #include "mining_l2.hpp"
+#include "mining_l3.hpp"
 #include "math.hpp"
 
 #include <algorithm>
@@ -998,6 +999,8 @@ std::vector<PatternEntry> mine_patterns_cpp(
         return mine_patterns_l1_cpp(td, ytrain, n_cls, K, G, timeout_s);
     if (L == 2)
         return mine_patterns_l2_cpp(td, ytrain, n_cls, K, G, timeout_s);
+    if (L == 3)
+        return mine_patterns_l3_cpp(td, ytrain, n_cls, K, G, timeout_s);
     return mine_patterns_generic_cpp(td, ytrain, n_cls, K, L, G, timeout_s);
 }
 

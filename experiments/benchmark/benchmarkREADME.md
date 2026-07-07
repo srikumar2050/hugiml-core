@@ -1,6 +1,6 @@
 # HUGIML benchmark dashboard
 
-The script runs a reproducible classifier benchmark for HUGIML and baseline models, checkpoints every dataset/model pair, and assembles the HTML dashboard from the checkpoint.
+The script runs a reproducible classifier benchmark for HUGIML and baseline models, checkpoints every dataset/model pair, and assembles the HTML dashboard from the checkpoint. When requested at assemble time, it can also write a privacy-sanitized SBOM-style reproducibility manifest and embed the same manifest in a collapsed section at the bottom of the dashboard HTML.
 
 The dashboard evaluation protocol is aligned with `hugiml.benchmarks.runner` when runner is invoked with tuning enabled:
 
@@ -83,6 +83,97 @@ Dashboard command with the same validation protocol:
 ```bash
 python experiments/benchmark/benchmark_dashboard.py --fresh --n-splits 5 --inner-splits 3 --random-state 42
 ```
+
+## Reproducibility SBOM
+
+The dashboard can optionally include an SBOM-style reproducibility manifest during the assemble step:
+
+```bash
+python experiments/benchmark/benchmark_dashboard.py --assemble --include-sbom
+```
+
+`--include-sbom` is an assemble-time option. A fresh benchmark command such as:
+
+```bash
+python experiments/benchmark/benchmark_dashboard.py --fresh --n-splits 5 --inner-splits 3 --random-state 42
+```
+
+does not by itself generate the HTML dashboard or the SBOM. Use the two-step flow when you want a public dashboard with reproducibility metadata:
+
+```bash
+python experiments/benchmark/benchmark_dashboard.py --fresh --n-splits 5 --inner-splits 3 --random-state 42
+python experiments/benchmark/benchmark_dashboard.py --assemble --include-sbom
+```
+
+When enabled, the assemble step writes:
+
+```text
+benchmark_reproducibility_sbom.json
+hugiml_benchmark_analysis_dashboard_revised.html
+```
+
+The HTML dashboard contains the same SBOM JSON at the bottom inside a collapsed `<details>` block titled:
+
+```text
+Reproducibility / SBOM manifest
+```
+
+The SBOM is hidden by default in the HTML and can be expanded by the reader.
+
+### SBOM contents
+
+The manifest is intended to make another person able to understand and reproduce the benchmark environment. It includes best-effort metadata for:
+
+- Benchmark configuration: datasets, model order, HUGIML scenarios, grids, row cap, random state, budget, split counts, and tuning mode where available.
+- Dashboard inputs and outputs: checkpoint/template/output fingerprints and SHA-256 hashes.
+- Python runtime: interpreter version, implementation, platform, executable label, and relevant environment variables.
+- Python packages: installed distribution versions and `pip freeze --all`, with local paths sanitized.
+- HUGIML package metadata: imported package location label, package version, native extension label, extension size, and extension SHA-256.
+- Source fingerprints: SHA-256 hashes and sizes for relevant source files under locations such as `src/`, `native/`, `include/`, `cmake/`, and benchmark scripts.
+- Git metadata: commit, branch, dirty status, short status, diff stat, and redacted remotes.
+- Native/C++ build evidence: compiler/linker settings that are discoverable at runtime.
+
+### C++ and native-extension reproducibility
+
+C++ build information is included because HUGIML uses the native `_hugiml_core` extension. Native compiler, ABI, optimization flags, OpenMP runtime, dynamic linkage, and whether the package came from a wheel or local source build can affect benchmark performance.
+
+The SBOM records native build evidence where discoverable:
+
+```text
+sysconfig compiler/linker variables
+CC, CXX, CFLAGS, CXXFLAGS, CPPFLAGS, LDFLAGS, and related environment variables
+compiler --version probes
+_hugiml_core binary hash and size
+ldd/readelf/otool linkage output when available
+installed wheel/package metadata where available
+native source fingerprints
+```
+
+This is best-effort metadata. If HUGIML was installed from a prebuilt wheel, the original compiler command line used by the wheel builder may not be fully recoverable from the installed package. In that case, the native extension hash, ABI tag, package metadata, runtime linkage, and source/git fingerprints are the main reproducibility anchors.
+
+### SBOM path privacy
+
+The SBOM is privacy-sanitized before it is written to both outputs:
+
+```text
+benchmark_reproducibility_sbom.json
+the collapsed SBOM section in hugiml_benchmark_analysis_dashboard_revised.html
+```
+
+The same sanitized manifest is used for both files. It avoids exposing raw absolute local paths by using labels such as:
+
+```text
+repo:...
+script_dir:...
+out_dir:...
+cwd:...
+<redacted-path>/...
+<redacted-remote>
+```
+
+The sanitizer also covers nested locations where paths commonly leak, including `sys.path`, `PYTHONPATH`, package install locations, HUGIML import paths, `_hugiml_core` paths, `ldd`/`readelf`/`otool` output, compiler probe output, `pip freeze --all`, and git remotes.
+
+The raw benchmark artifacts are still local working files. For public sharing, prefer sharing the dashboard HTML and the SBOM JSON. Avoid publishing raw checkpoints or intermediate JSON/CSV files if they were produced by an older script version or if you have not inspected them for local-path content.
 
 ## Metrics
 
@@ -373,11 +464,24 @@ After a complete run, assemble with:
 python experiments/benchmark/benchmark_dashboard.py --assemble
 ```
 
+To include the privacy-sanitized reproducibility SBOM in both JSON and HTML form:
+
+```bash
+python experiments/benchmark/benchmark_dashboard.py --assemble --include-sbom
+```
+
 Run and assemble as separate steps:
 
 ```bash
 python experiments/benchmark/benchmark_dashboard.py --fresh
 python experiments/benchmark/benchmark_dashboard.py --assemble
+```
+
+Run, assemble, and include the SBOM as separate steps:
+
+```bash
+python experiments/benchmark/benchmark_dashboard.py --fresh --n-splits 5 --inner-splits 3 --random-state 42
+python experiments/benchmark/benchmark_dashboard.py --assemble --include-sbom
 ```
 
 The script automatically searches upward from `experiments/benchmark/` for:
@@ -411,6 +515,14 @@ summary_comparison.csv
 hugiml_benchmark_analysis_dashboard_revised.html
 ```
 
+When `--include-sbom` is supplied during assembly, the results directory also contains:
+
+```text
+benchmark_reproducibility_sbom.json
+```
+
+The HTML dashboard also embeds the same sanitized SBOM in a collapsed section at the bottom.
+
 The HTML dashboard includes:
 
 - Overall model summary.
@@ -419,6 +531,7 @@ The HTML dashboard includes:
 - Friedman and Wilcoxon tests across dataset-level outer-CV aggregates.
 - Complexity vs performance chart.
 - Dataset column profile table with dtype, missingness, uniqueness, and summary statistics.
+- Optional collapsed reproducibility/SBOM manifest when assembled with `--include-sbom`.
 
 ## Useful options
 
@@ -426,6 +539,7 @@ The HTML dashboard includes:
 --fresh                         recreate the results directory before running
 --resume                        skip completed dataset/model/scenario pairs
 --assemble                      build dashboard files from the checkpoint
+--include-sbom                  include sanitized SBOM JSON and embed it in the HTML; used with --assemble
 --datasets A,B,C                run selected datasets
 --models M1,M2                  run selected model labels
 --start-pair N                  start at pair index N
@@ -444,6 +558,8 @@ The HTML dashboard includes:
 ## Notes
 
 - A complete dashboard assemble expects all requested dataset/model/scenario pairs to be present in the checkpoint.
+- `--include-sbom` only affects assembly. It does not rerun benchmarks or recompute metrics.
+- For public sharing, prefer the assembled HTML plus `benchmark_reproducibility_sbom.json`; inspect raw checkpoint/data artifacts before publishing them.
 - For partial runs, inspect the checkpoint or CSVs directly.
 - Do not assemble old holdout-protocol checkpoints together with nested-CV checkpoints.
 - For comparable dashboard and runner outputs, keep `--n-splits`, `--inner-splits`, `--random-state`, and tuning settings aligned.

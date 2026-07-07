@@ -39,7 +39,7 @@ C++ extension (_hugiml_core):
 
 Python layer:
     Column-type detection (prepareXy), NaN/Inf imputation, downstream sklearn
-    estimator (LogisticRegression default), explanation methods
+    estimator (LogisticRegression default, with optional saga/SGD downstream solvers), explanation methods
     (get_hug_features, get_pattern_info, feature_importances), versioned
     model serialisation, prediction monitoring, multi-method drift detection,
     latency SLA enforcement, and graceful degradation under memory pressure.
@@ -101,7 +101,7 @@ import numpy as np
 import pandas as pd
 from scipy.sparse import csr_matrix, hstack, issparse
 from sklearn.base import BaseEstimator, ClassifierMixin, TransformerMixin
-from sklearn.linear_model import LogisticRegression
+from sklearn.linear_model import LogisticRegression, SGDClassifier
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.utils.validation import check_is_fitted
@@ -780,6 +780,25 @@ def _is_binary_feature_series(s: pd.Series) -> bool:
         return int(normalized.nunique(dropna=True)) == 2
 
 
+_NUMERIC_DTYPE_KINDS = "fiub"  # float, signed int, unsigned int, bool
+
+
+def _is_zero_variance_numeric_column(col: np.ndarray) -> bool:
+    """Return True when a numeric column has at most one distinct value.
+
+    NaN is the only value treated as missing (matching pandas'
+    ``nunique(dropna=True)``); Inf is a real value and counts toward
+    distinctness. A single ``np.unique`` call handles both jobs at once:
+    it sorts NaNs to a single trailing entry for floating dtypes (this is
+    guaranteed numpy behaviour, not incidental), so there is no separate
+    NaN-masking pass over the column before counting distinct values.
+    """
+    u = np.unique(col)
+    if u.size and np.issubdtype(u.dtype, np.floating) and np.isnan(u[-1]):
+        u = u[:-1]
+    return u.size <= 1
+
+
 # =============================================================================
 # Configuration presets
 # =============================================================================
@@ -1082,13 +1101,30 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
     base_estimator : sklearn estimator, optional
         Downstream classifier trained on the selected representation.
         Defaults to LogisticRegression.
+    lr_solver : {"auto", "saga", "sgd"}, default "auto"
+        Downstream linear classifier used when ``base_estimator`` is not supplied.
+        ``"auto"`` preserves the historical behavior: binary classifiers use
+        ``LogisticRegression(solver="liblinear")`` and multiclass classifiers use
+        ``LogisticRegression(solver="lbfgs")``. ``"saga"`` uses
+        ``LogisticRegression(solver="saga")``. ``"sgd"`` uses
+        ``SGDClassifier(loss="log_loss")`` so large sparse downstream matrices can
+        be trained with stochastic gradient descent. All built-in choices keep the
+        existing deterministic ``random_state=0`` and ``max_iter=500`` defaults.
     n_jobs : int, default 1
         Number of OpenMP threads. -1 uses all available cores.
     max_predict_ms : float or None
         Prediction latency budget in milliseconds.
     max_fit_seconds : float or None
-        Wall-clock budget for the pattern-mining stage of fit(). Transaction
-        preparation and downstream model fitting are not bounded by this value.
+        Backward-compatible alias for the mining-stage wall-clock budget.
+        Transaction preparation and downstream model fitting are not bounded
+        by this value. Prefer ``max_mining_seconds`` for new code.
+    max_mining_seconds : float or None
+        Wall-clock budget, in seconds, for native pattern mining. This is
+        especially useful for explicit high-order bounded mining such as
+        ``L=4``/``L=5``/larger values. Use ``1800`` for a 30-minute mining
+        cap. When unset, ``max_fit_seconds`` is used for backward
+        compatibility. Partial patterns mined before timeout are retained, and
+        attempt-level details are recorded in ``mining_audit_log_``.
     adaptive_binning : bool, default True
         Select per-feature numeric bin counts using supervised information gain.
     b_candidates : list of int or None
@@ -1166,9 +1202,11 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         G: float = 1e-3,
         topK: int = 30,
         base_estimator: Any = None,
+        lr_solver: str = "auto",
         n_jobs: int = 1,
         max_predict_ms: float | None = None,
         max_fit_seconds: float | None = None,
+        max_mining_seconds: float | None = None,
         verbose: bool = False,
         # ── Adaptive binning ──────────────────────────────────────────────
         # When adaptive_binning=True each numerical feature is pre-discretised
@@ -1230,9 +1268,11 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         self.G = G
         self.topK = topK
         self.base_estimator = base_estimator
+        self.lr_solver = lr_solver
         self.n_jobs = n_jobs
         self.max_predict_ms = max_predict_ms
         self.max_fit_seconds = max_fit_seconds
+        self.max_mining_seconds = max_mining_seconds
         self.verbose = verbose
         self.adaptive_binning = adaptive_binning
         self.b_candidates = b_candidates
@@ -1416,9 +1456,11 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             G=self.G,
             topK=self.topK,
             base_estimator=(copy.deepcopy(self.base_estimator) if deep else self.base_estimator),
+            lr_solver=self.lr_solver,
             n_jobs=self.n_jobs,
             max_predict_ms=self.max_predict_ms,
             max_fit_seconds=self.max_fit_seconds,
+            max_mining_seconds=self.max_mining_seconds,
             verbose=self.verbose,
             adaptive_binning=self.adaptive_binning,
             b_candidates=self.b_candidates,
@@ -1589,6 +1631,13 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             self.dense_downstream_max_width = 200
         if not hasattr(self, "execution_mode"):
             self.execution_mode = "audit"
+        if not hasattr(self, "lr_solver"):
+            self.lr_solver = "auto"
+        if not hasattr(self, "max_mining_seconds"):
+            # v1.1.x compatibility: older pickles only know max_fit_seconds.
+            self.max_mining_seconds = None
+        if not hasattr(self, "mining_audit_log_"):
+            self.mining_audit_log_ = []
         if not hasattr(self, "augmented_pair_mode"):
             self.augmented_pair_mode = "interaction_information"
         if not hasattr(self, "ii_partner_size"):
@@ -1976,8 +2025,19 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
     def _make_estimator(self, n_cls: int) -> Any:
         if self.base_estimator is not None:
             return copy.deepcopy(self.base_estimator)
-        solver = "liblinear" if n_cls == 2 else "lbfgs"
-        return LogisticRegression(solver=solver, random_state=0, max_iter=500)
+
+        lr_solver = str(getattr(self, "lr_solver", "auto")).lower()
+        if lr_solver == "auto":
+            solver = "liblinear" if n_cls == 2 else "lbfgs"
+            return LogisticRegression(solver=solver, random_state=0, max_iter=500)
+        if lr_solver == "saga":
+            return LogisticRegression(solver="saga", random_state=0, max_iter=500)
+        if lr_solver == "sgd":
+            return SGDClassifier(loss="log_loss", random_state=0, max_iter=500)
+        raise HUGIMLParamError(
+            "lr_solver must be one of {'auto', 'saga', 'sgd'}, "
+            f"got {getattr(self, 'lr_solver', None)!r}."
+        )
 
     def _validate_params(self) -> None:
         if not isinstance(self.B, int):
@@ -1990,6 +2050,12 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             raise HUGIMLParamError(f"G must be numeric, got {type(self.G).__name__}")
         if self.G < 0:
             raise HUGIMLParamError(f"G must be >= 0, got {self.G}")
+        lr_solver = str(getattr(self, "lr_solver", "auto")).lower()
+        if lr_solver not in {"auto", "saga", "sgd"}:
+            raise HUGIMLParamError(
+                "lr_solver must be one of {'auto', 'saga', 'sgd'}, "
+                f"got {getattr(self, 'lr_solver', None)!r}."
+            )
         dense_width = getattr(self, "dense_downstream_max_width", 200)
         if isinstance(dense_width, bool) or not isinstance(dense_width, int):
             raise HUGIMLParamError(
@@ -2117,15 +2183,13 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                     "operator-feature path instead."
                 )
             # L=1 always uses the fused hotpath, which has no relaxed
-            # variant; relaxation is a no-op there. L in {2, 3, -1} route
-            # through mine_patterns_relaxed_cpp's dispatcher.
-            _supported_relaxed_L = (-1, 1, 2, 3)
-            if isinstance(self.L, int) and self.L not in _supported_relaxed_L:
+            # variant; relaxation is a no-op there. L>=2 and L=-1 route
+            # through mine_patterns_relaxed_cpp's dispatcher.  Do not cap this
+            # at L<=3: bounded higher-order mining (for example L=4 or L=5 for
+            # multiplexer-style rules) uses the generic relaxed dispatcher.
+            if isinstance(self.L, int) and self.L != -1 and self.L < 1:
                 raise HUGIMLParamError(
-                    f"interaction_relaxed_mining=True only supports L in "
-                    f"{_supported_relaxed_L}, got L={self.L}. Set "
-                    "interaction_relaxed_mining=False to use this L value with "
-                    "ordinary (unrelaxed) mining instead."
+                    f"interaction_relaxed_mining=True requires L=-1 or L>=1, got L={self.L}."
                 )
         if not isinstance(self.interaction_relaxed_feature_size, int):
             raise HUGIMLParamError(
@@ -2223,36 +2287,58 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         names = list(getattr(self, "feature_names_in_", []) or [])
         if not names:
             return []
+
         if isinstance(X_train, pd.DataFrame):
-            zero_variance = [
+            return [
                 name
                 for name in names
                 if name in X_train.columns and X_train[name].nunique(dropna=True) <= 1
             ]
-        else:
-            arr = np.asarray(X_train, dtype=object)
-            zero_variance = []
-            for j, name in enumerate(names):
-                if j >= arr.shape[1]:
+
+        arr = np.asarray(X_train)
+        if arr.dtype.kind in _NUMERIC_DTYPE_KINDS:
+            return [
+                name
+                for j, name in enumerate(names)
+                if j < arr.shape[1] and _is_zero_variance_numeric_column(arr[:, j])
+            ]
+
+        return self._identify_zero_variance_columns_fallback(names, X_train)
+
+    def _identify_zero_variance_columns_fallback(
+        self, names: list[str], X_train: Any
+    ) -> list[str]:
+        """Object-safe zero-variance check for non-numeric input.
+
+        Handles arbitrary Python objects (strings, mixed types, unhashable
+        values) cell by cell. Only reached for non-numeric ndarrays/lists;
+        numeric input and DataFrames are handled by the vectorised branches
+        above, which is what matters for performance since this is the one
+        branch that can't be vectorised in general.
+        """
+        arr = np.asarray(X_train, dtype=object)
+        zero_variance = []
+        for j, name in enumerate(names):
+            if j >= arr.shape[1]:
+                continue
+            observed: set[Any] = set()
+            for value in arr[:, j]:
+                try:
+                    missing = pd.isna(value)
+                except (TypeError, ValueError):
+                    missing = False
+                if isinstance(missing, (list, tuple, np.ndarray)):
+                    missing = False
+                if bool(missing):
                     continue
-                observed: set[Any] = set()
-                for value in arr[:, j]:
-                    try:
-                        missing = pd.isna(value)
-                    except (TypeError, ValueError):
-                        missing = False
-                    if isinstance(missing, (list, tuple, np.ndarray)):
-                        missing = False
-                    if bool(missing):
-                        continue
-                    try:
-                        observed.add(value)
-                    except TypeError:
-                        observed.add(repr(value))
-                    if len(observed) > 1:
-                        break
-                if len(observed) <= 1:
-                    zero_variance.append(name)
+                try:
+                    observed.add(value)
+                except TypeError:
+                    observed.add(repr(value))
+                if len(observed) > 1:
+                    break
+            if len(observed) <= 1:
+                zero_variance.append(name)
         return zero_variance
 
     def _exclude_zero_variance_columns(
@@ -3698,9 +3784,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
 
             if _use_fused:
                 # ── Fused path ────────────────────────────────────────────────
-                fit_deadline = (
-                    time.perf_counter() + self.max_fit_seconds if self.max_fit_seconds else None
-                )
+                fit_deadline = self._mining_deadline_from_now()
                 remaining_s = max(fit_deadline - time.perf_counter(), 0.0) if fit_deadline else 0.0
                 K_eff = self._effective_mining_topK()  # rough pre-estimate (no n_items yet)
 
@@ -3988,9 +4072,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                     )
 
                 t = self._timer()
-                fit_deadline = (
-                    time.perf_counter() + self.max_fit_seconds if self.max_fit_seconds else None
-                )
+                fit_deadline = self._mining_deadline_from_now()
                 relaxed_cols: list[int] | None = None
                 if bool(getattr(self, "interaction_relaxed_mining", False)):
                     survivors = list(
@@ -4226,6 +4308,10 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                 adaptive_binning=self.adaptive_binning,
                 feature_mode=self.feature_mode,
                 execution_mode=self.execution_mode,
+                max_fit_seconds=self.max_fit_seconds,
+                max_mining_seconds=getattr(self, "max_mining_seconds", None),
+                effective_mining_timeout_seconds=self._effective_mining_timeout_seconds(),
+                mining_audit_log_entries=len(getattr(self, "mining_audit_log_", []) or []),
             ),
             memory_peak_mb=round(mem.traced_peak_mb, 1),
             memory_rss_mb=round(rss_delta_mb, 1),
@@ -4240,6 +4326,35 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             logger.info("  fit complete: %s", self.fit_metadata_.summary())
 
         return self
+
+
+    def _effective_mining_timeout_seconds(self) -> float | None:
+        """Return the configured mining-stage timeout in seconds.
+
+        ``max_mining_seconds`` is the explicit new API. ``max_fit_seconds`` is
+        kept as a backward-compatible alias because earlier releases already
+        routed it to the native miner rather than to the whole fit pipeline.
+        """
+        timeout = getattr(self, "max_mining_seconds", None)
+        if timeout is None:
+            timeout = getattr(self, "max_fit_seconds", None)
+        if timeout is None:
+            return None
+        return float(timeout)
+
+    def _mining_deadline_from_now(self) -> float | None:
+        timeout = self._effective_mining_timeout_seconds()
+        return time.perf_counter() + timeout if timeout else None
+
+    def get_mining_audit_log(self) -> pd.DataFrame:
+        """Return the serialized mining audit log as a DataFrame.
+
+        The log is populated during ``fit()`` and intentionally contains only
+        scalar/list metadata: requested bounded depth, K/G, relaxed-mining
+        status, per-attempt timeout budget, elapsed time, status, and number of
+        patterns returned. It is safe to pickle/joblib with the estimator.
+        """
+        return pd.DataFrame(list(getattr(self, "mining_audit_log_", []) or []))
 
     def _mine_with_fallback(
         self,
@@ -4260,9 +4375,27 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         relaxed_mining). The minimal final fallback attempt drops G to 0.0
         for ordinary mining already; relaxation does not change that
         behavior, and the result remains bounded by the requested K.
+
+        Every attempt appends a JSON/pickle-safe row to ``mining_audit_log_``.
+        Native timeout returns are graceful: the C++ layer returns whatever
+        patterns were mined before the deadline, and the audit row marks that
+        the deadline was reached.
         """
         use_relaxed = bool(relaxed_cols)
         mine_fn = _core.mine_patterns_relaxed if use_relaxed else _core.mine_patterns
+        timeout_budget_s = self._effective_mining_timeout_seconds()
+        self.mining_audit_log_ = []
+        self.mining_audit_config_ = {
+            "requested_L": int(self.L) if isinstance(self.L, int) else self.L,
+            "requested_K": int(K),
+            "requested_G": float(self.G),
+            "timeout_budget_s": timeout_budget_s,
+            "uses_max_mining_seconds": getattr(self, "max_mining_seconds", None) is not None,
+            "legacy_max_fit_seconds": getattr(self, "max_fit_seconds", None),
+            "interaction_relaxed_mining": bool(use_relaxed),
+            "relaxed_cols_count": len(relaxed_cols or []),
+            "execution_mode": getattr(self, "execution_mode", "audit"),
+        }
 
         def _call(K_arg, L_arg, G_arg, timeout_arg):
             if use_relaxed:
@@ -4270,6 +4403,25 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                     self.td_, y_train, n_cls, K_arg, L_arg, G_arg, relaxed_cols, timeout_arg
                 )
             return mine_fn(self.td_, y_train, n_cls, K_arg, L_arg, G_arg, timeout_arg)
+
+        def _audit_entry(label: str, K_arg: int, L_arg: int, G_arg: float, timeout_arg: float) -> dict:
+            return {
+                "attempt_index": len(getattr(self, "mining_audit_log_", []) or []) + 1,
+                "label": str(label),
+                "K": int(K_arg),
+                "L": int(L_arg) if isinstance(L_arg, int) else L_arg,
+                "G": float(G_arg),
+                "timeout_s": float(timeout_arg or 0.0),
+                "deadline_enabled": bool(deadline),
+                "interaction_relaxed_mining": bool(use_relaxed),
+                "relaxed_cols_count": len(relaxed_cols or []),
+                "status": "started",
+                "elapsed_ms": 0.0,
+                "n_patterns_returned": 0,
+                "deadline_reached_after_attempt": False,
+                "exception_type": "",
+                "exception_message": "",
+            }
 
         attempts = [
             (K, self.L, self.G, "full"),
@@ -4281,6 +4433,12 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             if deadline and time.perf_counter() > deadline:
                 # Time budget exhausted — skip to minimal attempt immediately.
                 minimal_K, minimal_L, minimal_G = 50, 1, 0.0
+                preempt = _audit_entry(label, attempt_K, attempt_L, attempt_G, 0.0)
+                preempt.update(
+                    status="deadline_exhausted_before_attempt",
+                    deadline_reached_after_attempt=True,
+                )
+                self.mining_audit_log_.append(preempt)
                 self._degraded_reason = (
                     f"Time budget exceeded at '{label}'; "
                     f"falling back to minimal (K={minimal_K}, L={minimal_L})."
@@ -4288,31 +4446,104 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                 logger.warning("  fit timeout: %s", self._degraded_reason)
                 # Give the minimal attempt a constant 5-second window; it is
                 # cheap and must not run indefinitely on degenerate data.
+                entry = _audit_entry("minimal_after_timeout", minimal_K, minimal_L, minimal_G, 5.0)
+                t0 = time.perf_counter()
                 try:
-                    return list(_call(minimal_K, minimal_L, minimal_G, 5.0))
+                    patterns = list(_call(minimal_K, minimal_L, minimal_G, 5.0))
+                    entry.update(
+                        status="ok",
+                        elapsed_ms=(time.perf_counter() - t0) * 1000.0,
+                        n_patterns_returned=len(patterns),
+                    )
+                    self.mining_audit_log_.append(entry)
+                    return patterns
                 except Exception as exc:
+                    entry.update(
+                        status="failed",
+                        elapsed_ms=(time.perf_counter() - t0) * 1000.0,
+                        exception_type=type(exc).__name__,
+                        exception_message=str(exc)[:500],
+                    )
+                    self.mining_audit_log_.append(entry)
                     raise HUGIMLTimeoutError(
-                        f"fit() exceeded max_fit_seconds and the minimal fallback "
-                        f"also failed: {exc}"
+                        f"fit() exceeded max_mining_seconds/max_fit_seconds and the minimal "
+                        f"fallback also failed: {exc}"
                     ) from exc
             # Compute remaining budget and pass it to the C++ engine so it
             # can abort mid-run rather than running past the wall-clock limit.
             remaining_s = max(deadline - time.perf_counter(), 0.0) if deadline else 0.0
+            entry = _audit_entry(label, attempt_K, attempt_L, attempt_G, remaining_s)
+            t0 = time.perf_counter()
             try:
                 patterns: list = list(_call(attempt_K, attempt_L, attempt_G, remaining_s))
+                elapsed_ms = (time.perf_counter() - t0) * 1000.0
+                deadline_reached = bool(deadline and time.perf_counter() >= deadline)
+                entry.update(
+                    status="ok_timeout_partial" if deadline_reached and remaining_s > 0.0 else "ok",
+                    elapsed_ms=elapsed_ms,
+                    n_patterns_returned=len(patterns),
+                    deadline_reached_after_attempt=deadline_reached,
+                )
+                self.mining_audit_log_.append(entry)
+                if deadline_reached and remaining_s > 0.0:
+                    self._degraded_reason = (
+                        f"Mining deadline reached during {label}; using "
+                        f"{len(patterns)} partial pattern(s) returned by native miner."
+                    )
                 if label != "full" and len(patterns) > 0:
                     self._degraded_reason = (
                         f"Recovered with {label}: K={attempt_K}, L={attempt_L}, G={attempt_G}"
                     )
                 return patterns
-            except MemoryError:
+            except MemoryError as exc:
+                entry.update(
+                    status="memory_error",
+                    elapsed_ms=(time.perf_counter() - t0) * 1000.0,
+                    exception_type=type(exc).__name__,
+                    exception_message=str(exc)[:500],
+                )
+                self.mining_audit_log_.append(entry)
                 logger.warning("MemoryError during mining (%s), retrying…", label)
                 continue
             except Exception as e:
-                if "bad_alloc" in str(e).lower() or "memory" in str(e).lower():
+                msg = str(e)
+                if "bad_alloc" in msg.lower() or "memory" in msg.lower():
+                    entry.update(
+                        status="cpp_memory_error",
+                        elapsed_ms=(time.perf_counter() - t0) * 1000.0,
+                        exception_type=type(e).__name__,
+                        exception_message=msg[:500],
+                    )
+                    self.mining_audit_log_.append(entry)
                     logger.warning("C++ memory error during mining (%s), retrying…", label)
                     continue
+                entry.update(
+                    status="exception",
+                    elapsed_ms=(time.perf_counter() - t0) * 1000.0,
+                    exception_type=type(e).__name__,
+                    exception_message=msg[:500],
+                )
+                self.mining_audit_log_.append(entry)
                 raise
+        self.mining_audit_log_.append(
+            {
+                "attempt_index": len(getattr(self, "mining_audit_log_", []) or []) + 1,
+                "label": "all_attempts_exhausted",
+                "K": int(K),
+                "L": int(self.L) if isinstance(self.L, int) else self.L,
+                "G": float(self.G),
+                "timeout_s": 0.0,
+                "deadline_enabled": bool(deadline),
+                "interaction_relaxed_mining": bool(use_relaxed),
+                "relaxed_cols_count": len(relaxed_cols or []),
+                "status": "no_patterns",
+                "elapsed_ms": 0.0,
+                "n_patterns_returned": 0,
+                "deadline_reached_after_attempt": bool(deadline and time.perf_counter() >= deadline),
+                "exception_type": "",
+                "exception_message": "",
+            }
+        )
         return []
 
     # ── Constant-prior no-pattern fallback ───────────────────────────────────
@@ -7628,9 +7859,9 @@ def _hugiml_fast_grid_tune(
     - Only G, L, topK, and feature_mode vary. B may appear in the grid but is
       ignored for cache partitioning because adaptive binning chooses per-feature
       bins and fit() passes sentinel B=2 to the native transaction builder.
-    - max_fit_seconds must be None to guarantee equivalence to the ordinary grid
-      loop; timeout/degradation can make cached mining fits differ from
-      standalone candidates.
+    - max_fit_seconds and max_mining_seconds must be None to guarantee
+      equivalence to the ordinary grid loop; timeout/degradation can make
+      cached mining fits differ from standalone candidates.
 
     ``base_params['execution_mode']`` defaults to ``'production'`` when not
     supplied, since a tuning sweep evaluates many candidates and the
@@ -7685,9 +7916,10 @@ def _hugiml_fast_grid_tune(
     # cache group below.  A caller-supplied base G is used only for candidates
     # that omit G from the grid.
     params0.setdefault("G", grid_info["G_values"][0])
-    if params0.get("max_fit_seconds", None) is not None:
+    if params0.get("max_fit_seconds", None) is not None or params0.get("max_mining_seconds", None) is not None:
         raise HUGIMLParamError(
-            "fast_grid_tune requires max_fit_seconds=None for exact equivalence."
+            "fast_grid_tune requires max_fit_seconds=None and max_mining_seconds=None "
+            "for exact equivalence."
         )
 
     requested_execution_mode = str(params0.get("execution_mode", "production"))
@@ -8205,10 +8437,11 @@ def _hugiml_tune(
             # no fit-time timeout/degradation. Candidate grids that explicitly
             # set adaptive_binning=False are rejected above; this additional
             # guard covers the common case where adaptive_binning or
-            # max_fit_seconds is supplied only through base_params.
+            # max_fit_seconds/max_mining_seconds may be supplied only through base_params.
             if (
                 bool(base_params0.get("adaptive_binning", True))
                 and base_params0.get("max_fit_seconds", None) is None
+                and base_params0.get("max_mining_seconds", None) is None
             ):
                 fast_path_allowed = True
         except Exception:

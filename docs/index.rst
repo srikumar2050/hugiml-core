@@ -14,29 +14,35 @@ Why HUGIML?
 
 * **Intrinsic interpretability:** learned HUG patterns are the model representation, not an after-the-fact explanation.
 * **Regulated-domain fit:** model cards, audit artifacts, pruning trails, calibration, drift monitoring, and deployment helpers are included.
-* **Native performance:** computationally intensive mining, transaction construction, interaction-information scoring, pair-aware adaptive binning, and matrix-building stages are C++ accelerated with optional OpenMP support. Version 1.1.16 builds on v1.1.15 with the optional LLM assistant, augmented-pair path-cache improvements, expanded native pruning controls, refreshed documentation, and updated benchmark/scalability artifacts. Earlier 1.1.x capabilities remain available, including production/audit execution modes, fast adaptive-binning tuning, higher-order interaction selection, the native ``L=2`` hot path, augmented-pair operations, strict global ``topK`` budgeting, compact native transaction memory, and fused adaptive ``L=1`` execution.
+* **Native performance:** computationally intensive mining, transaction construction, interaction-information scoring, pair-aware adaptive binning, and matrix-building stages are C++ accelerated with optional OpenMP support. Version 1.1.17 builds on v1.1.16 with the native ``L=3`` mining hot path, explicit mining-stage time budgets, compact mining audit logs, and additional hot-path coverage. Earlier 1.1.x capabilities remain available, including production/audit execution modes, fast adaptive-binning tuning, higher-order interaction selection, the native ``L=2`` hot path, augmented-pair operations, strict global ``topK`` budgeting, compact native transaction memory, fused adaptive ``L=1`` execution, the optional LLM assistant, and native HUIM pruning controls.
 * **Python ergonomics:** the estimator follows the scikit-learn API and works with pandas DataFrames or NumPy arrays.
 
 
 Current release focus
 ---------------------
 
-The 1.1.16 release focuses on optional natural-language workflows, native mining
-runtime controls, and refreshed documentation while retaining the v1.1.15
-fallback and interaction-relaxed behavior:
+The 1.1.17 release focuses on performance optimization and L3 hot-path mining
+while retaining the v1.1.16 LLM assistant and native pruning documentation:
 
-* Added the optional HUGIML LLM assistant with Streamlit and CLI entry points,
-  built-in demo datasets, deterministic fast mode, and optional Ollama-backed
-  thinking mode.
-* Improved augmented-pair path reuse so repeated adaptive-binning/tuning runs
-  can reuse prepared path state more efficiently.
-* Expanded native HUIM pruning behavior around LIU, LA, and gated EUCS so
-  compound-pattern mining avoids more unnecessary search work.
-* Documented EUCS parameters, LLM assistant usage, and the updated release
-  surface for Read the Docs.
+* Added a native ``L=3`` mining hot path for bounded three-item pattern
+  workloads.
+* Added explicit mining-stage time budgets through ``max_mining_seconds`` while
+  keeping ``max_fit_seconds`` as a backward-compatible alias.
+* Added compact mining audit logs that record attempt status, timeout budget,
+  elapsed time, and returned pattern counts.
+* Improved native timeout handling so partial mining results can be retained
+  when a deadline is reached.
+* Added focused tests for L3 equivalence, timeout/audit behavior, relaxed
+  bounded mining beyond ``L=3``, and zero-variance edge cases.
+* Added downstream ``lr_solver`` choices for the default historical path,
+  ``saga`` LogisticRegression, and ``sgd`` SGDClassifier.
+* Added scalability-dashboard solver scenarios plus an optional
+  privacy-sanitized reproducibility/SBOM manifest.
 
-The v1.1.15 deterministic no-pattern fallback, fallback-aware serialization,
-and strengthened interaction-relaxed mining remain available.
+The full 1.1.x feature set remains documented in this guide, including the
+v1.1.16 LLM assistant, v1.1.15 deterministic no-pattern fallback, production
+execution mode, adaptive binning, augmented-pair features, governance tools,
+pruning controls, monitoring, deployment, and benchmark workflows.
 
 Installation
 ------------

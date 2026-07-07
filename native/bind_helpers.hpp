@@ -51,8 +51,8 @@ inline void validate_1d_array(const py::array& arr, const char* name,
 inline void validate_mining_params(int K, int L, double G) {
     if (K <= 0)
         throw std::invalid_argument("K (topK) must be > 0, got " + std::to_string(K));
-    if (L != -1 && (L < 1 || L > 3))
-        throw std::invalid_argument("L must be -1, 1, 2, or 3, got " + std::to_string(L));
+    if (L != -1 && L < 1)
+        throw std::invalid_argument("L must be -1 or >= 1, got " + std::to_string(L));
     if (G < 0.0)
         throw std::invalid_argument("G must be >= 0, got " + std::to_string(G));
 }

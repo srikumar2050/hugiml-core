@@ -4,6 +4,26 @@ All notable changes to hugiml-core are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
+## [1.1.17] - 2026-07-07
+
+### Added
+
+- Added a native `L=3` mining hot path for bounded three-item pattern workloads.
+- Added `max_mining_seconds` and `get_mining_audit_log()` so long mining runs can keep an explicit timeout budget and a compact audit trail.
+- Added focused fuzz, timeout, L3 hot-path, and zero-variance tests to cover the new mining paths and edge cases.
+- Added `lr_solver` support for built-in downstream `saga` LogisticRegression and `sgd` SGDClassifier paths while preserving the existing default solver behavior.
+- Added scalability dashboard solver scenarios for the new saga and SGD downstream paths.
+- Added a privacy-sanitized reproducibility/SBOM manifest option for the scalability and benchmark dashboard.
+
+### Changed
+
+- Optimized L3 mining with tighter same-feature checks, pair reuse, coverage de-duplication, and gated pair-cache pruning.
+- Improved native timeout behavior so miners return partial results where possible instead of discarding completed work.
+- Reduced Python-side overhead in numeric zero-variance detection and refreshed Sphinx documentation for the full 1.1.17 release surface.
+- Updated README and Sphinx guidance for choosing downstream solvers, including when to use the default, saga, or SGD path.
+- Updated versioned model serialization to record and restore the new built-in solver option, including native SGDClassifier estimator state.
+
+---
 ## [1.1.16] - 2026-06-30
 
 ### Added

@@ -3,11 +3,16 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
+import importlib.metadata as importlib_metadata
 import json
+import os
 import platform
+import shlex
 import shutil
 import subprocess
 import sys
+import sysconfig
 import threading
 import time
 from datetime import datetime, timezone
@@ -17,13 +22,38 @@ from typing import Any
 ROOT = Path(__file__).resolve().parent
 DEFAULT_OUTDIR = ROOT / "results"
 TEMPLATE_NAME = "hugiml_scalability_dashboard.html"
+
+
+def find_repo_root(start: Path) -> Path | None:
+    """Find the nearest parent containing src/hugiml, or return None."""
+    for base in [start, *start.parents]:
+        if (base / "src" / "hugiml").exists():
+            return base.resolve()
+    return None
+
+
+SOURCE_ROOT_ENV = os.environ.get("HUGIML_SOURCE_ROOT")
+SOURCE_ROOT = Path(SOURCE_ROOT_ENV).expanduser().resolve() if SOURCE_ROOT_ENV else find_repo_root(ROOT)
+if SOURCE_ROOT is not None and (SOURCE_ROOT / "src").exists():
+    sys.path.insert(0, str(SOURCE_ROOT / "src"))
+    sys.path.insert(0, str(SOURCE_ROOT))
+
+try:
+    import hugiml as _hugiml_pkg
+    HUGIML_IMPORTED_FROM = str(Path(getattr(_hugiml_pkg, "__file__", "")).resolve())
+except Exception:
+    _hugiml_pkg = None
+    HUGIML_IMPORTED_FROM = None
+
 DATASETS = ("sparse_nonlinear", "threshold_grid")
 
 MODEL_SPECS: dict[str, dict[str, Any]] = {
-    "hug_op_adaptive_full": {"family": "hug", "feature_mode": "original_plus_patterns", "scenario": "adaptive_full", "label": "HUG OP adaptive full"},
-    "hug_op_adaptive_s20": {"family": "hug", "feature_mode": "original_plus_patterns", "scenario": "adaptive_s20", "label": "HUG OP adaptive 20%"},
-    "hug_po_adaptive_full": {"family": "hug", "feature_mode": "patterns_only", "scenario": "adaptive_full", "label": "HUG PO adaptive full"},
-    "hug_po_adaptive_s20": {"family": "hug", "feature_mode": "patterns_only", "scenario": "adaptive_s20", "label": "HUG PO adaptive 20%"},
+    "hug_op_adaptive_full": {"family": "hug", "feature_mode": "original_plus_patterns", "scenario": "adaptive_full", "lr_solver": "auto", "label": "HUG OP adaptive full"},
+    "hug_op_adaptive_saga": {"family": "hug", "feature_mode": "original_plus_patterns", "scenario": "solver_saga", "lr_solver": "saga", "label": "HUG OP adaptive saga"},
+    "hug_op_adaptive_sgd": {"family": "hug", "feature_mode": "original_plus_patterns", "scenario": "solver_sgd", "lr_solver": "sgd", "label": "HUG OP adaptive SGD"},
+    "hug_op_adaptive_s20": {"family": "hug", "feature_mode": "original_plus_patterns", "scenario": "adaptive_s20", "lr_solver": "auto", "label": "HUG OP adaptive 20%"},
+    "hug_po_adaptive_full": {"family": "hug", "feature_mode": "patterns_only", "scenario": "adaptive_full", "lr_solver": "auto", "label": "HUG PO adaptive full"},
+    "hug_po_adaptive_s20": {"family": "hug", "feature_mode": "patterns_only", "scenario": "adaptive_s20", "lr_solver": "auto", "label": "HUG PO adaptive 20%"},
     "xgb": {"family": "xgb", "feature_mode": "baseline", "scenario": "baseline", "label": "XGBoost"},
     "lgb": {"family": "lgb", "feature_mode": "baseline", "scenario": "baseline", "label": "LightGBM"},
 }
@@ -329,6 +359,7 @@ def hug_params_for(model: str, sweep_name: str | None = None, sweep_value: Any =
         "interaction_relaxed_mining": False,
         "execution_mode": "production",
         "feature_mode": spec["feature_mode"],
+        "lr_solver": spec.get("lr_solver", "auto"),
         "topk_budget_strict": spec["feature_mode"] == "original_plus_patterns",
     }
     scenario = spec["scenario"]
@@ -653,7 +684,7 @@ def run_all(args: argparse.Namespace) -> None:
         "generated_at": now_iso(),
         "threads": 4,
         "system": {"python": platform.python_version(), "platform": platform.platform(), "system_memory_mb": get_total_memory_mb()},
-        "hugiml_config": {"L": 1, "G": 0.01, "topK": 50, "b_candidates": [3, 5, 7, 10], "use_hotpath": True, "execution_mode": "production"},
+        "hugiml_config": {"L": 1, "G": 0.01, "topK": 50, "b_candidates": [3, 5, 7, 10], "lr_solver": "auto", "use_hotpath": True, "execution_mode": "production"},
         "scenarios": MODEL_SPECS,
         "sweeps": SWEEP,
         "primary_memory_metric": "peak process-tree RSS during the full worker task",
@@ -699,7 +730,7 @@ def run_all(args: argparse.Namespace) -> None:
         ckpt["results"] = [r for r in ckpt.get("results", []) if r.get("key") != t["key"]]
         ckpt["results"].append(res)
         save_ckpt(ckpt_path, ckpt)
-    build_outputs(argparse.Namespace(outdir=str(outdir), output_html=args.output_html))
+    build_outputs(argparse.Namespace(outdir=str(outdir), output_html=args.output_html, include_sbom=getattr(args, "include_sbom", False)))
 
 
 def numeric(value: Any) -> float | None:
@@ -765,7 +796,7 @@ def write_csv(path: Path, rows: list[dict[str, Any]]) -> None:
 
 
 
-def render_html(rows: list[dict[str, Any]], metadata: dict[str, Any]) -> str:
+def render_html(rows: list[dict[str, Any]], metadata: dict[str, Any], reproducibility_sbom: dict[str, Any] | None = None) -> str:
     """Render a self-contained dynamic dashboard from checkpoint rows."""
     keep_fields = {
         "dataset", "section", "model", "sweep_name", "sweep_value", "model_label",
@@ -798,6 +829,7 @@ def render_html(rows: list[dict[str, Any]], metadata: dict[str, Any]) -> str:
         "datasets": list(DATASETS),
         "primary_memory_metric": "peak_process_tree_rss_mb",
         "primary_memory_metric_label": "Peak task RSS",
+        "reproducibility_sbom": reproducibility_sbom,
     }
     payload_json = (
         json.dumps(payload, allow_nan=False, separators=(",", ":"))
@@ -885,6 +917,7 @@ body[data-t=dark]{--bg:#0b1020;--panel:#111827;--p2:#0f172a;--ink:#f8fafc;--mu:#
   <div class=\"hero\"><h2>Methodology</h2><p>Benchmark setup, dataset definitions, model scenarios, and sweep grids used to produce the dashboard.</p></div>
   <div class=\"g2\"><div class=\"card\"><h3>Environment</h3><div id=\"envTable\"></div></div><div class=\"card\"><h3>Model scenarios</h3><div id=\"modelTable\"></div></div></div>
   <div class=\"g2\"><div class=\"card\"><h3>Dataset protocol</h3><div id=\"protocolBox\" class=\"mini-list\"></div></div><div class=\"card\"><h3>Sweep grids</h3><div id=\"sweepTable\"></div></div></div>
+  <div class=\"card\" id=\"sbomCard\" style=\"display:none;margin-top:12px\"><details><summary style=\"cursor:pointer;font-weight:800\">Reproducibility / SBOM manifest</summary><div class=\"ni\" style=\"margin:8px 0 10px 0\">Minimal path-free manifest with Python/runtime details, key package versions, native build/ABI facts, compiler optimization indicators, and artifact hashes.</div><pre id=\"sbomPre\" style=\"white-space:pre-wrap;overflow:auto;max-height:520px;background:#0f172a;color:#e5e7eb;border-radius:12px;padding:14px;font-size:11px;line-height:1.45\"></pre></details></div>
 </section>
 </main></div>
 <script>
@@ -938,7 +971,7 @@ function updateMemory(){const ds=currentDs(); document.getElementById('mem_n_ni'
 function sweepNames(ds){return uniq(allRows.filter(r=>r.dataset===ds && String(r.section||'').startsWith('parameter_sweep_')).map(r=>String(r.sweep_name||r.section.replace('parameter_sweep_','')))).sort();}
 function sweepChart(id,rs,metric){const data=rs.filter(r=>num(r[metric])!=null).sort((a,b)=>String(a.sweep_value).localeCompare(String(b.sweep_value),undefined,{numeric:true})); chart(id,{type:'line',data:{labels:data.map(r=>String(r.sweep_value)),datasets:[{label:metricLabel(metric),data:data.map(r=>num(r[metric])),borderColor:'#2563eb',backgroundColor:'#2563eb22',borderWidth:2,pointRadius:4,tension:.25}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:{callbacks:{label:(ctx)=>metricLabel(metric)+': '+yFormat(metric,ctx.parsed.y)}}},scales:{x:{title:{display:true,text:'sweep value'},grid:{color:gridColor()}},y:{title:{display:true,text:metricLabel(metric)},grid:{color:gridColor()}}}}});}
 function updateSweeps(){const ds=currentDs();const names=sweepNames(ds);const sel=document.getElementById('swSel');const oldVal=sel.value;sel.innerHTML=names.map(n=>'<option value="'+esc(n)+'" '+(n===oldVal?'selected':'')+'>'+esc(n)+'</option>').join('');const sw=sel.value||names[0];const rs=sweepRows(ds,sw);const el=document.getElementById('sw_area');if(!el||rs.length===0){el.innerHTML='<div class="ni">No sweep data.</div>';return;}document.getElementById('sw_hero').textContent='Parameter: '+sw;let html='';if(sw==='B'){html=`<div class="g2"><div class="cc"><h3>B sweep — fit (n=${fN(rs[0].n)}, p=${rs[0].p})</h3><div class="ni">Fit time nearly flat. B chosen on accuracy.</div><div class="ch" style="height:220px"><canvas id="sw_bFit"></canvas></div></div><div class="cc"><h3>B sweep — AUC & patterns</h3><div class="ni">AUC peaks near B=5. Use B=5 as default.</div><div class="ch" style="height:220px"><canvas id="sw_bAuc"></canvas></div></div></div>`;el.innerHTML=html;setTimeout(()=>{const sr=rs.slice().sort((a,b)=>a.sweep_value-b.sweep_value);sweepChart('sw_bFit',sr,'fit_s');const a=sr.map(r=>r.auc),p=sr.map(r=>r.patterns||0),aMn=Math.max(0.5,Math.floor((Math.min(...a)-0.02)*20)/20),aMx=Math.min(1.0,Math.ceil((Math.max(...a)+0.01)*20)/20);chart('sw_bAuc',{type:'line',data:{labels:sr.map(r=>String(r.sweep_value)),datasets:[{label:'AUC',data:a,borderColor:'#2563eb',backgroundColor:'#2563eb22',yAxisID:'y',tension:.3,borderWidth:2.5,pointRadius:5},{label:'Patterns',data:p,borderColor:'#d97706',yAxisID:'y1',tension:.3,borderWidth:2,borderDash:[4,3],pointRadius:5}]},options:{responsive:true,maintainAspectRatio:false,interaction:{mode:'index'},plugins:{legend:{display:true}},scales:{x:{ticks:{color:textColor()}},y:{min:aMn,max:aMx,title:{display:true,text:'AUC'},ticks:{color:textColor(),callback:v=>typeof v==='number'?v.toFixed(2):v}},y1:{position:'right',title:{display:true,text:'Patterns'},ticks:{color:textColor()}}}}});},50);}else if(sw==='G'){html=`<div class="g2"><div class="cc"><h3>G sweep — AUC & patterns (n=${fN(rs[0].n)}, p=${rs[0].p})</h3><div class="ni">Lower G mines more patterns. G=0.01 is default.</div><div class="ch" style="height:230px"><canvas id="sw_gAuc"></canvas></div></div><div class="cc"><h3>G sweep — fit</h3><div class="ni">Fit nearly flat despite pattern changes.</div><div class="ch" style="height:230px"><canvas id="sw_gFit"></canvas></div></div></div>`;el.innerHTML=html;setTimeout(()=>{const sr=rs.slice().sort((a,b)=>b.sweep_value-a.sweep_value);sweepChart('sw_gFit',sr,'fit_s');const a=sr.map(r=>r.auc),p=sr.map(r=>r.patterns||0),aMn=Math.max(0.5,Math.floor((Math.min(...a)-0.02)*20)/20),aMx=Math.min(1.0,Math.ceil((Math.max(...a)+0.01)*20)/20);chart('sw_gAuc',{type:'line',data:{labels:sr.map(r=>String(r.sweep_value)),datasets:[{label:'AUC',data:a,borderColor:'#2563eb',backgroundColor:'#2563eb22',yAxisID:'y',tension:.3,borderWidth:2.5,pointRadius:5},{label:'Patterns',data:p,borderColor:'#d97706',yAxisID:'y1',tension:.3,borderWidth:2,borderDash:[4,3],pointRadius:5}]},options:{responsive:true,maintainAspectRatio:false,interaction:{mode:'index'},plugins:{legend:{display:true}},scales:{x:{ticks:{color:textColor()}},y:{min:aMn,max:aMx,title:{display:true,text:'AUC'},ticks:{color:textColor(),callback:v=>typeof v==='number'?v.toFixed(2):v}},y1:{position:'right',title:{display:true,text:'Patterns'},ticks:{color:textColor()}}}}});},50);}else if(sw==='topK'){html=`<div class="cc" style="max-width:620px"><h3>topK sweep (n=${fN(rs[0].n)}, p=${rs[0].p})</h3><div class="ni">topK caps pattern budget. Binding at lower G.</div><div class="ch" style="height:270px"><canvas id="sw_topk"></canvas></div></div>`;el.innerHTML=html;setTimeout(()=>{const sr=rs.slice().sort((a,b)=>a.sweep_value-b.sweep_value);const a=sr.map(r=>r.auc),p=sr.map(r=>r.patterns||0),f=sr.map(r=>r.fit_s),aMn=Math.max(0.5,Math.floor((Math.min(...a)-0.02)*20)/20),aMx=Math.min(1.0,Math.ceil((Math.max(...a)+0.01)*20)/20);chart('sw_topk',{type:'line',data:{labels:sr.map(r=>String(r.sweep_value)),datasets:[{label:'AUC',data:a,borderColor:'#2563eb',backgroundColor:'#2563eb22',yAxisID:'y',pointRadius:5,tension:.3,borderWidth:2.5},{label:'Patterns',data:p,borderColor:'#d97706',yAxisID:'y1',pointRadius:5,tension:.3,borderWidth:2,borderDash:[4,3]},{label:'Fit',data:f,borderColor:'#16a34a',yAxisID:'y2',pointRadius:4,tension:.3,borderWidth:1.5,borderDash:[2,3]}]},options:{responsive:true,maintainAspectRatio:false,interaction:{mode:'index'},plugins:{legend:{display:true}},scales:{x:{ticks:{color:textColor()}},y:{min:aMn,max:aMx,title:{display:true,text:'AUC'},ticks:{color:textColor(),callback:v=>typeof v==='number'?v.toFixed(2):v}},y1:{position:'right',title:{display:true,text:'Patterns'},ticks:{color:textColor()}},y2:{display:false}}}});},50);}else if(sw==='L'){const sr=rs.slice().sort((a,b)=>a.sweep_value-b.sweep_value);const hasMem=sr.some(r=>r.memory_plot_gb!=null);html=`<div class="g2"><div class="card"><h3 style="font-size:12.5px;font-weight:800;margin-bottom:8px">L=1 vs L=2 (n=${fN(rs[0].n)}, p=${fP(rs[0].p)})</h3>${sr.map(r=>`<div style="border:1px solid var(--ln);border-radius:9px;padding:10px;margin-bottom:7px"><div style="font-size:14px;font-weight:900;color:var(--opp)">L = ${r.sweep_value}</div><div style="display:grid;grid-template-columns:repeat(${hasMem?4:3},1fr);gap:7px;margin-top:8px"><div><div style="font-size:9.5px;color:var(--mu)">Fit</div><div style="font-weight:800">${r.fit_s!=null?r.fit_s.toFixed(3)+'s':'—'}</div></div><div><div style="font-size:9.5px;color:var(--mu)">Patterns</div><div style="font-weight:800">${r.patterns??'—'}</div></div><div><div style="font-size:9.5px;color:var(--mu)">AUC</div><div style="font-weight:800">${r.auc!=null?r.auc.toFixed(4):'—'}</div></div>${hasMem?'<div><div style="font-size:9.5px;color:var(--mu)">Mem Δ</div><div style="font-weight:800">'+(r.memory_plot_gb!=null?r.memory_plot_gb.toFixed(1)+' MB':'—')+'</div></div>':''}</div></div>`).join('')}</div><div class="card"><h3 style="font-size:12.5px;font-weight:800;margin-bottom:8px">When to use L=2</h3><div style="font-size:11.5px;color:var(--mu);line-height:1.9">L=2 adds interactions. AUC gain <0.5%, fit 4.5× slower, patterns double. Prefer L=1 unless validated.</div></div></div>`;el.innerHTML=html;}else if(sw==='avf'){const sr=rs.slice().sort((a,b)=>(a.sweep_value===true||a.sweep_value===1?-1:1));const hasMem=sr.some(r=>r.memory_plot_gb!=null);html=`<div class="g2"><div class="card"><h3 style="font-size:12.5px;font-weight:800;margin-bottom:8px">Adaptive vs Fixed (n=${fN(rs[0].n)}, p=${fP(rs[0].p)})</h3>${sr.map((r,i)=>`<div style="border:1px solid var(--ln);border-radius:9px;padding:10px;margin-bottom:7px"><div style="font-size:13px;font-weight:900;color:var(--${i===0?'opp':'po'})">${r.sweep_value===true||r.sweep_value===1?'Adaptive':'Fixed B=5'}</div><div style="display:grid;grid-template-columns:repeat(${hasMem?4:3},1fr);gap:7px;margin-top:8px"><div><div style="font-size:9.5px;color:var(--mu)">Fit</div><div style="font-weight:800">${r.fit_s!=null?r.fit_s.toFixed(3)+'s':'—'}</div></div><div><div style="font-size:9.5px;color:var(--mu)">Patterns</div><div style="font-weight:800">${r.patterns??'—'}</div></div><div><div style="font-size:9.5px;color:var(--mu)">AUC</div><div style="font-weight:800">${r.auc!=null?r.auc.toFixed(4):'—'}</div></div>${hasMem?'<div><div style="font-size:9.5px;color:var(--mu)">Mem Δ</div><div style="font-weight:800">'+(r.memory_plot_gb!=null?r.memory_plot_gb.toFixed(1)+' MB':'—')+'</div></div>':''}</div></div>`).join('')}</div><div class="card"><h3 style="font-size:12.5px;font-weight:800;margin-bottom:8px">Choosing</h3><div style="font-size:11.5px;color:var(--mu);line-height:1.9"><strong style="color:var(--opp)">Adaptive:</strong> Info gain. Heterogeneous scales. AUC priority.</div><div style="height:1px;background:var(--ln);margin:10px 0"></div><div style="font-size:11.5px;color:var(--mu);line-height:1.9"><strong style="color:var(--po)">Fixed:</strong> Faster, reproducible. Large p. Uniform distributions.</div></div></div>`;el.innerHTML=html;}else{html=`<div class="cc"><h3>${esc(sw)}</h3><div class="ni">Data.</div></div>`;el.innerHTML=html;}}
-function methodology(){const m=payload.metadata||{}, sys=m.system||{}; const env=[['Python',sys.python],['Platform',sys.platform],['Logical CPUs',sys.cpu_count_logical||sys.logical_cpus],['System RAM',sys.system_memory_mb?fGB(sys.system_memory_mb/1024):undefined],['Threads',m.threads],['Train/test split','75% / 25%, stratified'],['Metric','Test-set ROC AUC'],['Dashboard memory','Peak task RSS in GB']]; document.getElementById('envTable').innerHTML='<table><tbody>'+env.map(([k,v])=>'<tr><td>'+esc(k)+'</td><td class="r">'+esc(v??'not recorded')+'</td></tr>').join('')+'</tbody></table>'; document.getElementById('modelTable').innerHTML='<table><thead><tr><th>Model</th><th>Family</th><th>Feature mode</th><th>Scenario</th></tr></thead><tbody>'+modelOrder.map(k=>{const v=models[k]||{};return '<tr><td>'+modelTag(k)+'</td><td>'+esc(v.family)+'</td><td>'+esc(v.feature_mode)+'</td><td>'+esc(v.scenario)+'</td></tr>';}).join('')+'</tbody></table>'; document.getElementById('protocolBox').innerHTML=['Two synthetic binary-classification datasets are generated with deterministic seeds.','Each benchmark row uses a single stratified holdout split.','Fit time measures classifier training only; prediction and AUC time are tracked separately.','Peak memory is measured from the parent process as process-tree RSS across the worker task.'].map(x=>'<div>'+esc(x)+'</div>').join(''); const sweeps=m.sweeps||{}; const sr=[]; for(const [ds,cfg] of Object.entries(sweeps)){for(const [name,c] of Object.entries(cfg||{})){sr.push([dsLabel(ds),name,c.n,c.p,(c.values||[]).join(', ')]);}} document.getElementById('sweepTable').innerHTML='<table><thead><tr><th>Dataset</th><th>Sweep</th><th>n</th><th>p</th><th>Values</th></tr></thead><tbody>'+sr.map(r=>'<tr>'+r.map(x=>'<td>'+esc(x)+'</td>').join('')+'</tr>').join('')+'</tbody></table>';}
+function methodology(){const m=payload.metadata||{}, sys=m.system||{}; const env=[['Python',sys.python],['Platform',sys.platform],['Logical CPUs',sys.cpu_count_logical||sys.logical_cpus],['System RAM',sys.system_memory_mb?fGB(sys.system_memory_mb/1024):undefined],['Threads',m.threads],['Train/test split','75% / 25%, stratified'],['Metric','Test-set ROC AUC'],['Dashboard memory','Peak task RSS in GB']]; document.getElementById('envTable').innerHTML='<table><tbody>'+env.map(([k,v])=>'<tr><td>'+esc(k)+'</td><td class="r">'+esc(v??'not recorded')+'</td></tr>').join('')+'</tbody></table>'; document.getElementById('modelTable').innerHTML='<table><thead><tr><th>Model</th><th>Family</th><th>Feature mode</th><th>Scenario</th><th>LR solver</th></tr></thead><tbody>'+modelOrder.map(k=>{const v=models[k]||{};return '<tr><td>'+modelTag(k)+'</td><td>'+esc(v.family)+'</td><td>'+esc(v.feature_mode)+'</td><td>'+esc(v.scenario)+'</td><td>'+esc(v.lr_solver||'—')+'</td></tr>';}).join('')+'</tbody></table>'; document.getElementById('protocolBox').innerHTML=['Two synthetic binary-classification datasets are generated with deterministic seeds.','Each benchmark row uses a single stratified holdout split.','Fit time measures classifier training only; prediction and AUC time are tracked separately.','Peak memory is measured from the parent process as process-tree RSS across the worker task.','Built-in HUGIML solver variants keep deterministic random_state/random_seed defaults aligned with the default downstream classifier.'].map(x=>'<div>'+esc(x)+'</div>').join(''); const sweeps=m.sweeps||{}; const sr=[]; for(const [ds,cfg] of Object.entries(sweeps)){for(const [name,c] of Object.entries(cfg||{})){sr.push([dsLabel(ds),name,c.n,c.p,(c.values||[]).join(', ')]);}} document.getElementById('sweepTable').innerHTML='<table><thead><tr><th>Dataset</th><th>Sweep</th><th>n</th><th>p</th><th>Values</th></tr></thead><tbody>'+sr.map(r=>'<tr>'+r.map(x=>'<td>'+esc(x)+'</td>').join('')+'</tr>').join('')+'</tbody></table>'; const sb=payload.reproducibility_sbom; const sbomCard=document.getElementById('sbomCard'), sbomPre=document.getElementById('sbomPre'); if(sb&&sbomCard&&sbomPre){sbomCard.style.display='block'; sbomPre.textContent=JSON.stringify(sb,null,2);}}
 function updateAll(){updateOverview(); updateScaling(); updateMemory(); updateSweeps();}
 function init(){const dsSel=document.getElementById('dsSel'); const dss=(payload.datasets||uniq(allRows.map(r=>r.dataset))).filter(ds=>allRows.some(r=>r.dataset===ds)); dsSel.innerHTML=dss.map(ds=>'<option value="'+esc(ds)+'">'+esc(dsScaleLabel(ds))+'</option>').join(''); dsSel.addEventListener('change',updateAll); document.getElementById('swSel').addEventListener('change',updateSweeps); document.querySelectorAll('[data-th]').forEach(b=>b.addEventListener('click',()=>{document.querySelectorAll('[data-th]').forEach(x=>x.classList.remove('on')); b.classList.add('on'); document.body.dataset.t=b.dataset.th; updateAll();})); document.querySelectorAll('.nb').forEach(b=>b.addEventListener('click',()=>{document.querySelectorAll('.nb').forEach(x=>x.classList.remove('on')); document.querySelectorAll('.sec').forEach(x=>x.classList.remove('on')); b.classList.add('on'); document.getElementById(b.dataset.s).classList.add('on'); setTimeout(updateAll,40);})); document.querySelectorAll('.tab').forEach(b=>b.addEventListener('click',()=>{const sec=b.closest('.sec'); sec.querySelectorAll('.tab').forEach(x=>x.classList.remove('on')); sec.querySelectorAll('.tc').forEach(x=>x.classList.remove('on')); b.classList.add('on'); document.getElementById(b.dataset.tab).classList.add('on'); setTimeout(updateAll,40);})); methodology(); updateAll();}
 init();
@@ -947,14 +980,410 @@ init();
 </body>
 </html>""".replace("__CSS__", css_text).replace("__PAYLOAD__", payload_json)
 
+
+def safe_jsonable(obj: Any) -> Any:
+    """Return an object containing only standards-compliant JSON values."""
+    if obj is None or isinstance(obj, (str, bool, int)):
+        return obj
+    if isinstance(obj, float):
+        return obj if obj == obj and obj not in (float("inf"), float("-inf")) else None
+    if isinstance(obj, dict):
+        return {str(k): safe_jsonable(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple, set)):
+        return [safe_jsonable(v) for v in obj]
+    try:
+        import numpy as np
+        if isinstance(obj, (np.integer,)):
+            return int(obj)
+        if isinstance(obj, (np.floating,)):
+            x = float(obj)
+            return x if x == x and x not in (float("inf"), float("-inf")) else None
+        if isinstance(obj, np.ndarray):
+            return safe_jsonable(obj.tolist())
+    except Exception:
+        pass
+    return str(obj)
+
+
+def _drop_unavailable(obj: Any) -> Any:
+    """Remove null/empty/unavailable fields from public reproducibility JSON."""
+    if isinstance(obj, dict):
+        out: dict[str, Any] = {}
+        for key, value in obj.items():
+            cleaned = _drop_unavailable(value)
+            if cleaned is None or cleaned == "" or cleaned == {} or cleaned == []:
+                continue
+            out[str(key)] = cleaned
+        return out
+    if isinstance(obj, list):
+        out = []
+        for value in obj:
+            cleaned = _drop_unavailable(value)
+            if cleaned is None or cleaned == "" or cleaned == {} or cleaned == []:
+                continue
+            out.append(cleaned)
+        return out
+    return obj
+
+
+def _compact_jsonable(obj: Any) -> Any:
+    return _drop_unavailable(safe_jsonable(obj))
+
+
+def _sha256_file(path: Path, *, chunk_size: int = 1024 * 1024, label: str | None = None) -> dict[str, Any]:
+    """Return a path-free SHA-256 fingerprint for a readable file."""
+    p = Path(path)
+    out: dict[str, Any] = {"file": label or p.name}
+    if not p.exists() or not p.is_file():
+        return out
+    try:
+        st = p.stat()
+        h = hashlib.sha256()
+        with p.open("rb") as f:
+            for chunk in iter(lambda: f.read(chunk_size), b""):
+                h.update(chunk)
+        out.update({"size_bytes": int(st.st_size), "sha256": h.hexdigest()})
+    except Exception as exc:
+        out["error"] = type(exc).__name__
+    return out
+
+
+def _package_version(dist_name: str) -> str | None:
+    try:
+        return str(importlib_metadata.version(dist_name))
+    except importlib_metadata.PackageNotFoundError:
+        return None
+    except Exception:
+        return None
+
+
+def _key_package_versions() -> dict[str, str]:
+    """Only record package versions that materially affect benchmark reproducibility."""
+    names = [
+        "hugiml",
+        "hugiml-core",
+        "numpy",
+        "pandas",
+        "scipy",
+        "scikit-learn",
+        "xgboost",
+        "lightgbm",
+        "psutil",
+        "joblib",
+        "threadpoolctl",
+    ]
+    out: dict[str, str] = {}
+    for name in names:
+        version = _package_version(name)
+        if version is not None:
+            out[name] = version
+    return out
+
+
+def _compiler_version_line(command: str | None) -> dict[str, Any] | None:
+    if not command:
+        return None
+    try:
+        parts = shlex.split(str(command))
+    except Exception:
+        parts = str(command).split()
+    if not parts:
+        return None
+    executable = shutil.which(parts[0])
+    if executable is None:
+        return None
+    try:
+        proc = subprocess.run(
+            [parts[0], "--version"],
+            capture_output=True,
+            text=True,
+            timeout=5.0,
+            check=False,
+        )
+    except Exception:
+        return {"compiler": parts[0]}
+    first_line = next((line.strip() for line in (proc.stdout or "").splitlines() if line.strip()), "")
+    return _compact_jsonable({"compiler": parts[0], "version": first_line})
+
+
+def _sanitize_build_tokens(value: Any) -> str | None:
+    """Remove local include/library paths while preserving relevant build flags."""
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        tokens = shlex.split(text)
+    except Exception:
+        tokens = text.split()
+    sanitized: list[str] = []
+    skip_next = False
+    path_flags = {"-I", "-L", "-isystem", "-iquote", "/I", "/LIBPATH:"}
+    for token in tokens:
+        if skip_next:
+            skip_next = False
+            sanitized.append("<path>")
+            continue
+        if token in path_flags:
+            sanitized.extend([token, "<path>"])
+            skip_next = True
+            continue
+        if any(token.startswith(prefix) and len(token) > len(prefix) for prefix in ["-I", "-L", "-isystem", "-iquote", "/I", "/LIBPATH:"]):
+            prefix = next(prefix for prefix in ["-isystem", "-iquote", "/LIBPATH:", "-I", "-L", "/I"] if token.startswith(prefix))
+            sanitized.append(prefix + "<path>")
+            continue
+        # Replace path-bearing tokens, but keep ordinary compiler switches.
+        if ("/" in token or "\\" in token) and not token.startswith(("-O", "/O", "-m", "-f", "-D", "-std", "/arch:")):
+            sanitized.append("<path>")
+            continue
+        sanitized.append(token)
+    return " ".join(sanitized) if sanitized else None
+
+
+def _optimization_indicators(*values: Any) -> list[str]:
+    text = " ".join(str(v) for v in values if v)
+    try:
+        tokens = shlex.split(text)
+    except Exception:
+        tokens = text.split()
+    keep: list[str] = []
+    prefixes = (
+        "-O",
+        "/O",
+        "-march",
+        "-mtune",
+        "-mcpu",
+        "-mavx",
+        "-msse",
+        "-mfma",
+        "-flto",
+        "-fopenmp",
+        "-fno-math-errno",
+        "-ffast-math",
+        "-DNDEBUG",
+        "-std=",
+        "/arch:",
+        "/openmp",
+    )
+    for token in tokens:
+        if token.startswith(prefixes) and token not in keep:
+            keep.append(token)
+    return keep
+
+
+def _hugiml_module_metadata() -> dict[str, Any]:
+    out: dict[str, Any] = {
+        "version_attr": getattr(_hugiml_pkg, "__version__", None) if _hugiml_pkg is not None else None,
+        "distributions": {
+            name: version
+            for name in ["hugiml", "hugiml-core", "hugiml_core"]
+            if (version := _package_version(name)) is not None
+        },
+    }
+    try:
+        import _hugiml_core as core_ext  # type: ignore
+        core_path = Path(getattr(core_ext, "__file__", ""))
+        out["native_extension"] = {
+            "module": "_hugiml_core",
+            "filename": core_path.name,
+            "fingerprint": _sha256_file(core_path, label=core_path.name),
+        }
+    except Exception:
+        pass
+    return _compact_jsonable(out)
+
+
+def _source_tree_fingerprint(root: Path | None, *, max_files: int = 2000, max_file_size_bytes: int = 2 * 1024 * 1024) -> dict[str, Any]:
+    """Return an aggregate source/build-input hash without exposing file paths."""
+    if root is None:
+        return {}
+    base = Path(root).resolve()
+    if not base.exists():
+        return {}
+    rel_roots = [
+        "src",
+        "native",
+        "include",
+        "cmake",
+        "CMakeLists.txt",
+        "pyproject.toml",
+        "setup.py",
+        "setup.cfg",
+        "MANIFEST.in",
+        "requirements.txt",
+        "requirements-dev.txt",
+        "experiments/scalability/scalability_dashboard.py",
+    ]
+    allowed_suffixes = {"", ".c", ".cc", ".cmake", ".cpp", ".cxx", ".h", ".hpp", ".hxx", ".in", ".lock", ".md", ".py", ".pyi", ".toml", ".txt", ".yaml", ".yml", ".cfg"}
+    skip_parts = {".git", ".mypy_cache", ".pytest_cache", "__pycache__", "build", "dist", "results"}
+    files: list[Path] = []
+    for rel in rel_roots:
+        candidate = base / rel
+        if not candidate.exists():
+            continue
+        if candidate.is_file():
+            files.append(candidate)
+            continue
+        for f in candidate.rglob("*"):
+            if not f.is_file():
+                continue
+            if any(part in skip_parts for part in f.relative_to(base).parts):
+                continue
+            if f.suffix.lower() not in allowed_suffixes:
+                continue
+            try:
+                if f.stat().st_size > max_file_size_bytes:
+                    continue
+            except Exception:
+                continue
+            files.append(f)
+    files = sorted(set(files), key=lambda p: p.relative_to(base).as_posix())[:max_files]
+    tree_hash = hashlib.sha256()
+    for f in files:
+        rel = f.relative_to(base).as_posix()
+        fp = _sha256_file(f, label=f.name)
+        tree_hash.update(rel.encode("utf-8", errors="replace"))
+        tree_hash.update(b"\0")
+        tree_hash.update(str(fp.get("size_bytes")).encode("ascii", errors="replace"))
+        tree_hash.update(b"\0")
+        tree_hash.update(str(fp.get("sha256")).encode("ascii", errors="replace"))
+        tree_hash.update(b"\0")
+    return _compact_jsonable({
+        "tree_sha256": tree_hash.hexdigest(),
+        "file_count_hashed": len(files),
+        "file_count_limit": int(max_files),
+        "max_file_size_bytes": int(max_file_size_bytes),
+        "note": "Aggregate source/build-input hash only; file paths and source-control metadata are intentionally omitted.",
+    })
+
+
+def _native_build_metadata() -> dict[str, Any]:
+    """Capture minimal Python/native build facts that can affect performance."""
+    config_keys = [
+        "SOABI",
+        "EXT_SUFFIX",
+        "MULTIARCH",
+        "Py_DEBUG",
+        "Py_ENABLE_SHARED",
+        "CC",
+        "CXX",
+        "CFLAGS",
+        "CXXFLAGS",
+        "CPPFLAGS",
+        "LDFLAGS",
+        "LDSHARED",
+        "CCSHARED",
+        "CONFIG_ARGS",
+    ]
+    raw_sysconfig = {k: sysconfig.get_config_var(k) for k in config_keys}
+    sysconfig_public = {k: _sanitize_build_tokens(v) for k, v in raw_sysconfig.items()}
+    env_keys = [
+        "CC",
+        "CXX",
+        "CFLAGS",
+        "CXXFLAGS",
+        "CPPFLAGS",
+        "LDFLAGS",
+        "ARCHFLAGS",
+        "CMAKE_ARGS",
+        "CMAKE_BUILD_PARALLEL_LEVEL",
+        "CMAKE_GENERATOR",
+        "NPY_NUM_BUILD_JOBS",
+    ]
+    env_public = {k: _sanitize_build_tokens(os.environ.get(k)) for k in env_keys if os.environ.get(k)}
+    compiler_versions = {
+        key: value
+        for key, cmd in {
+            "env_CC": os.environ.get("CC"),
+            "env_CXX": os.environ.get("CXX"),
+            "sysconfig_CC": raw_sysconfig.get("CC"),
+            "sysconfig_CXX": raw_sysconfig.get("CXX"),
+        }.items()
+        if (value := _compiler_version_line(cmd))
+    }
+    optimization_flags = _optimization_indicators(*raw_sysconfig.values(), *env_public.values())
+    return _compact_jsonable({
+        "python_abi": {
+            "SOABI": raw_sysconfig.get("SOABI"),
+            "EXT_SUFFIX": raw_sysconfig.get("EXT_SUFFIX"),
+            "MULTIARCH": raw_sysconfig.get("MULTIARCH"),
+            "Py_DEBUG": raw_sysconfig.get("Py_DEBUG"),
+            "Py_ENABLE_SHARED": raw_sysconfig.get("Py_ENABLE_SHARED"),
+        },
+        "compiler_versions": compiler_versions,
+        "build_flags": sysconfig_public,
+        "build_environment": env_public,
+        "optimization_indicators": optimization_flags,
+        "note": "Local include/library paths, command transcripts, and dynamic-linker dumps are intentionally omitted.",
+    })
+
+def build_reproducibility_sbom(*, checkpoint: Path, out_dir: Path, payload: dict[str, Any], rows: list[dict[str, Any]], output_paths: dict[str, Path]) -> dict[str, Any]:
+    """Build a minimal, path-free reproducibility manifest for scalability outputs."""
+    artifacts: dict[str, Any] = {
+        "script": _sha256_file(Path(__file__).resolve(), label="scalability_dashboard.py"),
+        "checkpoint_input": _sha256_file(checkpoint, label=checkpoint.name),
+    }
+    for name, p in output_paths.items():
+        if name in {"html", "sbom"}:
+            # The HTML embeds this manifest and the SBOM file has not been written yet.
+            continue
+        artifacts[name] = _sha256_file(p, label=p.name)
+
+    thread_env_keys = [
+        "OMP_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS",
+        "MKL_NUM_THREADS",
+        "NUMEXPR_NUM_THREADS",
+    ]
+    manifest = {
+        "bom_format": "HUGIML scalability reproducibility manifest",
+        "bom_version": "2.0",
+        "python_runtime": {
+            "version": platform.python_version(),
+            "implementation": platform.python_implementation(),
+            "compiler": platform.python_compiler(),
+            "build": list(platform.python_build()),
+            "system": platform.system(),
+            "release": platform.release(),
+            "machine": platform.machine(),
+        },
+        "packages": _key_package_versions(),
+        "hugiml": _hugiml_module_metadata(),
+        "native_build": _native_build_metadata(),
+        "runtime_environment": {
+            "threading": {k: os.environ.get(k) for k in thread_env_keys if os.environ.get(k)},
+        },
+        "artifacts": artifacts,
+        "source_tree": _source_tree_fingerprint(SOURCE_ROOT),
+        "redactions": {
+            "output_directory": "<output-dir>",
+            "local_paths": "<path>",
+        },
+        "privacy_note": "This manifest intentionally omits raw command output, sys.path, full package inventories, local paths, and unavailable/null fields; path placeholders document redaction without exposing real locations.",
+    }
+    return _compact_jsonable(manifest)
+
 def build_outputs(args: argparse.Namespace) -> None:
     outdir = resolve_outdir(args.outdir)
     ckpt_path = outdir / "scalability_checkpoint.json"
     ckpt = load_ckpt(ckpt_path)
     rows = flatten_results(ckpt.get("results", []))
-    write_csv(outdir / "scalability_results_flat.csv", rows)
-    html_text = render_html(rows, ckpt.get("metadata", {}))
+    csv_path = outdir / "scalability_results_flat.csv"
+    write_csv(csv_path, rows)
     output_html = Path(args.output_html).expanduser().resolve() if args.output_html else outdir / "hugiml_scalability_dashboard.html"
+    sbom: dict[str, Any] | None = None
+    if getattr(args, "include_sbom", False):
+        sbom_path = outdir / "scalability_reproducibility_sbom.json"
+        sbom = build_reproducibility_sbom(
+            checkpoint=ckpt_path,
+            out_dir=outdir,
+            payload=ckpt,
+            rows=rows,
+            output_paths={"flat_csv": csv_path, "html": output_html, "sbom": sbom_path},
+        )
+        sbom_path.write_text(json.dumps(sbom, indent=2, sort_keys=True, allow_nan=False), encoding="utf-8")
+    html_text = render_html(rows, ckpt.get("metadata", {}), reproducibility_sbom=sbom)
     output_html.parent.mkdir(parents=True, exist_ok=True)
     output_html.write_text(html_text, encoding="utf-8")
 
@@ -975,6 +1404,7 @@ def main() -> None:
     p.add_argument("--out-dir", dest="outdir", default=str(DEFAULT_OUTDIR))
     p.add_argument("--output-html", default=None)
     p.add_argument("--assemble", action="store_true")
+    p.add_argument("--include-sbom", action="store_true", help="Include a minimal path-free reproducibility/SBOM manifest in the Methodology tab and write scalability_reproducibility_sbom.json.")
     p.add_argument("--fresh", action="store_true")
     p.add_argument("--resume", action="store_true")
     p.add_argument("--only-section")

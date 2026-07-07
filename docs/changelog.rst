@@ -6,6 +6,19 @@ The canonical release notes live in ``CHANGELOG.md`` at the repository root. Kee
 Recent releases
 ---------------
 
+1.1.17 — 2026-07-07
+~~~~~~~~~~~~~~~~~~~
+
+* Added a native ``L=3`` mining hot path for bounded three-item pattern workloads.
+* Added ``max_mining_seconds`` and ``get_mining_audit_log()`` for explicit mining-stage time budgets and compact attempt-level audit trails.
+* Optimized L3 mining with tighter same-feature checks, pair reuse, coverage de-duplication, and gated pair-cache pruning.
+* Improved native timeout behavior so miners can return partial results where possible.
+* Added focused fuzz, timeout, L3 hot-path, and zero-variance tests for the new mining paths and edge cases.
+* Added ``lr_solver`` support for built-in downstream ``saga`` LogisticRegression and ``sgd`` SGDClassifier paths while preserving the existing default solver behavior.
+* Added scalability dashboard solver scenarios for the new saga and SGD downstream paths.
+* Added a privacy-sanitized reproducibility/SBOM manifest option for the scalability and benchmark dashboard.
+* Updated README and Sphinx guidance for choosing downstream solvers, and updated serialization for the new built-in SGD solver state.
+
 1.1.16 — 2026-06-30
 ~~~~~~~~~~~~~~~~~~~~~
 

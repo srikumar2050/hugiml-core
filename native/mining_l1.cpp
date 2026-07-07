@@ -87,6 +87,11 @@ static double l1_entropy(const int* counts, int n_cls, int total) {
 // Compute information gain for a single item.
 // Matches UL::compute_ig(parent=nullptr, ytrain, n_cls) precisely.
 //
+//   base_global — entropy of cnt_global over n_train (the "parent" population
+//                 entropy). Identical for every item in a given
+//                 mine_patterns_l1_cpp call, so it's computed once by the
+//                 caller and passed in here rather than being recomputed
+//                 (with n_cls std::log calls) on every surviving candidate.
 //   cnt_global  — class counts over ALL n_train rows (the "parent" population)
 //   cnt_in      — class counts over rows where this item appeared
 //   n_in        — number of rows where this item appeared
@@ -97,7 +102,7 @@ static double l1_entropy(const int* counts, int n_cls, int total) {
 //                 vector<int> on every call (previously: one heap alloc per
 //                 surviving candidate, since this is called once per item
 //                 in mine_patterns_l1_cpp's top-K loop).
-static double l1_ig(const int* cnt_global, const int* cnt_in,
+static double l1_ig(double base_global, const int* cnt_global, const int* cnt_in,
                     int n_in, int n_train, int n_cls,
                     int* cnt_out_buf) {
     int n_out = n_train - n_in;
@@ -106,15 +111,13 @@ static double l1_ig(const int* cnt_global, const int* cnt_in,
     if (n_out == 0)
         return std::numeric_limits<double>::quiet_NaN();
 
-    double base = l1_entropy(cnt_global, n_cls, n_train);
-
     // cnt_out = cnt_global - cnt_in  (identical to mining.cpp's cnt_out computation)
     for (int k = 0; k < n_cls; k++)
         cnt_out_buf[k] = cnt_global[k] - cnt_in[k];
 
     double ce = (static_cast<double>(n_in)  / n_train * l1_entropy(cnt_in,      n_cls, n_in)
                + static_cast<double>(n_out) / n_train * l1_entropy(cnt_out_buf, n_cls, n_out));
-    return base - ce;
+    return base_global - ce;
 }
 
 // Min-heap comparator — smallest utility on top (matches THUIsl's MinHeapCmp).
@@ -276,6 +279,10 @@ std::vector<PatternEntry> mine_patterns_l1_cpp(
     // inside l1_ig per call). Sized n_cls, same as every cnt_item row.
     std::vector<int> cnt_out_scratch(n_cls);
 
+    // Parent/global entropy is identical for every candidate item in this
+    // call — computed once here instead of inside l1_ig on every iteration.
+    const double base_global = l1_entropy(cnt_global.data(), n_cls, n_train);
+
     // candidates is in ascending TWU order (mirroring sorted_items).
     // Iterate in reverse to process highest TWU first.
     for (int ci = m - 1; ci >= 0; --ci) {
@@ -296,7 +303,7 @@ std::vector<PatternEntry> mine_patterns_l1_cpp(
         // iteration; the data is already contiguous, so a pointer suffices.)
         const int* cnt_in = cnt_item.data() + static_cast<size_t>(ci) * n_cls;
 
-        const double ig = l1_ig(cnt_global.data(), cnt_in, ni, n_train, n_cls,
+        const double ig = l1_ig(base_global, cnt_global.data(), cnt_in, ni, n_train, n_cls,
                                  cnt_out_scratch.data());
 
         // NaN ig (n_out == 0) and ig <= G are both skipped — NaN > G is false

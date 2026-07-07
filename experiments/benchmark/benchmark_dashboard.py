@@ -3,14 +3,22 @@ from __future__ import annotations
 # ruff: noqa: E402
 import argparse
 import copy
+import hashlib
+import html
+import importlib.metadata as importlib_metadata
 import json
 import math
 import os
+import platform
 import re
+import shlex
 import shutil
+import subprocess
 import sys
+import sysconfig
 import time
 import warnings
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -2808,6 +2816,522 @@ def _inject_before_body_end(text: str, block: str) -> str:
     return text + "\n" + block
 
 
+def _sha256_file(path: Path, *, chunk_size: int = 1024 * 1024) -> dict[str, Any]:
+    """Return a compact SHA-256 fingerprint for a file if it is readable."""
+    p = Path(path)
+    out: dict[str, Any] = {
+        "path": str(p),
+        "exists": bool(p.exists()),
+        "type": "file" if p.is_file() else ("directory" if p.is_dir() else "missing"),
+    }
+    if not p.exists() or not p.is_file():
+        return out
+    try:
+        st = p.stat()
+        h = hashlib.sha256()
+        with p.open("rb") as f:
+            for chunk in iter(lambda: f.read(chunk_size), b""):
+                h.update(chunk)
+        out.update(
+            {
+                "size_bytes": int(st.st_size),
+                "mtime_ns": int(st.st_mtime_ns),
+                "sha256": h.hexdigest(),
+            }
+        )
+    except Exception as exc:
+        out["error"] = repr(exc)
+    return out
+
+
+def _fingerprint_files(paths: list[Path]) -> list[dict[str, Any]]:
+    """Fingerprint a de-duplicated ordered list of files."""
+    seen: set[Path] = set()
+    out: list[dict[str, Any]] = []
+    for raw in paths:
+        try:
+            p = Path(raw).expanduser().resolve()
+        except Exception:
+            p = Path(raw)
+        if p in seen:
+            continue
+        seen.add(p)
+        out.append(_sha256_file(p))
+    return out
+
+
+def _source_tree_fingerprint(
+    root: Path | None,
+    *,
+    max_files: int = 2000,
+    max_file_size_bytes: int = 2 * 1024 * 1024,
+) -> dict[str, Any]:
+    """Hash source/build inputs that commonly affect the Python and native extension build."""
+    if root is None:
+        return {"available": False, "reason": "SOURCE_ROOT was not discovered; using installed package."}
+    base = Path(root).resolve()
+    if not base.exists():
+        return {"available": False, "path": str(base), "reason": "SOURCE_ROOT does not exist."}
+
+    rel_roots = [
+        "src",
+        "native",
+        "include",
+        "cmake",
+        "CMakeLists.txt",
+        "pyproject.toml",
+        "setup.py",
+        "setup.cfg",
+        "MANIFEST.in",
+        "requirements.txt",
+        "requirements-dev.txt",
+        "experiments/benchmark/benchmark_dashboard.py",
+    ]
+    allowed_suffixes = {
+        "",
+        ".c",
+        ".cc",
+        ".cmake",
+        ".cpp",
+        ".cxx",
+        ".h",
+        ".hpp",
+        ".hxx",
+        ".in",
+        ".lock",
+        ".md",
+        ".py",
+        ".pyi",
+        ".toml",
+        ".txt",
+        ".yaml",
+        ".yml",
+        ".cfg",
+    }
+    skip_parts = {".git", ".mypy_cache", ".pytest_cache", "__pycache__", "build", "dist"}
+    files: list[Path] = []
+    for rel in rel_roots:
+        candidate = base / rel
+        if not candidate.exists():
+            continue
+        if candidate.is_file():
+            files.append(candidate)
+            continue
+        for f in candidate.rglob("*"):
+            if not f.is_file():
+                continue
+            if any(part in skip_parts for part in f.relative_to(base).parts):
+                continue
+            if f.suffix.lower() not in allowed_suffixes:
+                continue
+            try:
+                if f.stat().st_size > max_file_size_bytes:
+                    continue
+            except Exception:
+                continue
+            files.append(f)
+
+    files = sorted(set(files), key=lambda p: p.relative_to(base).as_posix())[:max_files]
+    entries: list[dict[str, Any]] = []
+    tree_hash = hashlib.sha256()
+    for f in files:
+        rel = f.relative_to(base).as_posix()
+        fp = _sha256_file(f)
+        entry = {
+            "path": rel,
+            "size_bytes": fp.get("size_bytes"),
+            "sha256": fp.get("sha256"),
+        }
+        if "error" in fp:
+            entry["error"] = fp["error"]
+        entries.append(entry)
+        tree_hash.update(rel.encode("utf-8", errors="replace"))
+        tree_hash.update(b"\0")
+        tree_hash.update(str(entry.get("size_bytes")).encode("ascii", errors="replace"))
+        tree_hash.update(b"\0")
+        tree_hash.update(str(entry.get("sha256")).encode("ascii", errors="replace"))
+        tree_hash.update(b"\0")
+
+    return {
+        "available": True,
+        "root": str(base),
+        "file_count_recorded": len(entries),
+        "file_count_limit": int(max_files),
+        "max_file_size_bytes": int(max_file_size_bytes),
+        "tree_sha256": tree_hash.hexdigest(),
+        "files": entries,
+    }
+
+
+def _run_command(
+    cmd: list[str],
+    *,
+    cwd: Path | None = None,
+    timeout_s: float = 5.0,
+) -> dict[str, Any]:
+    executable = shutil.which(cmd[0]) if cmd else None
+    out: dict[str, Any] = {"cmd": cmd, "available": bool(executable)}
+    if not executable:
+        return out
+    try:
+        p = subprocess.run(
+            cmd,
+            cwd=str(cwd) if cwd is not None else None,
+            capture_output=True,
+            text=True,
+            timeout=timeout_s,
+            check=False,
+        )
+        out.update(
+            {
+                "returncode": int(p.returncode),
+                "stdout": (p.stdout or "")[:12000],
+                "stderr": (p.stderr or "")[:12000],
+            }
+        )
+    except Exception as exc:
+        out["error"] = repr(exc)
+    return out
+
+
+def _redact_remote_line(line: str) -> str:
+    # Redact tokens in https://token@host/path remotes while leaving host/path visible.
+    return re.sub(r"(https?://)([^/@\s]+)@", r"\1<redacted>@", line)
+
+
+def _git_metadata(root: Path | None) -> dict[str, Any]:
+    if root is None:
+        return {"available": False, "reason": "SOURCE_ROOT was not discovered."}
+    base = Path(root).resolve()
+    if not (base / ".git").exists() and _run_command(["git", "rev-parse", "--is-inside-work-tree"], cwd=base).get("returncode") != 0:
+        return {"available": False, "root": str(base), "reason": "not a git checkout"}
+
+    def git(*args: str) -> dict[str, Any]:
+        return _run_command(["git", *args], cwd=base, timeout_s=8.0)
+
+    remote = git("remote", "-v")
+    if isinstance(remote.get("stdout"), str):
+        remote["stdout"] = "\n".join(_redact_remote_line(x) for x in remote["stdout"].splitlines())
+    return {
+        "available": True,
+        "root": str(base),
+        "commit": git("rev-parse", "HEAD"),
+        "branch": git("rev-parse", "--abbrev-ref", "HEAD"),
+        "status_short": git("status", "--short"),
+        "diff_stat": git("diff", "--stat"),
+        "diff_name_status": git("diff", "--name-status"),
+        "tag_describe": git("describe", "--tags", "--dirty", "--always"),
+        "remotes_redacted": remote,
+    }
+
+
+def _distribution_record(dist_name: str) -> dict[str, Any] | None:
+    try:
+        dist = importlib_metadata.distribution(dist_name)
+    except importlib_metadata.PackageNotFoundError:
+        return None
+    except Exception as exc:
+        return {"name": dist_name, "error": repr(exc)}
+    files = []
+    try:
+        for f in list(dist.files or [])[:500]:
+            files.append(str(f))
+    except Exception:
+        files = []
+    metadata = {}
+    try:
+        for key in ["Name", "Version", "Summary", "Home-page", "License", "Installer"]:
+            val = dist.metadata.get(key)
+            if val:
+                metadata[key] = val
+    except Exception:
+        pass
+    return {
+        "name": metadata.get("Name", dist_name),
+        "version": getattr(dist, "version", None),
+        "location": str(getattr(dist, "_path", "")),
+        "metadata": metadata,
+        "recorded_files_sample": files,
+        "recorded_files_sample_limit": 500,
+    }
+
+
+def _installed_python_distributions() -> list[dict[str, Any]]:
+    out: list[dict[str, Any]] = []
+    for dist in importlib_metadata.distributions():
+        try:
+            name = dist.metadata.get("Name") or "<unknown>"
+            out.append(
+                {
+                    "name": str(name),
+                    "version": str(getattr(dist, "version", "")),
+                    "location": str(getattr(dist, "_path", "")),
+                    "installer": str(dist.metadata.get("Installer") or ""),
+                }
+            )
+        except Exception as exc:
+            out.append({"error": repr(exc)})
+    return sorted(out, key=lambda r: (str(r.get("name", "")).lower(), str(r.get("version", ""))))
+
+
+def _pip_freeze() -> dict[str, Any]:
+    return _run_command([sys.executable, "-m", "pip", "freeze", "--all"], timeout_s=15.0)
+
+
+def _compiler_probe(command: str | None) -> dict[str, Any]:
+    if not command:
+        return {"command": command, "available": False}
+    try:
+        parts = shlex.split(str(command))
+    except Exception:
+        parts = str(command).split()
+    if not parts:
+        return {"command": command, "available": False}
+    return _run_command([parts[0], "--version"], timeout_s=5.0)
+
+
+def _hugiml_module_metadata() -> dict[str, Any]:
+    out: dict[str, Any] = {
+        "package_import_path": HUGIML_IMPORTED_FROM,
+        "package_version_attr": getattr(_hugiml_pkg, "__version__", None),
+        "distributions": {},
+    }
+    for dist_name in ["hugiml", "hugiml-core", "hugiml_core"]:
+        rec = _distribution_record(dist_name)
+        if rec is not None:
+            out["distributions"][dist_name] = rec
+    try:
+        import _hugiml_core as core_ext  # type: ignore
+
+        core_path = Path(getattr(core_ext, "__file__", "")).resolve()
+        out["native_extension"] = {
+            "module": "_hugiml_core",
+            "path": str(core_path),
+            "fingerprint": _sha256_file(core_path),
+            "module_attributes": {
+                k: str(getattr(core_ext, k))
+                for k in ["__doc__", "__file__", "__name__", "__package__"]
+                if hasattr(core_ext, k)
+            },
+        }
+    except Exception as exc:
+        out["native_extension"] = {"module": "_hugiml_core", "error": repr(exc)}
+    return out
+
+
+def _native_build_metadata() -> dict[str, Any]:
+    """Capture native-extension build/rebuild evidence relevant to performance reproducibility."""
+    config_keys = [
+        "CC",
+        "CXX",
+        "CFLAGS",
+        "CXXFLAGS",
+        "CPPFLAGS",
+        "LDFLAGS",
+        "LDSHARED",
+        "CCSHARED",
+        "LINKFORSHARED",
+        "AR",
+        "ARFLAGS",
+        "SOABI",
+        "EXT_SUFFIX",
+        "CONFIG_ARGS",
+        "Py_DEBUG",
+        "Py_ENABLE_SHARED",
+        "MULTIARCH",
+        "LDLIBRARY",
+        "LIBDIR",
+        "INCLUDEPY",
+    ]
+    env_keys = [
+        "CC",
+        "CXX",
+        "CFLAGS",
+        "CXXFLAGS",
+        "CPPFLAGS",
+        "LDFLAGS",
+        "ARCHFLAGS",
+        "MACOSX_DEPLOYMENT_TARGET",
+        "CMAKE_ARGS",
+        "CMAKE_BUILD_PARALLEL_LEVEL",
+        "CMAKE_GENERATOR",
+        "CMAKE_PREFIX_PATH",
+        "SKBUILD_CONFIGURE_OPTIONS",
+        "PYBIND11_GLOBAL_SDIST",
+        "PYBIND11_PYTHON_VERSION",
+        "NPY_NUM_BUILD_JOBS",
+        "OMP_NUM_THREADS",
+        "OPENBLAS_NUM_THREADS",
+        "MKL_NUM_THREADS",
+    ]
+    sysconfig_vars = {k: sysconfig.get_config_var(k) for k in config_keys}
+    env_vars = {k: os.environ.get(k) for k in env_keys if os.environ.get(k) is not None}
+    compiler_commands = {
+        "env_CC": env_vars.get("CC"),
+        "env_CXX": env_vars.get("CXX"),
+        "sysconfig_CC": sysconfig_vars.get("CC"),
+        "sysconfig_CXX": sysconfig_vars.get("CXX"),
+    }
+    compilers = {name: _compiler_probe(cmd) for name, cmd in compiler_commands.items() if cmd}
+
+    native_extension = _hugiml_module_metadata().get("native_extension", {})
+    native_path_raw = native_extension.get("path") if isinstance(native_extension, dict) else None
+    native_path = Path(native_path_raw) if native_path_raw else None
+    linkage: dict[str, Any] = {}
+    if native_path is not None and native_path.exists():
+        linkage["ldd"] = _run_command(["ldd", str(native_path)], timeout_s=8.0)
+        linkage["readelf_dynamic"] = _run_command(["readelf", "-d", str(native_path)], timeout_s=8.0)
+        linkage["otool_L"] = _run_command(["otool", "-L", str(native_path)], timeout_s=8.0)
+
+    return {
+        "note": (
+            "Exact compiler flags used to build an already-installed wheel are not always "
+            "recoverable. This section records the active Python build configuration, "
+            "build-related environment variables, compiler probes, native-extension binary "
+            "fingerprint, and dynamic linkage so others can rebuild or compare environments."
+        ),
+        "sysconfig": sysconfig_vars,
+        "environment": env_vars,
+        "compiler_version_probes": compilers,
+        "native_extension_linkage": linkage,
+    }
+
+
+def build_reproducibility_sbom(
+    *,
+    checkpoint: Path,
+    out_dir: Path,
+    template_html: Path,
+    payload: dict[str, Any],
+    data: dict[str, Any],
+    output_paths: dict[str, Path],
+) -> dict[str, Any]:
+    """Build an SBOM-like reproducibility manifest for benchmark assembly outputs."""
+    metadata = payload.get("metadata", {}) if isinstance(payload, dict) else {}
+    existing_outputs: dict[str, Any] = {}
+    for name, p in output_paths.items():
+        if name == "html":
+            existing_outputs[name] = {
+                "path": str(p),
+                "sha256": None,
+                "note": "The HTML embeds this SBOM section, so its own hash is intentionally not included to avoid self-reference.",
+            }
+        else:
+            existing_outputs[name] = _sha256_file(p)
+
+    return _safe_jsonable(
+        {
+            "bom_format": "HUGIML benchmark reproducibility manifest",
+            "bom_version": "1.0",
+            "schema_hint": "SBOM-like JSON; intentionally lightweight rather than SPDX/CycloneDX-complete.",
+            "generated_utc": datetime.now(timezone.utc).isoformat(),
+            "command": {
+                "argv": list(sys.argv),
+                "executable": sys.executable,
+                "working_directory": str(Path.cwd().resolve()),
+            },
+            "benchmark": {
+                "script": _sha256_file(Path(__file__).resolve()),
+                "script_dir": str(SCRIPT_DIR),
+                "source_root": str(SOURCE_ROOT) if SOURCE_ROOT is not None else None,
+                "checkpoint_input": _sha256_file(checkpoint),
+                "template_html_input": _sha256_file(template_html),
+                "out_dir": str(out_dir),
+                "metadata": metadata,
+                "grid_snapshot": grid_snapshot(),
+                "dataset_names": list(DATASET_NAMES),
+                "model_order": list(MODEL_ORDER),
+                "hugiml_scenarios": HUGIML_SCENARIOS,
+                "data_object_counts": {
+                    "details": len(data.get("details", [])),
+                    "overall": len(data.get("overall", [])),
+                    "summary_by_scope": len(data.get("summary_by_scope", [])),
+                    "scope_tests": len(data.get("scope_tests", [])),
+                },
+            },
+            "artifacts": existing_outputs,
+            "source_fingerprints": _source_tree_fingerprint(SOURCE_ROOT),
+            "git": _git_metadata(SOURCE_ROOT),
+            "python_runtime": {
+                "version": sys.version,
+                "version_info": list(sys.version_info),
+                "implementation": platform.python_implementation(),
+                "platform": platform.platform(),
+                "machine": platform.machine(),
+                "processor": platform.processor(),
+                "system": platform.system(),
+                "release": platform.release(),
+                "python_build": platform.python_build(),
+                "python_compiler": platform.python_compiler(),
+                "sys_path_sample": list(sys.path[:20]),
+            },
+            "environment": {
+                "selected_variables": {
+                    k: os.environ.get(k)
+                    for k in sorted(
+                        {
+                            "HUGIML_SOURCE_ROOT",
+                            "PYTHONPATH",
+                            "PYTHONHASHSEED",
+                            "OMP_NUM_THREADS",
+                            "OPENBLAS_NUM_THREADS",
+                            "MKL_NUM_THREADS",
+                            "NUMEXPR_NUM_THREADS",
+                            "JOBLIB_TEMP_FOLDER",
+                            "SKLEARN_ALLOW_DEPRECATED_SKLEARN_PACKAGE_INSTALL",
+                            "CC",
+                            "CXX",
+                            "CFLAGS",
+                            "CXXFLAGS",
+                            "CPPFLAGS",
+                            "LDFLAGS",
+                            "CMAKE_ARGS",
+                            "CMAKE_BUILD_PARALLEL_LEVEL",
+                        }
+                    )
+                    if os.environ.get(k) is not None
+                }
+            },
+            "packages": {
+                "hugiml": _hugiml_module_metadata(),
+                "installed_distributions": _installed_python_distributions(),
+                "pip_freeze_all": _pip_freeze(),
+            },
+            "native_build": _native_build_metadata(),
+        }
+    )
+
+
+def _render_reproducibility_sbom_html(sbom: dict[str, Any]) -> str:
+    pretty = json.dumps(_safe_jsonable(sbom), indent=2, sort_keys=True, allow_nan=False)
+    escaped = html.escape(pretty)
+    generated = html.escape(str(sbom.get("generated_utc", "")))
+    return f"""
+<!-- BEGIN HUGIML_REPRODUCIBILITY_SBOM -->
+<section class="card" id="reproducibilitySbom" style="margin-top:16px">
+  <details>
+    <summary style="cursor:pointer;font-weight:700">Reproducibility / SBOM manifest</summary>
+    <div class="meta" style="margin:8px 0 12px 0">
+      Generated: {generated}. This collapsed section records benchmark configuration, artifact hashes, Python packages,
+      source fingerprints, git state, and discoverable native/C++ extension build metadata.
+    </div>
+    <pre style="white-space:pre-wrap;overflow:auto;max-height:640px;background:#0f172a;color:#e5e7eb;border-radius:12px;padding:14px;font-size:12px;line-height:1.45">{escaped}</pre>
+  </details>
+</section>
+<!-- END HUGIML_REPRODUCIBILITY_SBOM -->
+"""
+
+
+def _ensure_reproducibility_sbom_ui(text: str, sbom: dict[str, Any]) -> str:
+    text = re.sub(
+        r"\n?<!-- BEGIN HUGIML_REPRODUCIBILITY_SBOM -->.*?<!-- END HUGIML_REPRODUCIBILITY_SBOM -->\n?",
+        "\n",
+        text,
+        flags=re.S,
+    )
+    return _inject_before_body_end(text, _render_reproducibility_sbom_html(sbom))
+
+
 def _ensure_dashboard_scope_summary_ui(text: str) -> str:
     if "scopeSummaryTables" in text:
         return text
@@ -3081,7 +3605,12 @@ def _ensure_dashboard_scenario_ui(text: str, data: dict[str, Any]) -> str:
     return text
 
 
-def render_html(template_html: Path, data: dict[str, Any], out_html: Path) -> None:
+def render_html(
+    template_html: Path,
+    data: dict[str, Any],
+    out_html: Path,
+    reproducibility_sbom: dict[str, Any] | None = None,
+) -> None:
     text = (
         template_html.read_text(errors="ignore")
         if template_html.exists()
@@ -3229,13 +3758,21 @@ def render_html(template_html: Path, data: dict[str, Any], out_html: Path) -> No
     text = _ensure_dashboard_profile_ui(text)
     text = _ensure_dashboard_complexity_rendering(text)
     text = _ensure_dashboard_scenario_ui(text, data)
+    if reproducibility_sbom is not None:
+        text = _ensure_reproducibility_sbom_ui(text, reproducibility_sbom)
     out_html.parent.mkdir(parents=True, exist_ok=True)
     out_html.write_text(text)
 
 
 
 
-def assemble_outputs(checkpoint: Path, out_dir: Path, template_html: Path) -> dict[str, Path]:
+def assemble_outputs(
+    checkpoint: Path,
+    out_dir: Path,
+    template_html: Path,
+    *,
+    include_sbom: bool = False,
+) -> dict[str, Path]:
     payload = load_checkpoint(checkpoint)
     details = payload.get("results", [])
     order = {d: i for i, d in enumerate(DATASET_NAMES)}
@@ -3264,21 +3801,8 @@ def assemble_outputs(checkpoint: Path, out_dir: Path, template_html: Path) -> di
         )
     data = make_data(details)
     out_dir.mkdir(parents=True, exist_ok=True)
-    (out_dir / "benchmark_checkpoint.json").write_text(
-        json.dumps(_safe_jsonable(payload), indent=2, allow_nan=False)
-    )
-    (out_dir / "dashboard_data.json").write_text(
-        json.dumps(_safe_jsonable(data), separators=(",", ":"), allow_nan=False)
-    )
-    pd.DataFrame(data["details"]).to_csv(out_dir / "details.csv", index=False)
-    pd.DataFrame(data["overall"]).to_csv(out_dir / "overall.csv", index=False)
-    pd.DataFrame(data.get("summary_by_scope", [])).to_csv(
-        out_dir / "summary_by_scope.csv", index=False
-    )
-    pd.DataFrame(data.get("scope_tests", [])).to_csv(out_dir / "scope_tests.csv", index=False)
-    summary_comparison(template_html, data, out_dir / "summary_comparison.csv")
-    render_html(template_html, data, out_dir / "hugiml_benchmark_analysis_dashboard_revised.html")
-    return {
+
+    paths: dict[str, Path] = {
         "checkpoint": out_dir / "benchmark_checkpoint.json",
         "data": out_dir / "dashboard_data.json",
         "details_csv": out_dir / "details.csv",
@@ -3288,6 +3812,30 @@ def assemble_outputs(checkpoint: Path, out_dir: Path, template_html: Path) -> di
         "summary_csv": out_dir / "summary_comparison.csv",
         "html": out_dir / "hugiml_benchmark_analysis_dashboard_revised.html",
     }
+
+    paths["checkpoint"].write_text(json.dumps(_safe_jsonable(payload), indent=2, allow_nan=False))
+    paths["data"].write_text(json.dumps(_safe_jsonable(data), separators=(",", ":"), allow_nan=False))
+    pd.DataFrame(data["details"]).to_csv(paths["details_csv"], index=False)
+    pd.DataFrame(data["overall"]).to_csv(paths["overall_csv"], index=False)
+    pd.DataFrame(data.get("summary_by_scope", [])).to_csv(paths["summary_by_scope_csv"], index=False)
+    pd.DataFrame(data.get("scope_tests", [])).to_csv(paths["scope_tests_csv"], index=False)
+    summary_comparison(template_html, data, paths["summary_csv"])
+
+    sbom: dict[str, Any] | None = None
+    if include_sbom:
+        paths["sbom"] = out_dir / "benchmark_reproducibility_sbom.json"
+        sbom = build_reproducibility_sbom(
+            checkpoint=checkpoint,
+            out_dir=out_dir,
+            template_html=template_html,
+            payload=payload,
+            data=data,
+            output_paths=paths,
+        )
+        paths["sbom"].write_text(json.dumps(sbom, indent=2, sort_keys=True, allow_nan=False))
+
+    render_html(template_html, data, paths["html"], reproducibility_sbom=sbom)
+    return paths
 
 
 def parse_list(raw: str | None, allowed: list[str]) -> list[str]:
@@ -3374,6 +3922,11 @@ def main(argv=None) -> int:
         "--assemble", action="store_true", help="Build CSV/JSON/HTML from the checkpoint"
     )
     ap.add_argument(
+        "--include-sbom",
+        action="store_true",
+        help="When assembling, emit benchmark_reproducibility_sbom.json and embed a collapsed reproducibility/SBOM section at the bottom of the dashboard HTML",
+    )
+    ap.add_argument(
         "--row-cap",
         type=int,
         default=-1,
@@ -3407,7 +3960,7 @@ def main(argv=None) -> int:
             except FileNotFoundError:
                 pass
     if args.assemble:
-        paths = assemble_outputs(checkpoint, out_dir, template_html)
+        paths = assemble_outputs(checkpoint, out_dir, template_html, include_sbom=args.include_sbom)
         for k, v in paths.items():
             print(f"{k}: {v}")
         return 0

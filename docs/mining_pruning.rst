@@ -37,6 +37,43 @@ Pruning paths
        whose pair-level utility cannot enter the retained set.
      - Environment variables described below.
 
+
+Native hot paths
+----------------
+
+The native dispatcher uses specialized miners for the most common bounded
+pattern depths before falling back to the generic bounded miner:
+
+* ``L=1`` uses fused transaction preparation, singleton mining, top-K
+  retention, and sparse training-matrix construction where the input layout is
+  eligible.
+* ``L=2`` uses a dedicated two-item miner with same-feature conflict checks and
+  pruning before generic utility-list expansion is needed.
+* ``L=3`` uses the 1.1.17 three-item hot path, including pair reuse, coverage
+  de-duplication, same-feature conflict checks, gated EUCS pruning, and an
+  optional pair-cache budget for sparse workloads.
+* Higher bounded values, and ``L=-1`` unbounded mining, continue to use the
+  generic native miner.
+
+``interaction_relaxed_mining=True`` now allows ``L=-1`` or any integer
+``L>=1``. Dedicated relaxed paths are used where available, and higher bounded
+orders use the generic relaxed dispatcher.
+
+Mining timeout and audit log
+----------------------------
+
+Use ``max_mining_seconds`` to set a wall-clock budget for the native mining
+stage. ``max_fit_seconds`` is still accepted as a backward-compatible alias,
+but new code should prefer ``max_mining_seconds`` because the budget applies to
+mining rather than the entire estimator ``fit()`` call.
+
+When a budget is active, native miners check the deadline during search and
+return partial results where possible. The estimator records each mining
+attempt in ``mining_audit_log_`` and exposes it as a DataFrame through
+``get_mining_audit_log()``. The log includes the requested ``K``/``L``/``G``,
+timeout budget, elapsed time, status, relaxed-mining flag, and number of
+patterns returned.
+
 EUCS parameters
 ---------------
 

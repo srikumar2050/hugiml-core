@@ -8,14 +8,16 @@ The benchmark uses the following model set:
 
 | Model key | Description |
 |---|---|
-| `hug_op_adaptive_full` | HUG original + patterns, full adaptive binning |
+| `hug_op_adaptive_full` | HUG original + patterns, full adaptive binning, default downstream LR solver |
+| `hug_op_adaptive_saga` | HUG original + patterns, full adaptive binning, downstream LogisticRegression with `solver="saga"` |
+| `hug_op_adaptive_sgd` | HUG original + patterns, full adaptive binning, downstream `SGDClassifier(loss="log_loss")` |
 | `hug_op_adaptive_s20` | HUG original + patterns, adaptive binning sampled at 20% |
 | `hug_po_adaptive_full` | HUG patterns only, full adaptive binning |
 | `hug_po_adaptive_s20` | HUG patterns only, adaptive binning sampled at 20% |
 | `xgb` | XGBoost baseline |
 | `lgb` | LightGBM baseline |
 
-The static `B` comparison is now handled through the `B` parameter sweep rather than as separate full-grid model scenarios.
+The static `B` comparison is now handled through the `B` parameter sweep rather than as separate full-grid model scenarios. The saga and SGD rows isolate downstream solver scaling while keeping the same deterministic dataset seeds, train/test split, HUGIML mining defaults, `random_state=0`, and `max_iter=500` built-in estimator defaults used by the main classifier path.
 
 ## Datasets
 
@@ -99,10 +101,10 @@ The original sweep experiments are preserved and run against `hug_op_adaptive_fu
 With no caps and sweeps enabled, the current grid contains:
 
 ```text
-144 n-scaling tasks
-84 p-scaling tasks
+192 n-scaling tasks
+112 p-scaling tasks
 44 sweep tasks
-272 total tasks
+348 total tasks
 ```
 
 Use `--no-sweeps` to run only n/p scaling. Rows from retired model keys, such as earlier static `B=8` full-grid scenarios, are ignored during CSV and dashboard assembly so older checkpoints can be resumed without reintroducing obsolete scenarios.
@@ -144,6 +146,12 @@ Assemble from an existing checkpoint without running benchmarks:
 python experiments/scalability/scalability_dashboard.py --assemble --out-dir experiments/scalability/results
 ```
 
+Assemble with the privacy-sanitized reproducibility/SBOM manifest embedded in the Methodology tab:
+
+```bash
+python experiments/scalability/scalability_dashboard.py --assemble --include-sbom --out-dir experiments/scalability/results
+```
+
 Optional output path:
 
 ```bash
@@ -157,6 +165,7 @@ Supported relevant options:
 
 ```text
 --assemble              Assemble HTML dashboard from checkpoint only
+--include-sbom          Write scalability_reproducibility_sbom.json and embed the same sanitized manifest under Methodology
 --out-dir               Output directory; default is ./experiments/scalability/results
 --output-html           Custom output HTML path
 --fresh                 Start fresh by recreating the output directory
@@ -241,10 +250,11 @@ The HTML dashboard is self-contained and requires no external dependencies or ne
 ### Methodology section
 
 - System info: Python, platform, CPU count, RAM, worker threads
-- Model scenarios: family, feature mode, scenario label
+- Model scenarios: family, feature mode, scenario label, and downstream LR solver where applicable
 - Benchmark grid: datasets, n-scaling settings, p-scaling settings
 - Sweep grids: parameter ranges and values
 - Task limits metadata: `max_n`, `max_p`, selected dataset/model/section filters, selected task summary, and n-scaling cap fractions
+- Optional collapsed reproducibility/SBOM manifest when assembled with `--include-sbom`
 
 ### Theme and responsiveness
 
@@ -262,4 +272,11 @@ Assembly writes:
 | `scalability_checkpoint.json` | Full task checkpoint with task metadata and results |
 | `scalability_results_flat.csv` | Flat CSV with fit time, AUC, patterns, memory, and diagnostics |
 | `hugiml_scalability_dashboard.html` | Self-contained HTML dashboard |
+| `scalability_reproducibility_sbom.json` | Optional privacy-sanitized SBOM-style reproducibility manifest written when `--include-sbom` is supplied |
 
+
+## Reproducibility/SBOM path privacy
+
+`--include-sbom` captures an SBOM-style manifest with artifact hashes, source fingerprints, git metadata, Python runtime details, installed distributions, `pip freeze --all`, selected environment variables, HUGIML package metadata, and discoverable native-extension build/linkage metadata. The same sanitized manifest is written to `scalability_reproducibility_sbom.json` and embedded in the HTML Methodology tab inside a collapsed, expandable block.
+
+The sanitizer avoids publishing raw absolute local paths by replacing the source root, working directory, and user home directory with labels such as `<source-root>`, `<output-dir>`, `<cwd>`, and `<home>`. It also redacts credential-like URL userinfo in remotes and package output. For public sharing, prefer the assembled HTML and SBOM JSON over raw checkpoints from older script versions.

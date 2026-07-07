@@ -74,10 +74,10 @@ __all__ = [
     "generate_sbom",
 ]
 
-# Schema v5 adds execution_mode and lightweight retained training-matrix
-# shape/nnz metadata to clf_fit.json.  Loading remains backward-compatible
-# with v1-v4 because new fields are restored with .get(..., None).
-MODEL_SCHEMA_VERSION: int = 6
+# Schema v8 adds native serialization support for the built-in SGDClassifier
+# downstream solver option. Loading remains backward-compatible with v1-v7
+# because new fields are restored with .get(..., defaults).
+MODEL_SCHEMA_VERSION: int = 8
 MIN_SCHEMA_VERSION: int = 1
 
 # ── Legacy (v1/v2) pickle-envelope constants ──────────────────────────────────
@@ -219,9 +219,52 @@ def _deserialize_logreg(config: dict, arrays: dict[str, np.ndarray]) -> Any:
     return est
 
 
+def _serialize_sgd_classifier(est: Any) -> tuple[dict, dict[str, np.ndarray]]:
+    """Serialize a fitted SGDClassifier without pickle."""
+    config: dict[str, Any] = {
+        "class": "sklearn.linear_model.SGDClassifier",
+        "init_params": {
+            k: v
+            for k, v in est.get_params().items()
+            if (not callable(v) and v is not None) or k in {"class_weight", "random_state"}
+        },
+        "n_features_in_": int(est.n_features_in_),
+    }
+    for attr in ("n_iter_", "t_"):
+        if hasattr(est, attr):
+            val = getattr(est, attr)
+            config[attr] = float(val) if attr == "t_" else int(val)
+    arrays: dict[str, np.ndarray] = {
+        "coef_": np.asarray(est.coef_, dtype=np.float64),
+        "intercept_": np.asarray(est.intercept_, dtype=np.float64),
+        "classes_": np.asarray(est.classes_),
+    }
+    return config, arrays
+
+
+def _deserialize_sgd_classifier(config: dict, arrays: dict[str, np.ndarray]) -> Any:
+    # Filter init_params to only those the current sklearn version accepts.
+    import inspect
+
+    from sklearn.linear_model import SGDClassifier
+
+    valid = set(inspect.signature(SGDClassifier.__init__).parameters)
+    init_params = {k: v for k, v in config.get("init_params", {}).items() if k in valid}
+    est = SGDClassifier(**init_params)
+    est.coef_ = arrays["coef_"]
+    est.intercept_ = arrays["intercept_"]
+    est.classes_ = arrays["classes_"]
+    est.n_features_in_ = config["n_features_in_"]
+    if "n_iter_" in config:
+        est.n_iter_ = int(config["n_iter_"])
+    if "t_" in config:
+        est.t_ = float(config["t_"])
+    return est
+
+
 def _serialize_pipeline(est: Any) -> tuple[dict, dict[str, np.ndarray]]:
-    """Serialize a sklearn Pipeline whose final step is LogisticRegression."""
-    from sklearn.linear_model import LogisticRegression
+    """Serialize a sklearn Pipeline whose final step is LogisticRegression or SGDClassifier."""
+    from sklearn.linear_model import LogisticRegression, SGDClassifier
     from sklearn.pipeline import Pipeline
 
     if not isinstance(est, Pipeline):
@@ -232,6 +275,11 @@ def _serialize_pipeline(est: Any) -> tuple[dict, dict[str, np.ndarray]]:
     for name, step in est.steps:
         if isinstance(step, LogisticRegression):
             sc, sa = _serialize_logreg(step)
+            steps_config.append({"name": name, "estimator": sc})
+            for k, v in sa.items():
+                arrays_all[f"{name}__{k}"] = v
+        elif isinstance(step, SGDClassifier):
+            sc, sa = _serialize_sgd_classifier(step)
             steps_config.append({"name": name, "estimator": sc})
             for k, v in sa.items():
                 arrays_all[f"{name}__{k}"] = v
@@ -273,6 +321,13 @@ def _deserialize_pipeline(config: dict, arrays: dict[str, np.ndarray]) -> Any:
                 if k.startswith(f"{name}__")
             }
             step_est = _deserialize_logreg(est_cfg, step_arrays)
+        elif est_cfg.get("class") == "sklearn.linear_model.SGDClassifier":
+            step_arrays = {
+                k.removeprefix(f"{name}__"): v
+                for k, v in arrays.items()
+                if k.startswith(f"{name}__")
+            }
+            step_est = _deserialize_sgd_classifier(est_cfg, step_arrays)
         else:
             raise HUGIMLSerializationError(
                 f"Cannot deserialize pipeline step '{name}' of class {est_cfg.get('class')}."
@@ -286,15 +341,17 @@ def _serialize_estimator(
 ) -> tuple[dict[str, Any], dict[str, np.ndarray]]:
     """Serialize a fitted downstream estimator to (config_dict, arrays_dict).
 
-    Supports LogisticRegression natively.  Pipeline with LogisticRegression
-    final step is also supported.  All other estimators fall back to a
+    Supports LogisticRegression and SGDClassifier natively.  Pipelines with
+    those final steps are also supported.  All other estimators fall back to a
     restricted pickle stored as a uint8 byte array (logged at DEBUG level).
     """
-    from sklearn.linear_model import LogisticRegression
+    from sklearn.linear_model import LogisticRegression, SGDClassifier
     from sklearn.pipeline import Pipeline
 
     if isinstance(est, LogisticRegression):
         return _serialize_logreg(est)
+    if isinstance(est, SGDClassifier):
+        return _serialize_sgd_classifier(est)
     if isinstance(est, Pipeline):
         return _serialize_pipeline(est)
 
@@ -302,7 +359,7 @@ def _serialize_estimator(
     logger.debug(
         "Downstream estimator %s is not natively serializable; "
         "using restricted-pickle fallback.  Consider using LogisticRegression "
-        "for a fully pickle-free model artifact.",
+        "or SGDClassifier for a fully pickle-free model artifact.",
         type(est).__name__,
     )
     import pickle  # nosec B403 – controlled: payload is HMAC-signed on save
@@ -324,6 +381,8 @@ def _deserialize_estimator(config: dict, arrays: dict[str, np.ndarray]) -> Any:
     cls_name = config.get("class", "")
     if cls_name == "sklearn.linear_model.LogisticRegression":
         return _deserialize_logreg(config, arrays)
+    if cls_name == "sklearn.linear_model.SGDClassifier":
+        return _deserialize_sgd_classifier(config, arrays)
     if cls_name == "sklearn.pipeline.Pipeline":
         return _deserialize_pipeline(config, arrays)
     raise HUGIMLSerializationError(f"Cannot deserialize estimator of class '{cls_name}'.")
@@ -506,6 +565,10 @@ def save_model(clf: Any, path: str | os.PathLike) -> None:
             "majority_class": getattr(clf, "fallback_majority_class_", None),
             "n_samples": getattr(clf, "fallback_n_samples_", None),
         },
+        # Attempt-level native mining audit rows.  These are intentionally
+        # plain JSON dict/list/scalar values so the versioned .hugiml format
+        # preserves the same audit trail as pickle/joblib serialization.
+        "mining_audit_log": list(getattr(clf, "mining_audit_log_", []) or []),
     }
     if hasattr(clf, "fit_metadata_") and clf.fit_metadata_ is not None:
         import dataclasses
@@ -937,6 +1000,7 @@ def _load_v3(path: str | os.PathLike) -> Any:
         if majority is None and len(clf.classes_):
             majority = clf.classes_[int(np.argmax(clf.fallback_class_prior_))]
         clf.fallback_majority_class_ = majority
+    clf.mining_audit_log_ = list(clf_fit.get("mining_audit_log", []) or [])
     if clf_fit.get("training_pattern_matrix_shape") is not None:
         clf._training_pattern_matrix_shape_ = tuple(
             int(v) for v in clf_fit.get("training_pattern_matrix_shape")

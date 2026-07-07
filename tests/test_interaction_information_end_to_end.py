@@ -159,7 +159,7 @@ class TestInteractionPathEndToEnd:
         X, y = _xor_data(seed=41)
         clf = HUGIMLClassifierNative(
             B=5,
-            L=4,
+            L=0,
             G=0.001,
             topK=20,
             augmented_pair_transforms=False,

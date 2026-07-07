@@ -129,7 +129,7 @@ Dashboard modules
    :show-inheritance:
 
 LLM assistant add-on
--------------------
+---------------------
 
 .. automodule:: hugiml.llm.schemas
    :members:

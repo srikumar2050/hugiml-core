@@ -123,14 +123,14 @@ For ``L=1`` fits, the native hot path fuses transaction preparation, singleton p
 
 Transaction construction is performed in row-stripe chunks on the non-fused path, and materialized native transactions now store compact item ids with shared item-level utility lookup. The resulting model is intended to match the previous transaction semantics while reducing repeated utility storage and making memory use less bursty. This is most useful for wide data, large batches, and cross-validation loops.
 
-For interaction mining, structured constraints are applied exactly. In v1.1.16, EUCS is enabled for eligible ``L > 1`` native paths but only after workload gates confirm that the pair cache is likely to be useful. Prefer controlling complexity with ``L``, ``G``, and ``topK`` first; see :doc:`mining_pruning` for EUCS parameters and native pruning behavior.
+For interaction mining, structured constraints are applied exactly. In v1.1.17, native mining includes dedicated hot paths for ``L=1``, ``L=2``, and ``L=3`` before falling back to the generic bounded miner for higher orders. EUCS and pair-cache pruning are enabled only after workload gates confirm that they are likely to be useful. Prefer controlling complexity with ``L``, ``G``, and ``topK`` first; see :doc:`mining_pruning` for hot-path behavior, EUCS parameters, and native pruning guidance.
 
 Operational stability controls
 ------------------------------
 
 Use ``n_jobs=-1`` to allow the native backend to use all available OpenMP threads. The adaptive bin-selection and bin-code application stages can use this parallelism before the main mining step, so it benefits adaptive workflows as well as the fused ``L=1`` path.
 
-``max_fit_seconds`` is a wall-clock budget for the native mining stage. If the budget or memory pressure prevents the full configuration from completing, HUGIML attempts safer fallback configurations, records the degraded outcome in ``fit_metadata_.degraded``, and raises a clear ``HUGIMLTimeoutError`` or ``HUGIMLMemoryError`` only when it cannot recover. Inspect ``fit_metadata_`` after fitting to review pattern counts, stage timings, memory estimates, OpenMP thread count, and whether a fallback was used.
+``max_mining_seconds`` is a wall-clock budget for the native mining stage; ``max_fit_seconds`` remains a backward-compatible alias. If the budget or memory pressure prevents the full configuration from completing, HUGIML attempts safer fallback configurations, records the degraded outcome in ``fit_metadata_.degraded``, and keeps a compact attempt log in ``mining_audit_log_``. Inspect ``fit_metadata_`` and ``get_mining_audit_log()`` after fitting to review pattern counts, stage timings, memory estimates, OpenMP thread count, timeout status, and whether a fallback was used.
 
 Constant and zero-utility columns
 ---------------------------------

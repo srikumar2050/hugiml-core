@@ -27,8 +27,10 @@ Build from source when you need to edit the C++ extension or package internals:
 
    git clone https://github.com/srikumar2050/hugiml-core.git
    cd hugiml-core
-   pip install -e ".[dev]"
-   python setup.py build_ext --inplace
+   python -m pip install -e ".[dev]"
+   python scripts/build_batched.py --inplace
+
+The batched helper is the recommended local rebuild path for constrained machines. It uses ``HUGIML_BUILD_BATCH_SIZE=4`` and ``HUGIML_BUILD_JOBS=2`` unless overridden. For isolated package builds, use ``python -m pip install .`` so build requirements such as ``pybind11`` are installed automatically from ``pyproject.toml``. Avoid ``--no-build-isolation`` unless those build requirements are already installed locally.
 
 Minimal classifier workflow
 ---------------------------
@@ -84,6 +86,22 @@ When you already know the feature schema, pass ``allCols`` and ``origColumns`` e
    probabilities = clf.predict_proba(X_test)
 
 For smaller datasets, keep ``adaptive_binning_sample_frac=False`` to select bins on all rows. For larger adaptive-binning runs, a fractional value such as ``0.20`` reduces the bin-selection workload while the fitted model still uses the full training data after edges are selected.
+
+
+Downstream solver choices
+-------------------------
+
+When ``base_estimator`` is not supplied, HUGIML chooses the downstream linear classifier through ``lr_solver``. The default, ``lr_solver="auto"``, preserves the existing behavior: binary problems use ``LogisticRegression(solver="liblinear")`` and multiclass problems use ``LogisticRegression(solver="lbfgs")``.
+
+Use ``lr_solver="saga"`` when you want sklearn's ``LogisticRegression`` with the saga optimizer, especially for larger or sparse downstream matrices. Use ``lr_solver="sgd"`` when the downstream matrix is very large and stochastic optimization through ``SGDClassifier(loss="log_loss")`` is preferable. The built-in choices keep deterministic defaults aligned with the original path, including ``random_state=0`` and ``max_iter=500``.
+
+.. code-block:: python
+
+   clf_default = HUGIMLClassifier(lr_solver="auto")
+   clf_saga = HUGIMLClassifier(lr_solver="saga", feature_mode="original_plus_patterns")
+   clf_sgd = HUGIMLClassifier(lr_solver="sgd", feature_mode="original_plus_patterns")
+
+If a fully configured ``base_estimator`` is supplied, it overrides ``lr_solver``. Versioned model serialization records the selected ``lr_solver`` and natively round-trips both the built-in ``LogisticRegression`` and ``SGDClassifier`` downstream estimators.
 
 Recommended first checks
 ------------------------

@@ -103,14 +103,25 @@ pip install "hugiml-core[mlflow]"
 pip install "hugiml-core[all]"
 ```
 
-**Build from source** requires a C++17 compiler and pybind11:
+**Build from source** requires a C++17 compiler. The recommended source-build path uses the build requirements declared in `pyproject.toml` so that `pybind11` is installed before compilation:
 
 ```bash
 git clone https://github.com/srikumar2050/hugiml-core.git
 cd hugiml-core
-pip install -e ".[dev]"
-python setup.py build_ext --inplace
+python -m pip install -e ".[dev]"
+python scripts/build_batched.py --inplace
 ```
+
+The helper enables conservative native build batching by default (`HUGIML_BUILD_BATCH_SIZE=4`, `HUGIML_BUILD_JOBS=2`) to avoid memory spikes in constrained environments. Direct `python setup.py build_ext --inplace` still works when local build requirements are already installed. Avoid `--no-build-isolation` unless `pybind11`, `setuptools`, and `wheel` are already available in the active environment.
+
+Recommended local validation uses deterministic pytest batches instead of one long pytest process:
+
+```bash
+python scripts/run_pytest_batches.py
+ruff check .
+```
+
+`make build`, `make test`, `make lint`, and `make validate` provide the same default workflows when `make` is available.
 
 ---
 
@@ -204,6 +215,33 @@ clf_interactions = HUGIMLClassifier(B=-1, L=2, G=1e-2, topK=150,
 For hybrid modes, HUGIML standardizes numeric original features internally before concatenating them with the sparse binary pattern matrix and any active augmented-pair columns. `feature_importances()`, `model_summary()`, and `get_model_composition()` report the downstream feature representation, while `get_hug_features()` and `get_pattern_info()` remain pattern-only APIs.
 
 ---
+
+## Downstream Solver Support
+
+When `base_estimator` is not supplied, HUGIML now exposes the built-in downstream linear classifier choice through `lr_solver`. The default remains `"auto"`, which preserves the historical behavior: binary problems use `LogisticRegression(solver="liblinear")`, and multiclass problems use `LogisticRegression(solver="lbfgs")`.
+
+| `lr_solver` | Downstream estimator | When to use |
+|---|---|---|
+| `"auto"` | `LogisticRegression` with the historical binary/multiclass solver choice | Recommended default for most datasets and for backward-compatible results. |
+| `"saga"` | `LogisticRegression(solver="saga")` | Useful for larger or sparse downstream matrices when you still want logistic-regression coefficients and probability estimates. |
+| `"sgd"` | `SGDClassifier(loss="log_loss")` | Useful for very large downstream matrices where stochastic optimization can reduce memory pressure or wall-clock time. Validate accuracy because SGD can be more sensitive to scaling and convergence settings. |
+
+All built-in solver choices keep deterministic defaults aligned with the existing classifier path: `random_state=0` and `max_iter=500`. If you need complete control over solver-specific hyperparameters, pass a fully configured `base_estimator`; that continues to override `lr_solver`.
+
+```python
+from hugiml import HUGIMLClassifier
+
+# Historical default
+clf_default = HUGIMLClassifier(lr_solver="auto")
+
+# LogisticRegression through saga
+clf_saga = HUGIMLClassifier(lr_solver="saga", feature_mode="original_plus_patterns")
+
+# Logistic loss through SGDClassifier
+clf_sgd = HUGIMLClassifier(lr_solver="sgd", feature_mode="original_plus_patterns")
+```
+
+The versioned `.hugiml` serializer records `lr_solver` in the classifier initialization state and natively round-trips both `LogisticRegression` and the built-in `SGDClassifier` downstream estimator.
 
 ## Execution Modes
 
@@ -1002,10 +1040,13 @@ python experiments/scalability/scalability_dashboard.py --resume
 
 # Rebuild only the static dashboard from an existing checkpoint
 python experiments/scalability/scalability_dashboard.py --assemble
+
+# Assemble with a privacy-sanitized reproducibility/SBOM manifest embedded in Methodology
+python experiments/scalability/scalability_dashboard.py --assemble --include-sbom
 ```
 
 Default outputs are written under the scalability results directory configured by the script and include the
-JSON checkpoint, flat CSV export, and `hugiml_scalability_dashboard.html`.
+JSON checkpoint, flat CSV export, and `hugiml_scalability_dashboard.html`. With `--include-sbom`, assembly also writes `scalability_reproducibility_sbom.json` and embeds the same privacy-sanitized manifest as a collapsed block under the Methodology tab.
 
 Worked notebooks in [`notebooks/`](notebooks/) are organized as 12 self-contained folders:
 

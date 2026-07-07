@@ -17,23 +17,27 @@
 Build modes
 -----------
 Local development (fast, O0 binding TUs + O1 algo TUs):
-    python setup.py build_ext --inplace
+    python scripts/build_batched.py --inplace
 
     # Or explicitly:
     HUGIML_FAST_BUILD=1 python setup.py build_ext --inplace
 
 Release / production (O2 everywhere, default when invoked via pip):
-    pip install . --no-build-isolation
-    pip wheel . -w dist/
+    python -m pip install .
+    python -m pip wheel . -w dist/
 
 Sanitizers (Linux/macOS):
-    HUGIML_SANITIZE=address,undefined pip install . --no-build-isolation
+    HUGIML_SANITIZE=address,undefined python -m pip install .
 
 Debug build:
-    HUGIML_DEBUG=1 pip install . --no-build-isolation
+    HUGIML_DEBUG=1 python -m pip install .
 
-Parallel workers (default: CPU count, min 1):
-    HUGIML_BUILD_JOBS=4 pip install . --no-build-isolation
+Batching / parallelism controls:
+    HUGIML_BUILD_BATCH_SIZE=4 python scripts/build_batched.py --inplace
+    HUGIML_BUILD_JOBS=2 python scripts/build_batched.py --inplace
+
+Avoid --no-build-isolation unless build requirements from pyproject.toml
+(pybind11, setuptools, wheel) are already installed in the active environment.
 
 ccache acceleration (auto-detected):
     CC="ccache gcc" CXX="ccache g++" pip install . --no-build-isolation
@@ -54,9 +58,21 @@ import multiprocessing
 import os
 import platform
 import shutil
+import sys
+from collections.abc import Sequence
 from typing import Any, Callable, cast
 
-from pybind11.setup_helpers import Pybind11Extension, build_ext
+try:
+    from pybind11.setup_helpers import Pybind11Extension, build_ext
+except ModuleNotFoundError as exc:  # pragma: no cover - exercised before setup imports complete
+    if exc.name != "pybind11":
+        raise
+    raise SystemExit(
+        "pybind11 is required to build hugiml-core from source. "
+        "Use an isolated PEP 517 build such as `python -m pip install .` or "
+        "install build requirements first with `python -m pip install pybind11 wheel`. "
+        "Avoid `--no-build-isolation` unless those requirements are already installed."
+    ) from exc
 from setuptools import setup
 from setuptools.command.build_py import build_py as _build_py
 from setuptools.command.sdist import sdist as _sdist
@@ -118,8 +134,29 @@ else:
 # default to HUGIML_FAST_BUILD to avoid long O2 waits.
 # pip / build-backend invocations use the full O2 release path.
 
-_is_direct_build = "build_ext" in __import__("sys").argv
+_is_direct_build = "build_ext" in sys.argv
 _fast = bool(os.environ.get("HUGIML_FAST_BUILD") or _is_direct_build)
+
+
+def _env_int(name: str, default: int, *, minimum: int = 0) -> int:
+    raw = os.environ.get(name)
+    if raw is None or not raw.strip():
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return max(minimum, value)
+
+
+def _default_build_jobs() -> int:
+    try:
+        cpu_count = multiprocessing.cpu_count()
+    except NotImplementedError:
+        cpu_count = 1
+    # Keep the default conservative for memory-constrained pybind11 builds.
+    # Users can raise this with HUGIML_BUILD_JOBS.
+    return max(1, min(cpu_count, _env_int("HUGIML_BUILD_BATCH_SIZE", 4, minimum=1), 2))
 
 sanitize = os.environ.get("HUGIML_SANITIZE", "")
 
@@ -150,6 +187,7 @@ _ALGO_SOURCES = [
     "native/mining.cpp",
     "native/mining_l1.cpp",
     "native/mining_l2.cpp",
+    "native/mining_l3.cpp",
     "native/matrix.cpp",
     "native/prepare_mine_l1.cpp",
     "native/augmented_pair.cpp",
@@ -199,18 +237,17 @@ class _SplitOptBuildExt(build_ext):
         super().finalize_options()
         parallel = cast(Any, self).parallel
         if parallel is None:
-            try:
-                jobs = int(os.environ.get("HUGIML_BUILD_JOBS", "0"))
-                cast(Any, self).parallel = jobs if jobs > 0 else multiprocessing.cpu_count()
-            except (ValueError, NotImplementedError):
-                cast(Any, self).parallel = 1
+            cast(Any, self).parallel = _env_int(
+                "HUGIML_BUILD_JOBS", _default_build_jobs(), minimum=1
+            )
 
     def build_extensions(self) -> None:
         # UnixCCompiler._compile(obj, src, ext, cc_args, extra_postargs, pp_opts)
         # MSVCCompiler._compile(obj, src, ext, cc_args, extra_postargs, pp_opts)
         # Both have the same signature; extra_postargs holds our compile flags.
         compiler = cast(Any, self.compiler)
-        orig_compile: Callable[..., None] = compiler._compile
+        orig_compile_one: Callable[..., None] = compiler._compile
+        orig_compile_many: Callable[..., list[str]] = compiler.compile
 
         def _per_source_compile(
             obj: str,
@@ -222,13 +259,33 @@ class _SplitOptBuildExt(build_ext):
         ) -> None:
             if os.path.basename(src) in _BIND_BASENAMES:
                 extra_postargs = bind_args
-            orig_compile(obj, src, ext_suffix, cc_args, extra_postargs, pp_opts)
+            orig_compile_one(obj, src, ext_suffix, cc_args, extra_postargs, pp_opts)
+
+        def _batched_compile(sources: Sequence[str], *args: Any, **kwargs: Any) -> list[str]:
+            batch_size = _env_int("HUGIML_BUILD_BATCH_SIZE", 4, minimum=0)
+            source_list = list(sources)
+            if batch_size <= 0 or len(source_list) <= batch_size:
+                return orig_compile_many(source_list, *args, **kwargs)
+
+            objects: list[str] = []
+            total_batches = (len(source_list) + batch_size - 1) // batch_size
+            for batch_index, start in enumerate(range(0, len(source_list), batch_size), start=1):
+                batch = source_list[start : start + batch_size]
+                self.announce(
+                    f"building _hugiml_core source batch {batch_index}/{total_batches} "
+                    f"({len(batch)} translation units)",
+                    level=2,
+                )
+                objects.extend(orig_compile_many(batch, *args, **kwargs))
+            return objects
 
         compiler._compile = _per_source_compile
+        compiler.compile = _batched_compile
         try:
             super().build_extensions()
         finally:
-            compiler._compile = orig_compile
+            compiler.compile = orig_compile_many
+            compiler._compile = orig_compile_one
 
 
 # ── Custom build_py: strip native/ from Python package staging ────────────────

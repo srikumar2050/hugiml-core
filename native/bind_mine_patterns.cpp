@@ -8,6 +8,7 @@
 #include "bind_helpers.hpp"
 #include "mining.hpp"
 #include "mining_l2.hpp"
+#include "mining_l3.hpp"
 #include "resource_guard.hpp"
 
 namespace py = pybind11;
@@ -149,6 +150,40 @@ void bind_mine_patterns(py::module_& m)
         py::arg("td"), py::arg("ytrain"), py::arg("n_cls"),
         py::arg("K"), py::arg("G"), py::arg("timeout_s") = 0.0,
         "Run the exact L=2 top-K HUI hot path; intended for regression tests/benchmarks.");
+
+    m.def("mine_patterns_l3",
+        [](const TransactionDataCpp& td,
+           py::array_t<int64_t, py::array::c_style | py::array::forcecast> ytrain_arr,
+           int n_cls, int K, double G,
+           double timeout_s)
+        {
+            validate_1d_array(ytrain_arr, "ytrain");
+            if (K <= 0)
+                throw std::invalid_argument("K must be > 0, got " + std::to_string(K));
+            if (n_cls < 2)
+                throw std::invalid_argument(
+                    "n_cls must be >= 2, got " + std::to_string(n_cls));
+
+            auto yb = ytrain_arr.unchecked<1>();
+            std::vector<int> ytrain(static_cast<size_t>(yb.shape(0)));
+            for (py::ssize_t i = 0; i < yb.shape(0); i++)
+                ytrain[i] = static_cast<int>(yb(i));
+
+            try {
+                py::gil_scoped_release release;
+                return mine_patterns_l3_cpp(td, ytrain, n_cls, K, G, timeout_s);
+            } catch (const NativeMemoryError& e) {
+                PyErr_SetString(PyExc_MemoryError, e.what());
+                throw py::error_already_set();
+            } catch (const std::bad_alloc&) {
+                PyErr_SetString(PyExc_MemoryError,
+                    "HUGIML native OOM during L=3 pattern mining hotpath");
+                throw py::error_already_set();
+            }
+        },
+        py::arg("td"), py::arg("ytrain"), py::arg("n_cls"),
+        py::arg("K"), py::arg("G"), py::arg("timeout_s") = 0.0,
+        "Run the L=3 top-K HUI hot path; intended for regression tests/benchmarks.");
 
     py::class_<AugmentedPatternsResult>(m, "AugmentedPatternsResult",
         "Result of mine_patterns_l2_augmented_patterns: ordinary (utility-"

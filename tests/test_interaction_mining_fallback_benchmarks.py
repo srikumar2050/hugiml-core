@@ -274,8 +274,8 @@ class TestFallbackSerialization:
         finally:
             os.unlink(path)
 
-    def test_schema_version_is_six(self):
-        assert MODEL_SCHEMA_VERSION == 6
+    def test_schema_version_matches_current_release(self):
+        assert MODEL_SCHEMA_VERSION == 8
 
     def test_min_schema_backward_compat(self):
         assert MIN_SCHEMA_VERSION == 1
@@ -488,7 +488,7 @@ class TestBenchmarkConfigs:
 # ===================================================================
 
 class TestDownstreamAPI:
-    """Verify interpretability APIs remain intact after overlay changes."""
+    """Verify interpretability APIs remain intact after release changes."""
 
     @pytest.fixture(scope="class")
     def fitted_clf(self):
