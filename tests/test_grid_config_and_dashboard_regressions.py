@@ -899,6 +899,141 @@ def test_benchmark_dashboard_scenarios_keep_existing_selector_ids() -> None:
     assert scenarios["interaction_relaxed"]["grid_name"] == "interpretability_ho"
 
 
+def test_benchmark_dashboard_assembly_uses_compact_scenario_payload(tmp_path) -> None:
+    import copy
+    import importlib.util
+    from pathlib import Path
+
+    dashboard_path = (
+        Path(__file__).resolve().parents[1]
+        / "experiments"
+        / "benchmark"
+        / "benchmark_dashboard.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "hugiml_benchmark_dashboard_compact_test", dashboard_path
+    )
+    assert spec is not None and spec.loader is not None
+    dashboard = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(dashboard)
+
+    common = {
+        "overall": [
+            {
+                "model": "HUGIML",
+                "mean_auc": 0.9,
+                "mean_rank": 1.0,
+                "mean_model_inspection_units": 20.0,
+                "mean_complexity": 20.0,
+                "mean_instance_inspection_units": None,
+            },
+            {
+                "model": "XGB standard",
+                "mean_auc": 0.8,
+                "mean_rank": 2.0,
+                "mean_model_inspection_units": 40.0,
+                "mean_complexity": 40.0,
+                "mean_instance_inspection_units": None,
+            },
+        ],
+        "global": [{"p_value": 0.1}],
+        "budget": [],
+        "vs_hugiml": [],
+        "pairwise_all": [],
+        "summary_by_scope": [],
+        "scope_tests": [],
+        "methodology": {},
+        "dataset_profiles": {"demo": {"columns": [{"name": "x"}]}},
+    }
+    scenarios = []
+    for scenario_id, label in (
+        ("augmented_pair", "Augmented pair path"),
+        ("interaction_relaxed", "Interaction-relaxed path"),
+    ):
+        scenario_data = copy.deepcopy(common)
+        scenario_data["details"] = [
+            {"dataset": "demo", "model": "HUGIML", "scenario": scenario_id}
+        ]
+        scenarios.append(
+            {
+                "id": scenario_id,
+                "label": label,
+                "description": label,
+                "grid_name": "performance_ho",
+                "data": scenario_data,
+            }
+        )
+
+    data = copy.deepcopy(common)
+    data["details"] = scenarios[0]["data"]["details"]
+    data["dashboard_scenarios"] = scenarios
+    data["default_hugiml_scenario"] = "augmented_pair"
+    data["active_hugiml_scenario"] = "augmented_pair"
+
+    output = tmp_path / "dashboard.html"
+    dashboard.render_html(tmp_path / "missing-template.html", data, output)
+    rendered = output.read_text(encoding="utf-8")
+
+    assert rendered.count("const DASHBOARD_SCENARIOS=") == 1
+    assert "const DATA=JSON.parse" in rendered
+    assert "dataset_profiles" not in rendered
+    assert "datasetProfileCard" not in rendered
+    assert "Dataset column profile" not in rendered
+
+    extracted = dashboard.extract_original_data(output)
+    assert len(extracted["dashboard_scenarios"]) == 2
+    assert extracted["default_hugiml_scenario"] == "augmented_pair"
+    assert all(
+        "dataset_profiles" not in scenario["data"]
+        for scenario in extracted["dashboard_scenarios"]
+    )
+
+    second_output = tmp_path / "dashboard_second_assembly.html"
+    dashboard.render_html(output, data, second_output)
+    rendered_again = second_output.read_text(encoding="utf-8")
+    assert rendered_again.count("const DASHBOARD_SCENARIOS=") == 1
+    assert rendered_again.count("const DEFAULT_DASHBOARD_SCENARIO=") == 1
+    assert rendered_again.count("const DATA=") == 1
+
+
+def test_benchmark_methodology_describes_model_inspection_units_only() -> None:
+    import importlib.util
+    from pathlib import Path
+
+    dashboard_path = (
+        Path(__file__).resolve().parents[1]
+        / "experiments"
+        / "benchmark"
+        / "benchmark_dashboard.py"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "hugiml_benchmark_dashboard_methodology_test", dashboard_path
+    )
+    assert spec is not None and spec.loader is not None
+    dashboard = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(dashboard)
+
+    methodology = dashboard.methodology_snapshot(
+        {
+            "metadata": {
+                "dataset_names": ["BreastCancerOriginal", "SynthLinearLowDim"],
+                "n_splits": 5,
+                "inner_splits": 3,
+                "random_state": 42,
+                "row_cap": -1,
+            }
+        }
+    )
+    descriptions = list(methodology["complexity_overview"]) + [
+        model["complexity"] for model in methodology["models"]
+    ]
+    combined = " ".join(descriptions).lower()
+
+    assert "model inspection units" in combined
+    assert "instance inspection" not in combined
+    assert "model units" not in combined
+
+
 def test_baseline_grids_are_centralized_and_copy_safe() -> None:
     from sklearn.model_selection import ParameterGrid
 

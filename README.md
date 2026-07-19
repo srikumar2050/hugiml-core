@@ -38,7 +38,7 @@ checking_status=no_checking          coef= +1.12     support=0.39
 5. [Feature Modes](#feature-modes)
 6. [Execution Modes](#execution-modes)
 7. [Hyperparameter Search](#hyperparameter-search)
-8. [RPTE — Higher-Order Interactions](#rpte--higher-order-interactions)
+8. [RPTE: Higher-Order Interactions](#rpte--higher-order-interactions)
 9. [Governance Studio Dashboard](#governance-studio-dashboard)
 10. [LLM Assistant](#llm-assistant)
 11. [Augmented Pair Features](#augmented-pair-features)

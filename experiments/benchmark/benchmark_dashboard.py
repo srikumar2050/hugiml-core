@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+# ruff: noqa: E402
 import argparse
 import copy
 import hashlib
@@ -2753,10 +2754,9 @@ def methodology_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
                 "parameters": _methodology_parameter_rows(grid),
                 "constant_settings": notes,
                 "complexity": (
-                    "Model units count active fitted terms or active terminal leaves plus direct terms. "
-                    "Model inspection units expand the complete model into source elements or all active "
-                    "terminal paths. Instance inspection units count direct terms plus only row-specific "
-                    "linear evidence or the single reached path in each RPTE tree. Intercepts are excluded, "
+                    "Model inspection units represent the complete fitted HUGIML model that a reviewer "
+                    "must inspect. Linear branches count active source contributions; RPTE branches count "
+                    "conditions across active terminal paths plus direct terms. Intercepts are excluded, "
                     "and fitted numeric components are active when their absolute value exceeds 1e-12."
                 ),
             }
@@ -2778,24 +2778,21 @@ def methodology_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
     ]
     complexity_text = {
         "XGBoost": (
-            "Model inspection units sum complete root-to-leaf conditions for active "
-            "terminal outputs; instance inspection uses the reached active path."
+            "Model inspection units sum the conditions across complete root-to-leaf paths "
+            "with active terminal outputs."
         ),
         "LightGBM": (
-            "Model inspection units sum complete root-to-leaf conditions for active "
-            "terminal outputs; instance inspection uses the reached active path."
+            "Model inspection units sum the conditions across complete root-to-leaf paths "
+            "with active terminal outputs."
         ),
         "RandomForest": (
-            "Model inspection units sum every complete root-to-leaf path across the fitted "
-            "forest; instance inspection uses one reached path per tree."
+            "Model inspection units sum the conditions across every complete root-to-leaf "
+            "path in the fitted forest."
         ),
-        "EBM": (
-            "Model inspection units count finite nonzero term-score cells. Instance "
-            "inspection counts row-specific nonzero additive contributions."
-        ),
+        "EBM": "Model inspection units count finite nonzero term-score cells.",
         "RuleFit": (
             "Model inspection units count active linear terms and every condition in each "
-            "active rule. Instance inspection adds only rules satisfied by the row."
+            "active rule."
         ),
     }
     for label, family, budgeted in baseline_labels:
@@ -2844,12 +2841,10 @@ def methodology_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
     ]
 
     complexity_overview = [
-        "Model units provide the coarse active-component count for the selected model in each outer fold.",
-        "Model inspection units expand the complete fitted model into all reviewed conditions, source elements, rule literals, or active score cells.",
-        "Instance inspection units are evaluated on untouched outer-test rows. Their dataset mean and 95% Student-t confidence interval pool all out-of-fold rows so every dataset instance is counted once.",
-        "Tree models count the reached path when its terminal output is active. Linear direct terms count for every row, while row-specific pattern, pair, rule, and additive contributions count only when active for that row.",
+        "The dashboard reports model inspection units as the common complexity measure across all supported models.",
+        "Model inspection units represent the complete fitted model a reviewer must inspect, expressed through reviewed conditions, source elements, rule literals, or active score cells according to model family.",
         "A fitted numeric component is active when its absolute value exceeds 1e-12. Intercepts are not counted.",
-        "All three measures are computed after the selected hyperparameter configuration is refitted on the complete outer-training partition.",
+        "The measure is computed after the selected hyperparameter configuration is refitted on the complete outer-training partition.",
     ]
 
     return {
@@ -3439,7 +3434,6 @@ def _make_data_single(details: list[dict[str, Any]]) -> dict[str, Any]:
         "hug": hugrows,
         "summary_by_scope": scope_summary["summary_by_scope"],
         "scope_tests": scope_summary["scope_tests"],
-        "dataset_profiles": build_dataset_profiles(DATASET_NAMES),
         "dataset_catalog": [
             {
                 "dataset": name,
@@ -3480,7 +3474,6 @@ def make_data(details: list[dict[str, Any]]) -> dict[str, Any]:
         return _make_data_single(details)
 
     available: list[dict[str, Any]] = []
-    shared_profiles: dict[str, Any] | None = None
     shared_catalog: list[dict[str, Any]] | None = None
     for scenario, spec in HUGIML_SCENARIOS.items():
         scenario_details = _scenario_details_for_dashboard(df, scenario)
@@ -3490,11 +3483,9 @@ def make_data(details: list[dict[str, Any]]) -> dict[str, Any]:
         scenario_data["active_hugiml_scenario"] = scenario
         scenario_data["active_hugiml_scenario_label"] = spec["label"]
         scenario_data["active_hugiml_grid_name"] = spec["grid_name"]
-        if shared_profiles is None:
-            shared_profiles = scenario_data.get("dataset_profiles", {})
+        if shared_catalog is None:
             shared_catalog = scenario_data.get("dataset_catalog", [])
         else:
-            scenario_data["dataset_profiles"] = shared_profiles
             scenario_data["dataset_catalog"] = shared_catalog
         available.append(
             {
@@ -3523,8 +3514,33 @@ def make_data(details: list[dict[str, Any]]) -> dict[str, Any]:
 
 def extract_original_data(html_path: Path) -> dict[str, Any]:
     text = html_path.read_text(errors="ignore")
-    start = text.index("const DATA=") + len("const DATA=")
-    end = text.index(";\nconst MODEL_ORDER", start)
+    model_order_pos = text.index(";\nconst MODEL_ORDER")
+    data_pos = text.index("const DATA=")
+    scenarios_pos = text.find("const DASHBOARD_SCENARIOS=")
+
+    # Compact dashboards serialize the scenario payload once, then construct
+    # the active DATA object in JavaScript from the selected default scenario.
+    if 0 <= scenarios_pos < data_pos:
+        scenario_start = scenarios_pos + len("const DASHBOARD_SCENARIOS=")
+        scenario_end = text.index(";\nconst DEFAULT_DASHBOARD_SCENARIO", scenario_start)
+        scenarios = json.loads(text[scenario_start:scenario_end])
+        default_match = re.search(
+            r"const DEFAULT_DASHBOARD_SCENARIO=(.*?);\nconst DATA=",
+            text[scenario_end:model_order_pos],
+            flags=re.S,
+        )
+        default_id = json.loads(default_match.group(1)) if default_match else scenarios[0]["id"]
+        entry = next((item for item in scenarios if item.get("id") == default_id), scenarios[0])
+        data = copy.deepcopy(entry["data"])
+        data["dashboard_scenarios"] = scenarios
+        data["default_hugiml_scenario"] = default_id
+        return data
+
+    start = data_pos + len("const DATA=")
+    if scenarios_pos > data_pos:
+        end = text.rfind(";\n", start, scenarios_pos)
+    else:
+        end = model_order_pos
     return json.loads(text[start:end])
 
 
@@ -4237,6 +4253,26 @@ def _ensure_dashboard_profile_ui(text: str) -> str:
     return _inject_before_body_end(text, html + js)
 
 
+def _remove_dashboard_profile_ui(text: str) -> str:
+    """Remove the optional dataset column-profile card and its runtime code."""
+    marker = 'id="datasetProfileCard"'
+    marker_pos = text.find(marker)
+    if marker_pos >= 0:
+        section_start = text.rfind("<section", 0, marker_pos)
+        section_end = text.find("</section>", marker_pos)
+        if section_start >= 0 and section_end >= 0:
+            text = text[:section_start] + text[section_end + len("</section>") :]
+
+    marker = "function renderDatasetProfile(){"
+    marker_pos = text.find(marker)
+    if marker_pos >= 0:
+        script_start = text.rfind("<script>", 0, marker_pos)
+        script_end = text.find("</script>", marker_pos)
+        if script_start >= 0 and script_end >= 0:
+            text = text[:script_start] + text[script_end + len("</script>") :]
+    return text
+
+
 def _ensure_dashboard_complexity_rendering(text: str) -> str:
     js = """
 <script>
@@ -4374,7 +4410,12 @@ def _ensure_dashboard_scenario_ui(text: str, data: dict[str, Any]) -> str:
     const vsRows=DATA.vs_hugiml||[];
     const sig=significantCount(vsRows);
     setStat('Best mean AUC',fmt(best.mean_auc),best.model||'');
-    setStat('HUGIML mean AUC',fmt(hug.mean_auc),`mean model inspection units: ${fmt(hug.mean_model_inspection_units ?? hug.mean_complexity,1)} · mean instance inspection units: ${fmt(hug.mean_instance_inspection_units,1)}`);
+    const modelInspection=fmt(hug.mean_model_inspection_units ?? hug.mean_complexity,1);
+    const instanceInspection=fmt(hug.mean_instance_inspection_units,1);
+    const inspectionSummary=instanceInspection
+      ? `mean model inspection units: ${modelInspection} · mean instance inspection units: ${instanceInspection}`
+      : `mean model inspection units: ${modelInspection}`;
+    setStat('HUGIML mean AUC',fmt(hug.mean_auc),inspectionSummary);
     setStat('Best mean rank',fmt(bestRank.mean_rank,2),bestRank.model||'');
     setStat('Global rank test',fmt(p),Number.isFinite(p)&&p<0.05?'Significant global rank differences among models':'No significant global rank difference detected');
     setStat('Pairwise vs HUGIML',sig ? `${sig} significant` : 'None significant',`HUGIML vs ${vsRows.length} baselines, Holm-adjusted`);
@@ -4547,14 +4588,40 @@ def render_html(
     text = _remove_embedded_methodology_section(text)
     if "const DATA=" not in text or ";\nconst MODEL_ORDER" not in text:
         text = _default_dashboard_template()
-    start = text.index("const DATA=")
-    end = text.index(";\nconst MODEL_ORDER", start)
+    data_start = text.index("const DATA=")
+    scenario_start = text.rfind("const DASHBOARD_SCENARIOS=", 0, data_start)
+    start = scenario_start if scenario_start >= 0 else data_start
+    end = text.index(";\nconst MODEL_ORDER", data_start)
     safe_data = _safe_jsonable(data)
     scenario_payload = safe_data.get("dashboard_scenarios", []) if isinstance(safe_data, dict) else []
-    new_blob = "const DATA=" + json.dumps(safe_data, separators=(",", ":"), allow_nan=False)
+    if isinstance(safe_data, dict):
+        safe_data.pop("dataset_profiles", None)
+    for scenario in scenario_payload:
+        scenario_data = scenario.get("data", {}) if isinstance(scenario, dict) else {}
+        if isinstance(scenario_data, dict):
+            scenario_data.pop("dataset_profiles", None)
+
     if scenario_payload:
-        new_blob += ";\nconst DASHBOARD_SCENARIOS=" + json.dumps(
-            scenario_payload, separators=(",", ":"), allow_nan=False
+        default_scenario = str(
+            safe_data.get("default_hugiml_scenario")
+            or safe_data.get("active_hugiml_scenario")
+            or scenario_payload[0].get("id", "")
+        )
+        scenarios_json = json.dumps(scenario_payload, separators=(",", ":"), allow_nan=False)
+        default_json = json.dumps(default_scenario, separators=(",", ":"), allow_nan=False)
+        new_blob = (
+            "const DASHBOARD_SCENARIOS="
+            + scenarios_json
+            + ";\nconst DEFAULT_DASHBOARD_SCENARIO="
+            + default_json
+            + ";\nconst DATA=JSON.parse(JSON.stringify((DASHBOARD_SCENARIOS.find("
+            "item=>item.id===DEFAULT_DASHBOARD_SCENARIO)||DASHBOARD_SCENARIOS[0]).data));\n"
+            "DATA.dashboard_scenarios=DASHBOARD_SCENARIOS;\n"
+            "DATA.default_hugiml_scenario=DEFAULT_DASHBOARD_SCENARIO"
+        )
+    else:
+        new_blob = "const DATA=" + json.dumps(
+            safe_data, separators=(",", ":"), allow_nan=False
         )
     text = text[:start] + new_blob + text[end:]
 
@@ -4614,10 +4681,19 @@ def render_html(
         "This table can include HUGIML pairs if they are significant; use the HUGIML-focused comparison above for only HUGIML-vs-baseline tests."
     )
 
+    model_inspection_text = f"mean model inspection units: {float(hug.mean_model_inspection_units):.1f}"
+    if pd.notna(hug.mean_instance_inspection_units):
+        inspection_summary = (
+            f"{model_inspection_text}; mean instance inspection units: "
+            f"{float(hug.mean_instance_inspection_units):.1f}"
+        )
+    else:
+        inspection_summary = model_inspection_text
+
     replacements = {
         r"Friedman p-value: [^<]+": f"Friedman p-value: {p_text}",
         r'<div class="label">Best mean AUC</div><div class="value">[^<]+</div><div class="sub">[^<]+</div>': f'<div class="label">Best mean AUC</div><div class="value">{best.mean_auc:.4f}</div><div class="sub">{best.model}</div>',
-        r'<div class="label">HUGIML mean AUC</div><div class="value">[^<]+</div><div class="sub">[^<]+</div>': f'<div class="label">HUGIML mean AUC</div><div class="value">{hug.mean_auc:.4f}</div><div class="sub">mean model inspection units: {hug.mean_model_inspection_units:.1f}; mean instance inspection units: {hug.mean_instance_inspection_units:.1f}</div>',
+        r'<div class="label">HUGIML mean AUC</div><div class="value">[^<]+</div><div class="sub">[^<]+</div>': f'<div class="label">HUGIML mean AUC</div><div class="value">{hug.mean_auc:.4f}</div><div class="sub">{inspection_summary}</div>',
         r'<div class="label">Best mean rank</div><div class="value">[^<]+</div><div class="sub">[^<]+</div>': f'<div class="label">Best mean rank</div><div class="value">{best_rank.mean_rank:.2f}</div><div class="sub">{best_rank.model}</div>',
         r'<div class="label">Global rank test</div><div class="value">[^<]+</div><div class="sub">[^<]+</div>': f'<div class="label">Global rank test</div><div class="value">{p_text}</div><div class="sub">{global_text}</div>',
         r'<div class="label">Pairwise vs HUGIML</div><div class="value small">[^<]+</div><div class="sub">[^<]+</div>': f'<div class="label">Pairwise vs HUGIML</div><div class="value small">{vs_text}</div><div class="sub">{vs_sub}</div>',
@@ -4705,7 +4781,7 @@ def render_html(
         1,
     )
     text = _ensure_dashboard_scope_summary_ui(text)
-    text = _ensure_dashboard_profile_ui(text)
+    text = _remove_dashboard_profile_ui(text)
     text = _ensure_dashboard_complexity_rendering(text)
     text = _ensure_dashboard_scenario_ui(text, data)
     methodology = data.get("methodology", {}) if isinstance(data, dict) else {}

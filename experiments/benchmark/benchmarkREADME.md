@@ -19,7 +19,7 @@ The real-world panel contains package-bundled binary classification tasks coveri
 
 The synthetic panel covers linear and nonlinear decision boundaries, categorical and numeric interactions, missingness, imbalance, high-dimensional noise, correlated features, threshold and piecewise rules, parity/XOR, exact-cardinality, DNF/CNF, multiplexers, hierarchical and gated interactions, sparse conjunctions, and mixed-order logic.
 
-All stochastic benchmark operations use `--random-state`; the default is **42**, matching `hugiml.benchmarks.runner`. Synthetic generators derive deterministic dataset-specific streams or offsets from that value. Real-world source data are fixed, while any randomized row subsampling, cross-validation splitting, tuning, and supported model initialization also use seed 42 by default.
+All stochastic benchmark operations use `--random-state`; the default is **42**, matching `hugiml.benchmarks.runner`. Synthetic generators derive deterministic dataset-specific streams or offsets from that value. Real-world source data are deterministic, while any randomized row subsampling, cross-validation splitting, tuning, and supported model initialization also use seed 42 by default.
 
 The real-world datasets are loaded from installed Python packages; no network access is required during a run. Install the benchmark dependency set with `pip install "hugiml-core[benchmarks]"`; it includes the `statsmodels` dependency used by the expanded real-world panel.
 
@@ -411,7 +411,7 @@ The EBM grid contains **8 candidates**. The builder also sets:
 
 The RuleFit grid contains **8 candidates**. The builder sets `alpha=None` explicitly so `max_rules` remains authoritative.
 
-Complexity-budgeted XGBoost, LightGBM, and Random Forest candidates are structurally capped at **200 terminal leaves**. The four ensemble sizes represented are 50, 100, 100, and 200 maximum leaves before regularization effects. HUGIML reports its representation complexity separately using selected patterns and path-specific derived features.
+Complexity-budgeted XGBoost, LightGBM, and Random Forest candidates are structurally capped at **200 terminal leaves**. The four ensemble sizes represented are 50, 100, 100, and 200 maximum leaves before regularization effects. The dashboard uses model inspection units as the common reported complexity measure across HUGIML and all baseline models.
 
 ## Run a full benchmark
 
@@ -539,13 +539,13 @@ benchmark_reproducibility_sbom.json
 The HTML dashboard includes:
 
 - Augmented pair and interaction-relaxed HUGIML path options in one selector.
-- A collapsed methodology section at the end with the nested-CV protocol, preprocessing boundaries, timing definitions, constant estimator settings, and every parameter value considered for HUGIML and the baselines.
+- A collapsed methodology section at the end with the nested-CV protocol, preprocessing boundaries, timing definitions, the model inspection unit definition, constant estimator settings, and every parameter value considered for HUGIML and the baselines.
 - Overall model summary.
 - Real-world and synthetic summary tables.
 - Pairwise model comparisons.
 - Friedman and Wilcoxon tests across dataset-level outer-CV aggregates.
 - Complexity vs performance chart.
-- Dataset column profile table with dtype, missingness, uniqueness, and summary statistics.
+
 
 ## Useful options
 
