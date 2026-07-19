@@ -56,6 +56,10 @@ autodoc_mock_imports = [
     "openpyxl",
     "lightgbm",
     "imodels",
+    "dash",
+    "dash_bootstrap_components",
+    "matplotlib",
+    "statsmodels",
 ]
 
 napoleon_google_docstring = True
@@ -73,9 +77,13 @@ templates_path = ["_templates"]
 exclude_patterns = ["_build", "Thumbs.db", ".DS_Store"]
 
 html_theme = "sphinx_rtd_theme"
-html_static_path = ["_static"]
-html_css_files = ["custom.css"]
-html_logo = "images/header-hugiml.png"
+html_static_path = ["_static"] if (Path(__file__).parent / "_static").exists() else []
+html_css_files = ["custom.css"] if html_static_path else []
+html_logo = (
+    "images/header-hugiml.png"
+    if (Path(__file__).parent / "images" / "header-hugiml.png").exists()
+    else None
+)
 html_favicon = None
 html_theme_options = {
     "collapse_navigation": False,

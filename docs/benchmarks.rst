@@ -11,6 +11,11 @@ Install the benchmark optional dependencies before using the runner:
 
    pip install "hugiml-core[benchmarks]"
 
+The benchmark extra includes the statsmodels dependency used by the expanded
+real-world experiment panel. Root-level ``experiments/`` runners are included
+in the source distribution and source checkout; they are not installed as
+wheel package modules.
+
 You can run the benchmark module directly or use the installed console script:
 
 .. code-block:: bash

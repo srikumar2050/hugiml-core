@@ -124,22 +124,32 @@ public:
 
     // interaction_relaxed_mining support: when non-empty, item_col values
     // listed here are admitted into the depth-0 (root) candidate set even
-    // if they fail the TWU/RIU seed filter. This is the ONLY relaxation
-    // applied -- every gate inside explore() (G checks, the TWU/RIU bound
-    // at depth 1+, pair-construction IG checks) runs completely unmodified
-    // for every recursive call, regardless of whether the current prefix's
-    // root was relaxed. A relaxed item can therefore only ever appear as
-    // the root (items[0]) of an explored branch, never spliced in deeper.
-    // This is a deliberate scope limitation, not an oversight: it avoids
-    // threading relaxation state through the recursion (which would compound
-    // across depths and risk search-space blowup) at the cost of not
-    // rescuing patterns where the informative interaction only appears
-    // among items at depth 2+ with no individually-qualifying root. Given
-    // that interactions worth rescuing are expected to be low-order (2-3
-    // features), the root-only restriction does not need depth >1
-    // relaxation to be useful: any interaction the survivor participates
-    // in still gets the survivor's column as the anchor of a full,
-    // ordinarily-pruned exploration from that root.
+    // if they fail the TWU/RIU seed filter. This relaxation now extends to
+    // TWO positions in an explored branch: items[0] (the root) and, when
+    // depth == 0, its immediate pairing partner items[1] (the first
+    // child) -- see the uy_is_relaxed_child_at_depth0 gate in explore().
+    // A relaxed root's own IG/TWU no longer needs to clear G to be
+    // extended, and a relaxed first-child partner no longer needs to
+    // individually clear G to be paired with it; this rescues the
+    // classic case where two individually-uninformative-but-jointly-
+    // informative columns (e.g. XOR/parity-style interactions) would
+    // otherwise never be paired, since previously the *partner* still had
+    // to pass the ordinary IG gate even when the root was relaxed. Every
+    // other gate inside explore() (G checks, the TWU/RIU bound at depth
+    // 2+, pair-construction IG checks for grandchildren and beyond) runs
+    // completely unmodified. A relaxed item can therefore only ever
+    // appear at items[0] or items[1] of an explored branch, never spliced
+    // in deeper. This is a deliberate scope limitation, not an oversight:
+    // it avoids threading relaxation state through the recursion (which
+    // would compound across depths and risk search-space blowup) at the
+    // cost of not rescuing patterns where the informative interaction
+    // only appears among items at depth 2+ with no individually-
+    // qualifying root or first child. Given that interactions worth
+    // rescuing are expected to be low-order (2-3 features), the
+    // root+first-child restriction does not need depth >1 relaxation to
+    // be useful: any interaction the survivor(s) participate in still
+    // gets their columns as the anchor of a full, ordinarily-pruned
+    // exploration from that root/first-child pair.
     std::vector<int> relaxed_cols;
 
     // Dual-heap budget (mirrors mine_patterns_l2_augmented_patterns_v2_cpp):
@@ -219,9 +229,11 @@ std::vector<PatternEntry> mine_patterns_cpp(
 // ── Extended: interaction_relaxed_mining for the generic L (incl. L>2) path ──
 //
 // Same THUIsl::mine()/explore() recursion as mine_patterns_generic_cpp, with
-// exactly one change: items whose source column is in relaxed_cols are
-// admitted into the depth-0 root candidate set even if they fail the
-// TWU/RIU seed filter. No other gate is relaxed at any depth -- see the
+// two changes: items whose source column is in relaxed_cols are admitted
+// into the depth-0 root candidate set even if they fail the TWU/RIU seed
+// filter, AND, when pairing at depth 0, a relaxed-column partner (the
+// root's first child) may bypass its own IG gate the same way the root
+// does. No other gate is relaxed at any deeper depth -- see the
 // THUIsl::relaxed_cols comment in mining.hpp for why this scope is
 // deliberate. THUIsl::save() routes each pattern, at write time, into
 // either the ordinary utility-ranked heap or the relaxed-root IG-ranked

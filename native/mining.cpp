@@ -863,8 +863,11 @@ void THUIsl::explore(std::vector<int>  prefix,
         //       required, not optional: without it, a relaxed-column item
         //       that happens to also be considered as a depth>=1 PARTNER
         //       candidate would wrongly get the same exemption, letting it
-        //       appear at a non-root position -- silently widening scope
-        //       beyond the agreed root-only design.
+        //       appear at a depth >= 1 partner position -- silently
+        //       widening scope beyond the agreed root+first-child design
+        //       (first-child relaxation is handled separately below, via
+        //       uy_is_relaxed_child_at_depth0, and is likewise gated to
+        //       depth == 0 only).
         //   (b) the CURRENT prefix's root (prefix.front(), depth >= 1) was
         //       already a relaxed root established at depth 0. ux here is
         //       a depth 1+ partner being considered for extension; its own
@@ -910,9 +913,26 @@ void THUIsl::explore(std::vector<int>  prefix,
             UL* uy = uls[j];
             if (candidate_conflicts_with_prefix(prefix, ux->item, uy->item))
                 continue;
-            if (uy->ig <= G) continue;
+            // interaction_relaxed_mining, first-child extension: uy is the
+            // partner that becomes items[1] (the root's immediate/first
+            // child) when depth == 0. Previously only the root (ux/
+            // items[0]) could bypass its own IG gate; a relaxed-column
+            // partner was still required to individually clear G at 913,
+            // which meant two individually-weak-but-jointly-informative
+            // relaxed columns (the classic XOR/parity case) could never be
+            // paired -- the second one would always be filtered here before
+            // the combined pattern's IG was ever computed. This mirrors the
+            // L2 hotpath's `pair_relaxed = ux_relaxed || uy_relaxed` design
+            // (see mine_patterns_l2_augmented_patterns_cpp), but is
+            // deliberately restricted to depth == 0 so it only ever widens
+            // the root+first-child pairing, never deeper recursion levels
+            // (see the depth-scope rationale in THUIsl::relaxed_cols).
+            const bool uy_is_relaxed_child_at_depth0 =
+                (depth == 0) && is_relaxed_root(uy->item);
+            if (!uy_is_relaxed_child_at_depth0 && uy->ig <= G) continue;
             const bool utility_floor_applies =
-                !(ux_is_relaxed_root_at_depth0 || prefix_rooted_in_relaxed);
+                !(ux_is_relaxed_root_at_depth0 || prefix_rooted_in_relaxed
+                  || uy_is_relaxed_child_at_depth0);
             if (utility_floor_applies && L != 1 && eucs_enabled) {
                 double eucs_twu_val = 0.0;
                 if (!eucs_lookup(ux->item, uy->item, eucs_twu_val)

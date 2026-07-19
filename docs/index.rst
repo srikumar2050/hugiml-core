@@ -14,35 +14,31 @@ Why HUGIML?
 
 * **Intrinsic interpretability:** learned HUG patterns are the model representation, not an after-the-fact explanation.
 * **Regulated-domain fit:** model cards, audit artifacts, pruning trails, calibration, drift monitoring, and deployment helpers are included.
-* **Native performance:** computationally intensive mining, transaction construction, interaction-information scoring, pair-aware adaptive binning, and matrix-building stages are C++ accelerated with optional OpenMP support. Version 1.1.17 builds on v1.1.16 with the native ``L=3`` mining hot path, explicit mining-stage time budgets, compact mining audit logs, and additional hot-path coverage. Earlier 1.1.x capabilities remain available, including production/audit execution modes, fast adaptive-binning tuning, higher-order interaction selection, the native ``L=2`` hot path, augmented-pair operations, strict global ``topK`` budgeting, compact native transaction memory, fused adaptive ``L=1`` execution, the optional LLM assistant, and native HUIM pruning controls.
+* **Native performance:** computationally intensive mining, transaction construction, interaction-information scoring, pair-aware adaptive binning, matrix construction, and RPTE tree search are C++ accelerated with optional OpenMP support. Version 1.1.18 adds the RPTE downstream model, bounded interaction lookahead, expanded benchmark analysis, and a Dash governance interface while retaining the complete 1.1.x feature set.
 * **Python ergonomics:** the estimator follows the scikit-learn API and works with pandas DataFrames or NumPy arrays.
 
 
 Current release focus
 ---------------------
 
-The 1.1.17 release focuses on performance optimization and L3 hot-path mining
-while retaining the v1.1.16 LLM assistant and native pruning documentation:
+The 1.1.18 release extends HUGIML with an optional Residual Pattern Tree Ensemble
+(RPTE) downstream model and broader governance tooling:
 
-* Added a native ``L=3`` mining hot path for bounded three-item pattern
-  workloads.
-* Added explicit mining-stage time budgets through ``max_mining_seconds`` while
-  keeping ``max_fit_seconds`` as a backward-compatible alias.
-* Added compact mining audit logs that record attempt status, timeout budget,
-  elapsed time, and returned pattern counts.
-* Improved native timeout handling so partial mining results can be retained
-  when a deadline is reached.
-* Added focused tests for L3 equivalence, timeout/audit behavior, relaxed
-  bounded mining beyond ``L=3``, and zero-variance edge cases.
-* Added downstream ``lr_solver`` choices for the default historical path,
-  ``saga`` LogisticRegression, and ``sgd`` SGDClassifier.
-* Added scalability-dashboard solver scenarios plus an optional
-  privacy-sanitized reproducibility/SBOM manifest.
+* Learns higher-order relationships with shallow boosted trees over HUGIML's
+  supplied feature representation.
+* Uses an adaptive sequential or bounded-lookahead path. The lookahead path can
+  relax interaction selection through the first child split when individual
+  features are weak but their joint structure is useful.
+* Exposes accepted tree paths, direct source terms, coefficients, support,
+  provenance, and prediction-level inspection units for intrinsic review.
+* Adds a Dash-based Governance Studio while retaining the lightweight
+  Streamlit interface.
+* Extends benchmark analysis to 100 diverse datasets: 50 real-world and 50
+  synthetic datasets.
 
-The full 1.1.x feature set remains documented in this guide, including the
-v1.1.16 LLM assistant, v1.1.15 deterministic no-pattern fallback, production
-execution mode, adaptive binning, augmented-pair features, governance tools,
-pruning controls, monitoring, deployment, and benchmark workflows.
+The complete 1.1.x documentation remains in this guide, including execution
+modes, adaptive binning, feature modes, augmented-pair features, mining
+controls, explanations, monitoring, deployment, and benchmark workflows.
 
 Installation
 ------------
@@ -52,7 +48,7 @@ Installation
    pip install hugiml-core
    pip install "hugiml-core[plots]"       # optional Plotly dashboards
    pip install "hugiml-core[benchmarks]"  # optional comparison suite
-   pip install "hugiml-core[dashboard]"   # optional Streamlit dashboard
+   pip install "hugiml-core[dashboard]"   # optional Dash and Streamlit interfaces
    pip install "hugiml-core[llm]"         # optional LLM assistant
 
 Paper reference
@@ -71,6 +67,8 @@ The implementation is based on:
    feature_modes
    execution_modes
    augmented_features
+   rpte
+   complexity_units
    tuning
    mining_pruning
    explanations

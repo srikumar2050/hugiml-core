@@ -1,6 +1,6 @@
 # HUGIML benchmark dashboard
 
-The script runs a reproducible classifier benchmark for HUGIML and baseline models, checkpoints every dataset/model pair, and assembles the HTML dashboard from the checkpoint. When requested at assemble time, it can also write a privacy-sanitized SBOM-style reproducibility manifest and embed the same manifest in a collapsed section at the bottom of the dashboard HTML.
+The script runs a reproducible classifier benchmark for HUGIML and baseline models, checkpoints every dataset/model/configuration pair, and assembles the HTML dashboard from the checkpoint. The dashboard provides two HUGIML path options in one selector while sharing the same baseline results.
 
 The dashboard evaluation protocol is aligned with `hugiml.benchmarks.runner` when runner is invoked with tuning enabled:
 
@@ -10,14 +10,20 @@ python -m hugiml.benchmarks.runner --tune --n-splits 5 --inner-splits 3 --random
 
 ## Benchmark panel
 
-The default panel contains 50 datasets:
+The default panel contains **100 binary classification tasks**:
 
-- 30 public real-world datasets from scikit-learn and statsmodels.
-- 20 synthetic datasets generated inside the script.
+- **50 public real-world tasks** from scikit-learn and statsmodels.
+- **50 synthetic tasks** generated inside the script.
 
-Synthetic datasets are deterministic and use `--random-state` plus dataset-specific offsets. The default random seed is `42`, matching `hugiml.benchmarks.runner`.
+The real-world panel contains package-bundled binary classification tasks covering biomedical, demographic, economic, behavioral, environmental, and social-science domains.
 
-The real-world datasets are loaded from installed Python packages; no network access is required during a run. Statsmodels-backed datasets require `statsmodels` to be installed.
+The synthetic panel covers linear and nonlinear decision boundaries, categorical and numeric interactions, missingness, imbalance, high-dimensional noise, correlated features, threshold and piecewise rules, parity/XOR, exact-cardinality, DNF/CNF, multiplexers, hierarchical and gated interactions, sparse conjunctions, and mixed-order logic.
+
+All stochastic benchmark operations use `--random-state`; the default is **42**, matching `hugiml.benchmarks.runner`. Synthetic generators derive deterministic dataset-specific streams or offsets from that value. Real-world source data are fixed, while any randomized row subsampling, cross-validation splitting, tuning, and supported model initialization also use seed 42 by default.
+
+The real-world datasets are loaded from installed Python packages; no network access is required during a run. Install the benchmark dependency set with `pip install "hugiml-core[benchmarks]"`; it includes the `statsmodels` dependency used by the expanded real-world panel.
+
+This experiment runner and its documentation are included in the project source archive and source checkout. They are not installed as importable wheel-package modules under `hugiml`.
 
 ## Evaluation protocol
 
@@ -84,96 +90,21 @@ Dashboard command with the same validation protocol:
 python experiments/benchmark/benchmark_dashboard.py --fresh --n-splits 5 --inner-splits 3 --random-state 42
 ```
 
-## Reproducibility SBOM
+## Environment manifest
 
-The dashboard can optionally include an SBOM-style reproducibility manifest during the assemble step:
+The assemble step can optionally write a privacy-sanitized environment manifest:
 
 ```bash
 python experiments/benchmark/benchmark_dashboard.py --assemble --include-sbom
 ```
 
-`--include-sbom` is an assemble-time option. A fresh benchmark command such as:
-
-```bash
-python experiments/benchmark/benchmark_dashboard.py --fresh --n-splits 5 --inner-splits 3 --random-state 42
-```
-
-does not by itself generate the HTML dashboard or the SBOM. Use the two-step flow when you want a public dashboard with reproducibility metadata:
-
-```bash
-python experiments/benchmark/benchmark_dashboard.py --fresh --n-splits 5 --inner-splits 3 --random-state 42
-python experiments/benchmark/benchmark_dashboard.py --assemble --include-sbom
-```
-
-When enabled, the assemble step writes:
+When enabled, the results directory includes:
 
 ```text
 benchmark_reproducibility_sbom.json
-hugiml_benchmark_analysis_dashboard_revised.html
 ```
 
-The HTML dashboard contains the same SBOM JSON at the bottom inside a collapsed `<details>` block titled:
-
-```text
-Reproducibility / SBOM manifest
-```
-
-The SBOM is hidden by default in the HTML and can be expanded by the reader.
-
-### SBOM contents
-
-The manifest is intended to make another person able to understand and reproduce the benchmark environment. It includes best-effort metadata for:
-
-- Benchmark configuration: datasets, model order, HUGIML scenarios, grids, row cap, random state, budget, split counts, and tuning mode where available.
-- Dashboard inputs and outputs: checkpoint/template/output fingerprints and SHA-256 hashes.
-- Python runtime: interpreter version, implementation, platform, executable label, and relevant environment variables.
-- Python packages: installed distribution versions and `pip freeze --all`, with local paths sanitized.
-- HUGIML package metadata: imported package location label, package version, native extension label, extension size, and extension SHA-256.
-- Source fingerprints: SHA-256 hashes and sizes for relevant source files under locations such as `src/`, `native/`, `include/`, `cmake/`, and benchmark scripts.
-- Git metadata: commit, branch, dirty status, short status, diff stat, and redacted remotes.
-- Native/C++ build evidence: compiler/linker settings that are discoverable at runtime.
-
-### C++ and native-extension reproducibility
-
-C++ build information is included because HUGIML uses the native `_hugiml_core` extension. Native compiler, ABI, optimization flags, OpenMP runtime, dynamic linkage, and whether the package came from a wheel or local source build can affect benchmark performance.
-
-The SBOM records native build evidence where discoverable:
-
-```text
-sysconfig compiler/linker variables
-CC, CXX, CFLAGS, CXXFLAGS, CPPFLAGS, LDFLAGS, and related environment variables
-compiler --version probes
-_hugiml_core binary hash and size
-ldd/readelf/otool linkage output when available
-installed wheel/package metadata where available
-native source fingerprints
-```
-
-This is best-effort metadata. If HUGIML was installed from a prebuilt wheel, the original compiler command line used by the wheel builder may not be fully recoverable from the installed package. In that case, the native extension hash, ABI tag, package metadata, runtime linkage, and source/git fingerprints are the main reproducibility anchors.
-
-### SBOM path privacy
-
-The SBOM is privacy-sanitized before it is written to both outputs:
-
-```text
-benchmark_reproducibility_sbom.json
-the collapsed SBOM section in hugiml_benchmark_analysis_dashboard_revised.html
-```
-
-The same sanitized manifest is used for both files. It avoids exposing raw absolute local paths by using labels such as:
-
-```text
-repo:...
-script_dir:...
-out_dir:...
-cwd:...
-<redacted-path>/...
-<redacted-remote>
-```
-
-The sanitizer also covers nested locations where paths commonly leak, including `sys.path`, `PYTHONPATH`, package install locations, HUGIML import paths, `_hugiml_core` paths, `ldd`/`readelf`/`otool` output, compiler probe output, `pip freeze --all`, and git remotes.
-
-The raw benchmark artifacts are still local working files. For public sharing, prefer sharing the dashboard HTML and the SBOM JSON. Avoid publishing raw checkpoints or intermediate JSON/CSV files if they were produced by an older script version or if you have not inspected them for local-path content.
+The manifest is stored as a separate JSON file and is not included in the HTML dashboard.
 
 ## Metrics
 
@@ -197,6 +128,8 @@ For dashboard compatibility, the following aliases are also written:
 | `auc` | same value as outer-CV mean `roc_auc` |
 | `valid_auc` | same value as mean `best_inner_score` across outer folds |
 | `fit_seconds` | `fit_ms / 1000`, averaged across outer folds |
+
+`fit_ms` measures only the final selected estimator refit on each outer-training fold. `tune_ms` measures the inner-CV model search and excludes that final refit. For HUGIML, the tuning API exposes the final refit duration as `HUGIMLTuneResult.refit_time_`, which the benchmark writes into each outer-fold checkpoint. Missing timings remain unavailable rather than being converted to zero.
 
 `--assemble` does not recompute model metrics. It reads the checkpoint and builds CSV/JSON/HTML outputs from the aggregate rows already stored there. Use a fresh checkpoint when changing the validation protocol.
 
@@ -266,7 +199,7 @@ The checkpoint records:
 
 ### HUGIML scenarios
 
-The dashboard evaluates HUGIML through scenario-specific grids. Baselines are shared across scenarios.
+The dashboard contains two HUGIML path options in the existing selector. Baselines are shared across both options.
 
 #### Augmented pair path
 
@@ -278,6 +211,7 @@ The dashboard evaluates HUGIML through scenario-specific grids. Baselines are sh
     "topK": [50, 100],
     "feature_mode": ["original_plus_patterns"],
     "G": [0.01, 0.001],
+    "convert_binary_to_categorical": [False],
     "augmented_pair_transforms": [True],
     "interaction_relaxed_mining": [False],
 }
@@ -294,9 +228,73 @@ The dashboard evaluates HUGIML through scenario-specific grids. Baselines are sh
     "feature_mode": ["patterns_only"],
     "G": [0.01, 0.001],
     "interaction_relaxed_mining": [True],
+    "convert_binary_to_categorical": [True],
     "augmented_pair_transforms": [False],
 }
 ```
+
+#### Higher-order interpretability grid (`interpretability_ho`)
+
+The Interaction-relaxed option uses the pattern-only `interpretability_ho` grid. It does not generate augmented pairs, treats numeric 0/1 indicators categorically, and lets inner CV select between the built-in LR path and sequential RPTE with `enable_lookahead=False`. Survivor admission covers the root and immediate first-child positions of the initial branch, allowing weak-marginal pair evidence to be evaluated without recursively relaxing deeper positions.
+
+```python
+{
+    "B": [-1],
+    "adaptive_binning": [True],
+    "L": [1, 2],
+    "topK": [50, 100],
+    "feature_mode": ["patterns_only"],
+    "G": [0.01, 0.001],
+    "interaction_relaxed_mining": [True],
+    "convert_binary_to_categorical": [True],
+    "augmented_pair_transforms": [False],
+    "topk_budget_strict": [False],
+    "base_estimator": [
+        None,
+        OneVsRestClassifier(
+            LeafWiseBoundedLookaheadRPTEFeatureLR(
+                leaf_config="3xD",
+                depth=4,
+                enable_lookahead=False,
+            ),
+            n_jobs=1,
+        ),
+    ],
+}
+```
+
+#### Higher-order performance grid (`performance_ho`)
+
+The shared `hyperparameter_configs.py` module defines the higher-order hybrid grid as follows:
+
+```python
+{
+    "B": [-1],
+    "adaptive_binning": [True],
+    "L": [1, 2],
+    "topK": [50, 100],
+    "feature_mode": ["original_plus_patterns"],
+    "G": [0.01, 0.001],
+    "convert_binary_to_categorical": [False],
+    "augmented_pair_transforms": [True],
+    "topk_budget_strict": [False],
+    "base_estimator": [
+        None,
+        OneVsRestClassifier(
+            LeafWiseBoundedLookaheadRPTEFeatureLR(
+                leaf_config="3xD",
+                depth=4,
+                enable_lookahead="adaptive",
+            ),
+            n_jobs=1,
+        ),
+    ],
+}
+```
+
+`base_estimator=None` selects HUGIML's built-in logistic-regression downstream branch. The second candidate selects the adaptive RPTE downstream branch with the single `3xD` leaf configuration. With the listed `L`, `topK`, and `G` values, the grid contains 8 logistic-regression candidates and 8 RPTE candidates, for 16 candidates in total.
+
+`convert_binary_to_categorical=False` keeps binary-valued numeric columns eligible for augmented-pair transformations. `topk_budget_strict=False` retains the non-strict augmented-pair budget semantics. The cached HUGIML tuning path reuses compatible mining artifacts while evaluating both downstream estimator branches.
 
 The script also sets `execution_mode="production"` and `n_jobs=1` for HUGIML.
 
@@ -307,20 +305,24 @@ The script also sets `execution_mode="production"` and `n_jobs=1` for HUGIML.
     "n_estimators": [100, 200],
     "max_depth": [3, 4],
     "learning_rate": [0.03, 0.1],
+    "min_child_weight": [1, 5],
 }
 ```
+
+This grid contains **16 candidates**.
 
 ### XGB complexity-budgeted
 
 ```python
 {
-    "n_estimators": [25, 50, 75],
-    "max_depth": [1, 2, 3],
+    "n_estimators": [25, 50],
+    "max_depth": [1, 2],
     "learning_rate": [0.03, 0.1],
-    "subsample": [0.8, 1.0],
-    "colsample_bytree": [0.8, 1.0],
+    "min_child_weight": [1, 5],
 }
 ```
+
+This grid contains **16 candidates**. The largest configured structure is 50 depth-2 trees, giving a theoretical ceiling of 200 leaves.
 
 ### LightGBM standard
 
@@ -329,20 +331,24 @@ The script also sets `execution_mode="production"` and `n_jobs=1` for HUGIML.
     "n_estimators": [100, 200],
     "learning_rate": [0.03, 0.1],
     "num_leaves": [15, 31],
+    "min_child_samples": [10, 20],
 }
 ```
+
+This grid contains **16 candidates**.
 
 ### LightGBM complexity-budgeted
 
 ```python
 {
-    "n_estimators": [25, 50, 75],
-    "num_leaves": [2, 4, 8],
+    "n_estimators": [25, 50],
+    "num_leaves": [2, 4],
     "learning_rate": [0.03, 0.1],
-    "subsample": [0.8, 1.0],
-    "min_child_samples": [5],
+    "min_child_samples": [10, 20],
 }
 ```
+
+This grid contains **16 candidates**. The largest configured structure is 50 trees with four leaves each, for a ceiling of 200 leaves.
 
 ### RandomForest standard
 
@@ -351,19 +357,25 @@ The script also sets `execution_mode="production"` and `n_jobs=1` for HUGIML.
     "n_estimators": [200, 400],
     "max_depth": [4, 8],
     "min_samples_leaf": [1, 5],
+    "max_features": ["sqrt", 0.5],
 }
 ```
+
+This grid contains **16 candidates**.
 
 ### RandomForest complexity-budgeted
 
 ```python
 {
-    "n_estimators": [20, 50, 75],
-    "max_leaf_nodes": [2, 4, 8],
+    "n_estimators": [25, 50],
+    "max_leaf_nodes": [2, 4],
     "min_samples_leaf": [1, 5],
+    "max_features": ["sqrt", 0.5],
     "max_depth": [None],
 }
 ```
+
+This grid contains **16 candidates**. The largest configured structure is 50 trees with four leaves each, for a ceiling of 200 leaves.
 
 ### EBM
 
@@ -372,10 +384,11 @@ The script also sets `execution_mode="production"` and `n_jobs=1` for HUGIML.
     "learning_rate": [0.01, 0.05],
     "max_bins": [32, 64],
     "interactions": [0, 5],
+    "max_rounds": [500],
 }
 ```
 
-The EBM builder sets these defaults unless already supplied by the grid:
+The EBM grid contains **8 candidates**. The builder also sets:
 
 ```python
 {
@@ -396,7 +409,9 @@ The EBM builder sets these defaults unless already supplied by the grid:
 }
 ```
 
-Complexity-budgeted tree models are selected subject to a 100-leaf budget when leaf complexity is available. HUGIML reports its selected pattern count and uses the selected `topK` as its displayed budget.
+The RuleFit grid contains **8 candidates**. The builder sets `alpha=None` explicitly so `max_rules` remains authoritative.
+
+Complexity-budgeted XGBoost, LightGBM, and Random Forest candidates are structurally capped at **200 terminal leaves**. The four ensemble sizes represented are 50, 100, 100, and 200 maximum leaves before regularization effects. HUGIML reports its representation complexity separately using selected patterns and path-specific derived features.
 
 ## Run a full benchmark
 
@@ -464,7 +479,7 @@ After a complete run, assemble with:
 python experiments/benchmark/benchmark_dashboard.py --assemble
 ```
 
-To include the privacy-sanitized reproducibility SBOM in both JSON and HTML form:
+To write the privacy-sanitized environment manifest as a separate JSON file:
 
 ```bash
 python experiments/benchmark/benchmark_dashboard.py --assemble --include-sbom
@@ -477,7 +492,7 @@ python experiments/benchmark/benchmark_dashboard.py --fresh
 python experiments/benchmark/benchmark_dashboard.py --assemble
 ```
 
-Run, assemble, and include the SBOM as separate steps:
+Run, assemble, and write the environment manifest as separate steps:
 
 ```bash
 python experiments/benchmark/benchmark_dashboard.py --fresh --n-splits 5 --inner-splits 3 --random-state 42
@@ -487,7 +502,7 @@ python experiments/benchmark/benchmark_dashboard.py --assemble --include-sbom
 The script automatically searches upward from `experiments/benchmark/` for:
 
 ```text
-hugiml_benchmark_analysis_dashboard.html
+hugiml_benchmark_analysis_dashboard_100.html
 ```
 
 So if the template is in the repo root, no template argument is needed.
@@ -497,7 +512,7 @@ To override the template:
 ```bash
 python experiments/benchmark/benchmark_dashboard.py \
   --assemble \
-  --template-html path/to/hugiml_benchmark_analysis_dashboard.html
+  --template-html path/to/hugiml_benchmark_analysis_dashboard_100.html
 ```
 
 ## Output files
@@ -512,7 +527,7 @@ overall.csv
 summary_by_scope.csv
 scope_tests.csv
 summary_comparison.csv
-hugiml_benchmark_analysis_dashboard_revised.html
+hugiml_benchmark_analysis_dashboard.html
 ```
 
 When `--include-sbom` is supplied during assembly, the results directory also contains:
@@ -521,17 +536,16 @@ When `--include-sbom` is supplied during assembly, the results directory also co
 benchmark_reproducibility_sbom.json
 ```
 
-The HTML dashboard also embeds the same sanitized SBOM in a collapsed section at the bottom.
-
 The HTML dashboard includes:
 
+- Augmented pair and interaction-relaxed HUGIML path options in one selector.
+- A collapsed methodology section at the end with the nested-CV protocol, preprocessing boundaries, timing definitions, constant estimator settings, and every parameter value considered for HUGIML and the baselines.
 - Overall model summary.
 - Real-world and synthetic summary tables.
 - Pairwise model comparisons.
 - Friedman and Wilcoxon tests across dataset-level outer-CV aggregates.
 - Complexity vs performance chart.
 - Dataset column profile table with dtype, missingness, uniqueness, and summary statistics.
-- Optional collapsed reproducibility/SBOM manifest when assembled with `--include-sbom`.
 
 ## Useful options
 
@@ -539,7 +553,7 @@ The HTML dashboard includes:
 --fresh                         recreate the results directory before running
 --resume                        skip completed dataset/model/scenario pairs
 --assemble                      build dashboard files from the checkpoint
---include-sbom                  include sanitized SBOM JSON and embed it in the HTML; used with --assemble
+--include-sbom                  write a separate sanitized environment-manifest JSON; used with --assemble
 --datasets A,B,C                run selected datasets
 --models M1,M2                  run selected model labels
 --start-pair N                  start at pair index N
@@ -554,12 +568,3 @@ The HTML dashboard includes:
 --template-html PATH            custom dashboard template path
 --hugiml-max-fit-seconds FLOAT  optional HUGIML runtime cap
 ```
-
-## Notes
-
-- A complete dashboard assemble expects all requested dataset/model/scenario pairs to be present in the checkpoint.
-- `--include-sbom` only affects assembly. It does not rerun benchmarks or recompute metrics.
-- For public sharing, prefer the assembled HTML plus `benchmark_reproducibility_sbom.json`; inspect raw checkpoint/data artifacts before publishing them.
-- For partial runs, inspect the checkpoint or CSVs directly.
-- Do not assemble old holdout-protocol checkpoints together with nested-CV checkpoints.
-- For comparable dashboard and runner outputs, keep `--n-splits`, `--inner-splits`, `--random-state`, and tuning settings aligned.

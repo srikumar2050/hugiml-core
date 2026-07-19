@@ -6,6 +6,15 @@ The canonical release notes live in ``CHANGELOG.md`` at the repository root. Kee
 Recent releases
 ---------------
 
+1.1.18 — 2026-07-19
+~~~~~~~~~~~~~~~~~~~
+
+* Added the optional RPTE downstream model for higher-order relationships with adaptive sequential or bounded-lookahead tree growth.
+* Added interaction relaxation through the first child split, with held-out acceptance checks for jointly useful features.
+* Added interpretable RPTE tree, rule-table, direct-term provenance, complexity, instance inspection, and structured serialization views.
+* Added a Dash-based Governance Studio while retaining the lightweight Streamlit interface.
+* Expanded benchmark analysis to 100 diverse datasets: 50 real-world and 50 synthetic datasets.
+
 1.1.17 — 2026-07-07
 ~~~~~~~~~~~~~~~~~~~
 

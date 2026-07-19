@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-# ruff: noqa: E402
 import argparse
 import copy
 import hashlib
@@ -83,12 +82,14 @@ try:
 except ImportError:
     LGBMClassifier = None
 from scipy.stats import friedmanchisquare, rankdata, wilcoxon
+from scipy.stats import t as student_t
 from sklearn.compose import ColumnTransformer, make_column_selector
 from sklearn.datasets import (
     load_breast_cancer,
     load_diabetes,
     load_digits,
     load_iris,
+    load_linnerud,
     load_wine,
     make_circles,
     make_classification,
@@ -96,6 +97,7 @@ from sklearn.datasets import (
 )
 from sklearn.ensemble import RandomForestClassifier
 from sklearn.impute import SimpleImputer
+from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (
     accuracy_score,
     average_precision_score,
@@ -124,7 +126,7 @@ except Exception:  # pragma: no cover - optional benchmark dependency
     RuleFitClassifier = None
 
 import hugiml as _hugiml_pkg
-from hugiml import HUGIMLClassifierNative
+from hugiml import HUGIMLClassifierNative, get_complexity, get_complexity_report
 
 try:
     from hugiml.benchmarks.runner import (
@@ -246,18 +248,35 @@ def _preprocessor_feature_count(prep: ColumnTransformer, fallback: int) -> int:
         return int(fallback)
 
 
-HUGIML_IMPORTED_FROM = str(Path(getattr(_hugiml_pkg, "__file__", "")).resolve())
 
 try:
     from hugiml.hyperparameter_configs import (
         DEFAULT_HUGIML_GRID_NAME,
         get_baseline_grid,
+        get_budgeted_baseline_grid,
         get_hugiml_grid,
+        make_l1_logistic_base_estimator,
     )
 except Exception:
     # PyPI wheels may not ship the benchmark helper grids.  Keep the dashboard
     # benchmark reproducible by embedding the same default grids here.
-    DEFAULT_HUGIML_GRID_NAME = "performance"
+    from sklearn.multiclass import OneVsRestClassifier
+
+    from hugiml._compat import liblinear_penalty_kwargs
+    from hugiml.rpte_bounded_lookahead_leafwise import (
+        LeafWiseBoundedLookaheadRPTEFeatureLR,
+    )
+
+    DEFAULT_HUGIML_GRID_NAME = "performance_ho"
+
+    def make_l1_logistic_base_estimator() -> LogisticRegression:
+        return LogisticRegression(
+            solver="liblinear",
+            C=1.0,
+            random_state=0,
+            max_iter=500,
+            **liblinear_penalty_kwargs("l1"),
+        )
 
     def get_hugiml_grid(name: str = DEFAULT_HUGIML_GRID_NAME) -> dict[str, list[Any]]:
         grids = {
@@ -268,6 +287,8 @@ except Exception:
                 "topK": [50, 100],
                 "feature_mode": ["original_plus_patterns"],
                 "G": [0.01, 0.001],
+                "convert_binary_to_categorical": [False],
+                "base_estimator": [make_l1_logistic_base_estimator()],
             },
             "interpretability": {
                 "B": [-1],
@@ -277,7 +298,54 @@ except Exception:
                 "feature_mode": ["patterns_only"],
                 "G": [0.01, 0.001],
                 "interaction_relaxed_mining": [True],
+                "convert_binary_to_categorical": [True],
                 "augmented_pair_transforms": [False],
+                "base_estimator": [make_l1_logistic_base_estimator()],
+            },
+            "interpretability_ho": {
+                "B": [-1],
+                "adaptive_binning": [True],
+                "L": [1, 2],
+                "topK": [50, 100],
+                "feature_mode": ["patterns_only"],
+                "G": [0.01, 0.001],
+                "interaction_relaxed_mining": [True],
+                "augmented_pair_transforms": [False],
+                "convert_binary_to_categorical": [True],
+                "topk_budget_strict": [False],
+                "base_estimator": [
+                    make_l1_logistic_base_estimator(),
+                    OneVsRestClassifier(
+                        LeafWiseBoundedLookaheadRPTEFeatureLR(
+                            leaf_config="3xD",
+                            depth=4,
+                            enable_lookahead=False,
+                        ),
+                        n_jobs=1,
+                    ),
+                ],
+            },
+            "performance_ho": {
+                "B": [-1],
+                "adaptive_binning": [True],
+                "L": [1, 2],
+                "topK": [50, 100],
+                "feature_mode": ["original_plus_patterns"],
+                "G": [0.01, 0.001],
+                "convert_binary_to_categorical": [False],
+                "augmented_pair_transforms": [True],
+                "topk_budget_strict": [False],
+                "base_estimator": [
+                    make_l1_logistic_base_estimator(),
+                    OneVsRestClassifier(
+                        LeafWiseBoundedLookaheadRPTEFeatureLR(
+                            leaf_config="3xD",
+                            depth=4,
+                            enable_lookahead="adaptive",
+                        ),
+                        n_jobs=1,
+                    ),
+                ],
             },
         }
         resolved = name or DEFAULT_HUGIML_GRID_NAME
@@ -291,22 +359,25 @@ except Exception:
                 "n_estimators": [100, 200],
                 "max_depth": [3, 4],
                 "learning_rate": [0.03, 0.1],
+                "min_child_weight": [1, 5],
             },
             "LightGBM": {
                 "n_estimators": [100, 200],
                 "learning_rate": [0.03, 0.1],
                 "num_leaves": [15, 31],
+                "min_child_samples": [10, 20],
             },
             "RandomForest": {
                 "n_estimators": [200, 400],
                 "max_depth": [4, 8],
                 "min_samples_leaf": [1, 5],
+                "max_features": ["sqrt", 0.5],
             },
             "EBM": {
                 "learning_rate": [0.01, 0.05],
                 "max_bins": [32, 64],
                 "interactions": [0, 5],
-                "max_rounds": [500]
+                "max_rounds": [500],
             },
             "RuleFit": {
                 "n_estimators": [50, 100],
@@ -314,11 +385,70 @@ except Exception:
                 "tree_size": [5, 10],
             },
         }
-        return grids[model]
+        return copy.deepcopy(grids[model])
 
+    def get_budgeted_baseline_grid(model: str) -> dict[str, list[Any]]:
+        grids = {
+            "XGBoost": {
+                "n_estimators": [25, 50],
+                "max_depth": [1, 2],
+                "learning_rate": [0.03, 0.1],
+                "min_child_weight": [1, 5],
+            },
+            "LightGBM": {
+                "n_estimators": [25, 50],
+                "num_leaves": [2, 4],
+                "learning_rate": [0.03, 0.1],
+                "min_child_samples": [10, 20],
+            },
+            "RandomForest": {
+                "n_estimators": [25, 50],
+                "max_leaf_nodes": [2, 4],
+                "min_samples_leaf": [1, 5],
+                "max_features": ["sqrt", 0.5],
+                "max_depth": [None],
+            },
+        }
+        return copy.deepcopy(grids[model])
+
+
+def baseline_constant_parameters(model: str) -> dict[str, Any]:
+    settings = {
+        "XGBoost": {
+            "eval_metric": "logloss",
+            "verbosity": 0,
+            "n_jobs": 1,
+            "random_state": RANDOM_STATE,
+        },
+        "LightGBM": {
+            "verbose": -1,
+            "n_jobs": 1,
+            "random_state": RANDOM_STATE,
+        },
+        "RandomForest": {
+            "n_jobs": 1,
+            "random_state": RANDOM_STATE,
+        },
+        "EBM": {
+            "outer_bags": 4,
+            "max_rounds": 500,
+            "n_jobs": 1,
+            "random_state": RANDOM_STATE,
+        },
+        "RuleFit": {
+            "alpha": None,
+            "random_state": RANDOM_STATE,
+        },
+    }
+    return dict(settings[model])
+
+
+# This benchmark intentionally uses the higher-order grid, irrespective of
+# the package-wide default used by other APIs.
+DEFAULT_HUGIML_GRID_NAME = "performance_ho"
 
 RANDOM_STATE = 42
-BUDGET = 100.0
+BUDGET = 200.0
 MODEL_ORDER = [
     "HUGIML",
     "XGB standard",
@@ -331,87 +461,175 @@ MODEL_ORDER = [
     "RuleFit",
 ]
 
-# HUGIML is evaluated in two selectable dashboard scenarios while every
-# non-HUGIML baseline is shared across scenarios. The dashboard keeps the
-# visible model label as plain "HUGIML" so each selected scenario can be
-# compared against the same baseline panel without changing the layout.
+# The dashboard exposes two HUGIML paths while retaining the plain HUGIML model label.
 HUGIML_SCENARIOS: dict[str, dict[str, Any]] = {
     "augmented_pair": {
         "label": "Augmented pair path",
-        "description": "Current augmented-pair path using the performance grid",
-        "grid_name": "performance",
-        "overrides": {
-            "augmented_pair_transforms": [True],
-            "interaction_relaxed_mining": [False],
-        },
+        "description": (
+            "The performance_ho grid with original features, mined patterns, "
+            "augmented pairs, numeric 0/1 columns retained as numeric sources, "
+            "and inner-CV selection between logistic regression (L1 penalty, liblinear solver, C=1.0) and adaptive RPTE"
+        ),
+        "grid_name": "performance_ho",
+        "overrides": {},
     },
     "interaction_relaxed": {
-        "label": "Interaction-relaxed mining",
-        "description": "Interaction-relaxed mining path using the interpretability grid",
-        "grid_name": "interpretability",
-        "overrides": {
-            "interaction_relaxed_mining": [True],
-            "augmented_pair_transforms": [False],
-        },
+        "label": "Interaction-relaxed path",
+        "description": (
+            "The interpretability_ho grid with pattern-only interaction-relaxed "
+            "mining, numeric 0/1 indicators treated categorically, no augmented "
+            "pairs, and inner-CV selection between logistic regression (L1 penalty, liblinear solver, C=1.0) and sequential RPTE"
+        ),
+        "grid_name": "interpretability_ho",
+        "overrides": {},
     },
 }
 DEFAULT_DASHBOARD_HUGIML_SCENARIO = "augmented_pair"
-# A comprehensive benchmark panel with 30 public real-world datasets and
-# 20 deterministic synthetic cases that stress different inductive biases.
-DATASET_NAMES = [
-    # Public real-world datasets from scikit-learn and statsmodels
-    "BreastCancerOriginal",
-    "DiabetesHighTarget",
-    "DigitsOddVsEven64",
-    "DigitsHighVsLow64",
-    "WineClass1",
-    "IrisVersicolor",
-    "ANES96_PIDHigh",
-    "CCard_HighAvgExp",
-    "Cancer_HighRate",
-    "CopperHighWorldConsumption",
-    "DanishHighMoneyDemand",
-    "ElNinoHighAnnualTemp",
-    "Engel_HighIncome",
-    "FairAffairs",
-    "FertilityHigh2010",
-    "FertilityHighDecline1960_2010",
-    "Grunfeld_HighInvest",
-    "HeartTransplantCensorStatus",
-    "InterestInflationHighRate",
-    "LongleyHighEmployment",
-    "MacroData_HighInflation",
-    "ModeChoice",
-    "Nile_HighVolume6Lag",
-    "RandHIE_HighMDVisits",
-    "ScotlandHighYesVote",
-    "SpectorGrade",
-    "StacklossHigh",
-    "Star98_HighAboveRate",
-    "StateCrimeHighViolent",
-    "Sunspots_HighActivity12Lag",
-    # Reproducible synthetic stress tests
-    "SynthLinearLowDim",
-    "SynthSparseWide",
-    "SynthMoonsNonlinear",
-    "SynthCirclesNonlinear",
-    "SynthXORInteractions",
-    "SynthAdditiveNonlinear",
-    "SynthCategoricalRules",
-    "SynthCategoricalNumericInteraction",
-    "SynthHighCardinalityCategorical",
-    "SynthOrdinalCategorical",
-    "SynthMixedMissing",
-    "SynthMissingNotAtRandom",
-    "SynthImbalancedRare",
-    "SynthNoisyHighDimensional",
-    "SynthSmallNWide",
-    "SynthCorrelatedBlocks",
-    "SynthThresholdRules",
-    "SynthPiecewiseLinear",
-    "SynthHeteroskedasticNoise",
-    "SynthMostlyCategorical",
+# A comprehensive benchmark panel with 50 public real-world classification
+# tasks and 50 deterministic synthetic stress tests. Some real-world tasks
+# share a source dataset but use distinct, explicitly defined binary targets;
+# this mirrors the existing Digits and Fertility task construction.
+# Public real-world tasks from scikit-learn and statsmodels
+REAL_DATASET_NAMES = [
+    'BreastCancerOriginal',
+    'DiabetesHighTarget',
+    'DigitsOddVsEven64',
+    'DigitsHighVsLow64',
+    'WineClass1',
+    'IrisVersicolor',
+    'ANES96_PIDHigh',
+    'CCard_HighAvgExp',
+    'Cancer_HighRate',
+    'CopperHighWorldConsumption',
+    'DanishHighMoneyDemand',
+    'ElNinoHighAnnualTemp',
+    'Engel_HighIncome',
+    'FairAffairs',
+    'FertilityHigh2010',
+    'FertilityHighDecline1960_2010',
+    'Grunfeld_HighInvest',
+    'HeartTransplantCensorStatus',
+    'InterestInflationHighRate',
+    'LongleyHighEmployment',
+    'MacroData_HighInflation',
+    'ModeChoice',
+    'Nile_HighVolume6Lag',
+    'RandHIE_HighMDVisits',
+    'ScotlandHighYesVote',
+    'SpectorGrade',
+    'StacklossHigh',
+    'Star98_HighAboveRate',
+    'StateCrimeHighViolent',
+    'Sunspots_HighActivity12Lag',
+    'IrisSetosa',
+    'IrisVirginica',
+    'WineClass0',
+    'WineClass2',
+    'Digits0Vs1Original64',
+    'Digits3Vs8Original64',
+    'Digits4Vs9Original64',
+    'Digits5Vs6Original64',
+    'DigitsPrimeVsComposite64',
+    'DigitsZeroVsNonzero64',
+    'ANES96_Vote',
+    'CommitteeHighBills104',
+    'CPunishHighExecutions',
+    'StrikesHighDuration',
+    'CO2HighWeekly12Lag',
+    'LinnerudHighWeight',
+    'LinnerudHighWaist',
+    'LinnerudHighPulse',
+    'MacroData_HighUnemployment',
+    'StateCrimeHighMurder',
 ]
+
+# Higher-order binary interaction benchmarks (seed=2026, n=2000, p=32, 5% label noise)
+HIGHER_ORDER_SYNTHETIC_NAMES = [
+    'xor3_redundant',
+    'xor4_redundant',
+    'xor5_redundant',
+    'xor6_redundant',
+    'xor8_redundant',
+    'exactly2_of_5',
+    'exactly3_of_7',
+    'exactly4_of_9',
+    'atleast5_of_9',
+    'window_3_of_6_or_4_of_8',
+    'dnf_6clauses_3way',
+    'dnf_4clauses_4way',
+    'cnf_5clauses_3way',
+    'hierarchical_xor',
+    'gated_parity_2of4',
+    'mux_2addr_4data',
+    'mux_3addr_8data',
+    'mux_4addr_16data',
+    'two_block_xor_threshold',
+    'three_block_majority',
+    'nested_exact_threshold',
+    'cyclic_4way_dnf',
+    'sparse_5way_conjunctions',
+    'parity_of_majorities',
+    'mixed_order_logic',
+]
+
+# All deterministic synthetic tasks
+SYNTHETIC_DATASET_NAMES = [
+    'SynthLinearLowDim',
+    'SynthSparseWide',
+    'SynthMoonsNonlinear',
+    'SynthCirclesNonlinear',
+    'SynthXORInteractions',
+    'SynthAdditiveNonlinear',
+    'SynthCategoricalRules',
+    'SynthCategoricalNumericInteraction',
+    'SynthHighCardinalityCategorical',
+    'SynthOrdinalCategorical',
+    'SynthMixedMissing',
+    'SynthMissingNotAtRandom',
+    'SynthImbalancedRare',
+    'SynthNoisyHighDimensional',
+    'SynthSmallNWide',
+    'SynthCorrelatedBlocks',
+    'SynthThresholdRules',
+    'SynthPiecewiseLinear',
+    'SynthHeteroskedasticNoise',
+    'SynthMostlyCategorical',
+    'xor3_redundant',
+    'xor4_redundant',
+    'xor5_redundant',
+    'xor6_redundant',
+    'xor8_redundant',
+    'exactly2_of_5',
+    'exactly3_of_7',
+    'exactly4_of_9',
+    'atleast5_of_9',
+    'window_3_of_6_or_4_of_8',
+    'dnf_6clauses_3way',
+    'dnf_4clauses_4way',
+    'cnf_5clauses_3way',
+    'hierarchical_xor',
+    'gated_parity_2of4',
+    'mux_2addr_4data',
+    'mux_3addr_8data',
+    'mux_4addr_16data',
+    'two_block_xor_threshold',
+    'three_block_majority',
+    'nested_exact_threshold',
+    'cyclic_4way_dnf',
+    'sparse_5way_conjunctions',
+    'parity_of_majorities',
+    'mixed_order_logic',
+    'SynthCheckerboard2D',
+    'SynthFriedmanThreshold',
+    'SynthRotatedHyperplane',
+    'SynthRegimeSwitch',
+    'SynthRareHighOrderRule',
+]
+
+DATASET_NAMES = REAL_DATASET_NAMES + SYNTHETIC_DATASET_NAMES
+
+if len(REAL_DATASET_NAMES) != 50 or len(SYNTHETIC_DATASET_NAMES) != 50:
+    raise RuntimeError("Benchmark panel must contain exactly 50 real and 50 synthetic tasks.")
 
 
 def _binary_from_median(values: pd.Series | np.ndarray) -> np.ndarray:
@@ -530,7 +748,101 @@ def _cat_series(values, index=None) -> pd.Series:
     return pd.Series(vals, index=index, dtype="category")
 
 
+
+def _ho_clause(X: np.ndarray, terms: list[tuple[int, int]]) -> np.ndarray:
+    out = np.ones(len(X), dtype=bool)
+    for column, value in terms:
+        out &= X[:, column] == value
+    return out
+
+
+def _ho_flip_labels(y: np.ndarray, rng: np.random.Generator, rate: float = 0.05) -> np.ndarray:
+    result = np.asarray(y, dtype=np.int8).copy()
+    mask = rng.random(len(result)) < rate
+    result[mask] = 1 - result[mask]
+    return result
+
+
+def _higher_order_target(name: str, X: np.ndarray) -> np.ndarray:
+    def s(a: int, b: int) -> np.ndarray:
+        return X[:, a:b].sum(axis=1)
+
+    def parity(a: int, b: int) -> np.ndarray:
+        return np.bitwise_xor.reduce(X[:, a:b], axis=1)
+    if name.startswith("xor") and name.endswith("_redundant"):
+        order = int(name[3:name.index("_")])
+        return parity(0, order)
+    if name == "exactly2_of_5":
+        return s(0, 5) == 2
+    if name == "exactly3_of_7":
+        return s(0, 7) == 3
+    if name == "exactly4_of_9":
+        return s(0, 9) == 4
+    if name == "atleast5_of_9":
+        return s(0, 9) >= 5
+    if name == "window_3_of_6_or_4_of_8":
+        return (s(0, 6) == 3) | (s(6, 14) == 4)
+    if name == "dnf_6clauses_3way":
+        specs = [[(3 * i, 1), (3 * i + 1, i % 2), (3 * i + 2, 1 - (i % 2))] for i in range(6)]
+        return np.logical_or.reduce([_ho_clause(X, clause) for clause in specs])
+    if name == "dnf_4clauses_4way":
+        specs = [[(4 * i, 1), (4 * i + 1, 0), (4 * i + 2, i % 2), (4 * i + 3, 1)] for i in range(4)]
+        return np.logical_or.reduce([_ho_clause(X, clause) for clause in specs])
+    if name == "cnf_5clauses_3way":
+        clauses = [(X[:, 3 * i] | X[:, 3 * i + 1] | (1 - X[:, 3 * i + 2])).astype(bool) for i in range(5)]
+        return np.logical_and.reduce(clauses)
+    if name == "hierarchical_xor":
+        a = X[:, 0] & X[:, 1]
+        b = X[:, 2] & (1 - X[:, 3])
+        c = X[:, 4] & X[:, 5] & X[:, 6]
+        return np.bitwise_xor(np.bitwise_xor(a, b), c)
+    if name == "gated_parity_2of4":
+        gate = X[:, 0] & (1 - X[:, 1])
+        return np.where(gate, parity(2, 6), X[:, 6] & X[:, 7])
+    if name.startswith("mux_"):
+        addr = {"mux_2addr_4data": 2, "mux_3addr_8data": 3, "mux_4addr_16data": 4}[name]
+        weights = 2 ** np.arange(addr - 1, -1, -1)
+        idx = X[:, :addr] @ weights
+        return X[np.arange(len(X)), addr + idx]
+    if name == "two_block_xor_threshold":
+        a, b, c = s(0, 5) >= 3, s(5, 10) >= 3, s(10, 14) == 2
+        return np.logical_xor(np.logical_xor(a, b), c)
+    if name == "three_block_majority":
+        blocks = np.column_stack([s(0, 5) >= 3, s(5, 10) >= 3, s(10, 15) >= 3])
+        return blocks.sum(axis=1) >= 2
+    if name == "nested_exact_threshold":
+        return ((s(0, 6) == 3) & (s(6, 12) >= 4)) | ((s(12, 18) == 2) & (s(18, 24) >= 3))
+    if name == "cyclic_4way_dnf":
+        terms = [_ho_clause(X, [(i, 1), ((i + 1) % 12, 0), ((i + 4) % 12, 1), ((i + 7) % 12, 1)]) for i in range(12)]
+        return np.logical_or.reduce(terms)
+    if name == "sparse_5way_conjunctions":
+        terms = [_ho_clause(X, [(5 * i + j, (i + j) % 2) for j in range(5)]) for i in range(5)]
+        return np.logical_or.reduce(terms)
+    if name == "parity_of_majorities":
+        a, b, c = s(0, 7) >= 4, s(7, 14) >= 4, s(14, 21) >= 4
+        return np.logical_xor(np.logical_xor(a, b), c)
+    if name == "mixed_order_logic":
+        a = _ho_clause(X, [(0, 1), (1, 0), (2, 1)])
+        b, c, d = s(3, 9) == 3, parity(9, 14), s(14, 22) >= 5
+        return (a | b) ^ (c & d)
+    raise KeyError(name)
+
+
+def _load_higher_order_synthetic(name: str) -> tuple[pd.DataFrame, np.ndarray, str] | None:
+    if name not in HIGHER_ORDER_SYNTHETIC_NAMES:
+        return None
+    dataset_index = HIGHER_ORDER_SYNTHETIC_NAMES.index(name)
+    rng = np.random.default_rng(np.random.SeedSequence([2026, dataset_index]))
+    X = rng.integers(0, 2, size=(2000, 32), dtype=np.int8)
+    y = _ho_flip_labels(_higher_order_target(name, X), rng, rate=0.05)
+    frame = pd.DataFrame(X, columns=[f"x{i}" for i in range(X.shape[1])])
+    return *_clean_xy(frame, y), "Synthetic"
+
 def _load_synthetic_dataset(name: str) -> tuple[pd.DataFrame, np.ndarray, str] | None:
+    higher_order = _load_higher_order_synthetic(name)
+    if higher_order is not None:
+        return higher_order
+
     rng = np.random.default_rng(RANDOM_STATE + 101)
 
     if name == "SynthLinearLowDim":
@@ -821,6 +1133,62 @@ def _load_synthetic_dataset(name: str) -> tuple[pd.DataFrame, np.ndarray, str] |
         df["num1"] = x1
         return *_clean_xy(df, y), "Synthetic"
 
+
+    if name == "SynthCheckerboard2D":
+        n = 1400
+        xy = rng.uniform(-3.0, 3.0, size=(n, 2))
+        cells = np.floor((xy + 3.0) / 0.75).astype(int)
+        y = ((cells[:, 0] + cells[:, 1]) % 2).astype(int)
+        flip = rng.random(n) < 0.05
+        y = np.where(flip, 1 - y, y)
+        noise = rng.normal(size=(n, 8))
+        X = np.column_stack([xy, noise])
+        return _synthetic_frame(X, y, stem="chk")
+
+    if name == "SynthFriedmanThreshold":
+        n = 1500
+        X = rng.uniform(0.0, 1.0, size=(n, 12))
+        score = 10.0 * np.sin(np.pi * X[:, 0] * X[:, 1])
+        score += 20.0 * (X[:, 2] - 0.5) ** 2 + 10.0 * X[:, 3] + 5.0 * X[:, 4]
+        score += rng.normal(0.0, 1.5, size=n)
+        y = (score > np.median(score)).astype(int)
+        return _synthetic_frame(X, y, stem="fr")
+
+    if name == "SynthRotatedHyperplane":
+        n, p = 1400, 18
+        latent = rng.normal(size=(n, p))
+        rotation, _ = np.linalg.qr(rng.normal(size=(p, p)))
+        X = latent @ rotation
+        score = 1.6 * latent[:, 0] - 1.2 * latent[:, 1] + 0.8 * latent[:, 2]
+        score += 0.5 * latent[:, 3] + rng.normal(0.0, 0.7, size=n)
+        y = (score > np.median(score)).astype(int)
+        return _synthetic_frame(X, y, stem="rot")
+
+    if name == "SynthRegimeSwitch":
+        n = 1500
+        X = rng.normal(size=(n, 14))
+        regime = rng.integers(0, 2, size=n)
+        linear_score = 1.1 * X[:, 0] - 0.9 * X[:, 1] + 0.5 * X[:, 2]
+        interaction_score = 1.8 * ((X[:, 3] > 0) ^ (X[:, 4] > 0)).astype(float)
+        interaction_score += 0.8 * ((X[:, 5] > 0.5) & (X[:, 6] < -0.25)).astype(float) - 0.9
+        score = np.where(regime == 0, linear_score, interaction_score)
+        score += rng.normal(0.0, 0.35, size=n)
+        y = (score > np.median(score)).astype(int)
+        frame = pd.DataFrame(X, columns=[f"reg{i:02d}" for i in range(X.shape[1])])
+        frame["regime"] = _cat_series(np.where(regime == 1, "B", "A"), index=frame.index)
+        return *_clean_xy(frame, y), "Synthetic"
+
+    if name == "SynthRareHighOrderRule":
+        n = 1800
+        X = rng.integers(0, 2, size=(n, 24), dtype=np.int8)
+        rare = np.all(X[:, :5] == np.array([1, 0, 1, 1, 0], dtype=np.int8), axis=1)
+        exact = X[:, 5:10].sum(axis=1) == 2
+        signed_three_way = (X[:, 10] == 1) & (X[:, 11] == 1) & (X[:, 12] == 0)
+        y = (rare | exact | signed_three_way).astype(int)
+        flip = rng.random(n) < 0.04
+        y = np.where(flip, 1 - y, y)
+        return _synthetic_frame(X, y, stem="rare")
+
     return None
 
 
@@ -854,6 +1222,12 @@ def load_dataset(name: str) -> tuple[pd.DataFrame, np.ndarray, str]:
             y = (y0 % 2 == 1).astype(int)
         elif name == "DigitsHighVsLow64":
             y = (y0 >= 5).astype(int)
+        elif name == "DigitsPrimeVsComposite64":
+            mask = np.isin(y0, [2, 3, 4, 5, 6, 7, 8, 9])
+            X = X.loc[mask]
+            y = np.isin(y0[mask], [2, 3, 5, 7]).astype(int)
+        elif name == "DigitsZeroVsNonzero64":
+            y = (y0 == 0).astype(int)
         else:
             m = re.match(r"Digits(\d)Vs(\d)Original64", name)
             if not m:
@@ -865,6 +1239,61 @@ def load_dataset(name: str) -> tuple[pd.DataFrame, np.ndarray, str]:
         X, y = _clean_xy(X, y)
         return X, y, "Real-world"
 
+
+    if name == "ANES96_Vote":
+        df = _statsmodels_df("anes96")
+        y = df["vote"].astype(int).to_numpy()
+        X = df.drop(columns=["vote"])
+        return *_clean_xy(X, y), "Real-world"
+    if name == "CommitteeHighBills104":
+        df = _statsmodels_df("committee")
+        y = _binary_from_median(df["BILLS104"])
+        X = df.drop(columns=["BILLS104"])
+        return *_clean_xy(X, y), "Real-world"
+    if name == "CPunishHighExecutions":
+        df = _statsmodels_df("cpunish")
+        y = _binary_from_median(df["EXECUTIONS"])
+        X = df.drop(columns=["EXECUTIONS"])
+        return *_clean_xy(X, y), "Real-world"
+    if name == "StrikesHighDuration":
+        df = _statsmodels_df("strikes")
+        y = _binary_from_median(df["duration"])
+        X = df.drop(columns=["duration"])
+        return *_clean_xy(X, y), "Real-world"
+    if name == "CO2HighWeekly12Lag":
+        if sm is None:
+            raise RuntimeError("statsmodels is required for CO2HighWeekly12Lag") from STATSMODELS_IMPORT_ERROR
+        co2 = sm.datasets.co2.load_pandas().data["co2"].astype(float).interpolate(limit_direction="both")
+        frame = pd.DataFrame(index=np.arange(len(co2)))
+        for lag in range(1, 13):
+            frame[f"co2_lag{lag}"] = co2.shift(lag).to_numpy()
+        week = np.arange(len(co2), dtype=float)
+        frame["season_sin"] = np.sin(2.0 * np.pi * week / 52.0)
+        frame["season_cos"] = np.cos(2.0 * np.pi * week / 52.0)
+        frame["trend"] = week / max(len(co2) - 1, 1)
+        frame["target_value"] = co2.to_numpy()
+        frame = frame.dropna().reset_index(drop=True)
+        y = _binary_from_median(frame.pop("target_value"))
+        return *_clean_xy(frame, y), "Real-world"
+    if name in {"LinnerudHighWeight", "LinnerudHighWaist", "LinnerudHighPulse"}:
+        d = load_linnerud(as_frame=True)
+        target_col = {
+            "LinnerudHighWeight": "Weight",
+            "LinnerudHighWaist": "Waist",
+            "LinnerudHighPulse": "Pulse",
+        }[name]
+        y = _binary_from_median(d.target[target_col])
+        return *_clean_xy(d.data, y), "Real-world"
+    if name == "MacroData_HighUnemployment":
+        df = _statsmodels_df("macrodata")
+        y = _binary_from_median(df["unemp"])
+        X = df.drop(columns=["unemp"])
+        return *_clean_xy(X, y), "Real-world"
+    if name == "StateCrimeHighMurder":
+        df = _statsmodels_df("statecrime")
+        y = _binary_from_median(df["murder"])
+        X = df.drop(columns=["murder"])
+        return *_clean_xy(X, y), "Real-world"
     if name == "ANES96_PIDHigh":
         df = _statsmodels_df("anes96")
         y = _binary_from_median(df["PID"])
@@ -1228,7 +1657,7 @@ def _final_refit_ms_from_info(model: Any, info: dict[str, Any] | None = None) ->
     if val is not None:
         return float(val)
     val = _model_fit_ms_from_metadata(model)
-    return 0.0 if val is None else float(val)
+    return float("nan") if val is None else float(val)
 
 
 def _apply_row_cap(
@@ -1292,7 +1721,10 @@ def _tune_hugiml_inner_cv(
         use_fast_path=True,
     )
     tune_ms = (time.perf_counter() - t0) * 1000.0
-    final_refit_ms = _model_fit_ms_from_metadata(getattr(result, "best_estimator_", None))
+    refit_seconds = _safe_number_or_none(getattr(result, "refit_time_", None))
+    final_refit_ms = (refit_seconds * 1000.0) if refit_seconds is not None else None
+    if final_refit_ms is None:
+        final_refit_ms = _model_fit_ms_from_metadata(getattr(result, "best_estimator_", None))
     info = {
         "_final_refit_ms": final_refit_ms,
         "hugiml_fast_path_requested": True,
@@ -1332,7 +1764,7 @@ def _tune_pipeline_gridsearch(
         _prefix_grid_for_wrapped_model(grid_dict),
         scoring="roc_auc",
         cv=cv,
-        n_jobs=-1,
+        n_jobs=1,
         refit=True,
         error_score=np.nan,
     )
@@ -1473,6 +1905,65 @@ def _std_or_none(values: pd.Series) -> float | None:
     return None if len(nums) < 2 else float(nums.std(ddof=1))
 
 
+def _summary_from_moments(
+    n_samples: int,
+    total: float,
+    sum_squares: float,
+    *,
+    confidence_level: float = 0.95,
+) -> dict[str, float | int]:
+    n = int(n_samples)
+    if n <= 0:
+        raise ValueError("n_samples must be positive")
+    mean = float(total) / n
+    if n == 1:
+        std = 0.0
+        standard_error = 0.0
+        lower = mean
+        upper = mean
+    else:
+        variance = max(0.0, (float(sum_squares) - n * mean * mean) / (n - 1))
+        std = math.sqrt(variance)
+        standard_error = std / math.sqrt(n)
+        critical = float(student_t.ppf((1.0 + confidence_level) / 2.0, n - 1))
+        margin = critical * standard_error
+        lower = mean - margin
+        upper = mean + margin
+    return {
+        "mean": mean,
+        "std": std,
+        "standard_error": standard_error,
+        "ci_lower": float(lower),
+        "ci_upper": float(upper),
+        "confidence_level": float(confidence_level),
+        "n_samples": n,
+        "sum": float(total),
+        "sum_squares": float(sum_squares),
+    }
+
+
+def _series_mean_ci(
+    values: pd.Series,
+    *,
+    confidence_level: float = 0.95,
+) -> dict[str, float | int | None]:
+    nums = pd.to_numeric(values, errors="coerce").dropna().astype(float)
+    if nums.empty:
+        return {
+            "mean": None,
+            "ci_lower": None,
+            "ci_upper": None,
+            "confidence_level": float(confidence_level),
+            "n_samples": 0,
+        }
+    return _summary_from_moments(
+        len(nums),
+        float(nums.sum()),
+        float(np.square(nums.to_numpy()).sum()),
+        confidence_level=confidence_level,
+    )
+
+
 def _aggregate_fold_rows(fold_rows: list[dict[str, Any]]) -> dict[str, Any]:
     df = pd.DataFrame(fold_rows)
     row: dict[str, Any] = {}
@@ -1487,6 +1978,8 @@ def _aggregate_fold_rows(fold_rows: list[dict[str, Any]]) -> dict[str, Any]:
         "valid_auc",
         "best_inner_score",
         "complexity",
+        "complexity_model_inspection_units",
+        "complexity_model_units",
         "complexity_budget",
         "fit_ms",
         "predict_ms",
@@ -1501,6 +1994,53 @@ def _aggregate_fold_rows(fold_rows: list[dict[str, Any]]) -> dict[str, Any]:
     for col in ["roc_auc", "accuracy", "balanced_accuracy", "avg_precision", "brier", "f1"]:
         if col in df:
             row[f"std_{col}"] = _std_or_none(df[col])
+
+    instance_n = pd.to_numeric(
+        df.get("complexity_instance_inspection_units_n_samples", pd.Series(dtype=float)),
+        errors="coerce",
+    ).fillna(0)
+    instance_sum = pd.to_numeric(
+        df.get("complexity_instance_inspection_units_sum", pd.Series(dtype=float)),
+        errors="coerce",
+    ).fillna(0.0)
+    instance_sum_squares = pd.to_numeric(
+        df.get("complexity_instance_inspection_units_sum_squares", pd.Series(dtype=float)),
+        errors="coerce",
+    ).fillna(0.0)
+    pooled_n = int(instance_n.sum())
+    if pooled_n > 0:
+        confidence_values = pd.to_numeric(
+            df.get(
+                "complexity_instance_inspection_units_confidence_level",
+                pd.Series(dtype=float),
+            ),
+            errors="coerce",
+        ).dropna()
+        confidence_level = (
+            float(confidence_values.iloc[0]) if not confidence_values.empty else 0.95
+        )
+        pooled = _summary_from_moments(
+            pooled_n,
+            float(instance_sum.sum()),
+            float(instance_sum_squares.sum()),
+            confidence_level=confidence_level,
+        )
+        for key, value in pooled.items():
+            row[f"complexity_instance_inspection_units_{key}"] = value
+        min_values = pd.to_numeric(
+            df.get("complexity_instance_inspection_units_min", pd.Series(dtype=float)),
+            errors="coerce",
+        ).dropna()
+        max_values = pd.to_numeric(
+            df.get("complexity_instance_inspection_units_max", pd.Series(dtype=float)),
+            errors="coerce",
+        ).dropna()
+        row["complexity_instance_inspection_units_min"] = (
+            None if min_values.empty else int(min_values.min())
+        )
+        row["complexity_instance_inspection_units_max"] = (
+            None if max_values.empty else int(max_values.max())
+        )
     if "best_params_json" in df and not df["best_params_json"].dropna().empty:
         row["best_params_json"] = str(df["best_params_json"].dropna().iloc[0])
     else:
@@ -1509,96 +2049,14 @@ def _aggregate_fold_rows(fold_rows: list[dict[str, Any]]) -> dict[str, Any]:
         [r.get("best_params_json", "{}") for r in fold_rows], default=str
     )
     row["fold_rows_json"] = json.dumps(_safe_jsonable(fold_rows), default=str)
+    row["complexity_report_by_fold_json"] = json.dumps(
+        [r.get("complexity_report_json", "{}") for r in fold_rows], default=str
+    )
     row["outer_folds_completed"] = int(len(fold_rows))
     row["error_count"] = int(sum(int(r.get("error_count", 0) or 0) for r in fold_rows))
     errors = [str(r.get("last_error")) for r in fold_rows if r.get("last_error")]
     row["last_error"] = errors[-1] if errors else None
     return row
-
-
-def xgb_complexity(model):
-    model = _unwrap_model(model)
-    try:
-        df = model.get_booster().trees_to_dataframe()
-        return int((df["Feature"] == "Leaf").sum())
-    except Exception:
-        return None
-
-
-def lgb_complexity(model):
-    model = _unwrap_model(model)
-
-    def count(node):
-        if "leaf_index" in node:
-            return 1
-        return count(node["left_child"]) + count(node["right_child"])
-
-    try:
-        dump = model.booster_.dump_model()
-        return int(sum(count(t["tree_structure"]) for t in dump["tree_info"]))
-    except Exception:
-        return None
-
-
-def rf_complexity(model):
-    model = _unwrap_model(model)
-    try:
-        return int(sum(est.tree_.n_leaves for est in model.estimators_))
-    except Exception:
-        return None
-
-
-def hug_complexity(model):
-    for method in ["get_pattern_info"]:
-        try:
-            return int(len(getattr(model, method)()))
-        except Exception:
-            pass
-    for attr in ["selected_patterns_", "raw_patterns_"]:
-        try:
-            val = getattr(model, attr, None)
-            if val is not None:
-                return int(len(val))
-        except Exception:
-            pass
-    return None
-
-
-def ebm_complexity(model):
-    """Count active finite nonzero EBM cells across all additive/interaction terms."""
-    model = _unwrap_model(model)
-    try:
-        total = 0
-        for scores in getattr(model, "term_scores_", []) or []:
-            arr = np.asarray(scores, dtype=float)
-            total += int(np.sum(np.isfinite(arr) & (np.abs(arr) > 1e-12)))
-        return total
-    except Exception:
-        try:
-            return int(len(getattr(model, "term_names_", []) or []))
-        except Exception:
-            return None
-
-
-def rulefit_complexity(model):
-    """Count active nonzero RuleFit leaf/rule terms, excluding linear terms."""
-    model = _unwrap_model(model)
-    try:
-        rules = getattr(model, "rules_", []) or []
-        coefs = []
-        for rule in rules:
-            args = getattr(rule, "args", None)
-            if args is not None and len(args):
-                coefs.append(float(args[0]))
-        if coefs:
-            return int(np.sum(np.abs(np.asarray(coefs, dtype=float)) > 1e-12))
-        return int(len(rules))
-    except Exception:
-        try:
-            val = getattr(model, "complexity_", None)
-            return None if val is None else int(val)
-        except Exception:
-            return None
 
 
 def fit_select(
@@ -1777,6 +2235,11 @@ def _hugiml_scenario_label(scenario: str | None) -> str | None:
     return str(HUGIML_SCENARIOS.get(scenario, {}).get("label", scenario))
 
 
+def _model_inspection_complexity(model: Any) -> int | float | None:
+    """Return the complete-model inspection measure used by this benchmark."""
+    return get_complexity(model, "model inspection units")
+
+
 def get_model_spec(
     model: str,
     *,
@@ -1794,83 +2257,52 @@ def get_model_spec(
             pp.setdefault("n_jobs", 1)
             return HUGIMLClassifierNative(**pp)
 
-        return grid, builder, hug_complexity, None
+        return grid, builder, _model_inspection_complexity, None
 
     xgb_grid = list(ParameterGrid(get_baseline_grid("XGBoost")))
     lgb_grid = list(ParameterGrid(get_baseline_grid("LightGBM")))
     rf_grid = list(ParameterGrid(get_baseline_grid("RandomForest")))
     ebm_grid = list(ParameterGrid(get_baseline_grid("EBM") or {})) or [{}]
     rulefit_grid = list(ParameterGrid(get_baseline_grid("RuleFit") or {})) or [{}]
-    xgb_budget_grid = list(
-        ParameterGrid(
-            {
-                "n_estimators": [25, 50, 75],
-                "max_depth": [1, 2, 3],
-                "learning_rate": [0.03, 0.1],
-                "subsample": [0.8, 1.0],
-                "colsample_bytree": [0.8, 1.0],
-            }
-        )
-    )
-    lgb_budget_grid = list(
-        ParameterGrid(
-            {
-                "n_estimators": [25, 50, 75],
-                "num_leaves": [2, 4, 8],
-                "learning_rate": [0.03, 0.1],
-                "subsample": [0.8, 1.0],
-                "min_child_samples": [5],
-            }
-        )
-    )
-    rf_budget_grid = list(
-        ParameterGrid(
-            {
-                "n_estimators": [20, 50, 75],
-                "max_leaf_nodes": [2, 4, 8],
-                "min_samples_leaf": [1, 5],
-                "max_depth": [None],
-            }
-        )
-    )
+    xgb_budget_grid = list(ParameterGrid(get_budgeted_baseline_grid("XGBoost")))
+    lgb_budget_grid = list(ParameterGrid(get_budgeted_baseline_grid("LightGBM")))
+    rf_budget_grid = list(ParameterGrid(get_budgeted_baseline_grid("RandomForest")))
 
     def xgb_builder(params):
-        return XGBClassifier(
-            eval_metric="logloss", verbosity=0, n_jobs=1, random_state=RANDOM_STATE, **params
-        )
+        return XGBClassifier(**baseline_constant_parameters("XGBoost"), **params)
 
     def lgb_builder(params):
-        return LGBMClassifier(verbose=-1, n_jobs=1, random_state=RANDOM_STATE, **params)
+        return LGBMClassifier(**baseline_constant_parameters("LightGBM"), **params)
 
     def rf_builder(params):
-        return RandomForestClassifier(n_jobs=1, random_state=RANDOM_STATE, **params)
+        return RandomForestClassifier(**baseline_constant_parameters("RandomForest"), **params)
 
     def ebm_builder(params):
         if ExplainableBoostingClassifier is None:
             raise ImportError("interpret.glassbox.ExplainableBoostingClassifier is required for EBM")
-        pp = dict(params)
-        pp.setdefault("random_state", RANDOM_STATE)
-        pp.setdefault("n_jobs", 1)
-        pp.setdefault("outer_bags", 4)
-        pp.setdefault("max_rounds", 500)
+        pp = baseline_constant_parameters("EBM")
+        pp.update(params)
         return ExplainableBoostingClassifier(**pp)
 
     def rulefit_builder(params):
         if RuleFitClassifier is None:
             raise ImportError("imodels.RuleFitClassifier is required for RuleFit")
-        pp = dict(params)
-        pp.setdefault("random_state", RANDOM_STATE)
+        pp = baseline_constant_parameters("RuleFit")
+        pp.update(params)
+        # Keep max_rules authoritative. imodels ignores max_rules when alpha
+        # is explicitly numeric, so alpha remains None for every candidate.
+        pp["alpha"] = None
         return RuleFitClassifier(**pp)
 
     specs = {
-        "XGB standard": (xgb_grid, xgb_builder, xgb_complexity, None),
-        "LightGBM standard": (lgb_grid, lgb_builder, lgb_complexity, None),
-        "RandomForest standard": (rf_grid, rf_builder, rf_complexity, None),
-        "XGB complexity-budgeted": (xgb_budget_grid, xgb_builder, xgb_complexity, BUDGET),
-        "LightGBM complexity-budgeted": (lgb_budget_grid, lgb_builder, lgb_complexity, BUDGET),
-        "RandomForest complexity-budgeted": (rf_budget_grid, rf_builder, rf_complexity, BUDGET),
-        "EBM": (ebm_grid, ebm_builder, ebm_complexity, None),
-        "RuleFit": (rulefit_grid, rulefit_builder, rulefit_complexity, None),
+        "XGB standard": (xgb_grid, xgb_builder, _model_inspection_complexity, None),
+        "LightGBM standard": (lgb_grid, lgb_builder, _model_inspection_complexity, None),
+        "RandomForest standard": (rf_grid, rf_builder, _model_inspection_complexity, None),
+        "XGB complexity-budgeted": (xgb_budget_grid, xgb_builder, _model_inspection_complexity, BUDGET),
+        "LightGBM complexity-budgeted": (lgb_budget_grid, lgb_builder, _model_inspection_complexity, BUDGET),
+        "RandomForest complexity-budgeted": (rf_budget_grid, rf_builder, _model_inspection_complexity, BUDGET),
+        "EBM": (ebm_grid, ebm_builder, _model_inspection_complexity, None),
+        "RuleFit": (rulefit_grid, rulefit_builder, _model_inspection_complexity, None),
     }
     return specs[model]
 
@@ -1886,6 +2318,7 @@ def run_pair(
     inner_splits: int = 3,
     tune: bool = True,
     random_state: int | None = None,
+    fold_checkpoint_dir: Path | None = None,
 ) -> dict[str, Any]:
     random_state = RANDOM_STATE if random_state is None else int(random_state)
     X, y, group = load_dataset(dataset)
@@ -1909,8 +2342,31 @@ def run_pair(
     cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
     fold_rows: list[dict[str, Any]] = []
     model_feature_counts: list[int] = []
+    fold_checkpoint_path: Path | None = None
+    if fold_checkpoint_dir is not None:
+        fold_checkpoint_dir = Path(fold_checkpoint_dir)
+        fold_checkpoint_dir.mkdir(parents=True, exist_ok=True)
+        identity = {
+            "dataset": dataset, "model": model, "hugiml_scenario": hugiml_scenario,
+            "row_cap": row_cap, "n_splits": n_splits, "inner_splits": inner_splits,
+            "tune": tune, "random_state": random_state,
+        }
+        token = hashlib.sha256(json.dumps(identity, sort_keys=True, default=str).encode()).hexdigest()[:20]
+        fold_checkpoint_path = fold_checkpoint_dir / f"{token}.json"
+        if fold_checkpoint_path.exists():
+            try:
+                saved = json.loads(fold_checkpoint_path.read_text())
+                if saved.get("identity") == identity:
+                    fold_rows = list(saved.get("fold_rows", []))
+                    model_feature_counts = [int(v) for v in saved.get("model_feature_counts", [])]
+            except Exception:
+                fold_rows = []
+                model_feature_counts = []
+    completed_fold_ids = {int(r.get("fold")) for r in fold_rows if r.get("fold") is not None}
 
     for fold_idx, (tr_idx, te_idx) in enumerate(cv.split(X, y)):
+        if fold_idx in completed_fold_ids:
+            continue
         X_train_native = _force_writable_frame(X.iloc[tr_idx].reset_index(drop=True))
         X_test_native = _force_writable_frame(X.iloc[te_idx].reset_index(drop=True))
         y_train = np.asarray(y[tr_idx], dtype=int, copy=True)
@@ -1969,9 +2425,47 @@ def run_pair(
                 else:
                     clf, fit_ms, tune_ms = _fit_default_model(model, builder, X_train_model, y_train)
 
-            complexity = complexity_fn(clf) if complexity_fn else None
+            selection_info = dict(selection_info or {})
+            complexity_report = get_complexity_report(clf, X=X_test_model)
+            model_units = (complexity_report or {}).get("model_units", {}).get("value")
+            model_inspection_units = (complexity_report or {}).get(
+                "model_inspection_units", {}
+            ).get("value")
+            instance_summary = (complexity_report or {}).get(
+                "instance_inspection_units", {}
+            )
+            complexity = (
+                float(model_inspection_units)
+                if model_inspection_units is not None
+                else (complexity_fn(clf) if complexity_fn else None)
+            )
+            selection_info["complexity_model_units"] = (
+                None if model_units is None else float(model_units)
+            )
+            selection_info["complexity_model_inspection_units"] = (
+                None if model_inspection_units is None else float(model_inspection_units)
+            )
+            for key in (
+                "mean",
+                "std",
+                "standard_error",
+                "ci_lower",
+                "ci_upper",
+                "confidence_level",
+                "n_samples",
+                "sum",
+                "sum_squares",
+                "min",
+                "max",
+            ):
+                selection_info[f"complexity_instance_inspection_units_{key}"] = (
+                    instance_summary.get(key) if instance_summary.get("available") else None
+                )
+            selection_info["complexity_report_json"] = json.dumps(
+                complexity_report or {}, sort_keys=True, default=str
+            )
             model_feature_counts.append(_model_feature_count(clf, raw_features))
-            effective_budget = params.get("topK") if model == "HUGIML" else budget
+            effective_budget = budget
             fold_row = _evaluate_outer_fold(
                 clf,
                 X_test_model,
@@ -2001,6 +2495,20 @@ def run_pair(
                 "valid_auc": None,
                 "best_inner_score": None,
                 "complexity": None,
+                "complexity_model_inspection_units": None,
+                "complexity_model_units": None,
+                "complexity_instance_inspection_units_mean": None,
+                "complexity_instance_inspection_units_std": None,
+                "complexity_instance_inspection_units_standard_error": None,
+                "complexity_instance_inspection_units_ci_lower": None,
+                "complexity_instance_inspection_units_ci_upper": None,
+                "complexity_instance_inspection_units_confidence_level": None,
+                "complexity_instance_inspection_units_n_samples": None,
+                "complexity_instance_inspection_units_sum": None,
+                "complexity_instance_inspection_units_sum_squares": None,
+                "complexity_instance_inspection_units_min": None,
+                "complexity_instance_inspection_units_max": None,
+                "complexity_report_json": "{}",
                 "complexity_budget": None if budget is None else float(budget),
                 "fit_ms": None,
                 "predict_ms": None,
@@ -2026,7 +2534,18 @@ def run_pair(
             }
         )
         fold_rows.append(fold_row)
+        fold_rows.sort(key=lambda r: int(r.get("fold", 999999)))
+        if fold_checkpoint_path is not None:
+            checkpoint_payload = {
+                "identity": identity,
+                "fold_rows": fold_rows,
+                "model_feature_counts": model_feature_counts,
+            }
+            tmp = fold_checkpoint_path.with_suffix(fold_checkpoint_path.suffix + ".tmp")
+            tmp.write_text(json.dumps(checkpoint_payload, indent=2, default=_json_default))
+            tmp.replace(fold_checkpoint_path)
 
+    fold_rows.sort(key=lambda r: int(r.get("fold", 999999)))
     row = _aggregate_fold_rows(fold_rows)
     model_features = int(round(float(np.nanmean(model_feature_counts)))) if model_feature_counts else raw_features
     preprocessing_policy = (
@@ -2048,8 +2567,6 @@ def run_pair(
             "categorical_features": native_categorical_features,
             "n_rows": int(len(y)),
             "class_balance": float(np.mean(y)),
-            "source_root": str(SOURCE_ROOT) if SOURCE_ROOT is not None else "installed_package",
-            "hugiml_imported_from": HUGIML_IMPORTED_FROM,
             "preprocessing_policy": preprocessing_policy,
             "evaluation_protocol": protocol,
             "outer_n_splits": int(n_splits),
@@ -2122,7 +2639,225 @@ def grid_snapshot() -> dict[str, Any]:
             "EBM": get_baseline_grid("EBM"),
             "RuleFit": get_baseline_grid("RuleFit"),
         },
+        "baseline_budgeted_grids": {
+            "XGBoost": get_budgeted_baseline_grid("XGBoost"),
+            "LightGBM": get_budgeted_baseline_grid("LightGBM"),
+            "RandomForest": get_budgeted_baseline_grid("RandomForest"),
+        },
+        "baseline_constant_parameters": {
+            model: baseline_constant_parameters(model)
+            for model in ["XGBoost", "LightGBM", "RandomForest", "EBM", "RuleFit"]
+        },
         "execution_mode_base_setting": "production",
+    }
+
+
+def _methodology_display_value(value: Any) -> str:
+    if value is None:
+        return "None"
+    if value is True:
+        return "True"
+    if value is False:
+        return "False"
+    text = str(value)
+    if "LeafWiseBoundedLookaheadRPTEFeatureLR" in text:
+        params: dict[str, Any] = {}
+        try:
+            params = value.get_params(deep=True)
+        except Exception:
+            params = {}
+        lookahead = params.get(
+            "estimator__enable_lookahead",
+            params.get("enable_lookahead", "adaptive"),
+        )
+        backend = "sequential; lookahead inactive" if lookahead is False else "adaptive lookahead"
+        return f"OneVsRestClassifier(RPTE; leaf_config=3xD, depth=4, {backend})"
+    return text
+
+
+def _methodology_parameter_rows(grid: dict[str, list[Any]]) -> list[dict[str, Any]]:
+    rows = []
+    for parameter, values in grid.items():
+        display_values = [_methodology_display_value(value) for value in values]
+        if parameter == "base_estimator":
+            normalized = []
+            for value in values:
+                text = str(value)
+                if isinstance(value, LogisticRegression) or text.startswith("LogisticRegression("):
+                    normalized.append(
+                        "Logistic regression (L1 penalty, liblinear solver, C=1.0)"
+                    )
+                else:
+                    normalized.append(_methodology_display_value(value))
+            display_values = normalized
+        rows.append({"parameter": str(parameter), "values": display_values})
+    return rows
+
+
+def _methodology_candidate_count(grid: dict[str, list[Any]]) -> int:
+    count = 1
+    for values in grid.values():
+        count *= max(1, len(values))
+    return int(count)
+
+
+def methodology_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
+    metadata = dict(payload.get("metadata", {}))
+    snapshot = dict(metadata.get("grid_snapshot", {}) or {})
+    scenario_snapshot = dict(snapshot.get("hugiml_dashboard_scenarios", {}) or {})
+    standard_grids = dict(snapshot.get("baseline_grids", {}) or {})
+    budgeted_grids = dict(snapshot.get("baseline_budgeted_grids", {}) or {})
+    constant_parameters = dict(snapshot.get("baseline_constant_parameters", {}) or {})
+
+    for name in ["XGBoost", "LightGBM", "RandomForest", "EBM", "RuleFit"]:
+        standard_grids.setdefault(name, get_baseline_grid(name))
+        constant_parameters.setdefault(name, baseline_constant_parameters(name))
+    for name in ["XGBoost", "LightGBM", "RandomForest"]:
+        budgeted_grids.setdefault(name, get_budgeted_baseline_grid(name))
+
+    hugiml_models = []
+    for scenario_id, spec in HUGIML_SCENARIOS.items():
+        stored = dict(scenario_snapshot.get(scenario_id, {}) or {})
+        grid = dict(stored.get("grid", {}) or {})
+        if not grid:
+            grid = get_hugiml_grid(str(spec["grid_name"]))
+            grid.update(dict(spec.get("overrides", {})))
+        notes = [
+            "execution_mode=production",
+            "n_jobs=1",
+            "Linear base estimator: logistic regression with L1 penalty, liblinear solver, C=1.0, random_state=0, and max_iter=500.",
+        ]
+        if scenario_id == "augmented_pair":
+            notes.extend(
+                [
+                    "Inner cross-validation selects between the stated logistic-regression base estimator and one-vs-rest RPTE.",
+                    "Numeric 0/1 columns remain numeric and eligible for augmented-pair transforms.",
+                    "RPTE uses leaf indicators together with downstream inputs not selected in accepted tree splits.",
+                    "RPTE lookahead is adaptive for this path.",
+                ]
+            )
+        else:
+            notes.extend(
+                [
+                    "Inner cross-validation selects between the stated logistic-regression base estimator and one-vs-rest RPTE.",
+                    "Numeric 0/1 indicators are treated categorically for the pattern-mining surface.",
+                    "Interaction relaxation is performed by the pattern miner; augmented pairs are disabled.",
+                    "RPTE uses the sequential backend with lookahead inactive for this path.",
+                ]
+            )
+        hugiml_models.append(
+            {
+                "model": f'HUGIML — {spec["label"]}',
+                "grid_name": str(spec["grid_name"]),
+                "candidate_count": _methodology_candidate_count(grid),
+                "parameters": _methodology_parameter_rows(grid),
+                "constant_settings": notes,
+                "complexity": (
+                    "Model units count active fitted terms or active terminal leaves plus direct terms. "
+                    "Model inspection units expand the complete model into source elements or all active "
+                    "terminal paths. Instance inspection units count direct terms plus only row-specific "
+                    "linear evidence or the single reached path in each RPTE tree. Intercepts are excluded, "
+                    "and fitted numeric components are active when their absolute value exceeds 1e-12."
+                ),
+            }
+        )
+
+    baseline_models = []
+    # Methodology-card display order only: the two HUGIML variants are
+    # followed by the three standard ensembles; the second methodology row
+    # contains the corresponding budgeted ensembles and interpretable models.
+    baseline_labels = [
+        ("XGB standard", "XGBoost", False),
+        ("LightGBM standard", "LightGBM", False),
+        ("RandomForest standard", "RandomForest", False),
+        ("XGB complexity-budgeted", "XGBoost", True),
+        ("LightGBM complexity-budgeted", "LightGBM", True),
+        ("RandomForest complexity-budgeted", "RandomForest", True),
+        ("EBM", "EBM", False),
+        ("RuleFit", "RuleFit", False),
+    ]
+    complexity_text = {
+        "XGBoost": (
+            "Model inspection units sum complete root-to-leaf conditions for active "
+            "terminal outputs; instance inspection uses the reached active path."
+        ),
+        "LightGBM": (
+            "Model inspection units sum complete root-to-leaf conditions for active "
+            "terminal outputs; instance inspection uses the reached active path."
+        ),
+        "RandomForest": (
+            "Model inspection units sum every complete root-to-leaf path across the fitted "
+            "forest; instance inspection uses one reached path per tree."
+        ),
+        "EBM": (
+            "Model inspection units count finite nonzero term-score cells. Instance "
+            "inspection counts row-specific nonzero additive contributions."
+        ),
+        "RuleFit": (
+            "Model inspection units count active linear terms and every condition in each "
+            "active rule. Instance inspection adds only rules satisfied by the row."
+        ),
+    }
+    for label, family, budgeted in baseline_labels:
+        grid = budgeted_grids[family] if budgeted else standard_grids[family]
+        notes = [
+            f"{key}={_methodology_display_value(value)}"
+            for key, value in constant_parameters[family].items()
+        ]
+        if budgeted:
+            notes.append(
+                f"Complexity budget={float(metadata.get('budget', BUDGET)):g}; candidates within the budget are preferred during inner-CV selection."
+            )
+        notes.append("Unspecified estimator settings use the library defaults.")
+        baseline_models.append(
+            {
+                "model": label,
+                "grid_name": family,
+                "candidate_count": _methodology_candidate_count(grid),
+                "parameters": _methodology_parameter_rows(grid),
+                "constant_settings": notes,
+                "complexity": complexity_text[family],
+            }
+        )
+
+    dataset_names = list(metadata.get("dataset_names", DATASET_NAMES))
+    real_count = len([name for name in dataset_names if name in REAL_DATASET_NAMES])
+    synthetic_count = len(dataset_names) - real_count
+    outer_splits = int(metadata.get("n_splits", 5))
+    inner_splits = int(metadata.get("inner_splits", 3))
+    random_state = int(metadata.get("random_state", RANDOM_STATE))
+    row_cap = int(metadata.get("row_cap", -1))
+    protocol = [
+        f"Dataset panel: {len(dataset_names)} binary-classification tasks ({real_count} real-world and {synthetic_count} synthetic).",
+        f"Rows per dataset: {'all available rows' if row_cap < 0 else row_cap}.",
+        f"Outer evaluation: {outer_splits}-fold StratifiedKFold with shuffle=True and random_state={random_state}.",
+        f"Inner selection: {inner_splits}-fold StratifiedKFold within every outer-training partition, with shuffle=True and random_state={random_state}.",
+        "Selection metric: mean inner-fold ROC-AUC. The selected candidate is refitted on the complete outer-training partition and evaluated once on the untouched outer-test partition.",
+        f"Reported dataset AUC: arithmetic mean of the {outer_splits} outer-fold ROC-AUC values.",
+        "Statistical comparisons use dataset-level outer-CV aggregates, Friedman ranking, paired Wilcoxon tests, and Holm adjustment where shown.",
+    ]
+    preprocessing = [
+        "HUGIML receives the native pandas table, including categorical columns, and performs its own binning and pattern construction inside each training fold.",
+        "Non-HUGIML models use a fold-local pipeline: numeric median imputation; categorical most-frequent imputation followed by dense one-hot encoding with unknown categories ignored.",
+        "Preprocessing is fitted only on the relevant training partition. No test-fold information is used for preprocessing or parameter selection.",
+        "fit_seconds measures the selected estimator's final outer-fold refit; tune_seconds measures inner-CV search; predict_seconds measures outer-test inference.",
+    ]
+
+    complexity_overview = [
+        "Model units provide the coarse active-component count for the selected model in each outer fold.",
+        "Model inspection units expand the complete fitted model into all reviewed conditions, source elements, rule literals, or active score cells.",
+        "Instance inspection units are evaluated on untouched outer-test rows. Their dataset mean and 95% Student-t confidence interval pool all out-of-fold rows so every dataset instance is counted once.",
+        "Tree models count the reached path when its terminal output is active. Linear direct terms count for every row, while row-specific pattern, pair, rule, and additive contributions count only when active for that row.",
+        "A fitted numeric component is active when its absolute value exceeds 1e-12. Intercepts are not counted.",
+        "All three measures are computed after the selected hyperparameter configuration is refitted on the complete outer-training partition.",
+    ]
+
+    return {
+        "title": "Methodology and parameter search space",
+        "protocol": protocol,
+        "preprocessing": preprocessing,
+        "complexity_overview": complexity_overview,
+        "models": hugiml_models + baseline_models,
     }
 
 
@@ -2253,8 +2988,17 @@ def _summary_for_scope(df_scope: pd.DataFrame, scope: str) -> dict[str, Any]:
         fit = pd.to_numeric(sub.get("fit_seconds", pd.Series(dtype=float)), errors="coerce")
         pair = pd.to_numeric(sub.get("pair_seconds", pd.Series(dtype=float)), errors="coerce")
         comp = pd.to_numeric(
-            sub.get("complexity", pd.Series(dtype=float)), errors="coerce"
+            sub.get("complexity_model_inspection_units", sub.get("complexity", pd.Series(dtype=float))),
+            errors="coerce",
         ).dropna()
+        model_units = pd.to_numeric(
+            sub.get("complexity_model_units", pd.Series(dtype=float)), errors="coerce"
+        ).dropna()
+        instance_ci = _series_mean_ci(
+            sub.get(
+                "complexity_instance_inspection_units_mean", pd.Series(dtype=float)
+            )
+        )
         ranks = side[m + "_rank"].astype(float) if m + "_rank" in side else pd.Series(dtype=float)
         strict_wins = int((side["winner_model"] == m).sum()) if "winner_model" in side else 0
         tied_best = (
@@ -2280,6 +3024,14 @@ def _summary_for_scope(df_scope: pd.DataFrame, scope: str) -> dict[str, Any]:
                 "tied_best_count": tied_best,
                 "mean_complexity": None if comp.empty else float(comp.mean()),
                 "median_complexity": None if comp.empty else float(comp.median()),
+                "mean_model_units": None if model_units.empty else float(model_units.mean()),
+                "mean_model_inspection_units": None if comp.empty else float(comp.mean()),
+                "median_model_inspection_units": None if comp.empty else float(comp.median()),
+                "mean_instance_inspection_units": instance_ci["mean"],
+                "instance_inspection_ci_lower": instance_ci["ci_lower"],
+                "instance_inspection_ci_upper": instance_ci["ci_upper"],
+                "instance_inspection_confidence_level": instance_ci["confidence_level"],
+                "instance_inspection_n_datasets": instance_ci["n_samples"],
                 "mean_fit_seconds": None if fit.dropna().empty else float(fit.mean()),
                 "mean_pair_seconds": None if pair.dropna().empty else float(pair.mean()),
             }
@@ -2314,6 +3066,18 @@ def _summary_for_scope(df_scope: pd.DataFrame, scope: str) -> dict[str, Any]:
         "best_mean_auc": None if best is None else best["mean_auc"],
         "hugiml_mean_auc": None if hug is None else hug["mean_auc"],
         "hugiml_mean_rank": None if hug is None else hug["mean_rank"],
+        "hugiml_mean_model_inspection_units": None
+        if hug is None
+        else hug["mean_model_inspection_units"],
+        "hugiml_mean_instance_inspection_units": None
+        if hug is None
+        else hug["mean_instance_inspection_units"],
+        "hugiml_instance_inspection_ci_lower": None
+        if hug is None
+        else hug["instance_inspection_ci_lower"],
+        "hugiml_instance_inspection_ci_upper": None
+        if hug is None
+        else hug["instance_inspection_ci_upper"],
     }
 
 
@@ -2445,7 +3209,18 @@ def _make_data_single(details: list[dict[str, Any]]) -> dict[str, Any]:
     for m in MODEL_ORDER:
         sub = df[df.model == m]
         vals = pd.to_numeric(sub["auc"], errors="coerce")
-        comp = pd.to_numeric(sub["complexity"], errors="coerce").dropna()
+        comp = pd.to_numeric(
+            sub.get("complexity_model_inspection_units", sub["complexity"]),
+            errors="coerce",
+        ).dropna()
+        model_units = pd.to_numeric(
+            sub.get("complexity_model_units", pd.Series(dtype=float)), errors="coerce"
+        ).dropna()
+        instance_ci = _series_mean_ci(
+            sub.get(
+                "complexity_instance_inspection_units_mean", pd.Series(dtype=float)
+            )
+        )
         ranks = side[m + "_rank"].astype(float)
         strict_wins = int((side["winner_model"] == m).sum())
         tied_best = int(
@@ -2467,6 +3242,14 @@ def _make_data_single(details: list[dict[str, Any]]) -> dict[str, Any]:
                 "median_complexity": None if comp.empty else float(comp.median()),
                 "min_complexity": None if comp.empty else float(comp.min()),
                 "max_complexity": None if comp.empty else float(comp.max()),
+                "mean_model_units": None if model_units.empty else float(model_units.mean()),
+                "mean_model_inspection_units": None if comp.empty else float(comp.mean()),
+                "median_model_inspection_units": None if comp.empty else float(comp.median()),
+                "mean_instance_inspection_units": instance_ci["mean"],
+                "instance_inspection_ci_lower": instance_ci["ci_lower"],
+                "instance_inspection_ci_upper": instance_ci["ci_upper"],
+                "instance_inspection_confidence_level": instance_ci["confidence_level"],
+                "instance_inspection_n_datasets": instance_ci["n_samples"],
             }
         )
     overall = sorted(overall, key=lambda r: (-r["mean_auc"], r["mean_rank"]))
@@ -2616,9 +3399,21 @@ def _make_data_single(details: list[dict[str, Any]]) -> dict[str, Any]:
                 "test_auc": None if pd.isna(r["auc"]) else float(r["auc"]),
                 "test_f1": None if pd.isna(r["f1"]) else float(r["f1"]),
                 "test_accuracy": None if pd.isna(r["accuracy"]) else float(r["accuracy"]),
-                "model_complexity_leaves_or_patterns": None
-                if pd.isna(r["complexity"])
-                else int(r["complexity"]),
+                "model_units": None
+                if pd.isna(r.get("complexity_model_units"))
+                else float(r.get("complexity_model_units")),
+                "model_inspection_units": None
+                if pd.isna(r.get("complexity_model_inspection_units", r["complexity"]))
+                else float(r.get("complexity_model_inspection_units", r["complexity"])),
+                "instance_inspection_units_mean": None
+                if pd.isna(r.get("complexity_instance_inspection_units_mean"))
+                else float(r.get("complexity_instance_inspection_units_mean")),
+                "instance_inspection_units_ci_lower": None
+                if pd.isna(r.get("complexity_instance_inspection_units_ci_lower"))
+                else float(r.get("complexity_instance_inspection_units_ci_lower")),
+                "instance_inspection_units_ci_upper": None
+                if pd.isna(r.get("complexity_instance_inspection_units_ci_upper"))
+                else float(r.get("complexity_instance_inspection_units_ci_upper")),
                 "complexity_budget": None
                 if pd.isna(r.get("complexity_budget"))
                 else float(r.get("complexity_budget")),
@@ -2633,9 +3428,9 @@ def _make_data_single(details: list[dict[str, Any]]) -> dict[str, Any]:
     return {
         "side": side_rows,
         "overall": overall,
-        "details": df.drop(columns=[c for c in ["source_root"] if c in df.columns]).to_dict(
-            orient="records"
-        ),
+        "details": df.drop(
+            columns=[c for c in df.columns if _is_local_provenance_key(c)]
+        ).to_dict(orient="records"),
         "heat": heat,
         "global": global_rows,
         "vs_hugiml": pairs,
@@ -2649,11 +3444,11 @@ def _make_data_single(details: list[dict[str, Any]]) -> dict[str, Any]:
             {
                 "dataset": name,
                 "kind": (
-                    "Synthetic" if name.startswith("Synth") else "Public real-world / package"
+                    "Synthetic" if name in SYNTHETIC_DATASET_NAMES else "Public real-world / package"
                 ),
                 "source": (
                     "generated in script"
-                    if name.startswith("Synth")
+                    if name in SYNTHETIC_DATASET_NAMES
                     else "scikit-learn or statsmodels"
                 ),
             }
@@ -2674,12 +3469,10 @@ def _scenario_details_for_dashboard(df: pd.DataFrame, scenario: str) -> list[dic
 
 
 def make_data(details: list[dict[str, Any]]) -> dict[str, Any]:
-    """Build dashboard data with selectable HUGIML path scenarios.
+    """Build dashboard data for selectable HUGIML configuration options.
 
-    The active data object has the same shape as the legacy dashboard data, so
-    existing charts/tables continue to work. When both HUGIML scenarios are
-    present in the checkpoint, a ``dashboard_scenarios`` array is embedded; the
-    HTML dropdown swaps between those data objects client-side.
+    Each option keeps the same chart and table schema. Baseline rows are shared,
+    while the HUGIML rows are selected from the requested configuration.
     """
     details = _normalize_detail_rows_for_assembly(details)
     df = pd.DataFrame(details)
@@ -2738,21 +3531,35 @@ def extract_original_data(html_path: Path) -> dict[str, Any]:
 def summary_comparison(
     original_html: Path, new_data: dict[str, Any], out_csv: Path
 ) -> pd.DataFrame:
-    new = pd.DataFrame(new_data["overall"])[
-        ["model", "mean_auc", "mean_rank", "strict_wins", "tied_best_count", "mean_complexity"]
+    comparison_columns = [
+        "model",
+        "mean_auc",
+        "mean_rank",
+        "strict_wins",
+        "tied_best_count",
+        "mean_model_units",
+        "mean_model_inspection_units",
+        "mean_instance_inspection_units",
+        "instance_inspection_ci_lower",
+        "instance_inspection_ci_upper",
     ]
+    new_frame = pd.DataFrame(new_data["overall"])
+    new = new_frame.reindex(columns=comparison_columns)
     try:
         original = extract_original_data(original_html)
-        old = pd.DataFrame(original["overall"])[
-            ["model", "mean_auc", "mean_rank", "strict_wins", "tied_best_count", "mean_complexity"]
-        ]
+        old_frame = pd.DataFrame(original["overall"])
+        old = old_frame.reindex(columns=comparison_columns)
         old = old.rename(
             columns={
                 "mean_auc": "mean_auc_earlier",
                 "mean_rank": "mean_rank_earlier",
                 "strict_wins": "strict_wins_earlier",
                 "tied_best_count": "tied_best_count_earlier",
-                "mean_complexity": "mean_complexity_earlier",
+                "mean_model_units": "mean_model_units_earlier",
+                "mean_model_inspection_units": "mean_model_inspection_units_earlier",
+                "mean_instance_inspection_units": "mean_instance_inspection_units_earlier",
+                "instance_inspection_ci_lower": "instance_inspection_ci_lower_earlier",
+                "instance_inspection_ci_upper": "instance_inspection_ci_upper_earlier",
             }
         )
         new = new.rename(
@@ -2761,7 +3568,11 @@ def summary_comparison(
                 "mean_rank": "mean_rank_new",
                 "strict_wins": "strict_wins_new",
                 "tied_best_count": "tied_best_count_new",
-                "mean_complexity": "mean_complexity_new",
+                "mean_model_units": "mean_model_units_new",
+                "mean_model_inspection_units": "mean_model_inspection_units_new",
+                "mean_instance_inspection_units": "mean_instance_inspection_units_new",
+                "instance_inspection_ci_lower": "instance_inspection_ci_lower_new",
+                "instance_inspection_ci_upper": "instance_inspection_ci_upper_new",
             }
         )
         comp = old.merge(new, on="model")
@@ -2775,7 +3586,11 @@ def summary_comparison(
                 "mean_rank": "mean_rank_new",
                 "strict_wins": "strict_wins_new",
                 "tied_best_count": "tied_best_count_new",
-                "mean_complexity": "mean_complexity_new",
+                "mean_model_units": "mean_model_units_new",
+                "mean_model_inspection_units": "mean_model_inspection_units_new",
+                "mean_instance_inspection_units": "mean_instance_inspection_units_new",
+                "instance_inspection_ci_lower": "instance_inspection_ci_lower_new",
+                "instance_inspection_ci_upper": "instance_inspection_ci_upper_new",
             }
         )
     out_csv.parent.mkdir(parents=True, exist_ok=True)
@@ -2789,7 +3604,7 @@ def _default_dashboard_template() -> str:
 <script src=\"https://cdn.plot.ly/plotly-2.35.2.min.js\"></script>
 <style>body{font-family:system-ui,Segoe UI,Arial,sans-serif;margin:24px;background:#f8fafc;color:#111827}.card{background:white;border:1px solid #e5e7eb;border-radius:14px;padding:18px;margin:16px 0;box-shadow:0 1px 2px #0001}.plot{height:430px;overflow:visible}.grid-2{display:grid;grid-template-columns:1fr 1fr;gap:16px}table{border-collapse:collapse;width:100%;font-size:13px}th,td{border-bottom:1px solid #e5e7eb;padding:8px;text-align:left;vertical-align:top}th{background:#f3f4f6}.meta{color:#6b7280;font-size:13px}</style>
 </head><body><h1>HUGIML Benchmark Dashboard</h1><div class=\"meta\">Friedman p-value: pending</div>
-<section class=\"grid-2\"><div class=\"card\"><h2>Mean AUC by model</h2><div id=\"meanAuc\" class=\"plot\"></div></div><div class=\"card\"><h2>Complexity vs performance</h2><div id=\"complexityPerf\" class=\"plot\"></div></div></section>
+<section class=\"grid-2\"><div class=\"card\"><h2>Mean AUC by model</h2><div id=\"meanAuc\" class=\"plot\"></div></div><div class=\"card\"><h2>Model inspection units vs performance</h2><div id=\"complexityPerf\" class=\"plot\"></div></div></section>
 <section class=\"card\"><h2>Dataset × model heatmap</h2><div id=\"aucHeat\" class=\"plot\"></div></section>
 <script>
 const DATA={};
@@ -2801,7 +3616,7 @@ function renderBase(){
   Plotly.react('meanAuc',[{type:'bar',x:models,y:auc}],{margin:{l:55,r:30,t:20,b:100},yaxis:{title:'Mean AUC',range:[Math.max(0,Math.min(...auc)-0.03),1.01]},xaxis:{automargin:true}}, {responsive:true});
   const details=DATA.details||[]; const rows=details.filter(r=>r.complexity!=null && r.auc!=null);
   const traces=[...new Set(rows.map(r=>r.model))].map((m,i)=>{const sub=rows.filter(r=>r.model===m);return {type:'scatter',mode:'markers',name:m,x:sub.map(r=>r.complexity),y:sub.map(r=>r.auc),text:sub.map(r=>r.dataset),marker:{size:12,line:{width:1}},cliponaxis:false};});
-  Plotly.react('complexityPerf',traces,{margin:{l:70,r:80,t:20,b:70},xaxis:{title:'Complexity',type:'log',automargin:true},yaxis:{title:'AUC',automargin:true,range:[0,1.03]},legend:{orientation:'h',y:-0.22}}, {responsive:true});
+  Plotly.react('complexityPerf',traces,{margin:{l:70,r:80,t:20,b:70},xaxis:{title:'Model inspection units',type:'log',automargin:true},yaxis:{title:'AUC',automargin:true,range:[0,1.03]},legend:{orientation:'h',y:-0.22}}, {responsive:true});
   const ds=[...new Set((DATA.heat||[]).map(r=>r.dataset))]; const ms=[...new Set((DATA.heat||[]).map(r=>r.model))];
   const z=ds.map(d=>ms.map(m=>{const r=(DATA.heat||[]).find(x=>x.dataset===d&&x.model===m);return r?r.auc:null;}));
   Plotly.react('aucHeat',[{type:'heatmap',x:ms,y:ds,z:z}],{margin:{l:220,r:30,t:20,b:120},xaxis:{automargin:true},yaxis:{automargin:true}}, {responsive:true});
@@ -3092,7 +3907,6 @@ def _compiler_probe(command: str | None) -> dict[str, Any]:
 
 def _hugiml_module_metadata() -> dict[str, Any]:
     out: dict[str, Any] = {
-        "package_import_path": HUGIML_IMPORTED_FROM,
         "package_version_attr": getattr(_hugiml_pkg, "__version__", None),
         "distributions": {},
     }
@@ -3195,6 +4009,42 @@ def _native_build_metadata() -> dict[str, Any]:
         "compiler_version_probes": compilers,
         "native_extension_linkage": linkage,
     }
+
+
+def _sanitize_sbom_local_paths(sbom: dict[str, Any], *, out_dir: Path) -> dict[str, Any]:
+    """Replace the local output-directory path recorded anywhere in the SBOM
+    (the top-level "benchmark.out_dir" field, and every per-artifact "path"
+    under "artifacts" -- each artifact path is out_dir/<filename>, so it
+    carries the same prefix) with a stable placeholder. Mirrors
+    experiments/scalability/scalability_dashboard.py's
+    ``_sanitize_local_paths``: the "Reproducibility / SBOM manifest" is
+    documented as shareable output, so the one local path this script
+    chooses (where to write results) should not leak the machine/user's
+    directory structure. Broader scrubbing of every possibly-local path
+    recorded elsewhere in the manifest (installed-package locations,
+    sys.path entries, working directory) is intentionally out of scope
+    here, same as in the scalability dashboard's version of this function.
+
+    Operates on every string value in the (nested dict/list) structure
+    rather than only known field names, so it also catches the artifact
+    paths without having to enumerate each one.
+    """
+    raw = str(out_dir)
+    resolved = str(Path(out_dir).resolve())
+    needles = [n for n in {raw, resolved} if n]
+
+    def _walk(value: Any) -> Any:
+        if isinstance(value, str):
+            for needle in needles:
+                value = value.replace(needle, "<output-dir>")
+            return value
+        if isinstance(value, dict):
+            return {k: _walk(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [_walk(v) for v in value]
+        return value
+
+    return _walk(copy.deepcopy(sbom))
 
 
 def build_reproducibility_sbom(
@@ -3302,36 +4152,6 @@ def build_reproducibility_sbom(
     )
 
 
-def _render_reproducibility_sbom_html(sbom: dict[str, Any]) -> str:
-    pretty = json.dumps(_safe_jsonable(sbom), indent=2, sort_keys=True, allow_nan=False)
-    escaped = html.escape(pretty)
-    generated = html.escape(str(sbom.get("generated_utc", "")))
-    return f"""
-<!-- BEGIN HUGIML_REPRODUCIBILITY_SBOM -->
-<section class="card" id="reproducibilitySbom" style="margin-top:16px">
-  <details>
-    <summary style="cursor:pointer;font-weight:700">Reproducibility / SBOM manifest</summary>
-    <div class="meta" style="margin:8px 0 12px 0">
-      Generated: {generated}. This collapsed section records benchmark configuration, artifact hashes, Python packages,
-      source fingerprints, git state, and discoverable native/C++ extension build metadata.
-    </div>
-    <pre style="white-space:pre-wrap;overflow:auto;max-height:640px;background:#0f172a;color:#e5e7eb;border-radius:12px;padding:14px;font-size:12px;line-height:1.45">{escaped}</pre>
-  </details>
-</section>
-<!-- END HUGIML_REPRODUCIBILITY_SBOM -->
-"""
-
-
-def _ensure_reproducibility_sbom_ui(text: str, sbom: dict[str, Any]) -> str:
-    text = re.sub(
-        r"\n?<!-- BEGIN HUGIML_REPRODUCIBILITY_SBOM -->.*?<!-- END HUGIML_REPRODUCIBILITY_SBOM -->\n?",
-        "\n",
-        text,
-        flags=re.S,
-    )
-    return _inject_before_body_end(text, _render_reproducibility_sbom_html(sbom))
-
-
 def _ensure_dashboard_scope_summary_ui(text: str) -> str:
     if "scopeSummaryTables" in text:
         return text
@@ -3358,8 +4178,8 @@ def _ensure_dashboard_scope_summary_ui(text: str) -> str:
       const scopeRows=rows.filter(r=>r.scope===scope).slice().sort((a,b)=>(Number(b.mean_auc||-1)-Number(a.mean_auc||-1)) || (Number(a.mean_rank||999)-Number(b.mean_rank||999)));
       const t=tests.find(x=>x.scope===scope)||{};
       const meta=`datasets=${t.n_datasets ?? ''} · best mean AUC=${esc(t.best_mean_auc_model||'')}${t.best_mean_auc==null?'':' ('+fmt(t.best_mean_auc)+')'} · HUGIML mean AUC=${fmt(t.hugiml_mean_auc)} · Friedman p=${fmt(t.friedman_p)}`;
-      return `<div style="margin-top:14px"><h3 style="margin:8px 0 4px 0">${esc(scope)}</h3><div class="meta">${meta}</div><div style="overflow:auto;margin-top:8px"><table><thead><tr><th>Model</th><th>n</th><th>Mean AUC</th><th>Median AUC</th><th>Mean F1</th><th>Mean accuracy</th><th>Mean rank</th><th>Strict wins</th><th>Tied best</th><th>Mean complexity</th><th>Mean fit s</th></tr></thead><tbody>` +
-        scopeRows.map(r=>`<tr><td>${esc(r.model)}</td><td>${esc(r.n_datasets)}</td><td>${fmt(r.mean_auc)}</td><td>${fmt(r.median_auc)}</td><td>${fmt(r.mean_f1)}</td><td>${fmt(r.mean_accuracy)}</td><td>${fmt2(r.mean_rank)}</td><td>${esc(r.strict_wins)}</td><td>${esc(r.tied_best_count)}</td><td>${fmt2(r.mean_complexity)}</td><td>${fmt(r.mean_fit_seconds)}</td></tr>`).join('') +
+      return `<div style="margin-top:14px"><h3 style="margin:8px 0 4px 0">${esc(scope)}</h3><div class="meta">${meta}</div><div style="overflow:auto;margin-top:8px"><table><thead><tr><th>Model</th><th>n</th><th>Mean AUC</th><th>Median AUC</th><th>Mean F1</th><th>Mean accuracy</th><th>Mean rank</th><th>Strict wins</th><th>Tied best</th><th>Mean model inspection units</th><th>Mean instance inspection units (95% CI)</th><th>Mean fit s</th></tr></thead><tbody>` +
+        scopeRows.map(r=>`<tr><td>${esc(r.model)}</td><td>${esc(r.n_datasets)}</td><td>${fmt(r.mean_auc)}</td><td>${fmt(r.median_auc)}</td><td>${fmt(r.mean_f1)}</td><td>${fmt(r.mean_accuracy)}</td><td>${fmt2(r.mean_rank)}</td><td>${esc(r.strict_wins)}</td><td>${esc(r.tied_best_count)}</td><td>${fmt2(r.mean_model_inspection_units ?? r.mean_complexity)}</td><td>${r.mean_instance_inspection_units==null?'':fmt2(r.mean_instance_inspection_units)+' ('+fmt2(r.instance_inspection_ci_lower)+'–'+fmt2(r.instance_inspection_ci_upper)+')'}</td><td>${fmt(r.mean_fit_seconds)}</td></tr>`).join('') +
         `</tbody></table></div></div>`;
     }).join('');
   }
@@ -3467,51 +4287,48 @@ def _ensure_dashboard_scenario_ui(text: str, data: dict[str, Any]) -> str:
     if len(scenarios) < 2:
         return text
 
-    # Keep the existing dashboard theme/layout, but make the header controls
-    # read as a right-aligned control group: theme buttons first, then the
-    # HUGIML path dropdown as the rightmost control. This avoids stacking both
-    # controls from the same left edge while preserving the original header.
-    scenario_css = (
-        '.theme-switcher{display:flex;gap:10px;flex-wrap:wrap;justify-content:flex-end;'
-        'align-items:flex-end;min-width:min(620px,100%);margin-left:auto}\n'
-        '.theme-switcher .theme-btn{order:1}\n'
-        '.theme-switcher .scenario-control{order:2;width:270px;max-width:270px;'
-        'min-width:240px;text-align:left}\n'
-        '@media(max-width:760px){.theme-switcher{width:100%;justify-content:flex-start}'
-        '.theme-switcher .scenario-control{width:100%;max-width:none}}'
+    options = "".join(
+        f'<option value="{html.escape(str(item.get("id", "")))}">'
+        f'{html.escape(str(item.get("label", item.get("id", ""))))}</option>'
+        for item in scenarios
     )
-    old_theme_css = '.theme-switcher{display:flex;gap:8px;flex-wrap:wrap;justify-content:flex-end}'
-    if scenario_css not in text:
-        if old_theme_css in text:
-            text = text.replace(old_theme_css, scenario_css, 1)
-        elif '</style>' in text:
-            text = text.replace('</style>', scenario_css + '\n</style>', 1)
+    select_markup = (
+        '<div class="control scenario-control"><label>HUGIML path</label>'
+        f'<select id="hugimlScenarioSelect">{options}</select></div>'
+    )
 
+    text = re.sub(
+        r'<div class="scenario-panes" id="hugimlScenarioPanes".*?</div>',
+        '',
+        text,
+        flags=re.S,
+    )
+    text = re.sub(
+        r'<div class="control scenario-control"><label>HUGIML path</label>'
+        r'<select id="hugimlScenarioSelect">.*?</select></div>',
+        select_markup,
+        text,
+        count=1,
+        flags=re.S,
+    )
     if 'id="hugimlScenarioSelect"' not in text:
-        options = "".join(
-            f'<option value="{str(s.get("id", ""))}">{str(s.get("label", s.get("id", "")))}</option>'
-            for s in scenarios
-        )
-        selector = (
-            '<div class="control scenario-control">'
-            '<label>HUGIML path</label>'
-            f'<select id="hugimlScenarioSelect">{options}</select>'
-            '</div>'
-        )
         if '<div class="theme-switcher">' in text:
-            text = text.replace('<div class="theme-switcher">', '<div class="theme-switcher">' + selector, 1)
+            text = text.replace(
+                '<div class="theme-switcher">',
+                '<div class="theme-switcher">' + select_markup,
+                1,
+            )
         elif '<section class="hero">' in text:
-            text = text.replace('<section class="hero">', '<section class="hero">' + selector, 1)
+            text = text.replace('<section class="hero">', '<section class="hero">' + select_markup, 1)
 
-    scenario_script_re = (
-        r"\n<script>\s*\(function\(\)\{\s*"
-        r"if \(typeof DASHBOARD_SCENARIOS === 'undefined'.*?"
-        r"document\.getElementById\('hugimlScenarioSelect'\);.*?"
-        r"\}\)\(\);\s*</script>\s*"
+    text = re.sub(
+        r'\.scenario-panes\{.*?@media\(max-width:760px\)\{\.theme-switcher.*?\}\}',
+        '',
+        text,
+        flags=re.S,
     )
-    text = re.sub(scenario_script_re, "\n", text, flags=re.S)
 
-    js = r"""
+    runtime = r"""
 <script>
 (function(){
   if (typeof DASHBOARD_SCENARIOS === 'undefined' || !Array.isArray(DASHBOARD_SCENARIOS) || DASHBOARD_SCENARIOS.length < 2) return;
@@ -3527,12 +4344,14 @@ def _ensure_dashboard_scenario_ui(text: str, data: dict[str, Any]) -> str:
     document.querySelectorAll('.card.stat').forEach(card=>{
       const lab=card.querySelector('.label');
       if(lab && lab.textContent.trim()===label){
-        const val=card.querySelector('.value'); const s=card.querySelector('.sub');
-        if(val) val.textContent=value; if(s) s.textContent=sub;
+        const val=card.querySelector('.value');
+        const detail=card.querySelector('.sub');
+        if(val) val.textContent=value;
+        if(detail) detail.textContent=sub;
       }
     });
   }
-  function significantCount(rows){return (rows||[]).filter(r=>r.significant_holm_0_05).length;}
+  function significantCount(rows){return (rows||[]).filter(row=>row.significant_holm_0_05).length;}
   function setSignificantPairsMeta(){
     const rows=DATA.pairwise_all||[];
     const sig=significantCount(rows);
@@ -3548,24 +4367,24 @@ def _ensure_dashboard_scenario_ui(text: str, data: dict[str, Any]) -> str:
     const overall=(DATA.overall||[]).slice();
     if(!overall.length) return;
     const best=overall.slice().sort((a,b)=>(Number(b.mean_auc||-1)-Number(a.mean_auc||-1))||(Number(a.mean_rank||999)-Number(b.mean_rank||999)))[0];
-    const hug=overall.find(r=>r.model==='HUGIML')||{};
+    const hug=overall.find(row=>row.model==='HUGIML')||{};
     const bestRank=overall.slice().sort((a,b)=>(Number(a.mean_rank||999)-Number(b.mean_rank||999))||(Number(b.mean_auc||-1)-Number(a.mean_auc||-1)))[0];
     const p=Number((((DATA.global||[])[0]||{}).p_value));
-    const budgetOver=(DATA.budget||[]).reduce((s,r)=>s+Number(r.n_over_budget||0),0);
+    const budgetOver=(DATA.budget||[]).reduce((sum,row)=>sum+Number(row.n_over_budget||0),0);
     const vsRows=DATA.vs_hugiml||[];
     const sig=significantCount(vsRows);
     setStat('Best mean AUC',fmt(best.mean_auc),best.model||'');
-    setStat('HUGIML mean AUC',fmt(hug.mean_auc),`mean complexity: ${fmt(hug.mean_complexity,1)} patterns`);
+    setStat('HUGIML mean AUC',fmt(hug.mean_auc),`mean model inspection units: ${fmt(hug.mean_model_inspection_units ?? hug.mean_complexity,1)} · mean instance inspection units: ${fmt(hug.mean_instance_inspection_units,1)}`);
     setStat('Best mean rank',fmt(bestRank.mean_rank,2),bestRank.model||'');
     setStat('Global rank test',fmt(p),Number.isFinite(p)&&p<0.05?'Significant global rank differences among models':'No significant global rank difference detected');
     setStat('Pairwise vs HUGIML',sig ? `${sig} significant` : 'None significant',`HUGIML vs ${vsRows.length} baselines, Holm-adjusted`);
-    setStat('Budget violations',String(budgetOver),'budgeted tree fits exceeded 100 leaves');
+    setStat('Budget violations',String(budgetOver),'budgeted fits exceeded __TREE_BUDGET__ model inspection units');
     document.querySelectorAll('.chip').forEach(chip=>{
       if(chip.textContent.includes('Friedman p-value:')) chip.textContent='Friedman p-value: '+fmt(p);
     });
-    document.querySelectorAll('.callout').forEach(c=>{
-      if(c.textContent.includes('Global comparison:')) c.innerHTML='<strong>Global comparison:</strong> The Friedman test shows '+(Number.isFinite(p)&&p<0.05?'significant global rank differences among models':'no significant global rank difference at alpha 0.05')+'. It is a global rank test and does not identify which model pairs differ.';
-      if(c.textContent.includes('HUGIML-specific comparison:')) c.innerHTML='<strong>HUGIML-specific comparison:</strong> '+(sig ? `${sig} of ${vsRows.length} HUGIML-vs-baseline comparisons are significant after Holm correction.` : `No HUGIML-vs-baseline comparison is significant after Holm correction across the ${vsRows.length} focused tests.`);
+    document.querySelectorAll('.callout').forEach(callout=>{
+      if(callout.textContent.includes('Global comparison:')) callout.innerHTML='<strong>Global comparison:</strong> The Friedman test shows '+(Number.isFinite(p)&&p<0.05?'significant global rank differences among models':'no significant global rank difference at alpha 0.05')+'. It is a global rank test and does not identify which model pairs differ.';
+      if(callout.textContent.includes('HUGIML-specific comparison:')) callout.innerHTML='<strong>HUGIML-specific comparison:</strong> '+(sig ? `${sig} of ${vsRows.length} HUGIML-vs-baseline comparisons are significant after Holm correction.` : `No HUGIML-vs-baseline comparison is significant after Holm correction across the ${vsRows.length} focused tests.`);
     });
     setSignificantPairsMeta();
   }
@@ -3578,14 +4397,17 @@ def _ensure_dashboard_scenario_ui(text: str, data: dict[str, Any]) -> str:
     if(typeof adjustComplexityCharts==='function') setTimeout(adjustComplexityCharts,0);
   }
   function applyScenario(id){
-    const entry=DASHBOARD_SCENARIOS.find(s=>s.id===id) || DASHBOARD_SCENARIOS[0];
-    Object.keys(DATA).forEach(k=>delete DATA[k]);
+    const entry=DASHBOARD_SCENARIOS.find(item=>item.id===id) || DASHBOARD_SCENARIOS[0];
+    Object.keys(DATA).forEach(key=>delete DATA[key]);
     Object.assign(DATA, clone(entry.data));
     DATA.dashboard_scenarios = DASHBOARD_SCENARIOS;
+    DATA.default_hugiml_scenario = entry.id;
     DATA.active_hugiml_scenario = entry.id;
     DATA.active_hugiml_scenario_label = entry.label;
     DATA.active_hugiml_grid_name = entry.grid_name;
     window.DATA = DATA;
+    const select=document.getElementById('hugimlScenarioSelect');
+    if(select) select.value=entry.id;
     rerender();
   }
   const select=document.getElementById('hugimlScenarioSelect');
@@ -3600,22 +4422,129 @@ def _ensure_dashboard_scenario_ui(text: str, data: dict[str, Any]) -> str:
 })();
 </script>
 """
-    if "DASHBOARD_SCENARIOS" in text and "function applyScenario" not in text:
-        text = _inject_before_body_end(text, js)
+    runtime = runtime.replace("__TREE_BUDGET__", f"{BUDGET:g}")
+    marker = "if (typeof DASHBOARD_SCENARIOS === 'undefined'"
+    marker_pos = text.rfind(marker)
+    if marker_pos >= 0:
+        script_start = text.rfind('<script>', 0, marker_pos)
+        script_end = text.find('</script>', marker_pos)
+        if script_start >= 0 and script_end >= 0:
+            text = text[:script_start] + runtime + text[script_end + len('</script>'):]
+    else:
+        text = _inject_before_body_end(text, runtime)
     return text
 
+
+def _remove_embedded_reproducibility_section(text: str) -> str:
+    return re.sub(
+        r'<!-- BEGIN HUGIML_REPRODUCIBILITY_SBOM -->.*?'
+        r'<!-- END HUGIML_REPRODUCIBILITY_SBOM -->',
+        '',
+        text,
+        flags=re.S,
+    )
+
+
+def _remove_embedded_methodology_section(text: str) -> str:
+    return re.sub(
+        r'<!-- BEGIN HUGIML_METHODOLOGY -->.*?'
+        r'<!-- END HUGIML_METHODOLOGY -->',
+        '',
+        text,
+        flags=re.S,
+    )
+
+
+def _methodology_section_html(methodology: dict[str, Any]) -> str:
+    def esc(value: Any) -> str:
+        return html.escape(str(value), quote=True)
+
+    def bullet_list(items: list[Any]) -> str:
+        return '<ul>' + ''.join(f'<li>{esc(item)}</li>' for item in items) + '</ul>'
+
+    model_cards = []
+    for model in methodology.get('models', []):
+        parameter_rows = ''.join(
+            '<tr>'
+            f'<th scope="row">{esc(row.get("parameter", ""))}</th>'
+            f'<td>{esc(", ".join(str(value) for value in row.get("values", [])))}</td>'
+            '</tr>'
+            for row in model.get('parameters', [])
+        )
+        model_cards.append(
+            '<article class="methodology-model">'
+            f'<h4>{esc(model.get("model", ""))}</h4>'
+            f'<div class="methodology-meta">Search space: {esc(model.get("grid_name", ""))} · '
+            f'{esc(model.get("candidate_count", 0))} candidate configurations</div>'
+            '<div class="methodology-table-wrap"><table class="methodology-table">'
+            '<thead><tr><th>Parameter</th><th>Values considered</th></tr></thead>'
+            f'<tbody>{parameter_rows}</tbody></table></div>'
+            f'<p><strong>Constant settings:</strong> {esc("; ".join(model.get("constant_settings", [])))}</p>'
+            f'<p><strong>Complexity definition:</strong> {esc(model.get("complexity", ""))}</p>'
+            '</article>'
+        )
+
+    # The methodology cards are intentionally arranged as two five-model rows.
+    # This ordering is local to the methodology section and does not alter the
+    # model ordering used by charts, tables, rankings, or exported results.
+    methodology_rows = [model_cards[:5], model_cards[5:10]]
+    model_rows_html = ''.join(
+        '<div class="methodology-row-scroll"><div class="methodology-model-grid">'
+        + ''.join(row)
+        + '</div></div>'
+        for row in methodology_rows
+        if row
+    )
+
+    return f"""<!-- BEGIN HUGIML_METHODOLOGY -->
+<style>
+.methodology-card{{margin-top:18px}}
+.methodology-card details{{border:0}}
+.methodology-card summary{{cursor:pointer;font-weight:750;font-size:1.08rem;list-style-position:outside;padding:4px 0}}
+.methodology-card summary::marker{{color:var(--accent,#2563eb)}}
+.methodology-content{{padding-top:14px}}
+.methodology-content h3{{margin:20px 0 8px;font-size:1rem}}
+.methodology-content h4{{margin:0 0 4px;font-size:.98rem}}
+.methodology-content ul{{margin:8px 0 0;padding-left:22px}}
+.methodology-content li{{margin:5px 0;line-height:1.45}}
+.methodology-row-scroll{{overflow-x:auto;margin-top:12px;padding-bottom:4px}}
+.methodology-model-grid{{display:grid;grid-template-columns:repeat(5,minmax(280px,1fr));gap:14px;min-width:1456px}}
+.methodology-model{{border:1px solid var(--border,#d9e1ec);border-radius:12px;padding:14px;background:var(--panel,#fff)}}
+.methodology-meta{{font-size:.82rem;color:var(--muted,#64748b);margin-bottom:10px}}
+.methodology-table-wrap{{overflow-x:auto}}
+.methodology-table{{width:100%;border-collapse:collapse;font-size:.82rem}}
+.methodology-table th,.methodology-table td{{padding:6px 8px;border-bottom:1px solid var(--border,#e2e8f0);text-align:left;vertical-align:top}}
+.methodology-table th[scope=row]{{width:36%;font-weight:650}}
+.methodology-model p{{font-size:.82rem;line-height:1.45;margin:10px 0 0}}
+@media(max-width:720px){{.methodology-model-grid{{grid-template-columns:repeat(5,minmax(250px,1fr));min-width:1306px}}}}
+</style>
+<section class="card methodology-card">
+  <details id="benchmarkMethodology">
+    <summary>{esc(methodology.get('title', 'Methodology and parameter search space'))}</summary>
+    <div class="methodology-content">
+      <h3>Cross-validation protocol</h3>
+      {bullet_list(list(methodology.get('protocol', [])))}
+      <h3>Preprocessing and timing</h3>
+      {bullet_list(list(methodology.get('preprocessing', [])))}
+      <h3>Model search spaces</h3>
+      {model_rows_html}
+    </div>
+  </details>
+</section>
+<!-- END HUGIML_METHODOLOGY -->"""
 
 def render_html(
     template_html: Path,
     data: dict[str, Any],
     out_html: Path,
-    reproducibility_sbom: dict[str, Any] | None = None,
 ) -> None:
     text = (
         template_html.read_text(errors="ignore")
         if template_html.exists()
         else _default_dashboard_template()
     )
+    text = _remove_embedded_reproducibility_section(text)
+    text = _remove_embedded_methodology_section(text)
     if "const DATA=" not in text or ";\nconst MODEL_ORDER" not in text:
         text = _default_dashboard_template()
     start = text.index("const DATA=")
@@ -3688,30 +4617,41 @@ def render_html(
     replacements = {
         r"Friedman p-value: [^<]+": f"Friedman p-value: {p_text}",
         r'<div class="label">Best mean AUC</div><div class="value">[^<]+</div><div class="sub">[^<]+</div>': f'<div class="label">Best mean AUC</div><div class="value">{best.mean_auc:.4f}</div><div class="sub">{best.model}</div>',
-        r'<div class="label">HUGIML mean AUC</div><div class="value">[^<]+</div><div class="sub">[^<]+</div>': f'<div class="label">HUGIML mean AUC</div><div class="value">{hug.mean_auc:.4f}</div><div class="sub">mean complexity: {hug.mean_complexity:.1f} patterns</div>',
+        r'<div class="label">HUGIML mean AUC</div><div class="value">[^<]+</div><div class="sub">[^<]+</div>': f'<div class="label">HUGIML mean AUC</div><div class="value">{hug.mean_auc:.4f}</div><div class="sub">mean model inspection units: {hug.mean_model_inspection_units:.1f}; mean instance inspection units: {hug.mean_instance_inspection_units:.1f}</div>',
         r'<div class="label">Best mean rank</div><div class="value">[^<]+</div><div class="sub">[^<]+</div>': f'<div class="label">Best mean rank</div><div class="value">{best_rank.mean_rank:.2f}</div><div class="sub">{best_rank.model}</div>',
         r'<div class="label">Global rank test</div><div class="value">[^<]+</div><div class="sub">[^<]+</div>': f'<div class="label">Global rank test</div><div class="value">{p_text}</div><div class="sub">{global_text}</div>',
         r'<div class="label">Pairwise vs HUGIML</div><div class="value small">[^<]+</div><div class="sub">[^<]+</div>': f'<div class="label">Pairwise vs HUGIML</div><div class="value small">{vs_text}</div><div class="sub">{vs_sub}</div>',
-        r'<div class="label">Budget violations</div><div class="value">[^<]+</div><div class="sub">[^<]+</div>': f'<div class="label">Budget violations</div><div class="value">{budget_over}</div><div class="sub">budgeted tree fits exceeded 100 leaves</div>',
+        r'<div class="label">Budget violations</div><div class="value">[^<]+</div><div class="sub">[^<]+</div>': f'<div class="label">Budget violations</div><div class="value">{budget_over}</div><div class="sub">budgeted fits exceeded {BUDGET:g} model inspection units</div>',
         r"<strong>Global comparison:</strong>[^<]+</div>": f"<strong>Global comparison:</strong> The Friedman test shows {interp}. It is a global rank test and does not identify which model pairs differ.</div>",
         r"<strong>HUGIML-specific comparison:</strong>[^<]+</div>": f"<strong>HUGIML-specific comparison:</strong> {hug_interp}</div>",
     }
-    # Refresh static dashboard copy that predates the scenario/baseline additions.
+    # Refresh static dashboard copy and keep panel size aligned with DATASET_NAMES.
+    dataset_count = len(DATASET_NAMES)
+    real_count = len(REAL_DATASET_NAMES)
+    synthetic_count = len(SYNTHETIC_DATASET_NAMES)
+    text = re.sub(
+        r"A \d+-dataset tabular classification benchmark comparing HUGIML with tuned XGBoost,\s*LightGBM, RandomForest, EBM, and RuleFit baselines\.",
+        f"A {dataset_count}-dataset tabular classification benchmark ({real_count} real-world + {synthetic_count} synthetic) comparing HUGIML with tuned XGBoost, LightGBM, RandomForest, EBM, and RuleFit baselines.",
+        text,
+        flags=re.S,
+    )
+    text = re.sub(r"Datasets(?: configured)?: \d+(?:; embedded completed: \d+)?", f"Datasets: {dataset_count}", text)
+    text = re.sub(r'<div class="callout info" id="templateStatus">.*?</div>', '', text, flags=re.S)
     static_replacements = {
         "A 40-dataset tabular classification benchmark comparing HUGIML with tuned XGBoost,\n        LightGBM, and RandomForest baselines.":
-            "A 50-dataset tabular classification benchmark comparing HUGIML with tuned XGBoost,\n        LightGBM, RandomForest, EBM, and RuleFit baselines.",
+            f"A {dataset_count}-dataset tabular classification benchmark ({real_count} real-world + {synthetic_count} synthetic) comparing HUGIML with tuned XGBoost,\n        LightGBM, RandomForest, EBM, and RuleFit baselines.",
         "HUGIML topK: 30 / 50 / 100": "HUGIML topK: 50 / 100",
         "Models: 7": f"Models: {len(MODEL_ORDER)}",
         "Leaves for tree ensembles; selected patterns for HUGIML":
-            "Leaves for tree ensembles and RuleFit rules; EBM active cells; selected patterns for HUGIML",
+            "Benchmark complexity uses model inspection units for every supported model",
         "Mean model complexity (leaves or patterns)":
-            "Mean model complexity (leaves, rules, active cells, or patterns)",
+            "Mean model inspection units",
     }
     for old, new in static_replacements.items():
         text = text.replace(old, new)
 
     for pat, repl in replacements.items():
-        text = re.sub(pat, repl, text)
+        text = re.sub(pat, repl, text, count=1)
 
     # Keep the significant-all-pairs section description consistent with the actual run.
     # Some templates contain hard-coded copy such as "all 21 tests" or an assertion
@@ -3754,16 +4694,69 @@ def render_html(
         "  Plotly.react('hugFeatureMode',[{type:'bar',x:Object.keys(fm),y:Object.values(fm),marker:{color:theme().colors}}],layout({margin:{l:55,r:15,t:20,b:80},yaxis:{title:'Datasets',gridcolor:theme().grid}}),{displayModeBar:false,responsive:true});\n",
         "",
     )
+    text = text.replace(
+        "range:[.86,1.0]",
+        "range:[Math.max(0,Math.min(...d.map(r=>Number(r.mean_auc)).filter(Number.isFinite))-.02),Math.min(1,Math.max(...d.map(r=>Number(r.mean_auc)).filter(Number.isFinite))+.02)]",
+        1,
+    )
+    text = text.replace(
+        "range:[.88,.95]",
+        "range:[Math.max(0,Math.min(...d.map(r=>Number(r.mean_auc)).filter(Number.isFinite))-.02),Math.min(1,Math.max(...d.map(r=>Number(r.mean_auc)).filter(Number.isFinite))+.02)]",
+        1,
+    )
     text = _ensure_dashboard_scope_summary_ui(text)
     text = _ensure_dashboard_profile_ui(text)
     text = _ensure_dashboard_complexity_rendering(text)
     text = _ensure_dashboard_scenario_ui(text, data)
-    if reproducibility_sbom is not None:
-        text = _ensure_reproducibility_sbom_ui(text, reproducibility_sbom)
+    methodology = data.get("methodology", {}) if isinstance(data, dict) else {}
+    if methodology:
+        text = _inject_before_body_end(text, _methodology_section_html(methodology))
     out_html.parent.mkdir(parents=True, exist_ok=True)
     out_html.write_text(text)
 
 
+
+
+_LOCAL_PROVENANCE_KEYS = {"checkpoint", "out_dir", "template_html"}
+
+
+def _is_local_provenance_key(key: Any) -> bool:
+    name = str(key).lower()
+    return (
+        name in _LOCAL_PROVENANCE_KEYS
+        or name in {"baseline_source", "source_root"}
+        or name.endswith("_imported_from")
+    )
+
+
+_LOCAL_FILE_REFERENCE_RE = re.compile(
+    r'File\s+(["\'])(?:[A-Za-z]:[\\/]|/).*?\1'
+)
+_LOCAL_ABSOLUTE_PATH_RE = re.compile(
+    r'''(?<![A-Za-z0-9_:/])(?:[A-Za-z]:[\\/]|/)(?:[^\s"'<>:,]+[\\/]?)+'''
+)
+
+
+def _sanitize_local_text(value: str) -> str:
+    text = _LOCAL_FILE_REFERENCE_RE.sub('File "<local-path>"', value)
+    return _LOCAL_ABSOLUTE_PATH_RE.sub("<local-path>", text)
+
+
+def _remove_local_provenance(value: Any) -> Any:
+    """Remove machine-specific locations from data written by dashboard assembly."""
+    if isinstance(value, dict):
+        return {
+            key: _remove_local_provenance(item)
+            for key, item in value.items()
+            if not _is_local_provenance_key(key)
+        }
+    if isinstance(value, list):
+        return [_remove_local_provenance(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_remove_local_provenance(item) for item in value)
+    if isinstance(value, str):
+        return _sanitize_local_text(value)
+    return value
 
 
 def assemble_outputs(
@@ -3773,7 +4766,7 @@ def assemble_outputs(
     *,
     include_sbom: bool = False,
 ) -> dict[str, Path]:
-    payload = load_checkpoint(checkpoint)
+    payload = _remove_local_provenance(load_checkpoint(checkpoint))
     details = payload.get("results", [])
     order = {d: i for i, d in enumerate(DATASET_NAMES)}
     mo = {m: i for i, m in enumerate(MODEL_ORDER)}
@@ -3799,7 +4792,12 @@ def assemble_outputs(
             f"missing {len(missing)} pairs, extra {len(extra)} pairs, "
             f"first missing={missing[:5]}, first extra={extra[:5]}"
         )
-    data = make_data(details)
+    data = _remove_local_provenance(make_data(details))
+    methodology = methodology_snapshot(payload)
+    data["methodology"] = methodology
+    for scenario in data.get("dashboard_scenarios", []):
+        if isinstance(scenario, dict) and isinstance(scenario.get("data"), dict):
+            scenario["data"]["methodology"] = methodology
     out_dir.mkdir(parents=True, exist_ok=True)
 
     paths: dict[str, Path] = {
@@ -3810,7 +4808,7 @@ def assemble_outputs(
         "summary_by_scope_csv": out_dir / "summary_by_scope.csv",
         "scope_tests_csv": out_dir / "scope_tests.csv",
         "summary_csv": out_dir / "summary_comparison.csv",
-        "html": out_dir / "hugiml_benchmark_analysis_dashboard_revised.html",
+        "html": out_dir / "hugiml_benchmark_analysis_dashboard.html",
     }
 
     paths["checkpoint"].write_text(json.dumps(_safe_jsonable(payload), indent=2, allow_nan=False))
@@ -3832,9 +4830,10 @@ def assemble_outputs(
             data=data,
             output_paths=paths,
         )
+        sbom = _sanitize_sbom_local_paths(sbom, out_dir=out_dir)
         paths["sbom"].write_text(json.dumps(sbom, indent=2, sort_keys=True, allow_nan=False))
 
-    render_html(template_html, data, paths["html"], reproducibility_sbom=sbom)
+    render_html(template_html, data, paths["html"])
     return paths
 
 
@@ -3924,7 +4923,7 @@ def main(argv=None) -> int:
     ap.add_argument(
         "--include-sbom",
         action="store_true",
-        help="When assembling, emit benchmark_reproducibility_sbom.json and embed a collapsed reproducibility/SBOM section at the bottom of the dashboard HTML",
+        help="When assembling, emit benchmark_reproducibility_sbom.json alongside the dashboard outputs",
     )
     ap.add_argument(
         "--row-cap",
@@ -3973,33 +4972,64 @@ def main(argv=None) -> int:
     if args.max_pairs is not None:
         plan = plan[: args.max_pairs]
 
-    grid = get_hugiml_grid(DEFAULT_HUGIML_GRID_NAME)
+    grid = get_hugiml_grid("performance_ho")
     assert grid.get("feature_mode") == ["original_plus_patterns"]
     assert grid.get("topK") == [50, 100]
     assert grid.get("L") == [1, 2]
     assert grid.get("G") == [0.01, 0.001]
-    interpretability_grid = get_hugiml_grid("interpretability")
-    assert interpretability_grid.get("feature_mode") == ["patterns_only"]
-    assert interpretability_grid.get("interaction_relaxed_mining") == [True]
-    assert interpretability_grid.get("augmented_pair_transforms") == [False]
+    assert grid.get("augmented_pair_transforms") == [True]
+    assert grid.get("convert_binary_to_categorical") == [False]
+    assert grid.get("topk_budget_strict") == [False]
+    relaxed_grid = get_hugiml_grid("interpretability_ho")
+    assert relaxed_grid.get("interaction_relaxed_mining") == [True]
+    assert relaxed_grid.get("augmented_pair_transforms") == [False]
+    assert relaxed_grid.get("convert_binary_to_categorical") == [True]
+    assert len(list(ParameterGrid(relaxed_grid))) == 16
+    assert len(grid.get("base_estimator", [])) == 2
+    assert any(isinstance(estimator, LogisticRegression) for estimator in grid["base_estimator"])
+    _rpte_candidates = [
+        estimator
+        for estimator in grid["base_estimator"]
+        if not isinstance(estimator, LogisticRegression)
+    ]
+    assert len(_rpte_candidates) == 1
+    # sklearn's repr() omits params equal to the class's own __init__
+    # default, and RPTE's leaf_config default happens to also be "3xD", so
+    # repr()-based checks silently pass/fail regardless of what's actually
+    # configured; check get_params() instead.
+    _rpte_inner = getattr(_rpte_candidates[0], "estimator", _rpte_candidates[0])
+    assert _rpte_inner.get_params().get("leaf_config") == "3xD"
+    assert len(list(ParameterGrid(grid))) == 16
     ebm_grid = get_baseline_grid("EBM")
     assert ebm_grid.get("learning_rate") == [0.01, 0.05]
     assert ebm_grid.get("max_bins") == [32, 64]
     assert ebm_grid.get("interactions") == [0, 5]
+    assert len(list(ParameterGrid(ebm_grid))) == 8
     xgb_grid = get_baseline_grid("XGBoost")
     assert xgb_grid.get("n_estimators") == [100, 200]
     assert xgb_grid.get("max_depth") == [3, 4]
     assert xgb_grid.get("learning_rate") == [0.03, 0.1]
+    assert xgb_grid.get("min_child_weight") == [1, 5]
+    assert len(list(ParameterGrid(xgb_grid))) == 16
     assert "subsample" not in xgb_grid
     lgb_grid = get_baseline_grid("LightGBM")
     assert lgb_grid.get("n_estimators") == [100, 200]
     assert lgb_grid.get("learning_rate") == [0.03, 0.1]
     assert lgb_grid.get("num_leaves") == [15, 31]
+    assert lgb_grid.get("min_child_samples") == [10, 20]
+    assert len(list(ParameterGrid(lgb_grid))) == 16
     assert "subsample" not in lgb_grid
+    rf_grid = get_baseline_grid("RandomForest")
+    assert rf_grid.get("max_features") == ["sqrt", 0.5]
+    assert len(list(ParameterGrid(rf_grid))) == 16
+    for model_name in ["XGBoost", "LightGBM", "RandomForest"]:
+        assert len(list(ParameterGrid(get_budgeted_baseline_grid(model_name)))) == 16
     rulefit_grid = get_baseline_grid("RuleFit")
     assert rulefit_grid.get("n_estimators") == [50, 100]
     assert rulefit_grid.get("max_rules") == [50, 100]
     assert rulefit_grid.get("tree_size") == [5, 10]
+    assert len(list(ParameterGrid(rulefit_grid))) == 8
+    assert BUDGET == 200.0
 
     payload = load_checkpoint(checkpoint)
     payload["metadata"].update(
@@ -4014,9 +5044,6 @@ def main(argv=None) -> int:
             "grid_snapshot": grid_snapshot(),
             "hugiml_dashboard_scenarios": HUGIML_SCENARIOS,
             "default_hugiml_dashboard_scenario": DEFAULT_DASHBOARD_HUGIML_SCENARIO,
-            "out_dir": str(out_dir),
-            "checkpoint": str(checkpoint),
-            "template_html": str(template_html),
         }
     )
     done = completed_keys(payload) if args.resume else set()
@@ -4039,6 +5066,7 @@ def main(argv=None) -> int:
             inner_splits=args.inner_splits,
             tune=not args.no_tune,
             random_state=args.random_state,
+            fold_checkpoint_dir=out_dir / "fold_checkpoints",
         )
         row["pair_seconds"] = float(time.perf_counter() - started)
         payload["results"] = [

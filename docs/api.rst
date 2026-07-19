@@ -12,6 +12,24 @@ Core estimator
    :members:
    :show-inheritance:
 
+RPTE downstream model
+---------------------
+
+.. automodule:: hugiml.rpte_bounded_lookahead_leafwise
+   :members:
+   :show-inheritance:
+
+.. automodule:: hugiml.rpte_interpretability
+   :members:
+   :show-inheritance:
+
+Complexity and inspection
+-------------------------
+
+.. automodule:: hugiml.compute_complexity
+   :members:
+   :show-inheritance:
+
 Adaptive binning
 ----------------
 
@@ -125,6 +143,18 @@ Dashboard modules
    :show-inheritance:
 
 .. automodule:: hugiml.dashboard.components.governance_evidence
+   :members:
+   :show-inheritance:
+
+.. automodule:: hugiml.dashboard.dash_app
+   :members:
+   :show-inheritance:
+
+.. automodule:: hugiml.dashboard.launcher
+   :members:
+   :show-inheritance:
+
+.. automodule:: hugiml.dashboard.components.rpte_governance
    :members:
    :show-inheritance:
 

@@ -1,7 +1,7 @@
 Governance Studio dashboard
 ===========================
 
-HUGIML Governance Studio is the Streamlit dashboard and workbench for preparing data, configuring HUGIML runs, comparing candidate models, reviewing model evidence, and assembling governance-ready summaries. The dashboard keeps the existing Workbench/Governance layout and exposes the current evidence views for adaptive binning, augmented pairs, interaction-relaxed mining, survivor-led patterns, feature families, validation, monitoring, and governance review.
+HUGIML Governance Studio provides a Dash interface for preparing data, configuring HUGIML and RPTE runs, comparing candidate models, reviewing model evidence, and assembling governance-ready summaries. The existing lightweight Streamlit interface remains available. Both interfaces use the same model, runner, and governance evidence layers.
 
 Installation and launch
 -----------------------
@@ -11,23 +11,24 @@ Install the dashboard optional dependencies, then launch the installed console c
 .. code-block:: bash
 
    pip install "hugiml-core[dashboard]"
-   hugiml-dashboard
+   hugiml-dashboard                    # Dash, the default interface
+   hugiml-dashboard --ui light         # lightweight Streamlit interface
 
-Dashboard arguments can be passed after the command and are forwarded to the Streamlit app.
-
-For source-tree development, the app can also be launched directly:
+The launcher accepts ``--host``, ``--port``, ``--debug``, ``--no-open``,
+``--cv``, and ``--random-state``. For source-tree development, the interfaces
+can also be launched directly:
 
 .. code-block:: bash
 
+   python -m hugiml.dashboard.dash_app
    python -m streamlit run src/hugiml/dashboard/app.py
-   python -m hugiml.dashboard.app
 
 Workbench workflow
 ------------------
 
 * Choose a demo dataset or upload a tabular file.
 * Review and adjust target, identifier, protected, date, numeric, categorical, and excluded columns.
-* Configure HUGIML and optional comparison models; Workbench Advanced includes the adaptive-binning sample fraction for larger adaptive-binning runs.
+* Configure HUGIML, the optional RPTE downstream model, and comparison models; advanced controls include adaptive binning, representation choices, and RPTE tree-growth settings.
 * Run a single configuration or a small candidate grid.
 * Compare models using validation metrics and timing information.
 * Inspect feature roles, pattern evidence, case-level explanations, policy checks, and governance summaries.
@@ -42,7 +43,8 @@ The dashboard includes the full workbench experience plus governance evidence pa
 * Adaptive-binning evidence, including selected bin counts and information-gain summaries where available.
 * Augmented-pair traceability for product, absolute-difference, sum, and signed-difference features used by the downstream estimator.
 * Interaction-relaxed mining evidence, including survivor-source counts, best partners, and survivor-led pattern flags where available.
-* Feature-family review across original, pattern, and augmented representations.
+* Feature-family review across original, pattern, augmented, RPTE tree-leaf, and RPTE direct-term representations.
+* RPTE governance views for backend choice, accepted tree paths, direct source terms, coefficients, support, provenance, complexity, and instance inspection.
 * Pattern inventory, coefficient review, support coverage, and population-coverage summaries.
 * Case-level prediction review with active pattern evidence.
 * Missingness, drift, monitoring report parsing, and fairness-oriented checks.
@@ -61,7 +63,10 @@ Numeric columns with exactly two observed values are treated as categorical indi
 Installed command behavior
 --------------------------
 
-The ``hugiml-dashboard`` console script points to ``hugiml.dashboard.app:main``. When invoked from an installed package, it starts Streamlit with the packaged app path. When already running under Streamlit, it executes the dashboard directly.
+The ``hugiml-dashboard`` console script points to
+``hugiml.dashboard.launcher:main``. It starts the Dash interface by default and
+selects the Streamlit interface when ``--ui light`` is supplied or
+``HUGIML_UI=light`` is set.
 
 Dashboard API modules
 ---------------------
@@ -81,5 +86,13 @@ The following modules back the dashboard and are included in the Sphinx build so
    :no-index:
 
 .. automodule:: hugiml.dashboard.display
+   :members:
+   :no-index:
+
+.. automodule:: hugiml.dashboard.dash_app
+   :members:
+   :no-index:
+
+.. automodule:: hugiml.dashboard.components.rpte_governance
    :members:
    :no-index:

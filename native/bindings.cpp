@@ -23,6 +23,8 @@ void bind_transaction(py::module_& m);
 void bind_pattern(py::module_& m);
 void bind_openmp(py::module_& m);
 void bind_augmented_pair(py::module_& m);
+void bind_rpte_scoring(py::module_& m);
+void bind_rpte_tree(py::module_& m);
 
 PYBIND11_MODULE(_hugiml_core, m)
 {
@@ -31,4 +33,6 @@ PYBIND11_MODULE(_hugiml_core, m)
     bind_pattern(m);
     bind_openmp(m);
     bind_augmented_pair(m);
+    bind_rpte_scoring(m);
+    bind_rpte_tree(m);
 }
