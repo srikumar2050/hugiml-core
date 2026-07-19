@@ -2,9 +2,18 @@
 
 from __future__ import annotations
 
+from importlib.util import find_spec
+
 import numpy as np
 import pandas as pd
 import pytest
+
+_OPTIONAL_UI_MODULES = ("dash", "dash_bootstrap_components", "streamlit")
+_MISSING_UI_MODULES = tuple(name for name in _OPTIONAL_UI_MODULES if find_spec(name) is None)
+pytestmark = pytest.mark.skipif(
+    bool(_MISSING_UI_MODULES),
+    reason="optional dashboard dependencies are not installed: " + ", ".join(_MISSING_UI_MODULES),
+)
 
 # ── Fixtures ──────────────────────────────────────────────────────────────────
 

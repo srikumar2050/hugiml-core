@@ -155,6 +155,15 @@ elif is_macos:
 
     libomp_prefix = _candidate_libomp_prefix()
     if libomp_prefix:
+        # Homebrew libomp follows the machine architecture. A universal Python
+        # installation may otherwise request both arm64 and x86_64 for an
+        # editable build while linking against one native OpenMP installation.
+        # Explicit ARCHFLAGS and HUGIML_LIBOMP_ROOT settings remain authoritative.
+        if not os.environ.get("ARCHFLAGS") and not os.environ.get("HUGIML_LIBOMP_ROOT"):
+            machine_arch = platform.machine().lower()
+            if machine_arch in {"arm64", "x86_64"}:
+                os.environ["ARCHFLAGS"] = f"-arch {machine_arch}"
+
         deployment_target = os.environ.get("MACOSX_DEPLOYMENT_TARGET", "").strip()
         libomp_dylib = os.path.join(libomp_prefix, "lib", "libomp.dylib")
         libomp_minos = _macos_dylib_minos(libomp_dylib) if os.path.exists(libomp_dylib) else ""

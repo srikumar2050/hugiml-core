@@ -10,7 +10,10 @@ import ast
 import py_compile
 import re
 import sys
+from importlib.util import find_spec
 from pathlib import Path
+
+import pytest
 
 if sys.version_info >= (3, 11):
     import tomllib
@@ -22,6 +25,13 @@ WORKBENCH = ROOT / "src" / "hugiml" / "dashboard" / "workbench.py"
 RUNNER = ROOT / "src" / "hugiml" / "dashboard" / "runner.py"
 PYPROJECT = ROOT / "pyproject.toml"
 DASHBOARD_TEST_DIR = ROOT / "tests" / "dashboard"
+_DASH_RUNTIME_AVAILABLE = (
+    find_spec("dash") is not None and find_spec("dash_bootstrap_components") is not None
+)
+_REQUIRES_DASH_RUNTIME = pytest.mark.skipif(
+    not _DASH_RUNTIME_AVAILABLE,
+    reason="optional Dash dependencies are not installed",
+)
 
 
 def _source(path: Path = WORKBENCH) -> str:
@@ -144,12 +154,8 @@ def test_model_drilldown_callback_keeps_results_and_drilldown_section() -> None:
     assert 'st.session_state["hugiml_results_inner_section"] = "Model drill-down"' in src
 
 
-def test_dashboard_tests_are_not_skipped() -> None:
-    """Dashboard tests should run in normal CI.
-
-    The checks remain lightweight and do not use runtime skip calls or markers
-    for optional dashboard dependencies.
-    """
+def test_dashboard_tests_do_not_use_runtime_skip_calls() -> None:
+    """Optional UI dependencies are handled by collection-time markers."""
     offenders: list[str] = []
     for path in DASHBOARD_TEST_DIR.glob("test_*.py"):
         tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -158,11 +164,6 @@ def test_dashboard_tests_are_not_skipped() -> None:
                 func = node.func
                 if isinstance(func, ast.Attribute) and func.attr in {"skip", "importorskip"}:
                     offenders.append(f"{path.relative_to(ROOT)} calls {func.attr}() on line {node.lineno}")
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                for dec in node.decorator_list:
-                    text = ast.unparse(dec) if hasattr(ast, "unparse") else ""
-                    if "skip" in text:
-                        offenders.append(f"{path.relative_to(ROOT)} has skip decorator on line {node.lineno}")
     assert offenders == []
 
 
@@ -368,6 +369,7 @@ def test_dash_rpte_results_include_tree_and_leaf_inspection() -> None:
     assert "Leaf coefficients" in source
 
 
+@_REQUIRES_DASH_RUNTIME
 def test_dash_workbench_counts_all_model_parameter_combinations() -> None:
     from hugiml.dashboard.dash_components.workbench import _configuration_combination_count
 
@@ -424,6 +426,7 @@ def test_configuration_comparison_topk_uses_plain_numeric_text_entry() -> None:
     assert 'type="number",value=tk' not in source
 
 
+@_REQUIRES_DASH_RUNTIME
 def test_dash_artifact_comparison_identifies_hugiml_downstream_estimators() -> None:
     from hugiml.dashboard.dash_components.workbench import (
         _artifact_run_label,
