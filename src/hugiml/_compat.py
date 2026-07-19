@@ -34,6 +34,17 @@ HUGIMLClassifierNative targets the following sklearn surface:
 * ``__sklearn_tags__`` — introduced in sklearn 1.6 to replace ``_get_tags``.
   ``HUGIMLClassifierNative.__sklearn_tags__`` handles both APIs.
 
+* ``LogisticRegression(penalty=...)`` vs ``l1_ratio=...`` — sklearn >= 1.8
+  deprecates the ``penalty`` string in favor of expressing the L1/L2 mixture
+  through ``l1_ratio`` for every solver (removal targeted for sklearn 1.10),
+  and treats ``l1_ratio`` accordingly once ``penalty`` is left unset. On
+  sklearn < 1.8, ``l1_ratio`` is honored only when ``penalty="elasticnet"``;
+  passing it with any other (or default) ``penalty`` is silently ignored
+  with a ``UserWarning`` and the fit falls back to ``penalty``'s own value
+  -- so the two spellings are not interchangeable and must be chosen by
+  installed version, not simply swapped. ``liblinear_penalty_kwargs``
+  provides the correct one for the installed version.
+
 Supported sklearn range: >= 1.0  (tested through current stable).
 
 Unsupported operations are logged at DEBUG level and raise ImportError as
@@ -47,7 +58,13 @@ from typing import Any
 
 from packaging.version import Version as _V
 
-__all__ = ["check_X_y", "check_array", "sklearn_version", "SKLEARN_VERSION"]
+__all__ = [
+    "check_X_y",
+    "check_array",
+    "sklearn_version",
+    "SKLEARN_VERSION",
+    "liblinear_penalty_kwargs",
+]
 
 logger = logging.getLogger(__name__)
 
@@ -119,3 +136,31 @@ else:
 
         def check_array(X: Any, **kw: Any) -> Any:
             return _vd(_stub, X, reset=False, **kw)
+
+
+# ---------------------------------------------------------------------------
+# LogisticRegression penalty / l1_ratio (see module docstring)
+# ---------------------------------------------------------------------------
+
+_SKLEARN_DEPRECATES_PENALTY_STRING: bool = SKLEARN_VERSION >= _V("1.8")
+
+# solver="liblinear" only ever supports penalty in {"l1", "l2"}.
+_LIBLINEAR_PENALTY_TO_L1_RATIO = {"l1": 1.0, "l2": 0.0}
+
+
+def liblinear_penalty_kwargs(penalty: str) -> dict[str, Any]:
+    """Return the correct ``LogisticRegression(solver="liblinear", ...)``
+    keyword for the requested L1/L2 penalty on the installed sklearn
+    version -- see this module's docstring for why ``penalty=`` and
+    ``l1_ratio=`` are not interchangeable across versions.
+
+    ``penalty`` must be ``"l1"`` or ``"l2"``; any other value is passed
+    through as ``{"penalty": penalty}`` unchanged and left to raise
+    sklearn's own error, exactly as it would without this shim.
+    """
+    if not _SKLEARN_DEPRECATES_PENALTY_STRING:
+        return {"penalty": penalty}
+    l1_ratio = _LIBLINEAR_PENALTY_TO_L1_RATIO.get(penalty)
+    if l1_ratio is None:
+        return {"penalty": penalty}
+    return {"l1_ratio": l1_ratio}

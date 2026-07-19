@@ -24,7 +24,7 @@ def test_native_csr_helpers_return_sorted_indices_when_available():
     core = pytest.importorskip("hugiml._hugiml_core")
     if not hasattr(core, "build_train_matrix_csr"):
         pytest.skip(
-            "installed native extension does not expose build_train_matrix_csr; rebuild/install the v1.1.9 wheel to exercise this contract"
+            "installed native extension does not expose build_train_matrix_csr; rebuild the current native extension to exercise this contract"
         )
 
     from hugiml import HUGIMLClassifier

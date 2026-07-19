@@ -275,7 +275,7 @@ class TestFallbackSerialization:
             os.unlink(path)
 
     def test_schema_version_matches_current_release(self):
-        assert MODEL_SCHEMA_VERSION == 8
+        assert MODEL_SCHEMA_VERSION == 10
 
     def test_min_schema_backward_compat(self):
         assert MIN_SCHEMA_VERSION == 1

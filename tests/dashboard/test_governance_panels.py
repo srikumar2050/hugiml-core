@@ -1,8 +1,7 @@
-"""Dashboard governance-panel regression tests.
+"""Functional tests for dashboard governance panels.
 
-These tests stay dashboard-scoped and avoid launching Streamlit. They validate the
-pure data-shaping helpers and the app wiring for the v1.1.11 audit panels so future
-UI edits do not silently drop governance evidence.
+These tests stay dashboard-scoped and avoid launching Streamlit. They validate
+pure data-shaping helpers and app wiring used by the governance evidence views.
 """
 
 from __future__ import annotations
@@ -298,7 +297,11 @@ def test_dataframe_for_display_stringifies_array_values_without_ambiguous_truth(
 
 def test_validation_page_passes_model_x_y_to_performance():
     app = Path("src/hugiml/dashboard/app.py").read_text()
-    assert 'render_performance(cv_results, model=ctx["model"], X=ctx["X"], y=ctx.get("y"))' in app
+    assert "render_performance(" in app
+    assert 'model=ctx["model"]' in app
+    assert 'X=ctx["X"]' in app
+    assert 'y=ctx.get("y")' in app
+    assert 'evaluation=ctx.get("evaluation")' in app
 
 
 def test_performance_diagnostics_compute_confusion_brier_and_thresholds(monkeypatch):

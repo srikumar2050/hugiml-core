@@ -30,7 +30,7 @@ from sklearn.model_selection import ParameterGrid, train_test_split
 
 from hugiml import HUGIMLClassifier
 from hugiml.governance import generate_model_card, package_audit_artifacts
-from hugiml.hyperparameter_configs import get_hugiml_grid
+from hugiml.hyperparameter_configs import DEFAULT_HUGIML_GRID_NAME, get_hugiml_grid
 from hugiml.pruning import PatternEditor
 
 from .dataset_registry import DatasetRegistry
@@ -307,6 +307,12 @@ class HUGIMLActionOrchestrator:
 
     def _action_explain_model(self, request: ActionRequest) -> ActionResult:
         session = self._session_for(request)
+        focus = str(request.params.get("focus") or "overview").strip().lower()
+        if focus == "rpte_rules":
+            request.params["requested_representation"] = "rpte"
+            focus = "rules"
+        if focus != "overview":
+            return self._focused_model_result(session, request, focus)
         tables: dict[str, list[dict[str, Any]]] = {"metrics": [session.metrics]}
         data: dict[str, Any] = {"session_id": session.session_id, "summary": ""}
         try:
@@ -319,6 +325,39 @@ class HUGIMLActionOrchestrator:
             tables["pattern_info"] = _df_records(pat)
         except Exception as exc:
             data["pattern_info_error"] = str(exc)
+        try:
+            rpte_rows = session.model.rpte_rule_table()
+            if rpte_rows:
+                # RPTE prediction evidence contains leaf conjunctions and direct
+                # source terms. Format each row's conditions into one readable
+                # string while preserving its fitted representation role.
+                formatted = []
+                for row in sorted(
+                    rpte_rows, key=lambda r: abs(r.get("final_logistic_coefficient") or 0.0), reverse=True
+                )[: request.limit]:
+                    conditions = row.get("conditions") or []
+                    terms = [c.get("raw_condition") or c.get("downstream_condition") or "?" for c in conditions]
+                    formatted.append(
+                        {
+                            "class": row.get("class"),
+                            "term_type": (
+                                "direct_source_term"
+                                if row.get("term_role") == "direct_source_term"
+                                else "rpte_leaf"
+                            ),
+                            "tree_index": row.get("tree_index"),
+                            "leaf_index": row.get("leaf_index"),
+                            "backend": row.get("backend"),
+                            "conjunction": " AND ".join(str(t) for t in terms) if terms else "(linear term)",
+                            "coefficient": row.get("final_logistic_coefficient"),
+                            "support_count": row.get("support_count"),
+                        }
+                    )
+                tables["rpte_rule_conjunctions"] = [
+                    {k: _jsonable(v) for k, v in r.items()} for r in formatted
+                ]
+        except Exception as exc:
+            data["rpte_rule_conjunctions_error"] = str(exc)
         tables["model_configuration"] = _model_config_rows(session)
         try:
             composition = session.model.get_model_composition()
@@ -351,17 +390,377 @@ class HUGIMLActionOrchestrator:
             tables=tables,
         )
 
-    def _action_explain_prediction(self, request: ActionRequest) -> ActionResult:
-        # v1 returns predictions plus top global patterns as grounded explanation.
-        session = self._session_for(request)
-        result = self._action_generate_predictions(request)
+    def _focused_model_result(
+        self,
+        session: ModelSession,
+        request: ActionRequest,
+        focus: str,
+    ) -> ActionResult:
+        """Return fitted evidence selected by intent and model capabilities."""
+
+        if focus == "configuration":
+            return self._configuration_result(session, request)
+        if focus == "metrics":
+            return self._metrics_result(session, request)
+        if focus == "augmented_pairs":
+            return self._augmented_pair_result(session, request)
+        if focus == "interaction_relaxed":
+            return self._interaction_relaxed_result(session, request)
+        if focus == "patterns":
+            return self._pattern_rules_result(session, request)
+        if focus == "rules":
+            if (
+                _downstream_branch(session) == "RPTE"
+                or request.params.get("requested_representation") == "rpte"
+            ):
+                return self._rpte_rules_result(session, request)
+            return self._pattern_rules_result(session, request)
+        if focus == "prediction_drivers":
+            return self._prediction_drivers_result(session, request)
+        # Unknown focus values degrade to the complete grounded overview.
+        clone = ActionRequest.from_dict(request.to_dict())
+        clone.params = {**request.params, "focus": "overview"}
+        return self._action_explain_model(clone)
+
+    def _configuration_result(
+        self, session: ModelSession, request: ActionRequest
+    ) -> ActionResult:
+        tables = {"model_configuration": _model_config_rows(session)}
+        data: dict[str, Any] = {
+            "session_id": session.session_id,
+            "dataset": session.dataset,
+        }
         try:
-            result.tables["feature_importance"] = _df_records(
-                session.model.feature_importances().head(request.limit)
-            )
-            result.message += " Per-row local explanations can be layered on later; v1 returns prediction rows and global pattern evidence."
+            composition = session.model.get_model_composition()
+            data["model_composition"] = composition
+            tables["model_composition"] = _model_composition_rows(composition)
         except Exception:
             pass
+        branch = _downstream_branch(session)
+        return ActionResult(
+            ok=True,
+            action=request.action,
+            message=(
+                f"The active `{session.dataset}` model uses the **{branch}** downstream "
+                "branch. Its fitted configuration is shown below."
+            ),
+            data=data,
+            tables=tables,
+        )
+
+    def _metrics_result(self, session: ModelSession, request: ActionRequest) -> ActionResult:
+        metric = request.metric or session.metrics.get("primary_metric")
+        score = session.metrics.get(metric) if metric else session.metrics.get("primary_score")
+        label = str(metric or "primary metric").replace("_", " ")
+        score_text = f"{float(score):.4f}" if isinstance(score, (int, float, np.number)) else str(score)
+        return ActionResult(
+            ok=True,
+            action=request.action,
+            message=f"The active `{session.dataset}` model's {label} is **{score_text}**.",
+            data={"session_id": session.session_id, "dataset": session.dataset},
+            tables={"metrics": [session.metrics]},
+        )
+
+    def _prediction_drivers_result(
+        self, session: ModelSession, request: ActionRequest
+    ) -> ActionResult:
+        tables: dict[str, list[dict[str, Any]]] = {
+            "metrics": [session.metrics],
+            "model_configuration": _model_config_rows(session),
+        }
+        data: dict[str, Any] = {
+            "session_id": session.session_id,
+            "dataset": session.dataset,
+            "downstream_branch": _downstream_branch(session),
+        }
+        rows = _safe_rpte_rule_rows(session.model)
+        branch = _downstream_branch(session)
+        if branch == "RPTE":
+            if rows:
+                formatted = _format_rpte_rule_rows(rows, request.limit)
+                tables["rpte_rule_conjunctions"] = formatted
+                try:
+                    rendered = str(session.model.rpte_rule_tree()).strip()
+                except Exception:
+                    rendered = ""
+                data["rpte_rule_tree"] = rendered
+                message = (
+                    f"The active `{session.dataset}` model uses RPTE downstream. Its prediction "
+                    "drivers are the fitted leaf rules and direct source terms ranked below by "
+                    "absolute final logistic weight."
+                )
+            else:
+                message = (
+                    f"The active `{session.dataset}` model uses RPTE downstream, but this fit "
+                    "did not retain any RPTE rule or direct-term rows to display."
+                )
+        else:
+            try:
+                importance = session.model.feature_importances().head(request.limit)
+                tables["feature_importance"] = _df_records(importance)
+            except Exception as exc:
+                data["feature_importance_error"] = str(exc)
+            try:
+                patterns = session.model.get_pattern_info().head(request.limit)
+                tables["pattern_info"] = _df_records(patterns)
+            except Exception:
+                pass
+            message = (
+                f"The active `{session.dataset}` model uses the built-in linear downstream "
+                "branch. Its prediction drivers are the fitted original, pattern, and pair "
+                "coefficients ranked below."
+            )
+
+        self._append_path_evidence(session, tables, data, request.limit)
+        try:
+            composition = session.model.get_model_composition()
+            data["model_composition"] = composition
+            tables["model_composition"] = _model_composition_rows(composition)
+        except Exception:
+            pass
+        return ActionResult(
+            ok=True,
+            action=request.action,
+            message=message,
+            data=data,
+            tables=tables,
+        )
+
+    def _pattern_rules_result(
+        self, session: ModelSession, request: ActionRequest
+    ) -> ActionResult:
+        tables: dict[str, list[dict[str, Any]]] = {
+            "model_configuration": _model_config_rows(session)
+        }
+        data = {"session_id": session.session_id, "dataset": session.dataset}
+        try:
+            patterns = session.model.get_pattern_info().head(request.limit)
+            tables["pattern_info"] = _df_records(patterns)
+        except Exception as exc:
+            data["pattern_info_error"] = str(exc)
+        try:
+            tables["feature_importance"] = _df_records(
+                session.model.feature_importances().head(request.limit)
+            )
+        except Exception:
+            pass
+        return ActionResult(
+            ok=True,
+            action=request.action,
+            message=(
+                f"The active `{session.dataset}` model's HUG pattern inventory and available "
+                "fitted coefficients are shown below."
+            ),
+            data=data,
+            tables=tables,
+        )
+
+    def _augmented_pair_result(
+        self, session: ModelSession, request: ActionRequest
+    ) -> ActionResult:
+        tables: dict[str, list[dict[str, Any]]] = {
+            "model_configuration": _model_config_rows(session)
+        }
+        data: dict[str, Any] = {"session_id": session.session_id, "dataset": session.dataset}
+        enabled = bool(getattr(session.model, "augmented_pair_transforms", False))
+        rows: list[dict[str, Any]] = []
+        try:
+            frame = session.model.explain_augmented_pair_effects()
+            if hasattr(frame, "head"):
+                rows = _df_records(frame.head(request.limit))
+        except Exception as exc:
+            data["augmented_pair_error"] = str(exc)
+        if rows:
+            tables["augmented_pair_effects"] = rows
+        try:
+            composition = session.model.get_model_composition()
+            data["model_composition"] = composition
+            tables["model_composition"] = _model_composition_rows(composition)
+        except Exception:
+            pass
+        message = (
+            f"The active `{session.dataset}` model uses augmented-pair transforms; the "
+            "selected pair formulas and fitted effects are shown below."
+            if enabled and rows
+            else f"The active `{session.dataset}` model has no selected augmented-pair effects."
+        )
+        data["augmented_pair_transforms_enabled"] = enabled
+        return ActionResult(
+            ok=True,
+            action=request.action,
+            message=message,
+            data=data,
+            tables=tables,
+        )
+
+    def _interaction_relaxed_result(
+        self, session: ModelSession, request: ActionRequest
+    ) -> ActionResult:
+        tables: dict[str, list[dict[str, Any]]] = {
+            "model_configuration": _model_config_rows(session)
+        }
+        data: dict[str, Any] = {"session_id": session.session_id, "dataset": session.dataset}
+        enabled = bool(getattr(session.model, "interaction_relaxed_mining", False))
+        survivors = list(
+            getattr(session.model, "interaction_relaxed_mining_survivors_", []) or []
+        )
+        if survivors:
+            tables["interaction_relaxed_survivors"] = [
+                {key: _jsonable(value) for key, value in row.items()}
+                for row in survivors[: request.limit]
+                if isinstance(row, dict)
+            ]
+        try:
+            pattern_info = session.model.get_pattern_info()
+            if "survivor_led" in pattern_info.columns:
+                survivor_patterns = pattern_info[
+                    pattern_info["survivor_led"].astype(bool)
+                ].head(request.limit)
+                if not survivor_patterns.empty:
+                    tables["interaction_relaxed_patterns"] = _df_records(survivor_patterns)
+        except Exception:
+            pass
+        try:
+            composition = session.model.get_model_composition()
+            data["model_composition"] = composition
+            tables["model_composition"] = _model_composition_rows(composition)
+        except Exception:
+            pass
+        message = (
+            f"The active `{session.dataset}` model uses interaction-relaxed mining. "
+            "The admitted survivor sources and survivor-led patterns are shown below."
+            if enabled
+            else f"The active `{session.dataset}` model does not use interaction-relaxed mining."
+        )
+        data["interaction_relaxed_mining_enabled"] = enabled
+        data["survivor_count"] = len(survivors)
+        return ActionResult(
+            ok=True,
+            action=request.action,
+            message=message,
+            data=data,
+            tables=tables,
+        )
+
+    def _append_path_evidence(
+        self,
+        session: ModelSession,
+        tables: dict[str, list[dict[str, Any]]],
+        data: dict[str, Any],
+        limit: int,
+    ) -> None:
+        """Attach active representation evidence without changing the main intent."""
+
+        if bool(getattr(session.model, "augmented_pair_transforms", False)):
+            try:
+                frame = session.model.explain_augmented_pair_effects()
+                rows = _df_records(frame.head(limit)) if hasattr(frame, "head") else []
+                if rows:
+                    tables["augmented_pair_effects"] = rows
+            except Exception as exc:
+                data["augmented_pair_error"] = str(exc)
+        if bool(getattr(session.model, "interaction_relaxed_mining", False)):
+            survivors = list(
+                getattr(session.model, "interaction_relaxed_mining_survivors_", []) or []
+            )
+            if survivors:
+                tables["interaction_relaxed_survivors"] = [
+                    {key: _jsonable(value) for key, value in row.items()}
+                    for row in survivors[:limit]
+                    if isinstance(row, dict)
+                ]
+
+    def _rpte_rules_result(self, session: ModelSession, request: ActionRequest) -> ActionResult:
+        """Return fitted RPTE rules from the active model, never API help."""
+
+        try:
+            rows = list(session.model.rpte_rule_table())
+        except Exception as exc:
+            return ActionResult(
+                ok=False,
+                action=request.action,
+                message=f"RPTE rules are unavailable for the active model: {exc}",
+                data={
+                    "session_id": session.session_id,
+                    "dataset": session.dataset,
+                    "error_type": type(exc).__name__,
+                },
+            )
+
+        if not rows:
+            chosen = dict(session.metrics.get("chosen_params") or {})
+            is_rpte = _downstream_branch(session) == "RPTE"
+            message = (
+                "The active model uses RPTE downstream, but this fit did not retain any "
+                "RPTE rule or direct-term rows to display."
+                if is_rpte
+                else (
+                    "The active model does not contain fitted RPTE rules. Its selected "
+                    "downstream branch is the built-in linear estimator. Build a model with "
+                    "RPTE downstream or tune a higher-order grid and select the RPTE branch first."
+                )
+            )
+            return ActionResult(
+                ok=True,
+                action=request.action,
+                message=message,
+                data={
+                    "session_id": session.session_id,
+                    "dataset": session.dataset,
+                    "has_rpte_rules": False,
+                    "downstream_branch": _downstream_branch(session),
+                    "chosen_params": _jsonable(chosen),
+                },
+                tables={"model_configuration": _model_config_rows(session)},
+            )
+
+        formatted = _format_rpte_rule_rows(rows, request.limit)
+
+        try:
+            rendered = str(session.model.rpte_rule_tree()).strip()
+        except Exception:
+            rendered = ""
+
+        message_lines = [
+            f"### RPTE rules — `{session.dataset}`",
+            "",
+            f"The active model contains **{len(rows)}** fitted RPTE rule/direct-term rows.",
+        ]
+        if rendered:
+            message_lines.extend(["", "```text", rendered, "```"])
+        message = "\n".join(message_lines)
+        return ActionResult(
+            ok=True,
+            action=request.action,
+            message=message,
+            data={
+                "session_id": session.session_id,
+                "dataset": session.dataset,
+                "has_rpte_rules": True,
+                "rpte_rule_count": len(rows),
+                "rpte_rule_tree": rendered,
+            },
+            tables={
+                "rpte_rule_conjunctions": [
+                    {key: _jsonable(value) for key, value in row.items()}
+                    for row in formatted
+                ],
+                "model_configuration": _model_config_rows(session),
+            },
+        )
+
+    def _action_explain_prediction(self, request: ActionRequest) -> ActionResult:
+        """Return prediction rows plus evidence suited to the fitted estimator."""
+
+        session = self._session_for(request)
+        result = self._action_generate_predictions(request)
+        drivers = self._prediction_drivers_result(session, request)
+        result.tables.update(drivers.tables)
+        result.data.update({
+            "driver_summary": drivers.message,
+            "downstream_branch": drivers.data.get("downstream_branch"),
+        })
+        result.message = f"{result.message}\n\n{drivers.message}"
         return result
 
     def _action_prune_patterns(self, request: ActionRequest) -> ActionResult:
@@ -521,7 +920,7 @@ class HUGIMLActionOrchestrator:
             stratify = y if int(counts.min()) >= 2 else None
         else:
             stratify = None
-        X_work, _X_unused, y_work, _y_unused = train_test_split(
+        X_work, _X_holdout, y_work, _y_holdout = train_test_split(
             X,
             y,
             train_size=min(limit, len(y) - 1),
@@ -549,15 +948,26 @@ class HUGIMLActionOrchestrator:
         )
         if tune:
             model, metrics, chosen = self._tune_model(
-                X_train, y_train, X_test, y_test, request.strategy, request.metric
+                X_train,
+                y_train,
+                X_test,
+                y_test,
+                request.strategy,
+                request.metric,
+                request_params=request.params,
             )
         else:
             params = self._params_for_strategy(request.strategy)
             params.update(_extract_model_params_from_request(request.params))
+            downstream = _normalise_downstream_request(request.params.get("downstream_estimator"))
+            if downstream is not None:
+                params["base_estimator"] = _resolve_downstream_estimator(downstream)
             model = HUGIMLClassifier(**params)
             model.fit(X_train, y_train)
             metrics = self._evaluate(model, X_test, y_test, request.metric)
-            chosen = params
+            chosen = dict(params)
+            if downstream is not None:
+                chosen["downstream_constraint"] = downstream
         metrics.update({
             "n_train": int(len(y_train)),
             "n_rows_used": int(run_scope.get("rows_used", len(y))),
@@ -590,24 +1000,45 @@ class HUGIMLActionOrchestrator:
         y_test: np.ndarray,
         strategy: str,
         metric: str | None,
+        request_params: dict[str, Any] | None = None,
     ) -> tuple[Any, dict[str, Any], dict[str, Any]]:
-        grid_name = "interpretability" if strategy == "interpretability" else "performance"
+        options = dict(request_params or {})
+        requested_grid = _normalise_grid_name(options.get("grid_name"))
+        grid_name = requested_grid or _grid_for_strategy(strategy)
         try:
             grid = get_hugiml_grid(grid_name)
-        except Exception:
-            grid = {}
-        # Keep v1 NLP tuning bounded. HUGIML owns the model-level hyperparameter semantics;
-        # this loop just tries a few existing grid candidates.
+        except Exception as exc:
+            raise ValueError(f"Unknown HUGIML grid {grid_name!r}.") from exc
+
+        explicit_model_params = _extract_model_params_from_request(options)
+        for key, value in explicit_model_params.items():
+            grid[key] = [value]
+
+        downstream = _normalise_downstream_request(options.get("downstream_estimator"))
+        if downstream == "rpte":
+            grid["base_estimator"] = [_resolve_downstream_estimator("rpte")]
+        elif downstream == "logistic_regression":
+            # ``None`` is the HUGIML built-in logistic-regression branch.
+            grid["base_estimator"] = [None]
+
+        # Keep chat tuning bounded while preserving the requested search space.
         candidates = list(ParameterGrid(grid or {"B": [8], "L": [1], "G": [0.001], "topK": [30]}))
         max_trials = 4 if strategy in {"fast", "small_memory"} else 6
-        candidates = candidates[:max_trials]
+        candidates = _sample_tuning_candidates(
+            candidates,
+            max_trials=max_trials,
+            random_state=self.random_state,
+        )
+
         best_model = None
         best_metrics: dict[str, Any] = {}
         best_params: dict[str, Any] = {}
         best_score = -np.inf
         primary = metric or "roc_auc"
-        for params in candidates:
-            params = {**self._params_for_strategy(strategy), **params}
+        for candidate in candidates:
+            # A named grid is authoritative. Do not leak representation flags
+            # from a high-level strategy into a grid that does not define them.
+            params = {"n_jobs": 1, **candidate}
             try:
                 model = HUGIMLClassifier(**params)
                 model.fit(X_train, y_train)
@@ -620,9 +1051,15 @@ class HUGIMLActionOrchestrator:
                 best_score = score
                 best_model = locals().get("model")
                 best_metrics = metrics
-                best_params = params
+                best_params = dict(params)
         if best_model is None:
             raise RuntimeError("All HUGIML tuning candidates failed.")
+
+        # These values describe the search request and are intentionally added
+        # only after construction so they are never passed to HUGIMLClassifier.
+        best_params["tuning_grid"] = grid_name
+        if downstream is not None:
+            best_params["downstream_constraint"] = downstream
         return best_model, best_metrics, best_params
 
     @staticmethod
@@ -637,6 +1074,7 @@ class HUGIMLActionOrchestrator:
                 "feature_mode": "patterns_only",
                 "augmented_pair_transforms": False,
                 "interaction_relaxed_mining": True,
+                "convert_binary_to_categorical": True,
                 "n_jobs": 1,
             }
         if strategy in {"fast", "small_memory"}:
@@ -660,6 +1098,7 @@ class HUGIMLActionOrchestrator:
                 "feature_mode": "patterns_only",
                 "augmented_pair_transforms": False,
                 "interaction_relaxed_mining": True,
+                "convert_binary_to_categorical": True,
                 "n_jobs": 1,
             }
         if strategy == "performance":
@@ -671,6 +1110,7 @@ class HUGIMLActionOrchestrator:
                 "topK": 50,
                 "feature_mode": "original_plus_patterns",
                 "augmented_pair_transforms": True,
+                "convert_binary_to_categorical": False,
                 "n_jobs": 1,
             }
         # Unrecognized strategy strings fall back to the same setup as "performance".
@@ -1325,11 +1765,104 @@ def _fmt_html_num(value: Any) -> str:
 
 
 
+def _sample_tuning_candidates(
+    candidates: list[dict[str, Any]],
+    *,
+    max_trials: int,
+    random_state: int,
+) -> list[dict[str, Any]]:
+    """Select a bounded, reproducible candidate set without losing a branch.
+
+    Hybrid grids vary ``base_estimator`` between the built-in LR branch and
+    RPTE. A plain random prefix can omit one branch for some seeds, so hybrid
+    candidates are sampled round-robin by downstream branch.
+    """
+
+    if len(candidates) <= max_trials:
+        return list(candidates)
+    rng = np.random.RandomState(int(random_state))
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for candidate in candidates:
+        if "base_estimator" not in candidate:
+            groups.setdefault("single", []).append(candidate)
+        else:
+            key = "rpte" if candidate.get("base_estimator") is not None else "logistic_regression"
+            groups.setdefault(key, []).append(candidate)
+    if len(groups) <= 1:
+        order = rng.permutation(len(candidates))[:max_trials]
+        return [candidates[i] for i in order]
+
+    ordered_groups: list[list[dict[str, Any]]] = []
+    for key in sorted(groups):
+        values = groups[key]
+        order = rng.permutation(len(values))
+        ordered_groups.append([values[i] for i in order])
+
+    selected: list[dict[str, Any]] = []
+    cursor = 0
+    while len(selected) < max_trials and any(ordered_groups):
+        group_index = cursor % len(ordered_groups)
+        group = ordered_groups[group_index]
+        if group:
+            selected.append(group.pop())
+        cursor += 1
+    return selected
+
+
+def _grid_for_strategy(strategy: str) -> str:
+    if strategy == "interpretability":
+        return "interpretability"
+    if strategy in {"fast", "small_memory", "performance"}:
+        return "performance"
+    return DEFAULT_HUGIML_GRID_NAME
+
+
+def _normalise_grid_name(value: Any) -> str | None:
+    if value is None:
+        return None
+    name = str(value).strip().lower().replace("-", "_").replace(" ", "_")
+    aliases = {
+        "performanceho": "performance_ho",
+        "higher_order_performance": "performance_ho",
+        "performance_higher_order": "performance_ho",
+        "interpretabilityho": "interpretability_ho",
+        "higher_order_interpretability": "interpretability_ho",
+        "interpretability_higher_order": "interpretability_ho",
+    }
+    return aliases.get(name, name) or None
+
+
+def _normalise_downstream_request(value: Any) -> str | None:
+    if value is None:
+        return None
+    name = str(value).strip().lower().replace("-", "_").replace(" ", "_")
+    if name in {"rpte", "leafwise_rpte", "bounded_lookahead_rpte", "tree"}:
+        return "rpte"
+    if name in {"lr", "logistic", "logistic_regression", "linear", "none"}:
+        return "logistic_regression"
+    raise ValueError(
+        "downstream_estimator must be 'rpte' or 'logistic_regression'."
+    )
+
+
+def _resolve_downstream_estimator(name: str) -> Any:
+    if name == "logistic_regression":
+        return None
+    if name != "rpte":
+        raise ValueError(f"Unsupported downstream estimator {name!r}.")
+    grid = get_hugiml_grid("performance_ho")
+    for estimator in grid.get("base_estimator", []):
+        if estimator is not None:
+            return estimator
+    raise RuntimeError("The installed HUGIML grids do not provide an RPTE downstream estimator.")
+
+
 def _extract_model_params_from_request(params: dict[str, Any]) -> dict[str, Any]:
     allowed = {
         "B", "L", "G", "topK", "adaptive_binning", "feature_mode",
         "augmented_pair_transforms", "interaction_relaxed_mining", "aug_feature_size",
         "interaction_relaxed_feature_size", "n_jobs", "execution_mode",
+        "topk_budget_strict", "convert_binary_to_categorical",
     }
     model_params = dict(params.get("model_params", {}) or {})
     for key in allowed:
@@ -1346,6 +1879,87 @@ def _compact_metric_row(metrics: dict[str, Any]) -> dict[str, Any]:
 def _compact_param_row(params: dict[str, Any]) -> dict[str, Any]:
     keys = ["feature_mode", "B", "L", "G", "topK", "adaptive_binning", "augmented_pair_transforms", "interaction_relaxed_mining"]
     return {key: params.get(key) for key in keys if key in params}
+
+
+def _safe_rpte_rule_rows(model: Any) -> list[dict[str, Any]]:
+    try:
+        return list(model.rpte_rule_table() or [])
+    except Exception:
+        return []
+
+
+def _format_rpte_rule_rows(
+    rows: list[dict[str, Any]], limit: int
+) -> list[dict[str, Any]]:
+    formatted: list[dict[str, Any]] = []
+    for row in sorted(
+        rows,
+        key=lambda item: abs(item.get("final_logistic_coefficient") or 0.0),
+        reverse=True,
+    )[:limit]:
+        conditions = row.get("conditions") or []
+        terms = [
+            condition.get("raw_condition")
+            or condition.get("downstream_condition")
+            or "?"
+            for condition in conditions
+        ]
+        formatted.append(
+            {
+                "class": row.get("class"),
+                "term_type": (
+                    "direct_source_term"
+                    if row.get("term_role") == "direct_source_term"
+                    else "rpte_leaf"
+                ),
+                "tree_index": row.get("tree_index"),
+                "leaf_index": row.get("leaf_index"),
+                "backend": row.get("backend"),
+                "rule": (
+                    " AND ".join(str(term) for term in terms)
+                    if terms
+                    else "(direct source term)"
+                ),
+                "coefficient": row.get("final_logistic_coefficient"),
+                "odds_multiplier": row.get("odds_multiplier"),
+                "support_count": row.get("support_count"),
+                "support_fraction": row.get("support_fraction"),
+            }
+        )
+    return [{key: _jsonable(value) for key, value in row.items()} for row in formatted]
+
+
+def _contains_rpte_estimator(value: Any) -> bool:
+    """Return whether an estimator container represents the RPTE branch."""
+
+    if value is None:
+        return False
+    cls_name = type(value).__name__.lower()
+    if "rpte" in cls_name or "residualpatterntree" in cls_name:
+        return True
+    for attr in ("estimator", "estimator_", "base_estimator"):
+        nested = getattr(value, attr, None)
+        if nested is not None and nested is not value and _contains_rpte_estimator(nested):
+            return True
+    estimators = getattr(value, "estimators_", None)
+    if estimators:
+        return any(_contains_rpte_estimator(item) for item in estimators)
+    return False
+
+
+def _downstream_branch(session: ModelSession) -> str:
+    if _safe_rpte_rule_rows(session.model):
+        return "RPTE"
+    chosen = dict((session.metrics or {}).get("chosen_params") or {})
+    if chosen.get("downstream_constraint") == "rpte":
+        return "RPTE"
+    if _contains_rpte_estimator(chosen.get("base_estimator")):
+        return "RPTE"
+    if _contains_rpte_estimator(getattr(session.model, "base_estimator", None)):
+        return "RPTE"
+    if _contains_rpte_estimator(getattr(session.model, "model_", None)):
+        return "RPTE"
+    return "built-in linear"
 
 
 def _model_config_rows(session: ModelSession) -> list[dict[str, Any]]:
@@ -1791,8 +2405,15 @@ def _grounded_summary(metrics: dict[str, Any], tables: dict[str, list[dict[str, 
         f"Held-out primary score is {metrics.get('primary_score')} using {metrics.get('primary_metric')}.",
         f"Accuracy is {metrics.get('accuracy')} and F1 is {metrics.get('f1')}.",
     ]
+    rpte = tables.get("rpte_rule_conjunctions") or []
     fi = tables.get("feature_importance") or []
-    if fi:
+    if rpte:
+        top = rpte[0]
+        parts.append(
+            "The downstream estimator is RPTE; its highest-weight rule is "
+            f"\"{top.get('conjunction', 'n/a')}\" with coefficient {top.get('coefficient', 'n/a')}."
+        )
+    elif fi:
         top = fi[0]
         parts.append(
             "The highest-ranked artifact is "
@@ -1823,8 +2444,21 @@ def _jsonable(value: Any) -> Any:
         return None if not np.isfinite(value) else float(value)
     if isinstance(value, (np.ndarray, list, tuple)):
         return [_jsonable(v) for v in value]
-    if pd.isna(value):
-        return None
+    if isinstance(value, dict):
+        return {str(k): _jsonable(v) for k, v in value.items()}
+    if hasattr(value, "get_params") and not isinstance(value, (str, bytes)):
+        # A live sklearn estimator (e.g. performance_ho's RPTE
+        # base_estimator, possibly OneVsRestClassifier-wrapped) rather
+        # than a plain value -- summarize instead of passing through an
+        # object json.dumps can't serialize.
+        inner = getattr(value, "estimator", None)
+        label = f"{type(inner).__name__} via {type(value).__name__}" if inner is not None else type(value).__name__
+        return {"__estimator__": label}
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
     return value
 
 

@@ -91,6 +91,7 @@ import dataclasses
 import logging
 import math
 import os
+import re
 import threading
 import time
 import tracemalloc
@@ -102,6 +103,7 @@ import pandas as pd
 from scipy.sparse import csr_matrix, hstack, issparse
 from sklearn.base import BaseEstimator, ClassifierMixin, TransformerMixin
 from sklearn.linear_model import LogisticRegression, SGDClassifier
+from sklearn.multiclass import OneVsRestClassifier
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.utils.validation import check_is_fitted
@@ -115,7 +117,7 @@ from hugiml._binning import (
 from hugiml._binning import (
     _select_b as _adap_select_b,
 )
-from hugiml._compat import check_array, check_X_y
+from hugiml._compat import check_array, check_X_y, liblinear_penalty_kwargs
 from hugiml.exceptions import (
     HUGIMLConvergenceWarning,
     HUGIMLDtypeDriftWarning,
@@ -1063,6 +1065,88 @@ class _TransactionDataWrapper:
 # =============================================================================
 
 
+def _wire_hugiml_feature_metadata(
+    estimator: Any,
+    feature_names: list[str],
+    augmented_catalog: list[dict[str, Any]],
+    pattern_provenance: dict[str, dict[str, Any]] | None = None,
+    original_feature_standardization: dict[str, dict[str, Any]] | None = None,
+) -> None:
+    """Best-effort: if `estimator` (or, for a meta-estimator wrapper
+    exposing `.estimator` -- e.g. sklearn's OneVsRestClassifier -- the
+    estimator it wraps) knows how to consume HUGIML's own downstream
+    feature names / augmented-pair catalog / pattern provenance, wire it up
+    before fitting.
+
+    `base_estimator=` is a plain sklearn fit(X, y)/predict_proba(X)
+    hand-off: X arrives as an anonymous numpy/sparse matrix with no column
+    names attached, so a downstream estimator whose behavior depends on
+    knowing which columns are original features versus mined augmented
+    pairs versus mined patterns (duck-typed here via a
+    `set_hugiml_feature_metadata` method -- e.g. an RPTE-style
+    bounded-lookahead feature extractor) has no way to find that out on its
+    own without this wiring.
+
+    Two mechanisms are applied, both when available, because a single
+    `set_hugiml_feature_metadata()` call is not enough once a meta-estimator
+    is involved: sklearn.base.clone() (used internally by
+    OneVsRestClassifier and other wrappers to create per-fit/per-class
+    copies) reconstructs a fresh instance from get_params() and does not
+    copy arbitrary instance state a method sets after construction.
+      1. Call `set_hugiml_feature_metadata` if the estimator exposes it --
+         covers direct (non-cloning) fits.
+      2. If the estimator also exposes hugiml_feature_names /
+         hugiml_augmented_catalog / hugiml_pattern_provenance /
+         hugiml_original_feature_standardization as plain attributes (i.e.
+         they are constructor parameters, the clone()-safe design), set
+         those directly too -- these are the values clone() actually
+         propagates, which is what makes metadata survive
+         OneVsRestClassifier's internal per-class cloning.
+    Silently does nothing for any estimator that recognizes neither --
+    this is purely additive and never required for an ordinary fit
+    (e.g. the built-in LogisticRegression downstream branch) to proceed.
+
+    `feature_names` length is validated against nothing here (this
+    function doesn't have the downstream matrix in hand) -- callers that
+    do (both call sites below) should confirm feature_names' length
+    matches the actual downstream column count before calling this, since
+    a silent length mismatch would misattribute every later column.
+    """
+    targets = [estimator]
+    inner = getattr(estimator, "estimator", None)
+    if inner is not None:
+        targets.append(inner)
+    for target in targets:
+        if hasattr(target, "set_hugiml_feature_metadata"):
+            try:
+                target.set_hugiml_feature_metadata(
+                    feature_names,
+                    augmented_catalog,
+                    pattern_provenance,
+                    original_feature_standardization,
+                )
+            except TypeError:
+                try:
+                    target.set_hugiml_feature_metadata(
+                        feature_names, augmented_catalog, pattern_provenance
+                    )
+                except TypeError:
+                    try:
+                        target.set_hugiml_feature_metadata(feature_names, augmented_catalog)
+                    except TypeError:
+                        pass
+        if hasattr(target, "hugiml_feature_names"):
+            target.hugiml_feature_names = list(feature_names)
+        if hasattr(target, "hugiml_augmented_catalog"):
+            target.hugiml_augmented_catalog = [dict(item) for item in augmented_catalog]
+        if hasattr(target, "hugiml_pattern_provenance"):
+            target.hugiml_pattern_provenance = dict(pattern_provenance or {})
+        if hasattr(target, "hugiml_original_feature_standardization"):
+            target.hugiml_original_feature_standardization = dict(
+                original_feature_standardization or {}
+            )
+
+
 # =============================================================================
 # ── Per-feature adaptive binning — module-level helpers ───────────────────────
 #
@@ -1100,12 +1184,14 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         Maximum number of patterns to retain. -1 computes automatically.
     base_estimator : sklearn estimator, optional
         Downstream classifier trained on the selected representation.
-        Defaults to LogisticRegression.
+        Defaults to LogisticRegression. An explicit LogisticRegression using
+        the ``liblinear`` solver is fitted directly for binary targets and
+        through one-vs-rest classification for targets with three or more
+        classes.
     lr_solver : {"auto", "saga", "sgd"}, default "auto"
         Downstream linear classifier used when ``base_estimator`` is not supplied.
-        ``"auto"`` preserves the historical behavior: binary classifiers use
-        ``LogisticRegression(solver="liblinear")`` and multiclass classifiers use
-        ``LogisticRegression(solver="lbfgs")``. ``"saga"`` uses
+        ``"auto"`` uses L1-regularized logistic regression: binary classifiers use
+        the ``liblinear`` solver and multiclass classifiers use the ``saga`` solver. ``"saga"`` uses
         ``LogisticRegression(solver="saga")``. ``"sgd"`` uses
         ``SGDClassifier(loss="log_loss")`` so large sparse downstream matrices can
         be trained with stochastic gradient descent. All built-in choices keep the
@@ -1131,10 +1217,29 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         Candidate bin counts evaluated when adaptive binning is enabled.
     min_marginal_gain_ratio : float, default 0.02
         Elbow threshold for adaptive-binning marginal gain.
+    adaptive_binning_sample_frac : float or bool, default False
+        Fraction of training rows used for adaptive-bin selection. ``False``
+        uses all rows; a float in ``(0, 1]`` uses a deterministic stratified
+        sample for selecting edges before applying those edges to all rows.
+    adaptive_binning_sample_random_state : int, default 42
+        Random seed used when ``adaptive_binning_sample_frac`` requests a
+        stratified sample.
+    convert_binary_to_categorical : bool, default False
+        When enabled, numeric columns with exactly two observed values are
+        inferred as categorical indicators during automatic column detection.
+        The default keeps them numeric so they remain eligible for numeric
+        interaction and augmented-pair paths. The named performance grids
+        explicitly keep this disabled, while the named interpretability grids
+        enable it for the categorical pattern surface. Explicit ``allCols``
+        metadata takes precedence over this inference option.
     feature_mode : {"patterns_only", "original_plus_patterns",
         "original_plus_interactions"}, default "patterns_only"
         Downstream representation used by fit/predict APIs. ``transform(X)``
         always returns the HUG pattern matrix.
+    use_hotpath : bool, default True
+        Use the fused native ``L=1`` preparation/mining/matrix path when
+        eligible. Disable only for diagnostic equivalence checks against the
+        staged path.
     augmented_pair_transforms : bool, default True
         Enable downstream augmented-pair operator features for eligible
         ``L >= 2`` adaptive-binning models.
@@ -1162,8 +1267,11 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
     interaction_relaxed_mining : bool, default False
         Allow interaction-information survivors to participate in native mining
         as original-feature bins without creating augmented-pair operator
-        columns. Mutually exclusive with augmented-pair transforms at
-        ``L >= 2``.
+        columns. Relaxed admission covers the root and its immediate first-child
+        pairing partner; deeper positions receive no new admission exemption.
+        The generic miner still requires the constructed child pattern to clear
+        its joint information-gain gate. Mutually exclusive with augmented-pair
+        transforms at ``L >= 2``.
     interaction_relaxed_feature_size : int, default 10
         Survivor-source budget for interaction-relaxed mining.
     verbose : bool, default False
@@ -1231,6 +1339,25 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         min_marginal_gain_ratio: float = 0.02,
         adaptive_binning_sample_frac: float | bool = False,
         adaptive_binning_sample_random_state: int = 42,
+        # When True, any
+        # *numeric* column with exactly two distinct values is automatically
+        # treated as categorical during column-type detection (see
+        # _resolve_col_meta), the same as an explicitly categorical
+        # (object/string/pandas Categorical) column. This is sometimes
+        # desirable for genuinely nominal binary columns (e.g. a yes/no
+        # flag encoded as 0/1) -- set convert_binary_to_categorical=True to
+        # restore that behavior -- but the default (False) treats binary-
+        # valued numeric columns as numeric, matching their pandas dtype
+        # rather than their observed cardinality, because the previous
+        # default (True) silently excluded every such column from
+        # augmented-pair transforms: _numeric_feature_names_for_augmented_pairs()
+        # only considers columns NOT marked categorical, so a dataset made up
+        # entirely of 0/1-valued *measurements* (not categories) used to end
+        # up with augmented_pair_transforms constructing zero pairs
+        # regardless of augmented_pair_transforms=True, with no warning.
+        # Has no effect when column types are supplied explicitly via
+        # allCols/origColumns, since that path never auto-detects types.
+        convert_binary_to_categorical: bool = False,
         feature_mode: str = "patterns_only",
         use_hotpath: bool = True,
         augmented_pair_transforms: bool = True,
@@ -1243,9 +1370,15 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         dense_downstream_max_width: int = 200,
         execution_mode: str = "audit",
         # When True, interaction-information survivors can enter native mining
-        # as ordinary source columns even when their marginal IG is weak.  The
-        # relaxed admission applies at the root (depth-0) position only; see
-        # native/mining.hpp's THUIsl::relaxed_cols comment for the exact scope.
+        # as ordinary source columns even when their marginal IG is weak. Relaxed
+        # admission covers the first two positions of the initial branch: the root
+        # and its immediate first-child pairing partner. In the generic miner, a
+        # survivor at either position can bypass its own singleton admission gates
+        # long enough for the joint child pattern to be scored; no new relaxed
+        # admission is introduced at item positions 2+, where survivor items must
+        # pass the ordinary gates. The specialized L=2 path likewise treats a pair
+        # as relaxed when either member is a survivor. See native/mining.hpp for
+        # the exact pruning and heap-routing scope.
         # No augmented-pair operator features (sum/product/etc.) are generated
         # by this path.  The resulting HUG patterns remain conjunctions of
         # original feature bins and are annotated for audit APIs as
@@ -1279,6 +1412,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         self.min_marginal_gain_ratio = min_marginal_gain_ratio
         self.adaptive_binning_sample_frac = adaptive_binning_sample_frac
         self.adaptive_binning_sample_random_state = adaptive_binning_sample_random_state
+        self.convert_binary_to_categorical = convert_binary_to_categorical
         self.feature_mode = feature_mode
         self.use_hotpath = use_hotpath
         self.augmented_pair_transforms = augmented_pair_transforms
@@ -1418,18 +1552,21 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
     def default_param_grid(cls, name: str | None = None) -> dict[str, list]:
         """Return a named validation grid for compact HUGIML tuning.
 
-        ``name`` selects either ``performance`` or ``interpretability``. When
-        omitted, the performance grid is returned. Grid definitions live in
+        ``name`` selects ``performance_ho``, ``performance``,
+        ``interpretability_ho``, or ``interpretability``. When omitted,
+        ``performance_ho`` is returned. Grid definitions live in
         :mod:`hugiml.hyperparameter_configs` and are copied before return so
-        callers can narrow candidate values locally.
+        callers can narrow candidate values locally without mutating the
+        shared definitions.
 
-        The performance grid uses adaptive binning with ``B=-1``, searches
-        ``L`` values ``1`` and ``2``, searches ``topK`` values ``50`` and
-        ``100``, uses ``feature_mode='original_plus_patterns'``, and evaluates
-        ``G`` values ``0.01`` and ``0.001``. The interpretability grid uses the
-        same ``L``, ``topK``, and ``G`` values with
-        ``feature_mode='patterns_only'``, ``interaction_relaxed_mining=True``,
-        and ``augmented_pair_transforms=False``.
+        The two performance grids use ``feature_mode='original_plus_patterns'``;
+        ``performance_ho`` additionally searches the adaptive RPTE downstream
+        branch. The two interpretability grids use
+        ``feature_mode='patterns_only'``,
+        ``interaction_relaxed_mining=True``, and
+        ``augmented_pair_transforms=False``;
+        ``interpretability_ho`` additionally searches sequential RPTE while
+        explicitly keeping lookahead inactive.
         """
         return get_hugiml_grid(name)
 
@@ -1467,6 +1604,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             min_marginal_gain_ratio=self.min_marginal_gain_ratio,
             adaptive_binning_sample_frac=self.adaptive_binning_sample_frac,
             adaptive_binning_sample_random_state=self.adaptive_binning_sample_random_state,
+            convert_binary_to_categorical=self.convert_binary_to_categorical,
             feature_mode=self.feature_mode,
             use_hotpath=self.use_hotpath,
             augmented_pair_transforms=self.augmented_pair_transforms,
@@ -1760,8 +1898,13 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                 or pd.api.types.is_string_dtype(col)
                 or isinstance(col.dtype, pd.CategoricalDtype)
             )
+            # Estimators serialized before this parameter existed used binary
+            # numeric columns as categorical indicators. Preserve that legacy
+            # behavior only when the attribute is absent; newly constructed
+            # estimators use the explicit constructor default (False).
             is_binary_numeric = (
-                not is_explicit_cat
+                getattr(self, "convert_binary_to_categorical", True)
+                and not is_explicit_cat
                 and (pd.api.types.is_numeric_dtype(col) or pd.api.types.is_bool_dtype(col))
                 and _is_binary_feature_series(col)
             )
@@ -2024,16 +2167,40 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
 
     def _make_estimator(self, n_cls: int) -> Any:
         if self.base_estimator is not None:
-            return copy.deepcopy(self.base_estimator)
+            estimator = copy.deepcopy(self.base_estimator)
+            if (
+                n_cls > 2
+                and isinstance(estimator, LogisticRegression)
+                and str(getattr(estimator, "solver", "")).lower() == "liblinear"
+            ):
+                return OneVsRestClassifier(estimator, n_jobs=1)
+            return estimator
 
         lr_solver = str(getattr(self, "lr_solver", "auto")).lower()
         if lr_solver == "auto":
-            solver = "liblinear" if n_cls == 2 else "lbfgs"
-            return LogisticRegression(solver=solver, random_state=0, max_iter=500)
+            if n_cls == 2:
+                return LogisticRegression(
+                    solver="liblinear",
+                    C=1.0,
+                    random_state=0,
+                    max_iter=500,
+                    **liblinear_penalty_kwargs("l1"),
+                )
+            return LogisticRegression(
+                solver="saga",
+                penalty="l1",
+                C=1.0,
+                random_state=0,
+                max_iter=500,
+            )
         if lr_solver == "saga":
-            return LogisticRegression(solver="saga", random_state=0, max_iter=500)
+            return LogisticRegression(
+                solver="saga", penalty="l1", C=1.0, random_state=0, max_iter=500
+            )
         if lr_solver == "sgd":
-            return SGDClassifier(loss="log_loss", random_state=0, max_iter=500)
+            return SGDClassifier(
+                loss="log_loss", penalty="l1", random_state=0, max_iter=500
+            )
         raise HUGIMLParamError(
             "lr_solver must be one of {'auto', 'saga', 'sgd'}, "
             f"got {getattr(self, 'lr_solver', None)!r}."
@@ -2222,6 +2389,10 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             cat_mask_values: list[bool] = []
             int_mask_values: list[bool] = []
             binary_cat_cols: list[str] = []
+            # Attribute absence identifies a legacy estimator whose binary
+            # numeric columns were inferred categorically before this option
+            # became explicit. New estimators always carry the False default.
+            convert_binary = getattr(self, "convert_binary_to_categorical", True)
             for c in X_train.columns:
                 col = X_train[c]
                 is_explicit_cat = (
@@ -2230,7 +2401,8 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                     or isinstance(col.dtype, pd.CategoricalDtype)
                 )
                 is_binary_numeric = (
-                    not is_explicit_cat
+                    convert_binary
+                    and not is_explicit_cat
                     and (pd.api.types.is_numeric_dtype(col) or pd.api.types.is_bool_dtype(col))
                     and _is_binary_feature_series(col)
                 )
@@ -2305,9 +2477,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
 
         return self._identify_zero_variance_columns_fallback(names, X_train)
 
-    def _identify_zero_variance_columns_fallback(
-        self, names: list[str], X_train: Any
-    ) -> list[str]:
+    def _identify_zero_variance_columns_fallback(self, names: list[str], X_train: Any) -> list[str]:
         """Object-safe zero-variance check for non-numeric input.
 
         Handles arbitrary Python objects (strings, mixed types, unhashable
@@ -3646,9 +3816,9 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                         _attrs[_name] = _value
                 _fast_tune_adaptive_context["X_pre"] = X_train
                 _fast_tune_adaptive_context["attrs"] = _attrs
-                _fast_tune_adaptive_context["misses"] = int(
-                    _fast_tune_adaptive_context.get("misses", 0)
-                ) + 1
+                _fast_tune_adaptive_context["misses"] = (
+                    int(_fast_tune_adaptive_context.get("misses", 0)) + 1
+                )
         # ─────────────────────────────────────────────────────────────────
 
         # ── Constant-B non-finite handling (non-adaptive path) ───────────────
@@ -4230,6 +4400,23 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                 )
                 self._cache_downstream_feature_metadata()
                 self.model_ = Pipeline([("clf", self._make_estimator(n_cls))])
+                _downstream_names_for_wiring = self._get_downstream_feature_names()
+                if len(_downstream_names_for_wiring) != self.x_train_downstream_.shape[1]:
+                    raise RuntimeError(
+                        f"Internal error: downstream feature name count "
+                        f"({len(_downstream_names_for_wiring)}) does not match the "
+                        f"downstream matrix width ({self.x_train_downstream_.shape[1]}). "
+                        f"Refusing to wire HUGIML feature metadata into the downstream "
+                        f"estimator with mismatched names -- every later column would be "
+                        f"misattributed."
+                    )
+                _wire_hugiml_feature_metadata(
+                    self.model_.named_steps["clf"],
+                    _downstream_names_for_wiring,
+                    self.get_augmented_pair_transforms(),
+                    self.get_pattern_provenance(),
+                    self.get_original_feature_standardization(),
+                )
                 self.model_.fit(self.x_train_downstream_, y_train)
                 stage_times["fit_downstream"] = t.ms
 
@@ -4262,7 +4449,9 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             n_train_final = int(x_hup_for_metadata.shape[0])
             nnz = int(x_hup_for_metadata.nnz)
         else:
-            shape = tuple(getattr(self, "_training_pattern_matrix_shape_", (len(y_train), n_pats_final)))
+            shape = tuple(
+                getattr(self, "_training_pattern_matrix_shape_", (len(y_train), n_pats_final))
+            )
             n_train_final = int(shape[0]) if shape else int(len(y_train))
             nnz = int(getattr(self, "_training_pattern_matrix_nnz_", 0))
         density = (
@@ -4326,7 +4515,6 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             logger.info("  fit complete: %s", self.fit_metadata_.summary())
 
         return self
-
 
     def _effective_mining_timeout_seconds(self) -> float | None:
         """Return the configured mining-stage timeout in seconds.
@@ -4404,7 +4592,9 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                 )
             return mine_fn(self.td_, y_train, n_cls, K_arg, L_arg, G_arg, timeout_arg)
 
-        def _audit_entry(label: str, K_arg: int, L_arg: int, G_arg: float, timeout_arg: float) -> dict:
+        def _audit_entry(
+            label: str, K_arg: int, L_arg: int, G_arg: float, timeout_arg: float
+        ) -> dict:
             return {
                 "attempt_index": len(getattr(self, "mining_audit_log_", []) or []) + 1,
                 "label": str(label),
@@ -4539,7 +4729,9 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                 "status": "no_patterns",
                 "elapsed_ms": 0.0,
                 "n_patterns_returned": 0,
-                "deadline_reached_after_attempt": bool(deadline and time.perf_counter() >= deadline),
+                "deadline_reached_after_attempt": bool(
+                    deadline and time.perf_counter() >= deadline
+                ),
                 "exception_type": "",
                 "exception_message": "",
             }
@@ -4837,7 +5029,7 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         ``age=[29.2, 38.4)`` as order-2 because of the comma inside the
         interval notation, causing ``original_plus_interactions`` to
         incorrectly include numeric singletons in the downstream feature
-        matrix.  Using ``len(pe.items)`` gives the correct structural count:
+        matrix. Using ``len(pe.items)`` gives the retained item count:
         1 for singletons, 2 for pair conjunctions, regardless of feature type
         or label format.
         """
@@ -5878,6 +6070,142 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
             block._consume_fit_cache_ = True
         return block.transform(X_original)
 
+    _PATTERN_ATOM_INTERVAL_RE = re.compile(
+        r"^(?P<feature>.+?)=\[(?P<lower>[^,\]]+),\s*(?P<upper>[^)\]]+)\)$"
+    )
+
+    @classmethod
+    def _parse_pattern_atom_label(cls, label: str) -> dict[str, Any] | None:
+        """Parse ONE individual transaction-item label (e.g. "age=[35,50)"
+        or "gender=F") into a structured atom.
+
+        Deliberately operates on a single item's own label, never on a
+        compound pattern's comma-joined display string ("income=[91.02,
+        101.4), age=[60,87.2)") -- splitting THAT on every comma is unsafe,
+        since the commas inside numeric interval bounds are not atom
+        separators. Each pattern's individual item labels are already
+        available separately (self.td_.item_map, indexed by the item ids
+        in a PatternEntry.items list) with no compound-string parsing
+        needed at all; see get_pattern_provenance(), the only caller.
+        """
+        text = str(label or "").strip()
+        if not text:
+            return None
+        m = cls._PATTERN_ATOM_INTERVAL_RE.match(text)
+        if m:
+            feature = m.group("feature").strip()
+            try:
+                lower = float(m.group("lower"))
+                upper = float(m.group("upper"))
+            except ValueError:
+                return {"feature": feature, "operator": "unparsed", "raw_label": text}
+            return {
+                "feature": feature,
+                "operator": "interval",
+                "lower": lower,
+                "upper": upper,
+                "lower_inclusive": True,
+                "upper_inclusive": False,
+            }
+        if "=" in text:
+            feature, value = text.split("=", 1)
+            return {"feature": feature.strip(), "operator": "equals", "value": value.strip()}
+        return {"feature": text, "operator": "present"}
+
+    def get_pattern_provenance(self) -> dict[str, dict[str, Any]]:
+        """Return raw-feature provenance for downstream HUG pattern columns.
+
+        The method is available in both audit and production execution modes.
+        It reads the retained pattern structures and transaction item labels;
+        unlike :meth:`get_pattern_info`, it does not require the retained
+        training pattern matrix.
+
+        Returns
+        -------
+        dict[str, dict[str, Any]]
+            Mapping keyed by the full downstream pattern name. Each value
+            contains the pattern family, ordered raw feature names, and parsed
+            atom records. A representative value has this shape::
+
+                {
+                    "name": "pattern:age=[35,50), smoker=1",
+                    "family": "pattern",
+                    "raw_features": ["age", "smoker"],
+                    "atoms": [
+                        {
+                            "feature": "age",
+                            "operator": "interval",
+                            "lower": 35.0,
+                            "upper": 50.0,
+                            "lower_inclusive": True,
+                            "upper_inclusive": False,
+                        },
+                        {
+                            "feature": "smoker",
+                            "operator": "equals",
+                            "value": "1",
+                        },
+                    ],
+                }
+
+        Notes
+        -----
+        Each atom is parsed from its individual item label. The method never
+        splits the compound comma-joined display string, because numeric
+        interval bounds can themselves contain commas.
+        """
+        check_is_fitted(self)
+        try:
+            names = list(self._get_downstream_feature_names())
+            labels = self.get_hug_features()
+            patterns = list(getattr(self, "patterns_", []) or [])
+            item_map = getattr(getattr(self, "td_", None), "item_map", {}) or {}
+            label_remap = getattr(self, "_adaptive_code_label_map_", {}) or {}
+        except AttributeError:
+            return {}
+        if len(labels) != len(patterns):
+            return {}
+        pattern_by_label: dict[str, Any] = {}
+        for label, pe in zip(labels, patterns):
+            pattern_by_label[label] = pe
+            pattern_by_label[f"pattern:{label}"] = pe
+
+        provenance: dict[str, dict[str, Any]] = {}
+        for name in names:
+            try:
+                if self._downstream_feature_type(str(name)) != "pattern":
+                    continue
+                display = self._downstream_feature_display_name(str(name))
+            except AttributeError:
+                continue
+            pe = (
+                pattern_by_label.get(str(name))
+                or pattern_by_label.get(f"pattern:{display}")
+                or pattern_by_label.get(display)
+            )
+            if pe is None:
+                continue
+            atoms: list[dict[str, Any]] = []
+            raw_features: list[str] = []
+            for item_id in getattr(pe, "items", []) or []:
+                raw_label = item_map.get(int(item_id), str(item_id))
+                label = label_remap.get(raw_label, raw_label)
+                atom = self._parse_pattern_atom_label(str(label))
+                if atom is None:
+                    continue
+                atoms.append(atom)
+                feature = atom.get("feature")
+                if feature and feature not in raw_features:
+                    raw_features.append(str(feature))
+            if raw_features:
+                provenance[str(name)] = {
+                    "name": str(name),
+                    "family": "pattern",
+                    "raw_features": raw_features,
+                    "atoms": atoms,
+                }
+        return provenance
+
     def get_augmented_pair_transforms(self) -> list[dict[str, Any]]:
         """Return augmented pair transforms used by the downstream estimator.
 
@@ -5890,6 +6218,231 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         standardization, yielding a neutral standardized value.
         """
         return [dict(item) for item in getattr(self, "augmented_pair_transforms_", [])]
+
+    def rpte_rule_table(self, feature_names: list[str] | None = None) -> list[dict[str, Any]]:
+        """Return structured RPTE leaf and direct-source explanation rows.
+
+        The downstream estimator is identified by a
+        ``unified_rule_table()`` method, so this API does not require a hard
+        dependency on a particular RPTE implementation. The fitted pipeline is
+        unwrapped first. For a fitted ``OneVsRestClassifier``, rows from every
+        binary sub-estimator are concatenated and retain their class field.
+
+        RPTE rows cover both fitted leaf indicators and non-zero direct source
+        terms. Direct source terms may be original columns, HUG patterns, or
+        augmented pairs that were not selected in accepted tree splits.
+
+        Parameters
+        ----------
+        feature_names : list[str] or None, default None
+            Optional names aligned with the downstream estimator input. When
+            omitted, fitted downstream feature names are used.
+
+        Returns
+        -------
+        list[dict[str, Any]]
+            Structured explanation rows. Returns an empty list when the fitted
+            downstream estimator does not implement ``unified_rule_table()``
+            (for example, the built-in logistic-regression branch).
+
+        See Also
+        --------
+        rpte_rule_tree
+            Ready-to-print decision-tree-style representation.
+        """
+        check_is_fitted(self, "model_")
+        estimator = self.model_.named_steps.get("clf", self.model_)
+        names = feature_names if feature_names is not None else self._get_downstream_feature_names()
+
+        sub_estimators = []
+        if hasattr(estimator, "estimators_") and hasattr(estimator, "classes_"):
+            # OneVsRestClassifier (or a compatible multiclass wrapper):
+            # one fitted binary sub-estimator per class.
+            sub_estimators = list(getattr(estimator, "estimators_", []))
+        elif hasattr(estimator, "unified_rule_table"):
+            sub_estimators = [estimator]
+
+        rows: list[dict[str, Any]] = []
+        for sub in sub_estimators:
+            if not hasattr(sub, "unified_rule_table"):
+                continue
+            rows.extend(sub.unified_rule_table(feature_names=names))
+        return rows
+
+    def get_complexity_report(
+        self,
+        *,
+        X: Any | None = None,
+        coefficient_tolerance: float = 1e-12,
+        confidence_level: float = 0.95,
+    ) -> dict[str, Any]:
+        """Return the fitted model's structural and inspection measures.
+
+        Passing ``X`` adds the mean, sample standard deviation, and two-sided
+        confidence interval for instance inspection units.
+        """
+        from hugiml.compute_complexity import get_complexity_report
+
+        report = get_complexity_report(
+            self,
+            X=X,
+            coefficient_tolerance=coefficient_tolerance,
+            confidence_level=confidence_level,
+        )
+        if report is None:
+            raise RuntimeError("Complexity is unavailable for this fitted estimator")
+        return report
+
+    def get_instance_inspection_units(
+        self,
+        X: Any,
+        *,
+        coefficient_tolerance: float = 1e-12,
+    ) -> np.ndarray:
+        """Return one expanded inspection count for every row in ``X``."""
+        from hugiml.compute_complexity import get_instance_inspection_units
+
+        values = get_instance_inspection_units(
+            self,
+            X,
+            coefficient_tolerance=coefficient_tolerance,
+        )
+        if values is None:
+            raise RuntimeError(
+                "Instance inspection units are unavailable for this fitted estimator"
+            )
+        return values
+
+    def get_complexity(
+        self,
+        mode: str | None = None,
+        *,
+        X: Any | None = None,
+        coefficient_tolerance: float = 1e-12,
+        confidence_level: float = 0.95,
+    ) -> int | float:
+        """Return one measure from the uniform package interface.
+
+        Parameters
+        ----------
+        mode : {"model units", "model inspection units",
+                "instance inspection units"} or None, default=None
+            ``None`` returns model inspection units. Instance inspection units
+            require ``X`` and return the arithmetic mean across its rows.
+        X : array-like or DataFrame, optional
+            Rows used for instance inspection units.
+        coefficient_tolerance : float, default=1e-12
+            Absolute threshold used to identify active fitted terms and
+            non-zero row-specific transformed values.
+        confidence_level : float, default=0.95
+            Confidence level used when the instance summary is requested.
+        """
+        from hugiml.compute_complexity import get_complexity
+
+        value = get_complexity(
+            self,
+            mode,
+            X=X,
+            coefficient_tolerance=coefficient_tolerance,
+            confidence_level=confidence_level,
+        )
+        if value is None:
+            raise RuntimeError("Complexity is unavailable for this fitted estimator")
+        return value
+
+    def rpte_rule_tree(
+        self,
+        feature_names: list[str] | None = None,
+        *,
+        condition_space: str = "raw",
+        detail_level: str = "full",
+        precision: int = 5,
+        include_direct_terms: bool = True,
+        include_generation_details: bool = False,
+        class_label: Any | None = None,
+        tree_index: int | None = None,
+    ) -> str:
+        """Return RPTE prediction evidence as ready-to-print flat trees.
+
+        This is the readable companion to :meth:`rpte_rule_table`.  Shared
+        condition prefixes are merged, one split is shown per indentation
+        level, and final LR details are attached at terminal leaves.  Direct
+        source terms are grouped by original, HUG-pattern, and augmented-pair
+        families after the tree sections.
+
+        ``condition_space`` accepts ``"raw"``, ``"downstream"``, or ``"both"``.
+        ``detail_level`` accepts ``"compact"`` or ``"full"``.  The method
+        returns an empty string when the fitted downstream estimator is not
+        RPTE-based.
+
+        Example::
+
+            print(model.rpte_rule_tree())
+        """
+        from .rpte_interpretability import format_rpte_rule_tree
+
+        rows = self.rpte_rule_table(feature_names=feature_names)
+        return format_rpte_rule_tree(
+            rows,
+            condition_space=condition_space,
+            detail_level=detail_level,
+            precision=precision,
+            include_direct_terms=include_direct_terms,
+            include_generation_details=include_generation_details,
+            class_label=class_label,
+            tree_index=tree_index,
+        )
+
+    def get_original_feature_standardization(self) -> dict[str, dict[str, Any]]:
+        """Standardization and missing-value-imputation parameters for
+        every numeric original ("orig:") feature, keyed by raw feature
+        name (not the "orig:" prefixed downstream name).
+
+        This is what makes exact threshold rendering possible for original
+        features (interpretability priority #4): a downstream split like
+        "orig:age > -0.015" is meaningless to a domain reader on its own --
+        HUGIML standardizes every original numeric column with its own
+        (mean, scale) before any downstream estimator (including RPTE) ever
+        sees it. Inverting is a single affine transform:
+        raw_threshold = standardized_threshold * scale + mean.
+
+        Also reports the training-median imputation value used for missing
+        raw values in that column (interpretability priority #11): a row
+        whose standardized value is very close to 0 could be a genuinely
+        average observation OR a row where this feature was missing and
+        got median-imputed before standardization -- these are NOT always
+        distinguishable from the standardized value alone, which is
+        exactly why the imputation value is reported explicitly here rather
+        than left implicit.
+
+        Returns {} if no original numeric columns were standardized (e.g.
+        feature_mode="patterns_only", or every original column is
+        categorical).
+        """
+        check_is_fitted(self)
+        scaler = getattr(self, "_original_scaler_", None)
+        cols = list(getattr(self, "_original_numeric_cols_", []) or [])
+        if scaler is None or not cols:
+            return {}
+        means = np.asarray(getattr(scaler, "mean_", np.full(len(cols), np.nan)), dtype=float)
+        scales = np.asarray(getattr(scaler, "scale_", np.full(len(cols), np.nan)), dtype=float)
+        medians = getattr(self, "_original_numeric_medians_", None)
+        out: dict[str, dict[str, Any]] = {}
+        for i, name in enumerate(cols):
+            median_value = float("nan")
+            if medians is not None:
+                try:
+                    median_value = float(medians.get(name, float("nan")))
+                except Exception:
+                    median_value = float("nan")
+            out[str(name)] = {
+                "feature": str(name),
+                "standardization_mean": float(means[i]) if i < len(means) else float("nan"),
+                "standardization_scale": float(scales[i]) if i < len(scales) else float("nan"),
+                "missing_value_policy": "median_imputation",
+                "median_imputation_value": median_value,
+            }
+        return out
 
     def get_augmented_pair_standardization(self) -> pd.DataFrame:
         """Return standardization metadata for augmented pair features.
@@ -7061,16 +7614,21 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
         Raises
         ------
         AttributeError
-            When the downstream estimator does not expose ``coef_``
-            (e.g. non-linear models).
+            When the downstream estimator and its fitted one-vs-rest
+            estimators do not expose linear coefficients.
         """
         check_is_fitted(self)
         if self._is_constant_prior_fallback_active():
             return pd.DataFrame(
                 columns=[
-                    "pattern", "coefficient", "abs_coefficient",
-                    "pattern_support", "support_type", "feature_type",
-                    "pattern_origin", "survivor_led",
+                    "pattern",
+                    "coefficient",
+                    "abs_coefficient",
+                    "pattern_support",
+                    "support_type",
+                    "feature_type",
+                    "pattern_origin",
+                    "survivor_led",
                 ]
             )
         production_without_training_artifacts = self._is_production_mode() and not hasattr(
@@ -7088,18 +7646,23 @@ class HUGIMLClassifierNative(TransformerMixin, ClassifierMixin, BaseEstimator):
                 stacklevel=2,
             )
         clf_step = self.model_.named_steps.get("clf")
-        if not hasattr(clf_step, "coef_"):
+        coefficient_blocks: list[np.ndarray] = []
+        if hasattr(clf_step, "coef_"):
+            coefficient_blocks.append(np.atleast_2d(np.asarray(clf_step.coef_, dtype=float)))
+        else:
+            for estimator in list(getattr(clf_step, "estimators_", []) or []):
+                if hasattr(estimator, "coef_"):
+                    coefficient_blocks.append(
+                        np.atleast_2d(np.asarray(estimator.coef_, dtype=float))
+                    )
+        if not coefficient_blocks:
             raise AttributeError(
-                "feature_importances requires the downstream estimator "
-                "to expose coef_ (e.g. LogisticRegression)."
+                "feature_importances requires a linear downstream estimator "
+                "with fitted coefficients."
             )
 
-        raw_coef = clf_step.coef_
-        coef = (
-            raw_coef.mean(axis=0)
-            if raw_coef.ndim == 2 and raw_coef.shape[0] > 1
-            else raw_coef.ravel()
-        )
+        raw_coef = np.vstack(coefficient_blocks)
+        coef = raw_coef.mean(axis=0) if raw_coef.shape[0] > 1 else raw_coef.ravel()
         features = self._get_downstream_feature_names()
         if len(features) != len(coef):
             raise RuntimeError(
@@ -7617,11 +8180,21 @@ def _hugiml_validate_fast_tune_grid(candidates: list[dict[str, Any]]) -> dict[st
     """Validate that a grid is safe for exact cached tuning.
 
     The fast path is exact when adaptive binning is enabled and only mining/
-    representation dimensions vary: G, L, topK, and feature_mode.  Because G is
-    part of the native mining call, candidates are cached in separate constant-G
-    groups.  B may appear and even vary, but is ignored while
-    adaptive_binning=True because per-feature binning supplies the effective
-    discretisation.
+    representation dimensions (G, L, topK, feature_mode) plus the downstream
+    estimator choice (base_estimator) vary. Because G is part of the native
+    mining call, candidates are cached in separate constant-G groups. B may
+    appear and even vary, but is ignored while adaptive_binning=True because
+    per-feature binning supplies the effective discretisation.
+
+    base_estimator is safe to allow here even though it isn't a mining
+    parameter: it only affects the final "fit an estimator on the already-
+    built downstream feature matrix" step (see _make_estimator), never
+    mining, pattern selection, or downstream-matrix construction -- see
+    _hugiml_prepare_downstream_template_from_cached_base /
+    _hugiml_fit_downstream_estimator_from_template, which split those two
+    concerns precisely so a base_estimator-varying grid (e.g.
+    hyperparameter_configs.py's performance_ho) can still reuse the mining
+    and downstream-matrix cache across its base_estimator candidates.
     """
     if not candidates:
         raise HUGIMLParamError("No grid candidates supplied.")
@@ -7631,12 +8204,12 @@ def _hugiml_validate_fast_tune_grid(candidates: list[dict[str, Any]]) -> dict[st
         for key in set().union(*(set(c.keys()) for c in candidates))
         if len({repr(c.get(key, None)) for c in candidates}) > 1
     }
-    allowed_varying = {"B", "G", "L", "topK", "feature_mode"}
+    allowed_varying = {"B", "G", "L", "topK", "feature_mode", "base_estimator"}
     disallowed = sorted(varying - allowed_varying)
     if disallowed:
         raise HUGIMLParamError(
-            "fast_grid_tune requires only G, L, topK, and feature_mode to vary "
-            f"(B is ignored under adaptive_binning=True). Varying unsupported keys: {disallowed}."
+            "fast_grid_tune requires only G, L, topK, feature_mode, and base_estimator "
+            f"to vary (B is ignored under adaptive_binning=True). Varying unsupported keys: {disallowed}."
         )
 
     adaptive_values = {bool(c.get("adaptive_binning", True)) for c in candidates}
@@ -7659,11 +8232,25 @@ def _hugiml_validate_fast_tune_grid(candidates: list[dict[str, Any]]) -> dict[st
     if bad_modes:
         raise HUGIMLParamError(f"Unsupported feature_mode values for fast_grid_tune: {bad_modes}.")
 
+    # Deduplicated by repr(): distinct base_estimator *configurations*, not
+    # distinct Python object identities -- two None-vs-RPTE candidates
+    # collapse to the same 2 entries here regardless of how many times
+    # each was repeated across an outer grid expansion.
+    seen_reprs: set[str] = set()
+    base_estimator_values: list[Any] = []
+    for c in candidates:
+        value = c.get("base_estimator", None)
+        key = repr(value)
+        if key not in seen_reprs:
+            seen_reprs.add(key)
+            base_estimator_values.append(value)
+
     return {
         "L_values": L_values,
         "topK_values": topk_values,
         "feature_modes": feature_modes,
         "G_values": g_values,
+        "base_estimator_values": base_estimator_values,
         # Backward-compatible key used by older callers/tests.
         "G": g_values,
     }
@@ -7694,7 +8281,7 @@ def _hugiml_shallow_candidate_from_base(base: HUGIMLClassifierNative) -> HUGIMLC
     return cand
 
 
-def _hugiml_prepare_candidate_from_cached_base(
+def _hugiml_prepare_downstream_template_from_cached_base(
     base: HUGIMLClassifierNative,
     X_train_original: Any,
     y_train: Any,
@@ -7705,7 +8292,26 @@ def _hugiml_prepare_candidate_from_cached_base(
     native_augmented_pair_cache: Any | None = None,
     native_augmented_pair_score_topK: int | None = None,
 ) -> HUGIMLClassifierNative:
-    """Build and fit one exact candidate from a max-topK cached base model."""
+    """Build one (G, L, topK, feature_mode) candidate's downstream feature
+    matrix from a max-topK cached mining base -- everything a candidate
+    needs before an estimator is fit against it: pattern selection,
+    augmented-pair transforms, and the downstream matrix itself
+    (``x_train_downstream_``). Deliberately stops short of building or
+    fitting ``model_``: that step is the only one that depends on
+    ``base_estimator``, so keeping it separate lets
+    ``_hugiml_fit_downstream_estimator_from_template`` fit several
+    base_estimator candidates against the same prepared template without
+    repeating mining or downstream-matrix construction for each one (see
+    hyperparameter_configs.py's performance_ho grid, which varies
+    base_estimator between HUGIML's built-in logistic regression and RPTE).
+
+    A returned template that already has ``model_`` set (the constant-
+    prior fallback for a zero-pattern candidate) is already a complete,
+    usable model on its own -- there is no downstream feature matrix for
+    base_estimator to act on, so every base_estimator candidate sharing
+    this template is equivalent and
+    _hugiml_fit_downstream_estimator_from_template returns it unchanged.
+    """
     cand = _hugiml_shallow_candidate_from_base(base)
     cand.L = int(L_value)
     cand.topK = int(topK_value)
@@ -7772,7 +8378,52 @@ def _hugiml_prepare_candidate_from_cached_base(
     X_down = cand._apply_strict_topk_budget_fit(X_down, y_train)
     cand.x_train_downstream_ = X_down
     cand._cache_downstream_feature_metadata()
+    # Intentionally does not build/fit model_ here -- see
+    # _hugiml_fit_downstream_estimator_from_template.
+    return cand
+
+
+def _hugiml_fit_downstream_estimator_from_template(
+    template: HUGIMLClassifierNative,
+    base_estimator_value: Any,
+    y_train: Any,
+) -> HUGIMLClassifierNative:
+    """Fit one base_estimator candidate's downstream estimator against an
+    already-prepared template's cached downstream feature matrix, without
+    repeating mining, pattern selection, or downstream-matrix construction
+    -- see _hugiml_prepare_downstream_template_from_cached_base.
+
+    A shallow copy of `template` is used per call (numpy/scipy arrays are
+    shared by reference, not duplicated -- safe since nothing here mutates
+    them) so that fitting one base_estimator candidate never affects
+    another candidate built from the same template.
+    """
+    if hasattr(template, "model_"):
+        # Degenerate (constant-prior) template: no downstream feature
+        # matrix exists for base_estimator to act on, so every candidate
+        # sharing this template is identical regardless of base_estimator.
+        return template
+
+    cand = copy.copy(template)
+    cand.base_estimator = base_estimator_value
+    X_down = cand.x_train_downstream_
     cand.model_ = Pipeline([("clf", cand._make_estimator(len(cand.classes_)))])
+    _downstream_names_for_wiring = cand._get_downstream_feature_names()
+    if len(_downstream_names_for_wiring) != X_down.shape[1]:
+        raise RuntimeError(
+            f"Internal error: downstream feature name count "
+            f"({len(_downstream_names_for_wiring)}) does not match the downstream "
+            f"matrix width ({X_down.shape[1]}). Refusing to wire HUGIML feature "
+            f"metadata into the downstream estimator with mismatched names -- every "
+            f"later column would be misattributed."
+        )
+    _wire_hugiml_feature_metadata(
+        cand.model_.named_steps["clf"],
+        _downstream_names_for_wiring,
+        cand.get_augmented_pair_transforms(),
+        cand.get_pattern_provenance(),
+        cand.get_original_feature_standardization(),
+    )
     cand.model_.fit(X_down, y_train)
     cand._apply_execution_mode_retention()
     # Intentionally avoid drift baseline and rich metadata during tuning. The
@@ -7780,6 +8431,39 @@ def _hugiml_prepare_candidate_from_cached_base(
     # selected params if full production metadata/drift baseline is required.
     return cand
 
+
+def _hugiml_prepare_candidate_from_cached_base(
+    base: HUGIMLClassifierNative,
+    X_train_original: Any,
+    y_train: Any,
+    L_value: int,
+    topK_value: int,
+    feature_mode: str,
+    execution_mode: str = "audit",
+    native_augmented_pair_cache: Any | None = None,
+    native_augmented_pair_score_topK: int | None = None,
+) -> HUGIMLClassifierNative:
+    """Build and fit one exact candidate from a max-topK cached base model.
+
+    Kept as a single-call convenience wrapper composing
+    _hugiml_prepare_downstream_template_from_cached_base and
+    _hugiml_fit_downstream_estimator_from_template (using the base's own
+    base_estimator) for any caller that doesn't need to fit several
+    base_estimator candidates against the same template -- see those two
+    functions' docstrings for why the split exists.
+    """
+    template = _hugiml_prepare_downstream_template_from_cached_base(
+        base,
+        X_train_original,
+        y_train,
+        L_value,
+        topK_value,
+        feature_mode,
+        execution_mode,
+        native_augmented_pair_cache,
+        native_augmented_pair_score_topK,
+    )
+    return _hugiml_fit_downstream_estimator_from_template(template, base.base_estimator, y_train)
 
 
 def _hugiml_build_fast_tune_adaptive_context(
@@ -7916,7 +8600,33 @@ def _hugiml_fast_grid_tune(
     # cache group below.  A caller-supplied base G is used only for candidates
     # that omit G from the grid.
     params0.setdefault("G", grid_info["G_values"][0])
-    if params0.get("max_fit_seconds", None) is not None or params0.get("max_mining_seconds", None) is not None:
+    # Any grid key beyond the ones explicitly varying-and-handled below
+    # (L, topK, feature_mode, G, base_estimator) is required by
+    # _hugiml_validate_fast_tune_grid to be constant across every
+    # candidate -- but that constant value was never actually threaded
+    # into the cached mining base's own params here, only whatever the
+    # caller's base_params happened to set. Invisible for a grid that
+    # only ever varies the core four, but silently wrong for any grid
+    # (e.g. interpretability_ho, which explicitly sets
+    # convert_binary_to_categorical=True) that also sets another parameter
+    # mining itself depends
+    # on: the cached base would mine under the class default instead of
+    # the grid's actual value. Fold each such constant into params0
+    # (unless the caller's base_params already set it explicitly, which
+    # takes precedence) so the cached mining base -- and everything
+    # derived from it via _hugiml_shallow_candidate_from_base -- agrees
+    # with what every candidate in the grid actually requested.
+    _explicit_keys = {"L", "topK", "feature_mode", "G", "base_estimator", "adaptive_binning"}
+    _grid_keys: set[str] = set()
+    for _c in candidates:
+        _grid_keys.update(_c.keys())
+    for _key in sorted(_grid_keys - _explicit_keys):
+        if _key not in params0:
+            params0[_key] = candidates[0][_key]
+    if (
+        params0.get("max_fit_seconds", None) is not None
+        or params0.get("max_mining_seconds", None) is not None
+    ):
         raise HUGIMLParamError(
             "fast_grid_tune requires max_fit_seconds=None and max_mining_seconds=None "
             "for exact equivalence."
@@ -8017,6 +8727,13 @@ def _hugiml_fast_grid_tune(
     )
 
     validation_cache: dict[Any, Any] | None = None if disable_validation_cache else {}
+    # Second-level cache: one prepared downstream feature matrix per (G, L,
+    # topK, feature_mode), shared across every base_estimator candidate at
+    # that key (see _hugiml_prepare_downstream_template_from_cached_base /
+    # _hugiml_fit_downstream_estimator_from_template). For a grid that
+    # doesn't vary base_estimator this costs nothing extra: each key is
+    # still built exactly once, same as before the split existed.
+    downstream_template_cache: dict[tuple[float, int, int, str], HUGIMLClassifierNative] = {}
 
     rows: list[dict[str, Any]] = []
     best_score = -np.inf
@@ -8028,26 +8745,32 @@ def _hugiml_fast_grid_tune(
         topK_value = int(candidate_params.get("topK", 30))
         feature_mode = str(candidate_params.get("feature_mode", "patterns_only"))
         G_value = float(candidate_params.get("G", params0.get("G", 1e-2)))
+        base_estimator_value = candidate_params.get("base_estimator", params0.get("base_estimator"))
         t_cand = time.perf_counter()
         status = "ok"
         err = None
         score = np.nan
         model = None
         try:
-            model = _hugiml_prepare_candidate_from_cached_base(
-                base_by_G_L_topK[(G_value, L_value, topK_value)],
-                X_train_original,
-                y_train_arr,
-                L_value,
-                topK_value,
-                feature_mode,
-                requested_execution_mode,
-                native_augmented_pair_cache,
-                native_augmented_pair_score_topK,
+            template_key = (G_value, L_value, topK_value, feature_mode)
+            template = downstream_template_cache.get(template_key)
+            if template is None:
+                template = _hugiml_prepare_downstream_template_from_cached_base(
+                    base_by_G_L_topK[(G_value, L_value, topK_value)],
+                    X_train_original,
+                    y_train_arr,
+                    L_value,
+                    topK_value,
+                    feature_mode,
+                    requested_execution_mode,
+                    native_augmented_pair_cache,
+                    native_augmented_pair_score_topK,
+                )
+                downstream_template_cache[template_key] = template
+            model = _hugiml_fit_downstream_estimator_from_template(
+                template, base_estimator_value, y_train_arr
             )
-            score = _hugiml_score_model_for_tune(
-                model, X_val, y_val_arr, scoring, validation_cache
-            )
+            score = _hugiml_score_model_for_tune(model, X_val, y_val_arr, scoring, validation_cache)
             if np.isfinite(score) and score > best_score:
                 best_score = float(score)
                 best_model = model
@@ -8108,8 +8831,11 @@ def _hugiml_fast_grid_tune(
             int(adaptive_context.get("misses", 0)) if isinstance(adaptive_context, dict) else 0
         ),
         "adaptive_context_hits": (
-            max(0, sum(1 for _g, _l, _k in needed_cache_keys if int(_l) > 1)
-                - int(adaptive_context.get("misses", 0)))
+            max(
+                0,
+                sum(1 for _g, _l, _k in needed_cache_keys if int(_l) > 1)
+                - int(adaptive_context.get("misses", 0)),
+            )
             if isinstance(adaptive_context, dict) and "X_pre" in adaptive_context
             else 0
         ),
@@ -8198,7 +8924,10 @@ def _hugiml_score_model_for_tune(
                 if X_for_hug is None:
                     X_for_hug = model._prebin_for_predict(X_val)
                     validation_cache[pre_key] = X_for_hug
-            pat_sig = tuple(tuple(int(x) for x in getattr(p, "items", [])) for p in getattr(model, "patterns_", []))
+            pat_sig = tuple(
+                tuple(int(x) for x in getattr(p, "items", []))
+                for p in getattr(model, "patterns_", [])
+            )
             z_key = ("hup", id(getattr(model, "td_", None)), pat_sig)
             Z_val = validation_cache.get(z_key)
             if Z_val is None:

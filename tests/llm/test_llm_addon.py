@@ -58,3 +58,15 @@ def test_hugiml_only_end_to_end_flow(tmp_path: Path) -> None:
     governance = orch.execute(ActionRequest(action="generate_governance_report"))
     assert governance.ok
     assert "model_card_md" in governance.artifacts
+
+
+def test_interpretability_ho_command_forms_select_the_higher_order_grid() -> None:
+    for prompt in (
+        "run interpretability_ho grid",
+        "run interpretability ho grid",
+        "run higher order interpretability grid",
+    ):
+        planned = plan_request(prompt, prefer_llm=False)
+        assert isinstance(planned, ActionRequest)
+        assert planned.action == "tune_hyperparameters"
+        assert planned.params.get("grid_name") == "interpretability_ho"

@@ -27,6 +27,7 @@ except Exception:  # pragma: no cover - fallback message shown in UI
     go = None  # type: ignore[assignment]
 
 from hugiml.llm import ActionRequest, DatasetRegistry, HUGIMLActionOrchestrator
+from hugiml.llm.evidence import rpte_rule_rows_to_importance_rows
 from hugiml.llm.guardrails import deterministic_refusal
 from hugiml.llm.planner import plan_request
 from hugiml.llm.runtime import (
@@ -977,7 +978,29 @@ def _model_panel(orch: HUGIMLActionOrchestrator) -> None:
         _render_importance_chart(_df_records(imp))
         _show_dataframe(_df_records(imp), height=300)
     except Exception as exc:
-        st.warning(f"Feature importance unavailable: {exc}")
+        # feature_importances() requires a coef_-exposing downstream
+        # estimator and raises for RPTE (see classifier.feature_importances'
+        # docstring) -- which is now common, since "performance_ho" (the
+        # default tuning grid) can select the RPTE branch. Without this
+        # fallback the panel would just show the warning below and nothing
+        # else, right when a user most needs the RPTE-specific explanation.
+        rpte_rows: list[dict[str, Any]] = []
+        try:
+            rpte_rows = session.model.rpte_rule_table() if hasattr(session.model, "rpte_rule_table") else []
+        except Exception:
+            rpte_rows = []
+        if rpte_rows:
+            st.markdown("#### Top RPTE rules")
+            st.caption(
+                "The downstream estimator is RPTE; feature_importances() doesn't apply "
+                "(it requires a coef_-exposing estimator), so rules are ranked by each "
+                "leaf's own logistic coefficient instead."
+            )
+            importance_rows = rpte_rule_rows_to_importance_rows(rpte_rows)
+            _render_importance_chart(importance_rows)
+            _show_dataframe(importance_rows, height=300)
+        else:
+            st.warning(f"Feature importance unavailable: {exc}")
     try:
         pred = orch._prediction_rows(session, limit=12)  # dashboard-only readout from active session
         st.markdown("#### Held-out prediction snapshot")

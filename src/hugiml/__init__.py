@@ -81,7 +81,7 @@ Benchmark runner (CLI)::
 
 from __future__ import annotations
 
-__version__ = "1.1.17"
+__version__ = "1.1.18"
 __author__ = "Srikumar Krishnamoorthy"
 __license__ = "Apache-2.0"
 __paper__ = (
@@ -91,6 +91,14 @@ __paper__ = (
 )
 
 from hugiml.classifier import FitMetadata, HUGIMLClassifier, HUGIMLClassifierNative
+from hugiml.compute_complexity import (
+    INSTANCE_INSPECTION_UNITS,
+    MODEL_INSPECTION_UNITS,
+    MODEL_UNITS,
+    get_complexity,
+    get_complexity_report,
+    get_instance_inspection_units,
+)
 from hugiml.exceptions import (
     HUGIMLConvergenceWarning,
     HUGIMLDegradedWarning,
@@ -160,6 +168,12 @@ def check_native() -> bool:
 __all__ = [
     "HUGIMLClassifier",
     "HUGIMLClassifierNative",
+    "get_complexity",
+    "get_complexity_report",
+    "get_instance_inspection_units",
+    "MODEL_UNITS",
+    "MODEL_INSPECTION_UNITS",
+    "INSTANCE_INSPECTION_UNITS",
     "FitMetadata",
     "PredictionMonitor",
     "DriftDetector",

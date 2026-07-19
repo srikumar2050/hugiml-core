@@ -58,6 +58,11 @@ _HUGIML_PARAM_KEYS = {
     "ii_partner_size",
     "interaction_relaxed_mining",
     "interaction_relaxed_feature_size",
+    # Preserved so a promoted RPTE-based model keeps using RPTE when
+    # feature-removal pruning re-fits HUGIML on a reduced input set --
+    # without this, _safe_params()/fit_feature_pruned_hugiml() would
+    # silently drop it back to the built-in logistic-regression branch.
+    "base_estimator",
 }
 
 
@@ -223,12 +228,47 @@ def fit_feature_pruned_hugiml(
     return result, X_pruned
 
 
+def _rpte_final_representation(model: Any) -> str | None:
+    try:
+        from hugiml.dashboard.components.patterns import _get_rpte_feature_flow_audit
+
+        audit = _get_rpte_feature_flow_audit(model)
+    except Exception:
+        audit = {}
+    return str(audit.get("final_representation")) if audit else None
+
+
 def _transform_downstream(model: Any, X: pd.DataFrame) -> pd.DataFrame:
-    """Best-effort downstream representation transform for pattern/augmented pruning."""
+    """Return the fitted HUGIML source matrix with aligned column names.
+
+    HUGIML's public ``transform()`` returns the pattern matrix only, not the
+    complete original/pattern/augmented matrix supplied to the downstream
+    estimator. Prefer the fitted internal construction path when available so
+    representation-column pruning cannot silently target synthetic ``repr_*``
+    names or the wrong matrix.
+    """
+    make_downstream = getattr(model, "_make_downstream_features", None)
+    pattern_transform = getattr(model, "transform", None)
+    get_names = getattr(model, "get_downstream_features", None)
+    if callable(make_downstream) and callable(pattern_transform) and callable(get_names):
+        try:
+            Z_patterns = pattern_transform(X)
+            Z = make_downstream(X, Z_patterns, fit=False)
+            names = [str(v) for v in list(get_names() or [])]
+            if hasattr(Z, "toarray"):
+                arr = Z.toarray()
+            else:
+                arr = np.asarray(Z)
+            if arr.ndim == 1:
+                arr = arr.reshape(-1, 1)
+            if len(names) == arr.shape[1]:
+                return pd.DataFrame(arr, columns=names, index=X.index)
+        except Exception:
+            pass
+
     candidates = [
         "transform_downstream",
         "transform_features",
-        "transform",
         "_transform_downstream",
         "_transform_features",
     ]
@@ -251,9 +291,8 @@ def _transform_downstream(model: Any, X: pd.DataFrame) -> pd.DataFrame:
             continue
 
     raise RuntimeError(
-        "This HUGIML version does not expose a downstream representation transform. "
-        "Original-feature pruning is available; pattern/augmented representation pruning "
-        "requires transform/downstream columns from the fitted model."
+        "This HUGIML version does not expose an aligned downstream source representation. "
+        "Use raw-input exclusion with a full HUGIML rebuild instead."
     )
 
 
@@ -287,11 +326,45 @@ def fit_representation_pruned_downstream(
     scoring: str = "roc_auc",
     random_state: int = 2026,
 ) -> tuple[PrunedRepresentationResult, pd.DataFrame]:
-    """Remove selected downstream representation columns and refit downstream estimator."""
-    remove_columns = [str(c) for c in (remove_columns or [])]
+    """Remove selected direct LR representation columns for non-RPTE models.
+
+    RPTE models containing leaf indicators are rejected because a plain LR
+    refit on the HUGIML source matrix would discard the fitted leaf block. The
+    RPTE final LR may also contain direct source terms, but those terms
+    cannot be isolated with this generic source-matrix refit.
+    """
+    representation = _rpte_final_representation(base_model)
+    if representation in {"rpte_leaf_rules", "rpte_leaves_plus_direct_terms"}:
+        raise ValueError(
+            "The fitted RPTE final LR contains leaf indicators. Direct original, pattern, "
+            "and augmented-pair terms may also be appended directly, but a plain LR refit on the "
+            "HUGIML source matrix would discard the leaf block and change the model class. Exclude "
+            "raw inputs and rebuild the full pipeline, or refit a smaller RPTE configuration."
+        )
+    requested_columns = [str(c) for c in (remove_columns or [])]
     Z = _transform_downstream(base_model, X)
     Z.columns = [str(c) for c in Z.columns]
-    remove_set = set(remove_columns)
+
+    family_prefix = {
+        "HUG patterns": "pattern:",
+        "Augmented features": "augmented_pair:",
+    }.get(str(family), "")
+    column_set = set(Z.columns)
+    matched: list[str] = []
+    for requested in requested_columns:
+        candidates = [requested]
+        if family_prefix and not requested.startswith(family_prefix):
+            candidates.append(f"{family_prefix}{requested}")
+        match = next((candidate for candidate in candidates if candidate in column_set), None)
+        if match is not None and match not in matched:
+            matched.append(match)
+
+    if not matched:
+        raise ValueError(
+            "None of the requested representation columns exist in the fitted downstream matrix. "
+            "No pruning was performed."
+        )
+    remove_set = set(matched)
     keep_cols = [c for c in Z.columns if c not in remove_set]
     if not keep_cols:
         raise ValueError("Representation pruning removed all downstream columns; keep at least one column.")
@@ -311,7 +384,7 @@ def fit_representation_pruned_downstream(
             score=score,
             rows=rows,
             kept_columns=keep_cols,
-            removed_columns=remove_columns,
+            removed_columns=matched,
             family=family,
         ),
         Z_pruned,

@@ -41,6 +41,7 @@ from hugiml.dashboard.components.feature_family import render_feature_family_aud
 from hugiml.dashboard.components.governance_evidence import (
     render_adaptive_binning_evidence,
     render_augmented_pair_traceability,
+    render_rpte_rule_evidence,
     render_survivor_led_pattern_audit,
 )
 from hugiml.dashboard.components.missingness import render_missingness
@@ -49,6 +50,7 @@ from hugiml.dashboard.components.patterns import render_patterns
 from hugiml.dashboard.components.performance import render_performance
 from hugiml.dashboard.components.prediction import render_prediction
 from hugiml.dashboard.components.pruning import render_pruning_analysis
+from hugiml.dashboard.components.rpte_governance import rpte_has_tree_representation, rpte_is_active
 from hugiml.dashboard.data import prepare_model_frame
 from hugiml.dashboard.display import dataframe_for_display
 from hugiml.dashboard.runner import score_cases, train_hugiml
@@ -1128,6 +1130,12 @@ def _render_hero(ctx: dict[str, Any]) -> None:
     best_score = getattr(ctx["result"], "best_score_", None)
     model = ctx["model"]
     score_text = f"{best_score:.4f}" if best_score is not None else "N/A"
+    promoted_run = ctx.get("promoted_run") if isinstance(ctx.get("promoted_run"), dict) else {}
+    promoted_chip = (
+        f'<span class="hugiml-chip">Promoted run: {promoted_run.get("run_id")}</span>'
+        if promoted_run.get("run_id")
+        else ""
+    )
 
     st.markdown(
         f"""
@@ -1135,12 +1143,13 @@ def _render_hero(ctx: dict[str, Any]) -> None:
           <span class="hugiml-eyebrow">HUGIML Governance Studio</span>
           <h1>Audit &amp; Evidence Dashboard</h1>
           <p>Validation performance, model complexity, feature-family provenance, HUG pattern inventory,
-          case explanations, data quality, representation pruning, configuration comparison, and monitoring signals.</p>
+          case explanations, data quality, representation-valid rebuilds, configuration comparison, and monitoring signals.</p>
           <div class="hugiml-chip-row">
             <span class="hugiml-chip">Data: {ctx['mode']}</span>
             <span class="hugiml-chip">Rows: {ctx['meta']['n_rows']:,}</span>
             <span class="hugiml-chip">Features: {ctx['meta']['n_features']:,}</span>
             <span class="hugiml-chip">Best CV ROC-AUC: {score_text}</span>
+            {promoted_chip}
             <span class="hugiml-chip">Feature mode: {getattr(model, 'feature_mode', 'N/A')}</span>
           </div>
         </div>
@@ -1166,7 +1175,7 @@ def _render_governance_workflow() -> None:
           <div class="hugiml-step">
             <span class="hugiml-step-num">3</span>
             <b>Governance actions</b>
-            <span>Review sensitive/proxy columns, prune features, compare configs, and monitor drift.</span>
+            <span>Review sensitive/proxy lineage, apply representation-valid rebuilds or simplification tests, compare configs, and monitor drift.</span>
           </div>
         </div>
         """,
@@ -1175,27 +1184,114 @@ def _render_governance_workflow() -> None:
 
 
 def _render_representation_page(ctx: dict[str, Any]) -> None:
-    st.subheader("Representation Audit")
-    st.markdown(
-        """
-        <div class="hugiml-section-note">
-          <p>Combines complexity and feature-family provenance using explicit model evidence:
-          selected parameters, feature-family counts, pattern inventory, and generated-feature provenance.</p>
-        </div>
-        """,
-        unsafe_allow_html=True,
+    is_rpte = rpte_is_active(ctx["model"])
+    is_rpte_leaf = rpte_has_tree_representation(ctx["model"])
+    is_rpte_fallback = is_rpte and not is_rpte_leaf
+    title = (
+        "RPTE Representation Audit"
+        if is_rpte_leaf
+        else "RPTE Fallback Representation Audit"
+        if is_rpte_fallback
+        else "Representation Audit"
     )
+    st.subheader(title)
+    if is_rpte_leaf:
+        st.markdown(
+            """
+            <div class="hugiml-section-note">
+              <p>Audits the fitted path from raw inputs to HUGIML source columns, accepted RPTE splits,
+              root-to-leaf indicators, direct source columns, and final LR coefficients. Source
+              columns selected in tree splits are represented through leaves; direct original features, HUG
+              patterns, and augmented pairs are carried directly into the final LR.</p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    elif is_rpte_fallback:
+        st.markdown(
+            """
+            <div class="hugiml-section-note">
+              <p>RPTE could not form a valid tree in this fitted run. The emergency fallback therefore
+              uses HUGIML source columns directly in LR. This page audits those direct fallback terms
+              separately and does not describe them as RPTE leaf rules.</p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            """
+            <div class="hugiml-section-note">
+              <p>Combines complexity and feature-family provenance using explicit model evidence:
+              selected parameters, feature-family counts, pattern inventory, and generated-feature provenance.</p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
     with st.container(border=True):
         render_complexity(ctx["model"])
 
     st.divider()
 
-    tab1, tab2, tab3, tab4 = st.tabs([
+    if is_rpte_leaf:
+        tab1, tab2, tab3, tab4, tab5 = st.tabs([
+            "Feature-flow audit",
+            "Final RPTE LR evidence",
+            "Raw-input preprocessing",
+            "HUG pattern metadata",
+            "Augmented-pair metadata",
+        ])
+        with tab1:
+            render_feature_family_audit(
+                ctx["model"],
+                ctx["X"],
+                sensitive_columns=ctx["roles"]["sensitive_columns"],
+                excluded_columns=ctx["roles"]["excluded_columns"],
+                id_column=ctx["roles"]["id_column"],
+            )
+        with tab2:
+            render_rpte_rule_evidence(ctx["model"])
+        with tab3:
+            render_adaptive_binning_evidence(ctx["model"], ctx.get("X"))
+        with tab4:
+            render_survivor_led_pattern_audit(ctx["model"])
+        with tab5:
+            render_augmented_pair_traceability(ctx["model"])
+        return
+
+    if is_rpte_fallback:
+        tab1, tab2, tab3, tab4, tab5 = st.tabs([
+            "Final fallback LR source terms",
+            "Raw-input preprocessing",
+            "HUG pattern fallback inputs",
+            "Augmented-pair fallback inputs",
+            "RPTE fallback evidence",
+        ])
+        with tab1:
+            render_feature_family_audit(
+                ctx["model"],
+                ctx["X"],
+                sensitive_columns=ctx["roles"]["sensitive_columns"],
+                excluded_columns=ctx["roles"]["excluded_columns"],
+                id_column=ctx["roles"]["id_column"],
+            )
+        with tab2:
+            render_adaptive_binning_evidence(ctx["model"], ctx.get("X"))
+        with tab3:
+            render_survivor_led_pattern_audit(ctx["model"])
+        with tab4:
+            render_augmented_pair_traceability(ctx["model"])
+        with tab5:
+            render_rpte_rule_evidence(ctx["model"])
+        return
+
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
         "Feature families",
         "Adaptive binning evidence",
         "Augmented pair traceability",
         "Survivor-led pattern audit",
+        "RPTE final LR evidence",
     ])
     with tab1:
         render_feature_family_audit(
@@ -1211,6 +1307,8 @@ def _render_representation_page(ctx: dict[str, Any]) -> None:
         render_augmented_pair_traceability(ctx["model"])
     with tab4:
         render_survivor_led_pattern_audit(ctx["model"])
+    with tab5:
+        render_rpte_rule_evidence(ctx["model"])
 
 
 def _render_data_quality_policy_page(ctx: dict[str, Any]) -> None:
@@ -1249,7 +1347,13 @@ def _render_page(page: str, ctx: dict[str, Any]) -> None:
         )
     elif page == "Validation":
         cv_results = pd.DataFrame(getattr(ctx["result"], "results_", []))
-        render_performance(cv_results, model=ctx["model"], X=ctx["X"], y=ctx.get("y"))
+        render_performance(
+            cv_results,
+            model=ctx["model"],
+            X=ctx["X"],
+            y=ctx.get("y"),
+            evaluation=ctx.get("evaluation"),
+        )
     elif page == "Representation Audit":
         _render_representation_page(ctx)
     elif page == "Pattern Inventory":

@@ -32,46 +32,61 @@ checking_status=no_checking          coef= +1.12     support=0.39
 ## Table of Contents
 
 1. [What Is HUG-IML?](#what-is-hug-iml)
-2. [Installation](#installation)
-3. [Quick Start](#quick-start)
-4. [Feature Modes](#feature-modes)
-5. [Execution Modes](#execution-modes)
-6. [Hyperparameter Search](#hyperparameter-search)
-7. [Governance Studio Dashboard](#governance-studio-dashboard)
-8. [LLM Assistant](#llm-assistant)
-9. [Augmented Pair Features](#augmented-pair-features)
-10. [Adaptive Binning](#adaptive-binning)
-11. [Missing Value Handling](#missing-value-handling)
-12. [Model Explanation and Visualisations](#model-explanation-and-visualisations)
-13. [Native Mining Pruning Controls](#native-mining-pruning-controls)
-14. [Pattern Pruning](#pattern-pruning)
-15. [Interpretability Metrics](#interpretability-metrics)
-16. [Multiclass, Imbalanced Data, High-Cardinality](#multiclass-imbalanced-data-high-cardinality)
-17. [Drift Detection & Monitoring](#drift-detection--monitoring)
-18. [Calibration](#calibration)
-19. [Serialisation](#serialisation)
-20. [Governance & Model Cards](#governance--model-cards)
-21. [Benchmark Suite](#benchmark-suite)
-22. [Validation Highlights](#validation-highlights)
-23. [Inference Server](#inference-server)
-24. [CI / CD](#ci--cd)
-25. [Repository Structure](#repository-structure)
-26. [License](#license)
-27. [Citation](#citation)
+2. [Why HUG-IML?](#why-hug-iml)
+3. [Installation](#installation)
+4. [Quick Start](#quick-start)
+5. [Feature Modes](#feature-modes)
+6. [Execution Modes](#execution-modes)
+7. [Hyperparameter Search](#hyperparameter-search)
+8. [RPTE — Higher-Order Interactions](#rpte--higher-order-interactions)
+9. [Governance Studio Dashboard](#governance-studio-dashboard)
+10. [LLM Assistant](#llm-assistant)
+11. [Augmented Pair Features](#augmented-pair-features)
+12. [Adaptive Binning](#adaptive-binning)
+13. [Missing Value Handling](#missing-value-handling)
+14. [Model Explanation and Visualisations](#model-explanation-and-visualisations)
+15. [Native Mining Pruning Controls](#native-mining-pruning-controls)
+16. [Pattern Pruning](#pattern-pruning)
+17. [Interpretability Metrics](#interpretability-metrics)
+18. [Multiclass, Imbalanced Data, High-Cardinality](#multiclass-imbalanced-data-high-cardinality)
+19. [Drift Detection & Monitoring](#drift-detection--monitoring)
+20. [Calibration](#calibration)
+21. [Serialisation](#serialisation)
+22. [Governance & Model Cards](#governance--model-cards)
+23. [Benchmark Suite](#benchmark-suite)
+24. [Validation Highlights](#validation-highlights)
+25. [Inference Server](#inference-server)
+26. [CI / CD](#ci--cd)
+27. [Repository Structure](#repository-structure)
+28. [License](#license)
+29. [Citation](#citation)
 
 ---
 
 ## What Is HUG-IML?
 
-The **High Utility Gain Interpretable Machine Learning (HUG-IML)** framework extracts *High Utility Gain patterns* from labelled tabular data, transforms the input into a binary pattern-presence matrix, and fits an interpretable downstream classifier (logistic regression by default) on that matrix.
+The **High Utility Gain Interpretable Machine Learning (HUG-IML)** framework extracts *High Utility Gain patterns* from labelled tabular data, transforms the input into a binary pattern-presence matrix, and fits an interpretable downstream classifier on that matrix — logistic regression by default for a single fit, or, when tuning with the default `performance_ho` grid, either logistic regression or RPTE (Residual Pattern Tree Ensemble, an optional constrained higher-order rule ensemble — see [RPTE — Higher-Order Interactions](#rpte--higher-order-interactions)), whichever scores better.
 
 The resulting patterns are human-readable and serve as the primary source of model explanations, making the system suitable for regulated domains such as credit scoring, healthcare, and risk management.
 
-**Key reference:**
+**Key references:**
 
 > Krishnamoorthy, S. (2024). Interpretable Classifier Models for Decision
 > Support Using High Utility Gain Patterns. *IEEE Access*, 12, 126088–126107.
 > DOI: [10.1109/ACCESS.2024.3455563](https://doi.org/10.1109/ACCESS.2024.3455563)
+
+The interaction-aware extensions such as adaptive discretisation, interaction-supported
+pattern admission, explicit pair terms, and bounded explanation budgets are
+described in [Complexity-Budgeted, Interaction-Aware Interpretable Model for
+Tabular Data](https://arxiv.org/abs/2607.07060).
+
+---
+
+## Why HUG-IML?
+
+Most interpretable ML methods force a trade-off: either the model is readable but its complexity grows with the data (EBMs scale as features x bins plus interaction terms), or it performs well but explanations are post-hoc approximations of a black box (SHAP on XGBoost). HUG-IML sidesteps both problems. The model's complexity budget is always exactly **topK patterns**, regardless of how many features or bins the dataset has. Each pattern is a human-readable conjunction of intervals and categories. There is no separate explanation layer to trust or validate: the patterns *are* the learned representation, and a logistic regression over them *is* the classifier. On standard benchmarks, HUG-IML matches or exceeds EBM and XGBoost accuracy at a fraction of the complexity budget (see [Benchmark Suite](#benchmark-suite) and [Validation Highlights](#validation-highlights)).
+
+This design makes HUG-IML a natural fit for regulated domains like credit scoring, healthcare risk, insurance underwriting, and AML, where reviewers need to inspect, edit, and sign off on individual model components. The [pattern pruning](#pattern-pruning) workflow lets analysts remove patterns that reference protected attributes or show drift, refit, recalibrate, and produce a full JSON audit trail, all within a single API.
 
 ---
 
@@ -84,7 +99,7 @@ pip install hugiml-core
 # With profile plots
 pip install "hugiml-core[plots]"
 
-# With Streamlit UIs: Governance Studio dashboard and HUGIML LLM Assistant
+# With the Dash Governance Studio and dashboard dependencies
 pip install "hugiml-core[dashboard]"
 
 # With benchmark comparison suite
@@ -228,6 +243,8 @@ When `base_estimator` is not supplied, HUGIML now exposes the built-in downstrea
 
 All built-in solver choices keep deterministic defaults aligned with the existing classifier path: `random_state=0` and `max_iter=500`. If you need complete control over solver-specific hyperparameters, pass a fully configured `base_estimator`; that continues to override `lr_solver`.
 
+A `base_estimator` is not limited to `LogisticRegression`/`SGDClassifier` — see [RPTE — Higher-Order Interactions](#rpte--higher-order-interactions) for the constrained residual-rule branch reachable the same way (and, by default, automatically considered through the `performance_ho` grid).
+
 ```python
 from hugiml import HUGIMLClassifier
 
@@ -241,7 +258,7 @@ clf_saga = HUGIMLClassifier(lr_solver="saga", feature_mode="original_plus_patter
 clf_sgd = HUGIMLClassifier(lr_solver="sgd", feature_mode="original_plus_patterns")
 ```
 
-The versioned `.hugiml` serializer records `lr_solver` in the classifier initialization state and natively round-trips both `LogisticRegression` and the built-in `SGDClassifier` downstream estimator.
+The versioned `.hugiml` serializer records `lr_solver` in the classifier initialization state and natively round-trips both `LogisticRegression` and the built-in `SGDClassifier` downstream estimator; an RPTE (or otherwise custom) `base_estimator` round-trips too, including the unfitted `base_estimator` hyperparameter itself — see [Serialization](#serialization) under the RPTE section above.
 
 ## Execution Modes
 
@@ -276,15 +293,42 @@ HUGIML provides a fast cached tuning path for adaptive-binning grids. When `adap
 
 ### Recommended named parameter grids
 
-HUGIML tuning reads the recommended grids from `hugiml.hyperparameter_configs`. Use the default ``"performance"`` grid for a compact first pass, then switch to ``"interpretability"`` when the final representation should remain pattern-only.
+HUGIML tuning reads four named grids from `hugiml.hyperparameter_configs`. **`"performance_ho"` is the default**: it evaluates the eight `L × topK × G` configurations used by `"performance"` with both the built-in LR branch and the adaptive RPTE branch, for 16 candidates. It sets `feature_mode="original_plus_patterns"`, enables augmented pairs, keeps numeric 0/1 columns numeric with `convert_binary_to_categorical=False`, and keeps `topk_budget_strict=False`. Use `"performance"` for the same mining search with LR only, `"interpretability"` for pattern-only relaxed mining with LR, or `"interpretability_ho"` for the same pattern-only surface with LR versus sequential RPTE. Both interaction-relaxed grids set `convert_binary_to_categorical=True` so numeric 0/1 indicators enter the categorical pattern surface.
 
 ```python
 from hugiml import HUGIMLClassifier
 
-performance_grid = HUGIMLClassifier.default_param_grid()
+default_grid = HUGIMLClassifier.default_param_grid()          # performance_ho
+performance_grid = HUGIMLClassifier.default_param_grid("performance")
 interpretability_grid = HUGIMLClassifier.default_param_grid("interpretability")
+interpretability_ho_grid = HUGIMLClassifier.default_param_grid("interpretability_ho")
 
-# Equivalent default performance grid:
+# Equivalent default (performance_ho) grid:
+from sklearn.multiclass import OneVsRestClassifier
+from hugiml.rpte_bounded_lookahead_leafwise import LeafWiseBoundedLookaheadRPTEFeatureLR
+
+default_grid = {
+    "B": [-1],
+    "adaptive_binning": [True],
+    "L": [1, 2],
+    "topK": [50, 100],
+    "feature_mode": ["original_plus_patterns"],
+    "G": [0.01, 0.001],
+    "convert_binary_to_categorical": [False],
+    "augmented_pair_transforms": [True],
+    "topk_budget_strict": [False],
+    "base_estimator": [
+        None,  # HUGIML's built-in logistic-regression branch
+        OneVsRestClassifier(
+            LeafWiseBoundedLookaheadRPTEFeatureLR(
+                leaf_config="3xD", depth=4, enable_lookahead="adaptive"
+            ),
+            n_jobs=1,
+        ),
+    ],
+}
+
+# Equivalent performance grid (LR-only, no RPTE search):
 performance_grid = {
     "B": [-1],
     "adaptive_binning": [True],
@@ -292,6 +336,7 @@ performance_grid = {
     "topK": [50, 100],
     "feature_mode": ["original_plus_patterns"],
     "G": [0.01, 0.001],
+    "convert_binary_to_categorical": [False],
 }
 
 # Equivalent interpretability grid:
@@ -303,16 +348,34 @@ interpretability_grid = {
     "feature_mode": ["patterns_only"],
     "G": [0.01, 0.001],
     "interaction_relaxed_mining": [True],
+    "convert_binary_to_categorical": [True],
     "augmented_pair_transforms": [False],
+}
+
+# Equivalent interpretability_ho grid:
+interpretability_ho_grid = {
+    **interpretability_grid,
+    "topk_budget_strict": [False],
+    "base_estimator": [
+        None,
+        OneVsRestClassifier(
+            LeafWiseBoundedLookaheadRPTEFeatureLR(
+                leaf_config="3xD", depth=4, enable_lookahead=False
+            ),
+            n_jobs=1,
+        ),
+    ],
 }
 ```
 
 | Grid | Recommended use | Main values |
 |---|---|---|
-| `performance` | First-pass predictive tuning | `feature_mode=["original_plus_patterns"]`, `L=[1,2]`, `topK=[50,100]`, `G=[0.01,0.001]` |
-| `interpretability` | Pattern-only representation review | `feature_mode=["patterns_only"]`, `interaction_relaxed_mining=True`, `augmented_pair_transforms=False` |
+| `performance_ho` **(default)** | First-pass tuning that also considers higher-order interactions | Same mining budget as `performance`, `convert_binary_to_categorical=False`, plus `base_estimator=[None, RPTE(...)]` |
+| `performance` | First-pass predictive tuning, linear downstream only | `feature_mode=["original_plus_patterns"]`, `convert_binary_to_categorical=False`, `L=[1,2]`, `topK=[50,100]`, `G=[0.01,0.001]` |
+| `interpretability` | Pattern-only representation review | `feature_mode=["patterns_only"]`, `interaction_relaxed_mining=True`, `convert_binary_to_categorical=True`, `augmented_pair_transforms=False` |
+| `interpretability_ho` | Pattern-only higher-order review | Same binary-aware mining surface as `interpretability`, plus `base_estimator=[None, sequential RPTE(...)]`, `enable_lookahead=False` |
 
-Both grids keep `B=[-1]` and `adaptive_binning=[True]`, so each numerical feature chooses a supervised bin count. Do not enable `interaction_relaxed_mining=True` and `augmented_pair_transforms=True` in the same `L >= 2` candidate.
+All four grids keep `B=[-1]` and `adaptive_binning=[True]`, so each numerical feature chooses a supervised bin count. The performance/augmented-pair grids explicitly use `convert_binary_to_categorical=False`; the interpretability/interaction-relaxed grids explicitly use `True`. Do not enable `interaction_relaxed_mining=True` and `augmented_pair_transforms=True` in the same `L >= 2` candidate.
 
 Use focused follow-up grids when you want to explore interaction-relaxed mining or augmented-pair transforms.
 
@@ -321,7 +384,7 @@ Use focused follow-up grids when you want to explore interaction-relaxed mining 
 ```python
 result = HUGIMLClassifier.tune(
     X, y,
-    param_grid="performance",
+    param_grid="performance_ho",  # default; omit param_grid for the same effect
     cv=5,
     shuffle=True,
     random_state=42,
@@ -334,6 +397,11 @@ print(f"CV score: {result.best_score_:.4f}")
 print(f"Fast path used: {result.fast_path_used_}")
 
 best_model = result.best_estimator_
+
+# If RPTE wins, print the readable tree or use structured rows.
+if hasattr(best_model, "rpte_rule_tree"):
+    print(best_model.rpte_rule_tree())
+    rules = best_model.rpte_rule_table()
 ```
 
 A custom grid is supplied via `param_grid`. For the cached adaptive-binning path, keep the varying dimensions compact and centered on mining or representation choices such as `G`, `L`, `topK`, and `feature_mode`. Fixed values such as `B=-1` and `adaptive_binning=True` may be included for clarity.
@@ -385,6 +453,7 @@ patterns_relaxed_grid = {
     "G": [1e-2, 5e-3],
     "topK": [50, 100],
     "feature_mode": ["patterns_only"],
+    "convert_binary_to_categorical": [True],
     "augmented_pair_transforms": [False],
     "interaction_relaxed_mining": [True],
     "interaction_relaxed_feature_size": [8, 12],
@@ -398,6 +467,7 @@ patterns_augmented_grid = {
     "G": [1e-2, 5e-3],
     "topK": [50, 100],
     "feature_mode": ["patterns_only"],
+    "convert_binary_to_categorical": [False],
     "augmented_pair_transforms": [True],
     "augmented_pair_mode": ["interaction_information"],
     "aug_feature_size": [8, 12],
@@ -411,6 +481,7 @@ originals_relaxed_grid = {
     "G": [1e-2, 5e-3],
     "topK": [50, 100],
     "feature_mode": ["original_plus_patterns"],
+    "convert_binary_to_categorical": [True],
     "augmented_pair_transforms": [False],
     "interaction_relaxed_mining": [True],
     "interaction_relaxed_feature_size": [8, 12],
@@ -424,6 +495,7 @@ originals_augmented_grid = {
     "G": [1e-2, 5e-3],
     "topK": [50, 100],
     "feature_mode": ["original_plus_patterns"],
+    "convert_binary_to_categorical": [False],
     "augmented_pair_transforms": [True],
     "augmented_pair_mode": ["interaction_information"],
     "aug_feature_size": [8, 12],
@@ -436,7 +508,7 @@ originals_augmented_grid = {
 tune_result = HUGIMLClassifier.fast_grid_tune(
     X_train, y_train,
     X_val,   y_val,
-    param_grid="performance",
+    param_grid="performance_ho",  # default
     scoring="roc_auc",
     refit_full=False,
 )
@@ -447,9 +519,166 @@ print(f"Validation score: {tune_result['best_score']:.4f}")
 
 ---
 
+## RPTE: Higher-Order Interactions
+
+**Residual Pattern Tree Ensemble** (**RPTE**) is an optional downstream model for cases where individual HUG patterns or original features are readable, but their joint effect is not adequately represented by one linear coefficient.
+
+RPTE is not a conventional tree-voting ensemble. Its trees create a small rule representation, and a final sparse logistic regression assigns the prediction weights.
+
+### What keeps RPTE interpretable
+
+- **Residual construction.** Each accepted tree is trained on signal left after the earlier trees, so later trees have a distinct role.
+- **Source ownership across trees.** Once an accepted tree uses a raw source, later trees do not use that source again through another original, pattern, or pair-derived column.
+- **Bounded trees.** Depth and leaf budgets limit the length and number of displayed rules.
+- **One reached leaf per tree.** Every case follows one deterministic path through each accepted tree and reaches exactly one terminal leaf. The tree uses only its selected splits; it does not enumerate every possible input combination.
+- **No repeated input column.** A downstream input column used in an accepted tree is not also included as a direct term in the final logistic layer.
+- **Additive final score.** The prediction is the logistic intercept plus one reached-leaf coefficient from each accepted tree and any retained direct terms.
+
+### Breast-cancer example generated by the package
+
+The following example uses six measurements from scikit-learn's Breast Cancer Wisconsin dataset. The target is recoded so **Class 1 means malignant**. The small tree budget keeps the rendered output compact.
+
+```python
+from sklearn.datasets import load_breast_cancer
+from sklearn.model_selection import train_test_split
+
+from hugiml import HUGIMLClassifier
+from hugiml.rpte_bounded_lookahead_leafwise import (
+    LeafWiseBoundedLookaheadRPTEFeatureLR,
+)
+
+data = load_breast_cancer(as_frame=True)
+columns = [
+    "mean radius",
+    "mean texture",
+    "mean concavity",
+    "worst radius",
+    "worst concavity",
+    "worst symmetry",
+]
+X = data.data[columns]
+y = (data.target == 0).astype(int)  # malignant = 1
+
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.25, stratify=y, random_state=42
+)
+
+clf = HUGIMLClassifier(
+    B=-1,
+    adaptive_binning=True,
+    b_candidates=[3, 5, 7],
+    L=1,
+    G=0.5,
+    topK=6,
+    feature_mode="original_plus_patterns",
+    augmented_pair_transforms=False,
+    base_estimator=LeafWiseBoundedLookaheadRPTEFeatureLR(
+        leaf_config="2xD",
+        depth=2,
+        n_estimators=2,
+        min_samples_leaf=20,
+        enable_lookahead=False,
+        random_state=42,
+    ),
+)
+clf.fit(X_train, y_train)
+
+print(clf.rpte_rule_tree(detail_level="compact", precision=3))
+```
+
+This produces the following package-rendered representation:
+
+```text
+Class 1 | Tree 0 | sequential RPTE
+ROOT
+├── worst radius <= 16.795
+│   ├── mean concavity <= 0.11185
+│   │   └── LEAF 3  |  beta=-2.67  |  odds x0.0695  |  support=59.4% (n=253)
+│   └── mean concavity > 0.11185
+│       └── LEAF 4  |  beta=+0  |  odds x1  |  support=6.3% (n=27)
+└── worst radius > 16.795
+    ├── mean concavity <= 0.07344
+    │   └── LEAF 5  |  beta=+0  |  odds x1  |  support=4.7% (n=20)
+    └── mean concavity > 0.07344
+        └── LEAF 6  |  beta=+3.74  |  odds x42.3  |  support=29.6% (n=126)
+
+Class 1 | Tree 1 | sequential RPTE
+ROOT
+├── mean radius <= 15.045
+│   ├── worst concavity <= 0.3663
+│   │   └── LEAF 3  |  beta=-1.24  |  odds x0.29  |  support=59.6% (n=254)
+│   └── worst concavity > 0.3663
+│       ├── worst symmetry <= 0.33645
+│       │   └── LEAF 5  |  beta=+0  |  odds x1  |  support=4.7% (n=20)
+│       └── worst symmetry > 0.33645
+│           └── LEAF 6  |  beta=+1.37  |  odds x3.94  |  support=4.9% (n=21)
+└── mean radius > 15.045
+    └── LEAF 2  |  beta=+0.395  |  odds x1.48  |  support=30.8% (n=131)
+
+Class 1 | Direct source terms
+DIRECT SOURCE TERMS
+└── Original features
+    └── linear value of mean texture  |  beta=+1.14  |  odds x3.13
+```
+
+### Reading the example
+
+Tree 0 uses `worst radius` and `mean concavity`. A case with `worst radius > 16.795` and `mean concavity > 0.07344` reaches Leaf 6, whose positive coefficient raises the malignant-class log-odds. A case with `worst radius <= 16.795` and `mean concavity <= 0.11185` reaches Leaf 3, whose negative coefficient lowers them.
+
+Tree 1 uses a different source set: `mean radius`, `worst concavity`, and `worst symmetry`. The remaining `mean texture` input is retained as a direct linear term. For any case, the final logistic layer combines exactly one reached leaf from Tree 0, one reached leaf from Tree 1, and the direct `mean texture` term.
+
+A leaf with `beta=0` is still a valid terminal region, but the final sparse logistic regression assigns it no additional contribution after considering the other reached leaves and direct terms.
+
+The renderer reports:
+
+- the complete root-to-leaf conditions;
+- `beta`, the leaf or direct-term coefficient in the final logistic model;
+- the corresponding odds multiplier; and
+- training support for every leaf.
+
+Use `rpte_rule_table()` when the same evidence is needed as structured rows for governance checks, filtering, or export.
+
+### Using RPTE
+
+The default `performance_ho` grid compares the built-in logistic branch with an RPTE branch and retains the better cross-validated model. The `interpretability_ho` grid performs the same comparison on the interaction-relaxed, pattern-only representation using sequential RPTE.
+
+RPTE can also be supplied directly:
+
+```python
+from hugiml import HUGIMLClassifier
+from hugiml.rpte_bounded_lookahead_leafwise import LeafWiseBoundedLookaheadRPTEFeatureLR
+
+clf = HUGIMLClassifier(
+    L=1,
+    topK=100,
+    feature_mode="original_plus_patterns",
+    base_estimator=LeafWiseBoundedLookaheadRPTEFeatureLR(
+        leaf_config="3xD",
+        depth=4,
+        enable_lookahead="adaptive",
+    ),
+)
+clf.fit(X_train, y_train)
+
+print(clf.rpte_rule_tree(detail_level="compact"))
+rules = clf.rpte_rule_table()
+```
+
+For multiclass targets, wrap RPTE in `sklearn.multiclass.OneVsRestClassifier`; the named higher-order grids already do this.
+
+### Serialization
+
+RPTE-based models are persisted through `hugiml.serialization.save_model()` and `load_model()` using the versioned `.hugiml` archive format. The archive retains the fitted trees, final logistic layer, and reconstructable `base_estimator` configuration. See [Serialisation](#serialisation) for details.
+
+---
+
 ## Governance Studio Dashboard
 
-The **HUGIML Governance Studio** is an interactive Streamlit dashboard for preparing model runs, comparing candidate models, reviewing model evidence, and producing governance-ready summaries. It keeps the existing Workbench/Governance layout and exposes evidence views for adaptive binning, interaction-relaxed mining, augmented pairs, feature families, pattern coverage, monitoring, and validation review.
+The **HUGIML Governance Studio** is a Dash-based interface for configuring model
+experiments, comparing candidate runs, inspecting fitted representations, and
+promoting a selected HUGIML model into governance review. The default Ocean
+theme and compact Workbench/Governance navigation are designed for desktop use;
+Forest and Dark themes are also available.
 
 ### Installation
 
@@ -457,52 +686,49 @@ The **HUGIML Governance Studio** is an interactive Streamlit dashboard for prepa
 pip install "hugiml-core[dashboard]"
 ```
 
-The dashboard extra includes the UI and plotting dependencies used by the Governance Studio experience.
-
 ### Launch
 
 ```bash
-# Installed console script
+# Dash interface (default); opens the browser when the server is ready
 hugiml-dashboard
 
-# Pass Streamlit or dashboard arguments after the separator
-hugiml-dashboard -- --cv 5 --random-state 42
+# Common options
+hugiml-dashboard --port 8050 --cv 5 --random-state 42
+hugiml-dashboard --no-open
+
+# Lightweight Streamlit interface
+hugiml-dashboard --ui light
 
 # Source-tree development
-python -m streamlit run src/hugiml/dashboard/app.py
+python -m hugiml.dashboard.dash_app --port 8050
 ```
 
-When installed, `hugiml-dashboard` starts the packaged Streamlit app automatically, so you do not need to know the source file location.
+The Dash launcher uses `127.0.0.1:8050` by default. Use `--host`, `--port`,
+`--debug`, or `--no-open` as needed.
 
-### What is included
+### Main areas
 
 | Area | What it supports |
 |---|---|
-| **Workbench** | Demo data or uploaded tabular data, target and column-role setup, candidate run configuration, model comparison, and drill-down review |
-| **Governance** | Evidence summaries, validation results, representation review, adaptive-binning and augmented-pair evidence, feature-family review, pattern coverage, case-level explanations, data quality checks, policy review, monitoring signals, and model-card-oriented outputs |
+| **Workbench · Setup** | Demo or uploaded data, column roles, model selection, comma-separated parameter candidates, downstream LR/RPTE choices, and the total expanded model-combination count |
+| **Workbench · Results** | Leaderboard, ROC/PR comparisons, interpretability summaries, artifact comparison, RPTE tree/leaf inspection, and model drill-down |
+| **Governance** | Overview, validation, representation audit, pattern inventory, case review, data quality and policy, configuration comparison, representation pruning, and monitoring |
 
-### Evidence views
+### Governance evidence
 
 | View | What it shows |
 |---|---|
-| **Overview** | Dataset summary, active configuration, validation score, feature mode, and top evidence |
-| **Validation** | Cross-validation metrics, fold-level results, and calibration-oriented review |
-| **Representation Audit** | Original features, HUG patterns, augmented pairs, binary indicators, feature-family provenance, and complexity budget |
-| **Pattern Inventory** | Pattern table with coefficients, support, utility, information gain, review filters, and population coverage |
-| **Case Review** | Row-level predictions, probabilities, active pattern evidence, and explanation details |
-| **Data Quality & Policy** | Missingness review, sensitive/proxy column checks, and policy-oriented notes |
-| **Configuration Comparison** | Side-by-side comparison across HUGIML settings and optional baseline models |
-| **Representation Pruning** | Interactive removal of original features or representation columns with re-evaluation |
-| **Monitoring** | PSI and KL-divergence drift signals across fitted training baselines and review data |
+| **Representation Audit** | Fitted source families, accepted RPTE splits, individual trees and leaves, and final LR leaf/direct-term composition |
+| **Pattern Inventory** | Tree-used and direct patterns, coefficients, support, utility, information gain, and coverage |
+| **Case Review** | Row-level probability and active leaf/direct-term contributions |
+| **Data Quality & Policy** | Missingness, sensitive/proxy use, and policy checks |
+| **Configuration Comparison** | Side-by-side model settings, downstream estimator, performance, and representation size |
+| **Representation Pruning** | Original, pattern, or augmented representation pruning; raw-input exclusion rebuilds the full pipeline |
+| **Monitoring** | PSI, KL-divergence, leaf activation, direct-term, and representation-stability signals |
 
-### Data sources
-
-- **Demo datasets** — built-in examples for dashboard exploration without uploading data.
-- **Upload** — CSV, TSV, Excel (`.xlsx`/`.xls`), or Parquet files. The sidebar lets you choose the target, ID, protected/sensitive, date, numeric, categorical, and excluded columns before fitting.
-
-### Binary indicators
-
-Numeric two-value columns are treated as categorical indicators during HUGIML preparation, so encoded flags remain visible as discrete evidence in the dashboard instead of being shown as numeric intervals.
+Uploaded inputs may be CSV, TSV, Excel, or Parquet. Numeric two-value columns
+remain numeric unless `convert_binary_to_categorical=True`; the named grids set
+this explicitly according to their mining design.
 
 ### Demo preview
 
@@ -939,6 +1165,8 @@ clf2 = load_model("model.hugiml")
 sbom = generate_sbom(clf)
 ```
 
+`save_model()`/`load_model()` fully round-trip RPTE-based models (schema version 9+), including the fitted trees, final logistic layer, and reconstructable `base_estimator` configuration. Built-in logistic-regression and SGD estimators are stored as JSON/NumPy records. RPTE estimator state uses the archive's allowlisted restricted-pickle payload, while the surrounding `.hugiml` artifact remains versioned and can be HMAC-authenticated when `HUGIML_MODEL_HMAC_KEY` is configured. `load_model()` accepts recognized HUGIML model artifacts; it does not load arbitrary raw pickle files. Earlier supported schema versions remain readable.
+
 ---
 
 ## Governance & Model Cards
@@ -993,8 +1221,10 @@ hugiml-bench --datasets german_credit --output results/
 
 The public benchmark analysis dashboard is generated from
 [`experiments/benchmark/benchmark_dashboard.py`](experiments/benchmark/benchmark_dashboard.py).
-This script defines the 50-dataset panel, model grids, preprocessing policy, checkpointing, result aggregation,
+This script defines the 100-dataset panel (50 real-world and 50 synthetic tasks), model grids, preprocessing policy, checkpointing, result aggregation,
 and static HTML assembly used for the dashboard.
+
+The root-level `experiments/` runners and their documentation are included in the source distribution. They are not installed as importable wheel package modules; the installed wheel provides the `hugiml-bench` package runner described above.
 
 From the repository root:
 
@@ -1185,7 +1415,7 @@ With strict budgeting enabled, HUGIML applies the TopK budget during feature con
 | **Mixed feature types** | Integer, float, categorical — auto-detected or explicitly supplied |
 | **Feature modes** | Pattern-only, original-plus-patterns, original-plus-interactions, augmented-pair downstream features |
 | **Fast hyperparameter search** | Cached adaptive-binning grid; mining runs once per unique `(G, L, topK)` group |
-| **Governance Studio** | Multi-view Streamlit dashboard with audit evidence views and upload support |
+| **Governance Studio** | Dash Workbench/Governance dashboard with model comparison, representation inspection, pruning, monitoring, and upload support |
 | **Profile visualisations** | EBM-style 1-D/2-D HUG profiles, active-pattern explanations, coefficient-support views (Plotly) |
 | **Interpretability metrics** | Pattern count, coverage, overlap, sparsity, top-k cumulative contribution |
 | **Adaptive binning** | Per-feature supervised `B` selection with optional stratified sampling — addresses the B-sensitivity trap |
@@ -1227,7 +1457,7 @@ Kubernetes manifests are in [`kubernetes/deployment.yaml`](kubernetes/deployment
 | Workflow | Trigger | What it does |
 |---|---|---|
 | [`ci.yml`](.github/workflows/ci.yml) | Every push / PR | Lint, type-check, coverage gate, native tests, sanitizer build, benchmark regression, wheel build |
-| [`release.yml`](.github/workflows/release.yml) | Git tag `v*.*.*` | Build platform wheels, generate SBOM, publish to PyPI, create GitHub release |
+| [`release.yml`](.github/workflows/release.yml) | Git tag `v*.*.*` or manual dispatch | Build platform wheels and the source archive, generate an SBOM, assemble an advisory Docker scan image from the prebuilt CPython 3.12 Linux wheel, publish to PyPI, and create a GitHub release. The scan is retained for security visibility but does not block Python publication; manual runs may disable it. |
 
 ---
 
@@ -1251,11 +1481,13 @@ hugiml-core/
 │       ├── pruning.py           Pattern editor + audit trail
 │       ├── adaptive.py          Per-feature adaptive binning
 │       ├── multiclass.py        Multiclass / imbalanced / encoding
-│       ├── dashboard/           Governance Studio Streamlit application
-│       │   ├── app.py           Entry point (hugiml-dashboard console script)
-│       │   ├── runner.py        Model training and scoring helpers
-│       │   ├── components/      Individual evidence-view renderers
-│       │   └── ...
+│       ├── dashboard/           Governance Studio interfaces and shared runtime
+│       │   ├── launcher.py      hugiml-dashboard console entry point
+│       │   ├── dash_app.py      Primary Dash application
+│       │   ├── dash_components/ Dash pages, controls, tables, charts, and themes
+│       │   ├── app.py           Lightweight Streamlit interface
+│       │   ├── runner.py        Shared model training and scoring helpers
+│       │   └── components/      Streamlit evidence-view renderers
 │       ├── llm/                 LLM Assistant package and runtime
 │       │   ├── cli.py           hugiml-llm console entry point
 │       │   ├── ui_app.py        Streamlit chat interface
@@ -1297,17 +1529,28 @@ Apache License 2.0 — see [LICENSE](LICENSE).
 
 ## Citation
 
-If you use hugiml-core in research or commercial work, please cite:
+If you use `hugiml-core`, cite the paper or papers relevant to the functionality
+used:
 
 ```bibtex
+@misc{krishnamoorthy2026complexity,
+  title         = {Complexity-Budgeted, Interaction-Aware Interpretable Model for Tabular Data},
+  author        = {Krishnamoorthy, Srikumar},
+  year          = {2026},
+  eprint        = {2607.07060},
+  archivePrefix = {arXiv},
+  primaryClass  = {cs.LG},
+  doi           = {10.48550/arXiv.2607.07060},
+  url           = {https://arxiv.org/abs/2607.07060}
+}
+
 @article{krishnamoorthy2026interpretability,
-  title        = {Interpretability Myopia: Governance Fitness in Financial Risk Models},
-  author       = {Krishnamoorthy, Srikumar},
-  journal      = {SSRN Electronic Journal},
-  year         = {2026},
-  doi          = {10.2139/ssrn.6821418},
-  url          = {https://dx.doi.org/10.2139/ssrn.6821418},
-  keywords     = {Interpretable machine learning, analytics, financial risk governance, deployment evaluation, regulatory compliance, model risk management}
+  title   = {Interpretability Myopia: Governance Fitness in Financial Risk Models},
+  author  = {Krishnamoorthy, Srikumar},
+  journal = {SSRN Electronic Journal},
+  year    = {2026},
+  doi     = {10.2139/ssrn.6821418},
+  url     = {https://ssrn.com/abstract=6821418}
 }
 
 @article{krishnamoorthy2024hugIML,

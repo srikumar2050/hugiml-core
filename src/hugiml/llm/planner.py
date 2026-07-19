@@ -1,11 +1,11 @@
-"""Planning helpers for the optional HUGIML NLP interface."""
+"""Planning helpers for the optional HUGIML natural-language interface."""
 
 from __future__ import annotations
 
 from pathlib import Path
 from typing import Any
 
-from .guardrails import deterministic_refusal, route_without_llm
+from .guardrails import deterministic_refusal, infer_model_request_hints, route_without_llm
 from .ollama_client import OllamaPlanner
 from .runtime import (
     FALLBACK_OLLAMA_MODEL,
@@ -14,6 +14,8 @@ from .runtime import (
     recommend_profile,
 )
 from .schemas import ActionRequest, ActionResult
+
+_MODEL_ACTIONS = {"build_model", "tune_hyperparameters", "compare_model_configs"}
 
 
 def plan_request(
@@ -24,24 +26,15 @@ def plan_request(
     prefer_llm: bool = True,
     repo_root: str | Path | None = None,
 ) -> ActionRequest | ActionResult:
-    """Plan a user request into a safe action request.
-
-    Deterministic refusals happen before any model call.  Common actions can be
-    routed without Ollama.  If ``prefer_llm`` is true and Ollama is available,
-    the local model is asked for strict JSON, then the orchestrator still
-    validates it before execution.  ``repo_root`` is only used by the no-LLM
-    fallback router, to look up known dataset names mentioned in the text.
-    """
+    """Plan a user request into a validated, schema-safe action request."""
 
     refusal = deterministic_refusal(user_text)
     if refusal is not None:
         return refusal
 
-    # Route high-confidence intents deterministically first.  The selected local
-    # model is still useful as a writer/synthesis layer, but it should not be
-    # allowed to randomly reclassify obvious documentation questions such as
-    # "what is HUGIML" or obvious model-result requests such as
-    # "summarize findings".
+    # Common execution commands are deterministic so a local model cannot
+    # accidentally turn "run performance_ho" or "use RPTE downstream" into
+    # generic API help.
     routed = route_without_llm(user_text, repo_root=repo_root)
     if routed is not None:
         return routed
@@ -57,9 +50,6 @@ def plan_request(
             candidate_models: list[str] = []
             if selected_model:
                 candidate_models.append(selected_model)
-            # Try the explicit tiny fallback before abandoning Ollama.  This keeps
-            # the chat on a local model when Qwen/Gemma is temporarily unavailable
-            # or returns malformed planning JSON.
             if FALLBACK_OLLAMA_MODEL not in candidate_models:
                 candidate_models.append(FALLBACK_OLLAMA_MODEL)
             for candidate in candidate_models:
@@ -67,17 +57,78 @@ def plan_request(
                     continue
                 try:
                     planned = OllamaPlanner(candidate).plan(user_text, context=context or {})
-                    # If the model falls back to a generic API answer but the
-                    # deterministic router found a concrete workflow action, prefer
-                    # the concrete action.
-                    if planned.action == "answer_api_question" and routed is not None:
-                        return routed
-                    return planned
+                    return _normalise_planned_model_request(planned, user_text)
                 except Exception:
-                    # Try the next configured candidate, then fall through to the
-                    # deterministic router if all local models fail.
                     continue
 
-    if routed is not None:
-        return routed
     return ActionRequest(action="answer_api_question", question=user_text)
+
+
+def _normalise_planned_model_request(planned: ActionRequest, user_text: str) -> ActionRequest:
+    """Recover model options that small local planners commonly omit or rename."""
+
+    hints = infer_model_request_hints(user_text)
+    params = dict(planned.params or {})
+
+    # Accept common JSON forms produced by local models even when they do not
+    # exactly follow the prompt's preferred names.
+    model_params = dict(params.get("model_params") or {})
+    grid_value = (
+        params.pop("grid", None)
+        or params.get("grid_name")
+        or model_params.pop("grid", None)
+        or model_params.pop("grid_name", None)
+    )
+    downstream_value = (
+        params.pop("base_estimator", None)
+        or params.pop("downstream", None)
+        or params.get("downstream_estimator")
+        or model_params.pop("base_estimator", None)
+        or model_params.pop("downstream_estimator", None)
+    )
+    if model_params:
+        params["model_params"] = model_params
+    elif "model_params" in params:
+        params.pop("model_params", None)
+    strategy_text = str(planned.strategy or "").strip().lower().replace("-", "_").replace(" ", "_")
+    if strategy_text in {
+        "performance_ho",
+        "performanceho",
+        "interpretability_ho",
+        "interpretabilityho",
+        "interpretability",
+        "performance",
+    }:
+        if strategy_text in {"performance_ho", "performanceho"}:
+            grid_value = grid_value or "performance_ho"
+        elif strategy_text in {"interpretability_ho", "interpretabilityho"}:
+            grid_value = grid_value or "interpretability_ho"
+        elif "grid" in user_text.lower() or planned.action == "tune_hyperparameters":
+            grid_value = grid_value or strategy_text
+
+    grid_value = hints.get("grid_name") or grid_value
+    downstream_value = hints.get("downstream_estimator") or downstream_value
+    if grid_value:
+        params["grid_name"] = str(grid_value)
+    if downstream_value:
+        params["downstream_estimator"] = str(downstream_value)
+
+    hinted_params = dict(hints.get("model_params") or {})
+    if hinted_params:
+        merged = dict(params.get("model_params") or {})
+        merged.update(hinted_params)
+        params["model_params"] = merged
+
+    if planned.action == "answer_api_question" and hints.get("is_execution_command"):
+        routed = route_without_llm(user_text)
+        if routed is not None:
+            return routed
+
+    if planned.action in _MODEL_ACTIONS:
+        if params.get("grid_name"):
+            planned.action = "tune_hyperparameters"
+        hinted_strategy = str(hints.get("strategy") or "balanced")
+        if hinted_strategy != "balanced" or not planned.strategy:
+            planned.strategy = hinted_strategy
+        planned.params = params
+    return planned

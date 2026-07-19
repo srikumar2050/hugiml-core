@@ -3,22 +3,30 @@ include NOTICE
 include README.md
 include CONTRIBUTING.md
 include CHANGELOG.md
+include Makefile
+include .readthedocs.yaml
 include pyproject.toml
 include setup.py
 
+recursive-include THIRD_PARTY_LICENSES *.txt
+
 recursive-include native *.cpp *.hpp
 recursive-include src/hugiml *.py py.typed
-recursive-include tests *.py
+recursive-include tests *.py *.csv *.data
 recursive-include benchmarks *.py *.json
-recursive-include docs *.md *.rst *.py
-recursive-include docker Dockerfile*
+recursive-include experiments *.py *.md *.cmd
+recursive-include docs *.md *.rst *.py *.css *.png *.txt
+recursive-include docker Dockerfile* *.py *.yml
 recursive-include kubernetes *.yaml
 recursive-include scripts *.py *.sh
 
-exclude build/
-exclude dist/
-exclude *.egg-info/
-global-exclude __pycache__/
+prune experiments/benchmark/results
+prune experiments/scalability/results
+
+prune build
+prune dist
+prune *.egg-info
+global-exclude __pycache__
 global-exclude *.py[cod]
 global-exclude .DS_Store
 global-exclude *.so

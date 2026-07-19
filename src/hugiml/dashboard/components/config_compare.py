@@ -9,6 +9,21 @@ import streamlit as st
 
 from hugiml.dashboard.display import dataframe_for_display
 from hugiml.dashboard.runner import fit_hugiml_config
+from hugiml.rpte_bounded_lookahead_leafwise import LEAF_CONFIGS as RPTE_LEAF_CONFIGS
+from hugiml.rpte_bounded_lookahead_leafwise import LeafWiseBoundedLookaheadRPTEFeatureLR
+
+
+def _base_estimator_label(model: Any) -> str:
+    """Short, readable label for a fitted or candidate model's downstream
+    estimator -- 'HUGIML LR' for the built-in logistic-regression branch,
+    or the wrapped estimator's class name otherwise."""
+    value = getattr(model, "base_estimator", None)
+    if value is None:
+        return "HUGIML LR"
+    inner = getattr(value, "estimator", None)
+    if inner is not None:
+        return f"{type(inner).__name__} via {type(value).__name__}"
+    return type(value).__name__
 
 
 def _family_counts(model: Any, X: pd.DataFrame | None = None) -> dict[str, int]:
@@ -57,6 +72,7 @@ def _result_row(label: str, result: Any, X: pd.DataFrame | None = None) -> dict:
         "G": params.get("G", getattr(model, "G", None) if model is not None else None),
         "feature_mode": params.get("feature_mode", getattr(model, "feature_mode", None) if model is not None else None),
         "strict_budget": bool(params.get("topk_budget_strict", getattr(model, "topk_budget_strict", False) if model is not None else False)),
+        "downstream_estimator": _base_estimator_label(model) if model is not None else "HUGIML LR",
         "original_features": counts["original"],
         "pattern_features": counts["pattern"],
         "augmented_features": counts["augmented"],
@@ -122,6 +138,33 @@ def render_config_comparison(ctx: dict, *args, **kwargs) -> None:
             help="Supported HUGIML setting. When enabled, the final representation is constrained to the configured topK budget where applicable.",
         )
 
+        st.markdown("###### Downstream estimator")
+        downstream_choice = st.radio(
+            "Downstream estimator",
+            ["HUGIML logistic regression", "RPTE (bounded-lookahead trees)"],
+            index=0,
+            horizontal=True,
+            label_visibility="collapsed",
+            help="RPTE (leaf-wise bounded-lookahead trees + logistic regression) searches "
+                 "higher-order feature interactions the logistic branch can't represent directly.",
+            key="cc_downstream_estimator",
+        )
+        base_estimator = None
+        if downstream_choice.startswith("RPTE"):
+            r1, r2, r3 = st.columns(3)
+            leaf_config_options = sorted(RPTE_LEAF_CONFIGS)
+            rpte_leaf_config = r1.selectbox(
+                "Leaf config", leaf_config_options,
+                index=leaf_config_options.index("3xD") if "3xD" in leaf_config_options else 0,
+                key="cc_rpte_leaf_config",
+            )
+            rpte_depth = int(r2.number_input("Depth", value=4, min_value=1, max_value=10, step=1, key="cc_rpte_depth"))
+            rpte_n_estimators = int(r3.number_input("n_estimators", value=10, min_value=1, max_value=100, step=1, key="cc_rpte_n_estimators"))
+            base_estimator = LeafWiseBoundedLookaheadRPTEFeatureLR(
+                leaf_config=rpte_leaf_config, depth=rpte_depth, n_estimators=rpte_n_estimators,
+                enable_lookahead="adaptive",
+            )
+
         params = {
             "adaptive_binning": True,
             "B": -1,
@@ -130,6 +173,7 @@ def render_config_comparison(ctx: dict, *args, **kwargs) -> None:
             "G": G,
             "feature_mode": feature_mode,
             "topk_budget_strict": bool(strict),
+            "base_estimator": base_estimator,
         }
 
         run = st.button("Fit candidate configuration", type="primary", width="stretch")

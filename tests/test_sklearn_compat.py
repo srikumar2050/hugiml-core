@@ -32,11 +32,14 @@ predict time for column-name validation, etc.).
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import pandas as pd
 import pytest
 from packaging.version import Version as _V
 from sklearn.base import clone
+from sklearn.linear_model import LogisticRegression
 from sklearn.utils.estimator_checks import parametrize_with_checks
 
 from hugiml import HUGIMLClassifierNative
@@ -319,3 +322,90 @@ class TestCompatModule:
             f"scikit-learn {SKLEARN_VERSION} is below the minimum required version 1.0. "
             "Upgrade with: pip install 'scikit-learn>=1.0'"
         )
+
+    def test_liblinear_penalty_kwargs_selects_correct_keyword_for_installed_version(self):
+        """liblinear_penalty_kwargs must choose the keyword that actually
+        controls the L1/L2 penalty on the installed sklearn version:
+        `penalty=` on sklearn < 1.8 (where `l1_ratio` is honored only for
+        penalty="elasticnet" and is otherwise silently ignored with a
+        UserWarning), `l1_ratio=` on sklearn >= 1.8 (where `penalty` as a
+        string is deprecated). Verified directly against a real
+        LogisticRegression(solver="liblinear") fit rather than only
+        inspecting the returned dict, so a version-boundary regression in
+        sklearn itself would also be caught here.
+        """
+        from hugiml._compat import SKLEARN_VERSION as _INSTALLED
+        from hugiml._compat import liblinear_penalty_kwargs
+
+        kwargs = liblinear_penalty_kwargs("l1")
+        if _INSTALLED >= _V("1.8"):
+            assert kwargs == {"l1_ratio": 1.0}
+        else:
+            assert kwargs == {"penalty": "l1"}
+
+        rng = np.random.RandomState(0)
+        X = rng.uniform(0, 1, (200, 5))
+        y = (X[:, 0] > 0.5).astype(int)
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            reference = LogisticRegression(
+                penalty="l1", solver="liblinear", C=1.0, random_state=0, max_iter=2000
+            ).fit(X, y)
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            shimmed = LogisticRegression(
+                solver="liblinear", C=1.0, random_state=0, max_iter=2000, **kwargs
+            ).fit(X, y)  # must not warn on the installed sklearn version
+
+        np.testing.assert_allclose(shimmed.coef_, reference.coef_)
+        np.testing.assert_allclose(shimmed.intercept_, reference.intercept_)
+
+    def test_liblinear_penalty_kwargs_l2_matches_reference(self):
+        from hugiml._compat import liblinear_penalty_kwargs
+
+        rng = np.random.RandomState(1)
+        X = rng.uniform(0, 1, (200, 5))
+        y = (X[:, 0] > 0.5).astype(int)
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            reference = LogisticRegression(
+                penalty="l2", solver="liblinear", C=1.0, random_state=0, max_iter=2000
+            ).fit(X, y)
+            shimmed = LogisticRegression(
+                solver="liblinear",
+                C=1.0,
+                random_state=0,
+                max_iter=2000,
+                **liblinear_penalty_kwargs("l2"),
+            ).fit(X, y)
+
+        np.testing.assert_allclose(shimmed.coef_, reference.coef_)
+
+    def test_liblinear_penalty_kwargs_passes_through_unknown_value(self):
+        """A penalty value outside {"l1", "l2"} (solver="liblinear" doesn't
+        support anything else) is passed through as `penalty=` unchanged
+        rather than silently mapped, so sklearn's own error surfaces.
+        """
+        from hugiml._compat import liblinear_penalty_kwargs
+
+        assert liblinear_penalty_kwargs("elasticnet") == {"penalty": "elasticnet"}
+
+    def test_rpte_liblinear_helper_never_raises_sklearn_penalty_deprecation_warning(self):
+        """RPTE's own leaf-weighting LogisticRegression construction must not
+        raise sklearn's penalty-deprecation FutureWarning on the installed
+        sklearn version (see liblinear_penalty_kwargs). RPTE is reachable
+        through the default "performance_ho" grid, so this warning would
+        otherwise surface on every RPTE fit.
+        """
+        from hugiml.rpte_bounded_lookahead_leafwise import _liblinear_logistic_regression
+
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            lr = _liblinear_logistic_regression(lr_penalty="l1", lr_C=1.0, random_state=0)
+            rng = np.random.RandomState(0)
+            X = rng.uniform(0, 1, (100, 4))
+            y = (X[:, 0] > 0.5).astype(int)
+            lr.fit(X, y)

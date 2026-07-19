@@ -231,6 +231,7 @@ def _default_build_jobs() -> int:
     # Users can raise this with HUGIML_BUILD_JOBS.
     return max(1, min(cpu_count, _env_int("HUGIML_BUILD_BATCH_SIZE", 4, minimum=1), 2))
 
+
 sanitize = os.environ.get("HUGIML_SANITIZE", "")
 
 if os.environ.get("HUGIML_DEBUG"):
@@ -264,6 +265,8 @@ _ALGO_SOURCES = [
     "native/matrix.cpp",
     "native/prepare_mine_l1.cpp",
     "native/augmented_pair.cpp",
+    "native/rpte_scoring.cpp",
+    "native/rpte_tree.cpp",
 ]
 
 _BIND_SOURCES = [
@@ -275,6 +278,7 @@ _BIND_SOURCES = [
     "native/bind_build_matrix.cpp",
     "native/bind_openmp.cpp",
     "native/bindings.cpp",
+    "native/bind_rpte_tree.cpp",
 ]
 
 _BIND_BASENAMES = frozenset(os.path.basename(s) for s in _BIND_SOURCES)

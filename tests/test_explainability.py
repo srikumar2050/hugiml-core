@@ -231,6 +231,38 @@ class TestSHAPBridge:
         result = aggregate_shap_to_features(sv, clf)
         assert all(isinstance(k, str) for k in result.keys())
 
+    def test_shap_falls_back_to_kernel_explainer_for_rpte(self):
+        """shap.LinearExplainer only works for a linear downstream
+        estimator; RPTE is a boosted-tree ensemble, so this must fall
+        through to the model-agnostic KernelExplainer branch (via
+        classifier.model_.predict_proba, which works regardless of the
+        downstream estimator) rather than raising or silently returning
+        None for a reason unrelated to shap's availability.
+        """
+        from hugiml.hyperparameter_configs import get_hugiml_grid
+
+        try:
+            import shap  # noqa: F401
+        except ImportError:
+            pytest.skip("shap not installed")
+
+        rng = np.random.RandomState(0)
+        n = 300
+        import pandas as pd
+
+        X = pd.DataFrame({"a": rng.uniform(0, 1, n), "b": rng.uniform(0, 1, n)})
+        y = (X["a"] > 0.5).astype(int).to_numpy()
+
+        rpte_estimator = get_hugiml_grid("performance_ho")["base_estimator"][1]
+        clf = HUGIMLClassifierNative(
+            L=1, topK=20, feature_mode="patterns_only", base_estimator=rpte_estimator,
+        )
+        clf.fit(X, y)
+
+        sv = shap_values_from_pattern_matrix(X=X.iloc[:40], classifier=clf, background_samples=20)
+        assert sv is not None
+        assert np.all(np.isfinite(sv))
+
 
 def test_explanation_stability_reports_feature_type_specific_metrics():
     X, y = make_classification(n_samples=180, n_features=6, n_informative=4, random_state=42)

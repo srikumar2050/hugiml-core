@@ -4,6 +4,22 @@ All notable changes to hugiml-core are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
+## [1.1.18] - 2026-07-19
+
+### Added
+
+- Added the optional RPTE downstream model for learning higher-order relationships with adaptive sequential or bounded-lookahead tree growth.
+- Added interaction relaxation through the first child split, with held-out acceptance checks for jointly useful features that may have weak individual signal.
+- Added RPTE rule-tree and rule-table views, direct-term provenance, model and instance inspection units, and structured save/load support.
+- Added a Dash-based Governance Studio interface while retaining the lightweight Streamlit interface.
+- Expanded benchmark analysis to 100 diverse datasets: 50 real-world and 50 synthetic datasets, with instance-level inspection and confidence summaries.
+
+### Changed
+
+- Extended governance, dashboard, LLM evidence, complexity, and serialization workflows to recognize RPTE models and their interpretable direct and tree-based terms.
+- Extended the native build and release package with RPTE scoring, tree-growth, binding, and third-party notice files.
+
+---
 ## [1.1.17] - 2026-07-07
 
 ### Added

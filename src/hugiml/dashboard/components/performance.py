@@ -132,30 +132,83 @@ def score_separation_frames(y_true: np.ndarray, proba: np.ndarray) -> dict[str, 
     return {"separation": sep_df, "calibration": cal_df}
 
 
-def performance_diagnostic_frames(model: Any = None, X: pd.DataFrame | None = None, y: Any = None) -> dict[str, pd.DataFrame]:
-    """Build validation diagnostics from fitted probabilities and labels."""
+def _diagnostic_inputs(
+    model: Any = None,
+    X: pd.DataFrame | None = None,
+    y: Any = None,
+    evaluation: dict[str, Any] | None = None,
+) -> tuple[np.ndarray | None, np.ndarray | None, np.ndarray | None]:
+    """Resolve diagnostics from promoted evidence before considering a refit.
+
+    A promoted Workbench run carries stitched out-of-fold predictions.  Those
+    arrays are the evaluation contract.  Re-running ``predict_proba`` on the
+    final full-data refit would produce training diagnostics and is therefore
+    deliberately only the fallback for non-promoted contexts.
+    """
+    if isinstance(evaluation, dict):
+        try:
+            y_true = _binary_y(evaluation.get("y_true"))
+            proba = np.asarray(evaluation.get("y_proba"), dtype=float).reshape(-1)
+            pred = np.asarray(evaluation.get("y_pred"), dtype=int).reshape(-1)
+        except Exception:
+            y_true, proba, pred = None, np.asarray([]), np.asarray([])
+        if y_true is not None:
+            n = min(len(y_true), len(proba), len(pred))
+            if n > 0:
+                return y_true[:n], np.clip(proba[:n], 0.0, 1.0), pred[:n]
+
     y_true = _binary_y(y)
     proba = _positive_probabilities(model, X)
     if y_true is None or proba is None:
-        return {"metrics": pd.DataFrame(), "confusion": pd.DataFrame(), "thresholds": pd.DataFrame(), "curves": pd.DataFrame()}
+        return None, None, None
     n = min(len(y_true), len(proba))
     if n == 0:
-        return {"metrics": pd.DataFrame(), "confusion": pd.DataFrame(), "thresholds": pd.DataFrame(), "curves": pd.DataFrame()}
+        return None, None, None
     y_true = y_true[:n]
     proba = np.clip(np.asarray(proba[:n], dtype=float), 0.0, 1.0)
+    return y_true, proba, (proba >= 0.5).astype(int)
+
+
+def performance_diagnostic_frames(
+    model: Any = None,
+    X: pd.DataFrame | None = None,
+    y: Any = None,
+    evaluation: dict[str, Any] | None = None,
+) -> dict[str, pd.DataFrame]:
+    """Build validation diagnostics from one explicitly identified evidence set."""
+    y_true, proba, supplied_pred = _diagnostic_inputs(model, X, y, evaluation)
+    empty = {
+        "metrics": pd.DataFrame(),
+        "confusion": pd.DataFrame(),
+        "thresholds": pd.DataFrame(),
+        "curves": pd.DataFrame(),
+        "evaluation": pd.DataFrame(),
+    }
+    if y_true is None or proba is None or supplied_pred is None:
+        return empty
+
     pred_50 = (proba >= 0.5).astype(int)
-    tp = int(((pred_50 == 1) & (y_true == 1)).sum())
-    fp = int(((pred_50 == 1) & (y_true == 0)).sum())
-    tn = int(((pred_50 == 0) & (y_true == 0)).sum())
-    fn = int(((pred_50 == 0) & (y_true == 1)).sum())
+    pred = np.asarray(supplied_pred, dtype=int)
+    tp = int(((pred == 1) & (y_true == 1)).sum())
+    fp = int(((pred == 1) & (y_true == 0)).sum())
+    tn = int(((pred == 0) & (y_true == 0)).sum())
+    fn = int(((pred == 0) & (y_true == 1)).sum())
+    precision = tp / (tp + fp) if (tp + fp) else np.nan
+    recall = tp / (tp + fn) if (tp + fn) else np.nan
+    f1 = 2.0 * precision * recall / (precision + recall) if np.isfinite(precision + recall) and (precision + recall) else np.nan
     brier = float(np.mean((proba - y_true) ** 2))
     auc = _auc_from_scores(y_true, proba)
     thresholds = _threshold_sweep_frame(y_true, proba)
     metrics = pd.DataFrame([
         {"metric": "roc_auc", "value": auc},
         {"metric": "brier_score", "value": brier},
+        {"metric": "accuracy", "value": float((pred == y_true).mean())},
+        {"metric": "precision", "value": precision},
+        {"metric": "recall", "value": recall},
+        {"metric": "f1", "value": f1},
         {"metric": "accuracy_at_0_50", "value": float((pred_50 == y_true).mean())},
         {"metric": "positive_rate", "value": float(y_true.mean())},
+        {"metric": "predicted_positive_rate", "value": float(pred.mean())},
         {"metric": "predicted_positive_rate_at_0_50", "value": float(pred_50.mean())},
     ])
     confusion = pd.DataFrame([
@@ -165,7 +218,21 @@ def performance_diagnostic_frames(model: Any = None, X: pd.DataFrame | None = No
         {"actual": 1, "predicted": 1, "count": tp},
     ])
     curves = thresholds[["threshold", "recall", "precision", "specificity", "predicted_positive_rate"]].copy()
-    return {"metrics": metrics, "confusion": confusion, "thresholds": thresholds, "curves": curves}
+    evaluation_row = {
+        "source": evaluation.get("source") if isinstance(evaluation, dict) else "fitted_model_rescore",
+        "scope": evaluation.get("scope") if isinstance(evaluation, dict) else "full_data_refit",
+        "run_id": evaluation.get("run_id") if isinstance(evaluation, dict) else None,
+        "cv": evaluation.get("cv") if isinstance(evaluation, dict) else None,
+        "random_state": evaluation.get("random_state") if isinstance(evaluation, dict) else None,
+        "n_rows": int(len(y_true)),
+    }
+    return {
+        "metrics": metrics,
+        "confusion": confusion,
+        "thresholds": thresholds,
+        "curves": curves,
+        "evaluation": pd.DataFrame([evaluation_row]),
+    }
 
 
 
@@ -184,19 +251,28 @@ def normalize_validation_results(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def render_performance(results: Any = None, model: Any = None, X: pd.DataFrame | None = None, y: Any = None, *args, **kwargs) -> None:
+def render_performance(
+    results: Any = None,
+    model: Any = None,
+    X: pd.DataFrame | None = None,
+    y: Any = None,
+    evaluation: dict[str, Any] | None = None,
+    *args,
+    **kwargs,
+) -> None:
     st.subheader("Validation Evidence")
     st.markdown(
         """
         <div class="hugiml-section-note">
-          <p>Shows HUGIML tuning/CV evidence plus label-aware validation diagnostics when X/y are available:
-          confusion matrix, ROC/PR evidence, Brier score, and threshold sweep.</p>
+          <p>Shows HUGIML tuning/CV evidence and one consistent diagnostic evidence set. For promoted
+          Workbench runs, Governance uses the exact stitched out-of-fold predictions carried by the
+          promotion; it does not replace them with full-data refit scores.</p>
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-    diagnostics = performance_diagnostic_frames(model, X, y)
+    diagnostics = performance_diagnostic_frames(model, X, y, evaluation=evaluation)
     diag_available = not diagnostics["metrics"].empty
 
     if results is None:
@@ -211,6 +287,36 @@ def render_performance(results: Any = None, model: Any = None, X: pd.DataFrame |
 
     df = normalize_validation_results(df)
 
+    promoted_metrics = evaluation.get("metrics", {}) if isinstance(evaluation, dict) else {}
+    promoted_cv = promoted_metrics.get("cv_roc_auc") if isinstance(promoted_metrics, dict) else None
+    table_cv = None
+    if not df.empty:
+        if "mean_test_score" in df.columns:
+            values = pd.to_numeric(df["mean_test_score"], errors="coerce")
+            if values.notna().any():
+                table_cv = float(values.max())
+        elif "cv_roc_auc" in df.columns:
+            values = pd.to_numeric(df["cv_roc_auc"], errors="coerce")
+            if values.notna().any():
+                table_cv = float(values.max())
+        elif "validation_roc_auc" in df.columns:
+            values = pd.to_numeric(df["validation_roc_auc"], errors="coerce")
+            if values.notna().any():
+                # SimpleTuneResult stores one row per fold, so best_score_ is
+                # the mean rather than the largest individual fold.
+                table_cv = float(values.mean()) if "fold" in df.columns else float(values.max())
+        elif "score" in df.columns:
+            values = pd.to_numeric(df["score"], errors="coerce")
+            if values.notna().any():
+                table_cv = float(values.mean()) if "fold" in df.columns else float(values.max())
+    if promoted_cv is not None and table_cv is not None and not np.isclose(
+        float(promoted_cv), float(table_cv), rtol=1e-8, atol=1e-10
+    ):
+        st.error(
+            "The promoted Workbench CV score "
+            f"({float(promoted_cv):.6g}) differs from the Governance result table ({float(table_cv):.6g})."
+        )
+
     if df.empty and not diag_available:
         st.info("No performance result table or label-aware diagnostics are available.")
         return
@@ -223,17 +329,25 @@ def render_performance(results: Any = None, model: Any = None, X: pd.DataFrame |
             numeric_cols = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
             score_cols = [c for c in numeric_cols if "score" in str(c).lower() or "auc" in str(c).lower()]
             score_col = score_cols[0] if score_cols else None
+            best_idx = None
             if score_col:
-                best_idx = df[score_col].idxmax()
-                best_row = df.loc[best_idx]
+                score_values = pd.to_numeric(df[score_col], errors="coerce")
+                fold_rows = "fold" in df.columns and score_col in {"validation_roc_auc", "score"}
+                if fold_rows:
+                    summary_value = float(score_values.mean())
+                    summary_label = "Mean validation ROC-AUC"
+                else:
+                    best_idx = score_values.idxmax()
+                    summary_value = float(score_values.loc[best_idx])
+                    summary_label = "Best validation ROC-AUC"
                 c1, c2, c3 = st.columns(3)
-                c1.metric("Best validation ROC-AUC", f"{float(best_row[score_col]):.4f}")
+                c1.metric(summary_label, f"{summary_value:.4f}")
                 c2.metric("Rows compared", f"{len(df):,}")
                 c3.metric("Validation metric", str(score_col))
             with st.container(border=True):
                 st.markdown("#### CV / tuning result table")
                 st.dataframe(dataframe_for_display(df), width="stretch", hide_index=True)
-            if score_col:
+            if score_col and best_idx is not None:
                 with st.container(border=True):
                     st.markdown("#### Best row by validation metric")
                     st.dataframe(df.loc[[best_idx]], width="stretch", hide_index=True)
@@ -244,19 +358,35 @@ def render_performance(results: Any = None, model: Any = None, X: pd.DataFrame |
         else:
             metrics = diagnostics["metrics"]
             metric_map = dict(zip(metrics["metric"], metrics["value"]))
-            c1, c2, c3 = st.columns(3)
-            c1.metric("ROC-AUC", f"{metric_map.get('roc_auc', np.nan):.4f}")
-            c2.metric("Brier score", f"{metric_map.get('brier_score', np.nan):.4f}")
-            c3.metric("Accuracy @ 0.50", f"{metric_map.get('accuracy_at_0_50', np.nan):.2%}")
-            st.markdown("#### Confusion matrix @ threshold 0.50")
+            scope = str(evaluation.get("scope") or "unknown") if isinstance(evaluation, dict) else "full_data_refit"
+            is_oof = scope == "out_of_fold"
+            if is_oof:
+                st.info(
+                    "These diagnostics use the exact stitched out-of-fold predictions promoted from Workbench. "
+                    "The fitted full-data model is used for rules and explanations only, not to replace validation numbers."
+                )
+                c1, c2, c3, c4 = st.columns(4)
+                c1.metric("Mean-fold CV ROC-AUC", f"{float(promoted_cv):.4f}" if promoted_cv is not None else "N/A")
+                c2.metric("Pooled OOF ROC-AUC", f"{metric_map.get('roc_auc', np.nan):.4f}")
+                c3.metric("OOF F1", f"{metric_map.get('f1', np.nan):.2%}")
+                c4.metric("OOF accuracy", f"{metric_map.get('accuracy', np.nan):.2%}")
+                st.markdown("#### Promoted out-of-fold confusion matrix")
+            else:
+                st.warning(
+                    "No promoted out-of-fold evidence was available. These diagnostics were computed from the "
+                    "full-data refit and must be treated as training diagnostics."
+                )
+                c1, c2, c3 = st.columns(3)
+                c1.metric("Refit ROC-AUC", f"{metric_map.get('roc_auc', np.nan):.4f}")
+                c2.metric("Brier score", f"{metric_map.get('brier_score', np.nan):.4f}")
+                c3.metric("Refit accuracy", f"{metric_map.get('accuracy', np.nan):.2%}")
+                st.markdown("#### Full-data refit confusion matrix")
             st.dataframe(dataframe_for_display(diagnostics["confusion"]), width="stretch", hide_index=True)
 
-            # Score separation histogram
-            _y_true_sep = _binary_y(y)
-            _proba_sep = _positive_probabilities(model, X)
+            # Score separation histogram from the same diagnostic evidence.
+            _y_true_sep, _proba_sep, _ = _diagnostic_inputs(model, X, y, evaluation)
             if _y_true_sep is not None and _proba_sep is not None:
-                _n = min(len(_y_true_sep), len(_proba_sep))
-                _sep_frames = score_separation_frames(_y_true_sep[:_n], _proba_sep[:_n])
+                _sep_frames = score_separation_frames(_y_true_sep, _proba_sep)
                 st.markdown("#### Score distribution by class")
                 st.caption("Overlap between distributions indicates cases where the model is uncertain.")
                 _sep_df = _sep_frames["separation"]

@@ -15,6 +15,12 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
+from hugiml.dashboard.components.patterns import (
+    _get_rpte_feature_flow_audit,
+    _get_rpte_final_term_rows,
+    _rpte_rules_to_frame,
+    render_rpte_flat_tree_view,
+)
 from hugiml.dashboard.display import dataframe_for_display
 
 try:
@@ -599,6 +605,96 @@ def render_survivor_led_pattern_audit(model: Any = None, *args: Any, **kwargs: A
         show_df = show_df.loc[mask]
     st.metric("Survivor-led patterns", f"{len(show_df):,}")
     st.dataframe(dataframe_for_display(show_df), width="stretch", hide_index=True)
+    return df
+
+
+def rpte_rule_evidence_frame(model: Any) -> pd.DataFrame:
+    """Return the complete fitted RPTE final-LR representation.
+
+    The frame contains RPTE leaf indicators and every direct HUGIML source term
+    source column carried directly into the final LR. Zero-valued direct
+    coefficients are retained so the audit remains aligned with the fitted
+    coefficient vector.
+    """
+    rows = _get_rpte_final_term_rows(model, include_zero_direct=True)
+    return _rpte_rules_to_frame(rows) if rows else pd.DataFrame()
+
+
+def render_rpte_rule_evidence(model: Any = None, *args: Any, **kwargs: Any) -> pd.DataFrame:
+    """Render leaf-tree and direct-source evidence separately."""
+    st.markdown("### RPTE Final LR Evidence")
+    st.caption(
+        "The final logistic regression contains RPTE leaf indicators followed by HUGIML "
+        "source columns not used in accepted tree splits. Direct source terms are grouped "
+        "as original features, HUG patterns, and augmented pairs."
+    )
+
+    if model is None:
+        st.info("No fitted model is available for RPTE evidence.")
+        return pd.DataFrame()
+
+    rows = _get_rpte_final_term_rows(model, include_zero_direct=True)
+    df = _rpte_rules_to_frame(rows) if rows else pd.DataFrame()
+    if df.empty:
+        st.info("No RPTE final-LR evidence is recorded for this fitted model.")
+        return df
+
+    flow = _get_rpte_feature_flow_audit(model)
+    leaf_df = df.loc[df.get("is_leaf_term", False)].copy() if "is_leaf_term" in df else pd.DataFrame()
+    direct_flag = df.get("is_direct_source_term", False)
+    direct_df = df.loc[direct_flag].copy() if not df.empty else pd.DataFrame()
+
+    metrics = st.columns(5)
+    metrics[0].metric("Final LR terms", f"{int(flow.get('final_term_count', len(df)) or len(df)):,}")
+    metrics[1].metric("Leaf terms", f"{len(leaf_df):,}")
+    family_counts = direct_df.get("source_family", pd.Series(dtype=str)).value_counts()
+    metrics[2].metric("Direct original features", f"{int(family_counts.get('original', 0)):,}")
+    metrics[3].metric("Direct HUG patterns", f"{int(family_counts.get('pattern', 0)):,}")
+    metrics[4].metric("Direct augmented pairs", f"{int(family_counts.get('augmented_pair', 0)):,}")
+
+    if not leaf_df.empty:
+        st.markdown("#### RPTE leaf trees")
+        query = st.text_input("Search RPTE leaf rules", value="", key="rpte_rule_evidence_search")
+        show_leaf = leaf_df.copy()
+        if query:
+            mask = show_leaf.astype(str).apply(
+                lambda col: col.str.contains(query, case=False, na=False)
+            ).any(axis=1)
+            show_leaf = show_leaf.loc[mask]
+        render_rpte_flat_tree_view(rows, show_leaf, key_prefix="governance_rpte_flat_tree")
+        leaf_columns = [
+            "class", "tree", "leaf", "effect", "coefficient", "odds_multiplier",
+            "support_rate", "support_count", "n_conditions", "raw_sources", "backend",
+        ]
+        st.markdown("##### Leaf coefficient table")
+        st.dataframe(
+            dataframe_for_display(show_leaf[[c for c in leaf_columns if c in show_leaf.columns]]),
+            width="stretch",
+            hide_index=True,
+        )
+
+    st.markdown("#### Direct source terms carried directly into LR")
+    st.caption(
+        "Only fitted source columns identified as direct because they were not selected by accepted RPTE splits appear below. "
+        "Columns used in tree splits remain represented through leaf indicators and are not repeated."
+    )
+    tabs = st.tabs(["Direct original features", "Direct HUG patterns", "Direct augmented pairs"])
+    families = ["original", "pattern", "augmented_pair"]
+    for tab, family in zip(tabs, families):
+        with tab:
+            family_df = direct_df.loc[direct_df.get("source_family", pd.Series(index=direct_df.index, dtype=str)).eq(family)].copy()
+            if family_df.empty:
+                st.info("No direct terms from this source family enter the final LR.")
+                continue
+            display_cols = [
+                "class", "source_display_name", "source_column", "raw_sources",
+                "effect", "coefficient", "odds_multiplier", "backend",
+            ]
+            st.dataframe(
+                dataframe_for_display(family_df[[c for c in display_cols if c in family_df.columns]]),
+                width="stretch",
+                hide_index=True,
+            )
     return df
 
 

@@ -16,6 +16,7 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
+from hugiml.dashboard.components.patterns import _get_rpte_feature_flow_audit
 from hugiml.dashboard.display import dataframe_for_display
 
 
@@ -272,6 +273,10 @@ def render_drift(model: Any = None, X: pd.DataFrame | None = None, y: Any = None
     miss = _missingness_summary(X)
     dist = _distribution_review(X)
     pattern_summary = _pattern_activation_summary(model, X)
+    rpte_flow = _get_rpte_feature_flow_audit(model)
+    rpte_has_leaf_terms = rpte_flow.get("final_representation") in {
+        "rpte_leaf_rules", "rpte_leaves_plus_direct_terms"
+    }
 
     c1, c2, c3, c4 = st.columns(4)
     if not pred_summary.empty:
@@ -294,7 +299,7 @@ def render_drift(model: Any = None, X: pd.DataFrame | None = None, y: Any = None
         "Prediction distribution",
         "Missingness",
         "Distribution review",
-        "Pattern activation",
+        "HUG input-pattern activation" if rpte_has_leaf_terms else "Pattern activation",
         "CV Monitoring",
     ])
 
@@ -348,7 +353,17 @@ def render_drift(model: Any = None, X: pd.DataFrame | None = None, y: Any = None
             st.dataframe(dataframe_for_display(dist), width="stretch", hide_index=True)
 
     with tab4:
-        st.markdown("#### Pattern activation summary")
+        st.markdown(
+            "#### HUG pattern construction-input activation"
+            if rpte_has_leaf_terms
+            else "#### Pattern activation summary"
+        )
+        if rpte_has_leaf_terms:
+            st.caption(
+                "These are HUG pattern columns supplied to RPTE. Split-used patterns contribute through "
+                "leaf indicators; direct HUG patterns can enter the final LR directly. Representation "
+                "Audit identifies the fitted role of each pattern."
+            )
         if pattern_summary.empty:
             st.info(
                 "Pattern activation transform is not exposed by this installed model version. "
@@ -447,7 +462,7 @@ def render_cv_monitoring(model: Any = None, X: pd.DataFrame | None = None, y: An
     """Render cross-validated monitoring stability evidence."""
     st.markdown("#### Cross-Validation Monitoring")
     st.caption(
-        "Evaluates whether prediction behaviour, fold-level PSI, fit timing, and pattern counts remain stable across CV folds."
+        "Evaluates whether prediction behaviour, fold-level PSI, fit timing, and HUG source-pattern counts remain stable across CV folds. Under RPTE, these pattern counts describe construction inputs rather than final LR terms."
     )
 
     cache_key = _cv_monitoring_cache_key(model, X, y, cv)

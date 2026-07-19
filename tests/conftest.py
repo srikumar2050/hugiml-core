@@ -41,7 +41,7 @@ from pathlib import Path
 def _stabilize_native_test_threads() -> None:
     """Use deterministic native-worker settings on macOS test runners.
 
-    The v1.1.10 native test suite exercises the OpenMP-backed extension heavily.
+    The native test suite exercises the OpenMP-backed extension heavily.
     macOS CI runners can load the coverage tracer and native threaded libraries
     in the same process; keeping native worker counts to one preserves test
     semantics while avoiding runner-specific thread runtime instability.

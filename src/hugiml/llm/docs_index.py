@@ -289,8 +289,7 @@ class DocumentationSearchIndex:
                     roots.append((docs_dir, "docs"))
             for rel in (
                 "README.md",
-                "LLM/README.md",
-                "LLM/OVERLAY_MANIFEST.md",
+                "LLM/llmREADME.md",
                 "LLM/prompts/system.md",
                 "experiments/benchmark/benchmarkREADME.md",
                 "experiments/scalability/scalabilityREADME.md",
@@ -661,6 +660,7 @@ _FALLBACK_HUGIML_GRIDS: dict[str, dict[str, list[Any]]] = {
         "topK": [50, 100],
         "feature_mode": ["original_plus_patterns"],
         "G": [0.01, 0.001],
+        "convert_binary_to_categorical": [False],
     },
     "interpretability": {
         "B": [-1],
@@ -670,7 +670,49 @@ _FALLBACK_HUGIML_GRIDS: dict[str, dict[str, list[Any]]] = {
         "feature_mode": ["patterns_only"],
         "G": [0.01, 0.001],
         "interaction_relaxed_mining": [True],
+        "convert_binary_to_categorical": [True],
         "augmented_pair_transforms": [False],
+    },
+    "interpretability_ho": {
+        "B": [-1],
+        "adaptive_binning": [True],
+        "L": [1, 2],
+        "topK": [50, 100],
+        "feature_mode": ["patterns_only"],
+        "G": [0.01, 0.001],
+        "interaction_relaxed_mining": [True],
+        "augmented_pair_transforms": [False],
+        "convert_binary_to_categorical": [True],
+        "topk_budget_strict": [False],
+        "base_estimator": [
+            "None (built-in logistic regression)",
+            "Sequential RPTE (LeafWiseBoundedLookaheadRPTEFeatureLR, "
+            "leaf_config='3xD', depth=4, enable_lookahead=False; "
+            "OneVsRestClassifier-wrapped for multiclass)",
+        ],
+    },
+    # Default grid (DEFAULT_HUGIML_GRID_NAME). The real grid's base_estimator
+    # values are live sklearn estimator instances (None, or an RPTE
+    # estimator OneVsRestClassifier-wrapped for multiclass support); this
+    # fallback copy is plain-text/JSON, so they're represented as readable
+    # placeholder strings instead -- see hyperparameter_configs.HUGIML_GRIDS
+    # for the actual objects.
+    "performance_ho": {
+        "B": [-1],
+        "adaptive_binning": [True],
+        "L": [1, 2],
+        "topK": [50, 100],
+        "feature_mode": ["original_plus_patterns"],
+        "G": [0.01, 0.001],
+        "convert_binary_to_categorical": [False],
+        "augmented_pair_transforms": [True],
+        "topk_budget_strict": [False],
+        "base_estimator": [
+            "None (built-in logistic regression)",
+            "RPTE (LeafWiseBoundedLookaheadRPTEFeatureLR, leaf_config='3xD', "
+            "depth=4, enable_lookahead='adaptive'; OneVsRestClassifier-wrapped "
+            "for multiclass)",
+        ],
     },
 }
 
@@ -681,8 +723,11 @@ _GRID_PARAM_NOTES: dict[str, str] = {
     "topK": "maximum retained pattern count / representation budget",
     "feature_mode": "downstream representation: pattern-only or original features plus HUG patterns",
     "G": "minimum information-gain threshold for mined patterns",
-    "interaction_relaxed_mining": "allows interaction-information survivor columns into native mining while preserving pattern features",
+    "interaction_relaxed_mining": "admits interaction-information survivor columns at the root or immediate first-child position while preserving pattern features; deeper positions receive no new relaxed admission",
     "augmented_pair_transforms": "adds downstream pair/operator features when enabled; disabled in the pattern-focused interpretability grid",
+    "base_estimator": "downstream estimator choice; `None` uses HUGIML's built-in logistic regression, while the higher-order grids also search RPTE",
+    "topk_budget_strict": "whether one global downstream TopK cap is enforced; the higher-order named grids keep it False",
+    "convert_binary_to_categorical": "whether automatically detected numeric 0/1 columns are treated as categorical; interaction-relaxed grids set True, while augmented-pair grids set False",
 }
 
 _PUBLIC_CONSTANT_NAMES = {
@@ -763,8 +808,8 @@ def _build_hugiml_overview_answer(hits: list[DocumentationHit]) -> str:
         "**Typical workflow**",
         "1. Fit `HUGIMLClassifier` on a tabular dataset.",
         "2. Inspect held-out metrics and confusion matrix.",
-        "3. Review `feature_importances()`, `get_pattern_info()`, and `model_summary()`.",
-        "4. Tune with the `performance` grid when score matters most, or `interpretability` when the final model should remain pattern-focused.",
+        "3. Review `feature_importances()` (or `rpte_rule_tree()` / `rpte_rule_table()` when the fitted downstream estimator is RPTE-based -- `feature_importances()` requires a `coef_`-exposing estimator and raises for RPTE), `get_pattern_info()`, and `model_summary()`.",
+        "4. Tune with the `performance_ho` grid (the default) to search adaptive RPTE alongside LR, `performance` for a linear-only first pass, `interpretability` for a pattern-only LR model, or `interpretability_ho` for pattern-only LR versus sequential RPTE.",
         "5. Use pruning and governance APIs to remove invalid patterns and package audit artifacts.",
         "",
         "**Minimal usage**",
@@ -810,7 +855,7 @@ def _build_pruning_answer(hits: list[DocumentationHit]) -> str:
         "",
         "**Typical workflow**",
         "1. Build or tune a model.",
-        "2. Inspect `get_pattern_info()` / `feature_importances()`.",
+        "2. Inspect `get_pattern_info()` / `feature_importances()` (or `rpte_rule_tree()` for readable review or `rpte_rule_table()` for structured analysis when the downstream estimator is RPTE-based).",
         "3. Use `PatternEditor` to remove patterns by index, keyword, or minimum support.",
         "4. Refit the downstream classifier on the remaining pattern representation.",
         "5. Finalize the model and keep the audit report.",
@@ -882,8 +927,8 @@ def _build_hyperparameter_answer(question: str, hits: list[DocumentationHit]) ->
     """Synthesize named-grid docs into a compact human answer.
 
     The docs contain the exact named grids.  This function extracts the values
-    from retrieved Sphinx/source content, then presents the two user-facing
-    choices side by side instead of dumping the retrieved chunks.
+    from retrieved Sphinx/source content, then presents the four named choices
+    side by side instead of dumping the retrieved chunks.
     """
 
     grids = _hyperparameter_grids_from_hits(hits)
@@ -891,17 +936,26 @@ def _build_hyperparameter_answer(question: str, hits: list[DocumentationHit]) ->
         grids = {name: dict(values) for name, values in _FALLBACK_HUGIML_GRIDS.items()}
     performance = grids.get("performance") or _FALLBACK_HUGIML_GRIDS["performance"]
     interpretability = grids.get("interpretability") or _FALLBACK_HUGIML_GRIDS["interpretability"]
+    interpretability_ho = grids.get("interpretability_ho") or _FALLBACK_HUGIML_GRIDS["interpretability_ho"]
+    performance_ho = grids.get("performance_ho") or _FALLBACK_HUGIML_GRIDS["performance_ho"]
 
-    params = _ordered_grid_params(performance, interpretability)
+    params = _ordered_grid_params(
+        performance,
+        interpretability,
+        interpretability_ho,
+        performance_ho,
+    )
     rows = [
-        "| Hyperparameter | Performance grid | Interpretability grid | Meaning |",
-        "|---|---:|---:|---|",
+        "| Hyperparameter | performance_ho (default) | Performance | interpretability_ho | Interpretability | Meaning |",
+        "|---|---:|---:|---:|---:|---|",
     ]
     for name in params:
         rows.append(
             "| "
             f"`{name}` | "
+            f"{_format_grid_value(performance_ho.get(name))} | "
             f"{_format_grid_value(performance.get(name))} | "
+            f"{_format_grid_value(interpretability_ho.get(name))} | "
             f"{_format_grid_value(interpretability.get(name))} | "
             f"{_GRID_PARAM_NOTES.get(name, 'documented HUGIML tuning option')} |"
         )
@@ -909,7 +963,7 @@ def _build_hyperparameter_answer(question: str, hits: list[DocumentationHit]) ->
     lines = [
         "### HUGIML hyperparameters",
         "",
-        "HUGIML exposes two recommended named grids for tuning: `performance` and `interpretability`. They share the same basic mining budget, but differ in the final representation and audit posture.",
+        "HUGIML exposes four named grids for tuning: `performance_ho`, `performance`, `interpretability_ho`, and `interpretability`. `performance_ho` is the default (`DEFAULT_HUGIML_GRID_NAME`) used whenever a grid name is omitted. The `_ho` grids search RPTE alongside the built-in logistic-regression branch; `interpretability_ho` keeps the pattern-only relaxed-mining surface and explicitly uses sequential RPTE with lookahead inactive.",
         "",
         "**Recommended grids**",
         "",
@@ -919,30 +973,42 @@ def _build_hyperparameter_answer(question: str, hits: list[DocumentationHit]) ->
         "",
         "| Goal | Use | Why |",
         "|---|---|---|",
-        "| Strong first-pass validation score | `performance` | Keeps original features plus mined HUG patterns. |",
+        "| Best default -- may include higher-order interactions | `performance_ho` (default) | Searches both the built-in logistic-regression branch and an RPTE (boosted-tree) branch; RPTE explanations come from `model.rpte_rule_tree()` for a readable flat-tree view or `rpte_rule_table()` for structured rows when RPTE wins. |",
+        "| Strong first-pass score, linear-only | `performance` | Keeps original features plus mined HUG patterns, logistic-regression downstream only. |",
         "| Cleaner audit / pattern-focused model | `interpretability` | Uses `patterns_only`, enables interaction-relaxed mining, and disables augmented-pair transforms. |",
+        "| Pattern-focused higher-order comparison | `interpretability_ho` | Uses the same pattern surface as `interpretability`, then lets inner CV choose LR or sequential RPTE with lookahead inactive. |",
         "",
         "**How to use them**",
         "",
         "```python",
         "from hugiml import HUGIMLClassifier",
         "",
+        "default_grid = HUGIMLClassifier.default_param_grid()  # performance_ho",
         "performance_grid = HUGIMLClassifier.default_param_grid('performance')",
         "interpretability_grid = HUGIMLClassifier.default_param_grid('interpretability')",
+        "interpretability_ho_grid = HUGIMLClassifier.default_param_grid('interpretability_ho')",
         "",
         "result = HUGIMLClassifier.tune(",
         "    X_train,",
         "    y_train,",
         "    cv=5,",
         "    scoring='roc_auc',",
-        "    param_grid='performance',  # or 'interpretability'",
+        "    param_grid='performance_ho',  # or performance / interpretability / interpretability_ho",
         "    refit=True,",
         "    use_fast_path=True,",
         ")",
+        "",
+        "# If the winning candidate is RPTE-based, print the flat-tree view",
+        "# instead of feature_importances() (which requires a coef_-exposing",
+        "# downstream estimator and raises for RPTE):",
+        "best_model = result.best_estimator_",
+        "tree = best_model.rpte_rule_tree() if hasattr(best_model, 'rpte_rule_tree') else ''",
+        "rules = best_model.rpte_rule_table() if hasattr(best_model, 'rpte_rule_table') else []",
         "```",
         "",
         "**Practical notes**",
         "- Keep follow-up grids compact after the recommended first pass.",
+        "- Interaction-relaxed admission covers the root and immediate first-child positions; it is not root-only and does not recursively relax deeper positions.",
         "- For `L >= 2`, do not enable interaction-relaxed mining and augmented-pair transforms in the same candidate.",
     ]
     return "\n".join(lines).strip()
@@ -1035,8 +1101,13 @@ def _balanced_brace_text(text: str, start: int) -> str:
     depth = 0
     quote = ""
     escaped = False
+    in_comment = False
     for pos in range(start, len(text)):
         ch = text[pos]
+        if in_comment:
+            if ch == "\n":
+                in_comment = False
+            continue
         if quote:
             if escaped:
                 escaped = False
@@ -1044,6 +1115,9 @@ def _balanced_brace_text(text: str, start: int) -> str:
                 escaped = True
             elif ch == quote:
                 quote = ""
+            continue
+        if ch == "#":
+            in_comment = True
             continue
         if ch in {"'", '"'}:
             quote = ch
@@ -1058,12 +1132,91 @@ def _balanced_brace_text(text: str, start: int) -> str:
 
 
 def _safe_literal_eval_dict(text: str) -> dict[str, Any] | None:
+    """Parse a dict-literal source snippet, tolerating individual values that
+    aren't literals.
+
+    Grid source dicts used to be all-literal (``HUGIML_GRIDS`` /
+    ``performance_grid`` / ``interpretability_grid`` held only
+    numbers/strings/bools/lists/None), so a single whole-text
+    ``ast.literal_eval`` was sufficient. That stopped being true once
+    ``performance_ho`` was added: its ``base_estimator`` values are
+    constructor-call expressions (``OneVsRestClassifier(LeafWiseBounded
+    LookaheadRPTEFeatureLR(...))``), which ``ast.literal_eval`` cannot
+    evaluate -- and because the previous implementation evaluated the
+    *entire* ``HUGIML_GRIDS`` dict text in one call, one non-literal value
+    anywhere in it (nested arbitrarily deep, e.g. inside one grid's one
+    key) failed the parse for every grid in the dict, including the
+    perfectly literal ``performance``/``interpretability`` ones --
+    `_hyperparameter_grids_from_hits` would then fall through to
+    `_FALLBACK_HUGIML_GRIDS` for every retrieved doc/source hit that
+    happened to contain the real ``HUGIML_GRIDS`` definition (which is
+    exactly the hit `_prioritise_hyperparameter_sources` ranks highest).
+
+    Falls back to a per-value best-effort walk on failure: still attempts
+    ``ast.literal_eval`` first (fast path, and exactly reproduces prior
+    behavior for any dict that IS fully literal); only on failure parses the
+    text as an expression AST and evaluates each dict entry/list element
+    independently, substituting a short source-text placeholder (e.g.
+    ``"<OneVsRestClassifier(...)>"``, via ast.unparse) for any value that
+    still isn't literal-evaluable, rather than discarding the whole
+    structure. This keeps every literal value intact and never raises.
+    """
     cleaned = re.sub(r"#.*", "", text)
     try:
         value = ast.literal_eval(cleaned)
+        return value if isinstance(value, dict) else None
     except Exception:
+        pass
+    try:
+        node = ast.parse(cleaned, mode="eval").body
+    except SyntaxError:
         return None
-    return value if isinstance(value, dict) else None
+    if not isinstance(node, ast.Dict):
+        return None
+    resolved = _best_effort_eval_node(node)
+    return resolved if isinstance(resolved, dict) else None
+
+
+def _placeholder_for_node(node: ast.AST) -> str:
+    try:
+        source = ast.unparse(node)
+    except Exception:
+        source = type(node).__name__
+    source = re.sub(r"\s+", " ", source).strip()
+    if len(source) > 80:
+        source = source[:77] + "..."
+    return f"<{source}>"
+
+
+def _best_effort_eval_node(node: ast.AST) -> Any:
+    """Evaluate an AST node as far as literal_eval can, recursing into Dict/
+    List/Tuple/Set containers and substituting a readable placeholder (see
+    _placeholder_for_node) for any sub-expression that isn't itself a
+    literal -- see _safe_literal_eval_dict for why this exists.
+    """
+    try:
+        return ast.literal_eval(node)
+    except Exception:
+        pass
+    if isinstance(node, ast.Dict):
+        out: dict[Any, Any] = {}
+        for key_node, value_node in zip(node.keys, node.values):
+            if key_node is None:  # dict-unpacking (**expr) entry; skip
+                continue
+            try:
+                key = ast.literal_eval(key_node)
+            except Exception:
+                key = _placeholder_for_node(key_node)
+            out[key] = _best_effort_eval_node(value_node)
+        return out
+    if isinstance(node, (ast.List, ast.Tuple, ast.Set)):
+        items = [_best_effort_eval_node(elt) for elt in node.elts]
+        if isinstance(node, ast.Tuple):
+            return tuple(items)
+        if isinstance(node, ast.Set):
+            return items  # keep list-shaped for downstream _normalise_grid_dict
+        return items
+    return _placeholder_for_node(node)
 
 
 def _normalise_grid_dict(grid: dict[Any, Any]) -> dict[str, list[Any]]:
@@ -1089,6 +1242,8 @@ def _ordered_grid_params(*grids: dict[str, list[Any]]) -> list[str]:
         "G",
         "interaction_relaxed_mining",
         "augmented_pair_transforms",
+        "base_estimator",
+        "topk_budget_strict",
     ]
     present = {key for grid in grids for key in grid}
     ordered = [name for name in preferred if name in present]
@@ -1427,6 +1582,8 @@ def _synthetic_example(question: str, focus: str, signatures: list[str]) -> str:
         return "proba = model.predict_proba(X_test)"
     if re.search(r"\bpredict\b", low):
         return "labels = model.predict(X_test)"
+    if "rpte" in low:
+        return "print(model.rpte_rule_tree())  # use rpte_rule_table() for structured rows"
     if "feature_importance" in low or "importance" in low:
         return "importance = model.feature_importances()"
     if "pattern" in low and "prun" in low:

@@ -23,8 +23,8 @@ or under pytest:
     pytest test_extra_features.py -v
 
 Every check here uses synthetic, generated-in-place data rather than files
-specific to any one machine, so this runs the same way against any checkout
-with the overlay applied. Some sections are optional and skip themselves
+specific to any one machine, so this runs the same way against any source
+checkout. Some sections are optional and skip themselves
 with a printed reason rather than failing outright:
 
 - The native-function section needs the compiled extension
@@ -53,6 +53,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import pytest
+from sklearn.linear_model import LogisticRegression
 
 from hugiml import HUGIMLClassifier, check_native
 from hugiml import classifier as clf_mod
@@ -72,8 +73,10 @@ from hugiml.classifier import (
 )
 from hugiml.hyperparameter_configs import (
     BASELINE_MODEL_GRIDS,
+    BUDGETED_BASELINE_MODEL_GRIDS,
     DEFAULT_HUGIML_GRID_NAME,
     get_baseline_grid,
+    get_budgeted_baseline_grid,
     get_hugiml_grid,
     list_hugiml_grids,
 )
@@ -413,15 +416,16 @@ def run_grid_config_section() -> None:
         "topK": [50, 100],
         "feature_mode": ["original_plus_patterns"],
         "G": [0.01, 0.001],
+        "convert_binary_to_categorical": [False],
     }
     _report(
         "performance grid matches the specified values",
         get_hugiml_grid("performance") == expected_performance,
     )
-    _report("default grid name is 'performance'", DEFAULT_HUGIML_GRID_NAME == "performance")
+    _report("default grid name is 'performance_ho'", DEFAULT_HUGIML_GRID_NAME == "performance_ho")
     _report(
-        "default_param_grid() with no name equals the performance grid",
-        HUGIMLClassifier.default_param_grid() == get_hugiml_grid("performance"),
+        "default_param_grid() with no name equals the performance_ho grid",
+        HUGIMLClassifier.default_param_grid() == get_hugiml_grid("performance_ho"),
     )
 
     interp = get_hugiml_grid("interpretability")
@@ -454,8 +458,9 @@ def run_grid_config_section() -> None:
         isinstance(get_baseline_grid("XGBoost"), dict),
     )
     _report(
-        "list_hugiml_grids includes both named grids",
-        set(list_hugiml_grids()) >= {"performance", "interpretability"},
+        "list_hugiml_grids includes all four named grids",
+        set(list_hugiml_grids())
+        == {"performance", "interpretability", "performance_ho", "interpretability_ho"},
     )
 
     # Validate every candidate in the interpretability grid actually
@@ -707,12 +712,18 @@ def run_workbench_grid_selector_section() -> None:
         _report("tuning-grid selector is present in Guided mode", bool(selectors))
         if selectors:
             _report(
-                "tuning-grid selector defaults to 'performance'",
-                selectors[0].value == "performance",
+                "tuning-grid selector defaults to 'performance_ho'",
+                selectors[0].value == "performance_ho",
             )
             _report(
-                "tuning-grid selector offers both named grids",
-                set(selectors[0].options) >= {"performance", "interpretability"},
+                "tuning-grid selector offers all named grids",
+                set(selectors[0].options)
+                >= {
+                    "performance_ho",
+                    "performance",
+                    "interpretability_ho",
+                    "interpretability",
+                },
             )
             selectors[0].set_value("interpretability").run()
             _report("switching to the interpretability grid does not raise", not at.exception)
@@ -749,7 +760,8 @@ def main() -> int:
 
 def test_hugiml_named_grids_have_expected_values_and_are_copy_safe() -> None:
     performance = get_hugiml_grid("performance")
-    assert DEFAULT_HUGIML_GRID_NAME == "performance"
+    assert DEFAULT_HUGIML_GRID_NAME == "performance_ho"
+    linear_estimators = performance.pop("base_estimator")
     assert performance == {
         "B": [-1],
         "adaptive_binning": [True],
@@ -757,7 +769,14 @@ def test_hugiml_named_grids_have_expected_values_and_are_copy_safe() -> None:
         "topK": [50, 100],
         "feature_mode": ["original_plus_patterns"],
         "G": [0.01, 0.001],
+        "convert_binary_to_categorical": [False],
     }
+    assert len(linear_estimators) == 1
+    linear = linear_estimators[0]
+    assert isinstance(linear, LogisticRegression)
+    assert linear.solver == "liblinear"
+    assert linear.max_iter == 500
+    assert linear.random_state == 0
 
     performance["topK"].append(200)
     assert get_hugiml_grid("performance")["topK"] == [50, 100]
@@ -765,15 +784,42 @@ def test_hugiml_named_grids_have_expected_values_and_are_copy_safe() -> None:
     interpretability = get_hugiml_grid("interpretability")
     assert interpretability["feature_mode"] == ["patterns_only"]
     assert interpretability["interaction_relaxed_mining"] == [True]
+    assert interpretability["convert_binary_to_categorical"] == [True]
     assert interpretability["augmented_pair_transforms"] == [False]
-    assert set(list_hugiml_grids()) == {"performance", "interpretability"}
+    assert set(list_hugiml_grids()) == {
+        "performance_ho",
+        "performance",
+        "interpretability_ho",
+        "interpretability",
+    }
 
 
 def test_classifier_default_param_grid_accepts_named_grid() -> None:
-    assert HUGIMLClassifier.default_param_grid() == get_hugiml_grid("performance")
-    assert HUGIMLClassifier.default_param_grid("interpretability") == get_hugiml_grid(
-        "interpretability"
-    )
+    default_grid = HUGIMLClassifier.default_param_grid()
+    performance_ho = get_hugiml_grid("performance_ho")
+    assert default_grid.keys() == performance_ho.keys()
+    for key in default_grid:
+        if key == "base_estimator":
+            # Each accessor deliberately deep-copies live estimator objects,
+            # so identity/value equality is not meaningful here.
+            assert len(default_grid[key]) == len(performance_ho[key]) == 2
+            assert isinstance(default_grid[key][0], LogisticRegression)
+            assert isinstance(performance_ho[key][0], LogisticRegression)
+            assert default_grid[key][0].solver == performance_ho[key][0].solver == "liblinear"
+            assert type(default_grid[key][1]) is type(performance_ho[key][1])
+        else:
+            assert default_grid[key] == performance_ho[key]
+    for name in ("performance", "interpretability"):
+        classifier_grid = HUGIMLClassifier.default_param_grid(name)
+        named_grid = get_hugiml_grid(name)
+        assert classifier_grid.keys() == named_grid.keys()
+        for key in classifier_grid:
+            if key == "base_estimator":
+                assert [repr(value) for value in classifier_grid[key]] == [
+                    repr(value) for value in named_grid[key]
+                ]
+            else:
+                assert classifier_grid[key] == named_grid[key]
 
 
 def test_fast_tune_grid_expansion_accepts_string_grid() -> None:
@@ -783,15 +829,41 @@ def test_fast_tune_grid_expansion_accepts_string_grid() -> None:
     assert rows
     assert {row["feature_mode"] for row in rows} == {"patterns_only"}
     assert all(row["augmented_pair_transforms"] is False for row in rows)
+    assert all(row["convert_binary_to_categorical"] is True for row in rows)
 
 
 def test_baseline_grids_are_centralized_and_copy_safe() -> None:
+    from sklearn.model_selection import ParameterGrid
+
     assert benchmark_runner.TUNING_GRIDS is BASELINE_MODEL_GRIDS
     rf_grid = get_baseline_grid("RandomForest")
     assert rf_grid is not None
     rf_grid["n_estimators"].append(800)
     assert get_baseline_grid("RandomForest")["n_estimators"] == [200, 400]
     assert get_baseline_grid("UnregisteredModel") is None
+
+    for model_name in ["XGBoost", "LightGBM", "RandomForest"]:
+        assert len(list(ParameterGrid(get_baseline_grid(model_name)))) == 16
+        budgeted = get_budgeted_baseline_grid(model_name)
+        assert budgeted is not None
+        budgeted_candidates = list(ParameterGrid(budgeted))
+        assert len(budgeted_candidates) == 16
+        for candidate in budgeted_candidates:
+            if model_name == "XGBoost":
+                ceiling = candidate["n_estimators"] * (2 ** candidate["max_depth"])
+            elif model_name == "LightGBM":
+                ceiling = candidate["n_estimators"] * candidate["num_leaves"]
+            else:
+                ceiling = candidate["n_estimators"] * candidate["max_leaf_nodes"]
+            assert ceiling <= 200
+
+    assert len(list(ParameterGrid(get_baseline_grid("EBM")))) == 8
+    assert len(list(ParameterGrid(get_baseline_grid("RuleFit")))) == 8
+    assert get_budgeted_baseline_grid("UnregisteredModel") is None
+
+    budgeted_rf = get_budgeted_baseline_grid("RandomForest")
+    budgeted_rf["n_estimators"].append(100)
+    assert BUDGETED_BASELINE_MODEL_GRIDS["RandomForest"]["n_estimators"] == [25, 50]
 
 
 def test_baseline_ohe_preprocessor_handles_unknown_categories_and_missing_columns() -> None:

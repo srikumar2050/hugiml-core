@@ -30,6 +30,39 @@ def _meta_get(meta: Any, name: str, default: Any = None) -> Any:
     return getattr(meta, name, default)
 
 
+def _has_evidence_rows(value: Any) -> bool:
+    """Return whether a result artifact contains at least one row/item.
+
+    Pandas objects intentionally reject scalar truth testing because ``bool(df)``
+    is ambiguous. Promotion preserves the original tuning result, whose
+    ``results_`` can be a DataFrame, list of rows, NumPy array, mapping, or a
+    custom table-like object. Inspect shape/length explicitly instead of ever
+    evaluating the artifact itself in a boolean context.
+    """
+    if value is None:
+        return False
+    if isinstance(value, (pd.DataFrame, pd.Series)):
+        return not value.empty
+
+    empty = getattr(value, "empty", None)
+    if isinstance(empty, bool):
+        return not empty
+
+    shape = getattr(value, "shape", None)
+    if isinstance(shape, tuple) and shape:
+        try:
+            return int(shape[0]) > 0
+        except (TypeError, ValueError, OverflowError):
+            pass
+
+    try:
+        return len(value) > 0
+    except (TypeError, AttributeError):
+        # A non-container scalar/custom evidence object is still an available
+        # artifact; the renderer can decide how much detail it exposes.
+        return True
+
+
 def fit_metadata_frame(model: Any) -> pd.DataFrame:
     """Flatten model.fit_metadata_ into dashboard rows."""
     fit_meta = getattr(model, "fit_metadata_", None)
@@ -68,7 +101,7 @@ def evidence_status_frame(model: Any = None, result: Any = None, X: Any = None, 
     rows = [
         {
             "area": "Validation evidence",
-            "status": status(result is not None and bool(getattr(result, "results_", []))),
+            "status": status(result is not None and _has_evidence_rows(getattr(result, "results_", None))),
             "evidence": "CV/tuning result table and label-aware diagnostics when y is loaded",
         },
         {

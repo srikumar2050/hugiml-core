@@ -3,52 +3,13 @@ hugiml-core
 
 Copyright 2026 Srikumar Krishnamoorthy
 
-Licensed under the Apache License, Version 2.0 (the "License");
-you may not use this file except in compliance with the License.
-You may obtain a copy of the License at
+Licensed under the Apache License, Version 2.0. See LICENSE.
 
-    http://www.apache.org/licenses/LICENSE-2.0
+Third-party components included in distributed binaries:
 
-Unless required by applicable law or agreed to in writing, software
-distributed under the License is distributed on an "AS IS" BASIS,
-WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-See the License for the specific language governing permissions and
-limitations under the License.
+- pybind11 (BSD-3-Clause), used to build the native extension.
+- LLVM OpenMP runtime, which may be bundled in macOS wheels
+  (Apache-2.0 WITH LLVM-exception).
 
-
-Scientific Reference
---------------------
-The algorithms implemented in this package are described in:
-
-  Krishnamoorthy, S. (2024). "Interpretable Classifier Models for Decision
-  Support Using High Utility Gain Patterns." IEEE Access, 12, 126088–126107.
-  DOI: 10.1109/ACCESS.2024.3455563
-
-Third-Party Dependencies
-------------------------
-This software depends on the following third-party packages, each governed
-by its own license:
-
-  numpy         — BSD 3-Clause License
-                  https://numpy.org/
-  scipy         — BSD 3-Clause License
-                  https://scipy.org/
-  scikit-learn  — BSD 3-Clause License
-                  https://scikit-learn.org/
-  pandas        — BSD 3-Clause License
-                  https://pandas.pydata.org/
-  pybind11      — BSD 3-Clause License (build-time only)
-                  https://github.com/pybind/pybind11
-
-Optional integrations (not bundled):
-  opentelemetry-api    — Apache License 2.0
-  prometheus-client    — Apache License 2.0
-  shap                 — MIT License
-
-All of the above licenses are compatible with the Apache License 2.0 under
-which this package is distributed.
-
-Provenance
-----------
-Source repository: https://github.com/srikumar2050/hugiml-core
-Primary maintainer: Srikumar Krishnamoorthy
+Their license texts are provided in THIRD_PARTY_LICENSES/. Other Python
+dependencies are installed separately and remain under their own licenses.

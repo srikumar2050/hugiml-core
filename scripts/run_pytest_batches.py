@@ -20,6 +20,15 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_LOG_DIR = ROOT / "build" / "pytest_batches"
 
 
+def _display_path(path: Path) -> str:
+    """Return a stable repository-relative path, or an absolute external path."""
+    resolved = path.resolve()
+    try:
+        return resolved.relative_to(ROOT).as_posix()
+    except ValueError:
+        return resolved.as_posix()
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("paths", nargs="*", default=["tests"], help="Test files or directories.")
@@ -117,7 +126,7 @@ def _run_pytest(files: list[Path], pytest_args: list[str], log_path: Path, timeo
     elapsed = round(time.monotonic() - start, 3)
     return {
         "files": rel_files,
-        "log": log_path.relative_to(ROOT).as_posix(),
+        "log": _display_path(log_path),
         "returncode": returncode,
         "status": status,
         "timed_out": timed_out,
@@ -178,7 +187,7 @@ def main() -> int:
     summary["failed_units"] = failures
     summary_path = log_dir / "summary.json"
     summary_path.write_text(json.dumps(summary, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-    print(f"summary written to {summary_path.relative_to(ROOT)}")
+    print(f"summary written to {_display_path(summary_path)}")
     return 1 if failures else 0
 
 

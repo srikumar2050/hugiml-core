@@ -398,3 +398,108 @@ class TestSBOMGeneration:
         names = {c["name"] for c in sbom.get("components", [])}
         assert "numpy" in names
         assert "scipy" in names
+
+
+# =============================================================================
+# base_estimator-valued hyperparameter round-tripping (schema v9)
+#
+# Before v9, save_model() called json.dumps(clf.get_params()) directly:
+# base_estimator is None for the pre-RPTE built-in logistic-regression
+# branch (the only case previously exercised), but for any estimator-valued
+# base_estimator (RPTE, bare or OneVsRestClassifier-wrapped) that raised
+# TypeError outright. End-to-end coverage against a real fitted RPTE model
+# lives in tests/test_rpte_interpretability.py (it needs the RPTE module);
+# these tests cover the helper functions directly, including the
+# allowlist/unreconstructable-fallback edges that aren't practical to
+# reach through an actual RPTE fit.
+# =============================================================================
+
+
+class TestBaseEstimatorParamRoundTrip:
+    def test_none_passes_through_unchanged(self):
+        from hugiml.serialization import _json_safe_params, _reconstruct_params
+
+        safe = _json_safe_params({"base_estimator": None, "L": 1})
+        assert safe == {"base_estimator": None, "L": 1}
+        assert _reconstruct_params(safe) == {"base_estimator": None, "L": 1}
+
+    def test_plain_json_native_values_pass_through_unchanged(self):
+        from hugiml.serialization import _json_safe_params, _reconstruct_params
+
+        params = {"L": 2, "G": 0.01, "feature_mode": "patterns_only", "flag": True, "tags": [1, 2, "x"]}
+        safe = _json_safe_params(params)
+        assert safe == params
+        assert _reconstruct_params(safe) == params
+        # Must actually be JSON-dumpable (the whole point).
+        json.dumps(safe)
+
+    def test_sklearn_estimator_param_round_trips(self):
+        from sklearn.linear_model import LogisticRegression
+
+        from hugiml.serialization import _json_safe_params, _reconstruct_params
+
+        est = LogisticRegression(C=0.5, max_iter=250)
+        safe = _json_safe_params({"base_estimator": est})
+        json.dumps(safe)  # must be JSON-safe
+        assert safe["base_estimator"]["class"] == "sklearn.linear_model._logistic.LogisticRegression"
+        rebuilt = _reconstruct_params(safe)
+        assert isinstance(rebuilt["base_estimator"], LogisticRegression)
+        assert rebuilt["base_estimator"].get_params()["C"] == 0.5
+        assert rebuilt["base_estimator"].get_params()["max_iter"] == 250
+
+    def test_nested_wrapper_estimator_round_trips(self):
+        from sklearn.linear_model import LogisticRegression
+        from sklearn.multiclass import OneVsRestClassifier
+
+        from hugiml.serialization import _json_safe_params, _reconstruct_params
+
+        est = OneVsRestClassifier(LogisticRegression(C=2.0), n_jobs=3)
+        safe = _json_safe_params({"base_estimator": est})
+        json.dumps(safe)
+        rebuilt = _reconstruct_params(safe)
+        outer = rebuilt["base_estimator"]
+        assert isinstance(outer, OneVsRestClassifier)
+        assert outer.n_jobs == 3
+        assert isinstance(outer.estimator, LogisticRegression)
+        assert outer.estimator.get_params()["C"] == 2.0
+
+    def test_object_outside_allowlisted_modules_never_raises(self):
+        """An estimator-shaped object whose class lives outside
+        _SAFE_MODULES (e.g. a user-defined class in some arbitrary module)
+        must never crash save_model(); it's saved as a non-reconstructable
+        record and resolves to None on load rather than being silently
+        (and unsafely) imported and instantiated from an untrusted path.
+        """
+        from hugiml.serialization import (
+            _UNRECONSTRUCTABLE_PARAM_MARKER,
+            _json_safe_params,
+            _reconstruct_params,
+        )
+
+        class _NotAllowlisted:
+            def get_params(self, deep=True):
+                return {"x": 1}
+
+        # Force an "outside module" class path regardless of where this
+        # test file itself lives, by faking the module name.
+        obj = _NotAllowlisted()
+        obj.__class__.__module__ = "totally_untrusted_external_package"
+        safe = _json_safe_params({"base_estimator": obj})
+        json.dumps(safe)  # must not raise
+        assert safe["base_estimator"][_UNRECONSTRUCTABLE_PARAM_MARKER] is True
+        rebuilt = _reconstruct_params(safe)
+        assert rebuilt["base_estimator"] is None
+
+    def test_arbitrary_non_estimator_object_never_raises(self):
+        """A hyperparameter holding some other arbitrary non-JSON,
+        non-estimator object (no get_params()) must also degrade safely
+        rather than raising.
+        """
+        from hugiml.serialization import _json_safe_params, _reconstruct_params
+
+        class _Weird:
+            pass
+
+        safe = _json_safe_params({"custom_param": _Weird()})
+        json.dumps(safe)  # must not raise
+        assert _reconstruct_params(safe)["custom_param"] is None

@@ -9,6 +9,11 @@ import pandas as pd
 import streamlit as st
 
 from hugiml.dashboard.components.feature_family import pattern_feature_audit
+from hugiml.dashboard.components.patterns import (
+    _get_rpte_final_term_rows,
+    _is_direct_source_row,
+    _rpte_source_family,
+)
 from hugiml.dashboard.display import dataframe_for_display
 
 
@@ -75,6 +80,60 @@ def sensitive_pattern_flags(model: Any, sensitive_columns: list[str] | None) -> 
     return out
 
 
+def sensitive_rpte_rule_flags(model: Any, sensitive_columns: list[str] | None) -> pd.DataFrame:
+    """Return sensitive/proxy flags across the complete RPTE final-LR terms."""
+    if not sensitive_columns:
+        return pd.DataFrame()
+    rows = _get_rpte_final_term_rows(model, include_zero_direct=True)
+    if not rows:
+        return pd.DataFrame()
+    sensitive = set(map(str, sensitive_columns))
+    out_rows: list[dict[str, Any]] = []
+    for row in rows:
+        coefficient = pd.to_numeric(
+            pd.Series([row.get("final_logistic_coefficient")]), errors="coerce"
+        ).iloc[0]
+        if pd.isna(coefficient) or abs(float(coefficient)) < 1e-12:
+            continue
+        raw_sources = [str(s) for s in (row.get("raw_sources") or [])]
+        hit = sensitive.intersection(raw_sources)
+        if not hit:
+            continue
+        backend = str(row.get("backend") or "unknown")
+        source_column = str(row.get("downstream_feature") or "")
+        family = str(row.get("source_family") or _rpte_source_family(source_column))
+        if backend in {"bounded_lookahead", "sequential_default"}:
+            term_type = "RPTE leaf indicator"
+            conditions = row.get("conditions") or []
+            terms = [
+                c.get("raw_condition") or c.get("downstream_condition") or "?"
+                for c in conditions
+            ]
+            term = " AND ".join(str(t) for t in terms)
+        elif _is_direct_source_row(row):
+            term_type = {
+                "original": "direct original term",
+                "pattern": "direct HUG pattern term",
+                "augmented_pair": "direct augmented-pair term",
+            }.get(family, "direct source term")
+            term = source_column
+        else:
+            term_type = "RPTE source fallback term"
+            term = source_column or "(linear term)"
+        out_rows.append({
+            "final_term": term,
+            "term_type": term_type,
+            "source_family": family,
+            "sensitive_features_used": ", ".join(sorted(hit)),
+            "all_raw_sources": ", ".join(raw_sources),
+            "coefficient": float(coefficient),
+            "backend": backend,
+            "support_count": row.get("support_count"),
+            "status": "Review",
+        })
+    return pd.DataFrame(out_rows)
+
+
 def render_fairness(
     sensitive_columns: list[str] | None = None,
     model: Any = None,
@@ -96,7 +155,9 @@ def render_fairness(
         "required_action": ["Review usage in originals, HUG patterns, augmented/generated features, and group prediction rates"] * len(sensitive_columns),
     })
 
-    tab1, tab2, tab3 = st.tabs(["Column review", "Group prediction rates", "Sensitive pattern flags"])
+    tab1, tab2, tab3, tab4 = st.tabs([
+        "Column review", "Group prediction rates", "Sensitive pattern flags", "Sensitive RPTE final-term flags",
+    ])
     with tab1:
         st.dataframe(dataframe_for_display(base), width="stretch", hide_index=True)
     with tab2:
@@ -132,3 +193,18 @@ def render_fairness(
             st.info("No mined HUG patterns containing sensitive/proxy source features were found, or pattern audit metadata is unavailable.")
         else:
             st.dataframe(dataframe_for_display(flags), width="stretch", hide_index=True)
+    with tab4:
+        st.caption(
+            "RPTE can synthesize a split on a raw-feature pair that was never mined into a "
+            "HUG pattern or augmented-pair transform, so it would not appear in the "
+            "'Sensitive pattern flags' tab even if it uses a sensitive/proxy column directly. "
+            "This checks the complete fitted RPTE final-LR representation instead of the mined-pattern list."
+        )
+        rpte_flags = sensitive_rpte_rule_flags(model, sensitive_columns)
+        if rpte_flags.empty:
+            st.info(
+                "No non-zero RPTE final-LR terms reference the selected sensitive/proxy columns. "
+                "This is also expected when the downstream estimator is not RPTE-based."
+            )
+        else:
+            st.dataframe(dataframe_for_display(rpte_flags), width="stretch", hide_index=True)

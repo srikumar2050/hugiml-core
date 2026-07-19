@@ -14,11 +14,13 @@
 
 """Versioned serialization and SBOM generation for HUGIMLClassifierNative.
 
-Format (v3 — default)
----------------------
-A ZIP archive containing JSON manifests and NumPy array bundles.  No
-``pickle`` is required to round-trip the model, eliminating the gadget-chain
-attack surface that exists in any pickle-based format.
+Format (v3+ — current writer)
+-----------------------------
+A ZIP archive containing JSON manifests and NumPy array bundles. Built-in
+``LogisticRegression``, ``SGDClassifier``, and RPTE downstream models are stored
+as structured configuration plus fitted NumPy state. ``OneVsRestClassifier``
+and ``Pipeline`` containers are serialized recursively. Estimators without a
+native serializer continue to use the restricted custom-estimator fallback.
 
 Archive layout::
 
@@ -77,7 +79,29 @@ __all__ = [
 # Schema v8 adds native serialization support for the built-in SGDClassifier
 # downstream solver option. Loading remains backward-compatible with v1-v7
 # because new fields are restored with .get(..., defaults).
-MODEL_SCHEMA_VERSION: int = 8
+#
+# Schema v10 adds first-class structured serialization for RPTE, including
+# its fitted feature extractor, sklearn decision trees, final logistic layer,
+# and OneVsRestClassifier wrappers. New v10 archives no longer use the generic
+# custom-estimator payload for RPTE. v1-v9 loading remains supported, including
+# v9 RPTE archives written through the previous fallback path.
+#
+# Schema v9 covers `base_estimator` values that are live sklearn estimator
+# instances rather than plain scalars/None -- reachable through RPTE (a
+# downstream branch: bare, or OneVsRestClassifier-wrapped for multiclass, as
+# produced by the "performance_ho" grid). clf_init.json stores each
+# estimator-valued hyperparameter as a reconstructable {class, params}
+# record (module-prefix-allowlisted the same way the restricted Unpickler
+# already is, via _SAFE_MODULES) via _json_safe_params, and _load_v3
+# reconstructs it via _reconstruct_params so the reloaded classifier's own
+# `base_estimator` attribute -- not just the fitted `self.model_` Pipeline,
+# which is stored separately -- matches what was actually fit. This is what
+# `get_params()`, `sklearn.base.clone()`, and any refit that reads
+# `self.base_estimator` (e.g. dashboard/runner.py's feature-pruning refit)
+# rely on. Loading remains backward-compatible with v1-v8: those files'
+# `base_estimator` value is always plain None (RPTE did not exist yet) and
+# round-trips through the same code unchanged.
+MODEL_SCHEMA_VERSION: int = 10
 MIN_SCHEMA_VERSION: int = 1
 
 # ── Legacy (v1/v2) pickle-envelope constants ──────────────────────────────────
@@ -146,7 +170,7 @@ def _get_hmac_key() -> bytes | None:
 
 
 # =============================================================================
-# v3 – ZIP / JSON / NumPy format (no pickle)
+# v3+ – ZIP / JSON / NumPy model format
 # =============================================================================
 
 
@@ -167,11 +191,315 @@ def _json_dumps(obj: Any) -> bytes:
     return json.dumps(obj, default=_default, separators=(",", ":")).encode()
 
 
+_ESTIMATOR_PARAM_MARKER = "__hugiml_estimator__"
+_UNRECONSTRUCTABLE_PARAM_MARKER = "__hugiml_unreconstructable__"
+
+
+def _is_json_native(value: Any) -> bool:
+    """True for values json.dumps (plus _json_dumps's numpy _default) already handles."""
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return True
+    if isinstance(value, np.generic):
+        return True
+    if isinstance(value, (list, tuple)):
+        return all(_is_json_native(v) for v in value)
+    if isinstance(value, dict):
+        return all(isinstance(k, str) and _is_json_native(v) for k, v in value.items())
+    return False
+
+
+def _json_safe_params(params: dict[str, Any]) -> dict[str, Any]:
+    """Return a JSON-safe copy of a ``get_params()``-style dict for clf_init.json.
+
+    A plain ``json.dumps(clf.get_params())`` (the pre-v9 behavior) raises
+    TypeError the moment any hyperparameter holds a live, non-JSON-native
+    object -- which never happened before RPTE existed (every HUGIML
+    hyperparameter was a plain scalar/string/None), but now happens for any
+    fit whose `base_estimator` is an RPTE estimator (bare or
+    OneVsRestClassifier-wrapped): see MODEL_SCHEMA_VERSION's v9 note.
+
+    Recurses into any value exposing sklearn's `get_params()` (so a wrapped
+    estimator like OneVsRestClassifier(estimator=RPTE(...)) is captured
+    fully, not just its outer class) and converts each into a
+    {_ESTIMATOR_PARAM_MARKER: True, "class": "<module>.<qualname>", "params":
+    {...}} record IF its module is allowlisted the same way the legacy
+    restricted Unpickler already allowlists modules for pickle fallback
+    (_SAFE_MODULES) -- this is the same trust boundary already used
+    elsewhere in this file, not a new one. Anything else non-JSON-native
+    (an object this format has no allowlisted way to reconstruct) becomes a
+    {_UNRECONSTRUCTABLE_PARAM_MARKER: True, "class": ..., "repr": ...}
+    record instead of raising, with a warning at save time -- prediction
+    from the saved file is unaffected (self.model_ is serialized
+    separately, in full, regardless of this function), but that one
+    hyperparameter's value won't be restored on load.
+    """
+    out: dict[str, Any] = {}
+    for key, value in params.items():
+        out[key] = _json_safe_param_value(value)
+    return out
+
+
+def _json_safe_param_value(value: Any) -> Any:
+    if _is_json_native(value):
+        return value
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if hasattr(value, "get_params") and callable(getattr(value, "get_params")):
+        module = type(value).__module__
+        qualname = type(value).__qualname__
+        if any(module == m or module.startswith(m + ".") for m in _SAFE_MODULES):
+            try:
+                inner_params = value.get_params(deep=False)
+            except Exception as exc:
+                logger.warning(
+                    "base_estimator-style param %s.%s could not be introspected via "
+                    "get_params() (%s); it will not be reconstructable from this file.",
+                    module,
+                    qualname,
+                    exc,
+                )
+                return {
+                    _UNRECONSTRUCTABLE_PARAM_MARKER: True,
+                    "class": f"{module}.{qualname}",
+                    "repr": repr(value)[:500],
+                }
+            return {
+                _ESTIMATOR_PARAM_MARKER: True,
+                "class": f"{module}.{qualname}",
+                "params": _json_safe_params(inner_params),
+            }
+        logger.warning(
+            "base_estimator-style param of class %s.%s is outside the allowlisted "
+            "modules for reconstruction (%s); it will be saved as a non-reconstructable "
+            "record and not restored on load.",
+            module,
+            qualname,
+            ", ".join(_SAFE_MODULES),
+        )
+        return {
+            _UNRECONSTRUCTABLE_PARAM_MARKER: True,
+            "class": f"{module}.{qualname}",
+            "repr": repr(value)[:500],
+        }
+    # Unknown, non-estimator, non-JSON-native object (e.g. a bare function or
+    # an arbitrary user object passed as a hyperparameter): same
+    # non-reconstructable fallback, never raise.
+    logger.warning(
+        "Hyperparameter value of type %s is not JSON-serializable and does not "
+        "expose get_params(); it will be saved as a non-reconstructable record "
+        "and not restored on load.",
+        type(value).__name__,
+    )
+    return {
+        _UNRECONSTRUCTABLE_PARAM_MARKER: True,
+        "class": f"{type(value).__module__}.{type(value).__qualname__}",
+        "repr": repr(value)[:500],
+    }
+
+
+def _reconstruct_params(params: dict[str, Any]) -> dict[str, Any]:
+    """Inverse of _json_safe_params: rebuild estimator-valued params from
+    clf_init.json's records. Never raises -- a record this file's HUGIML
+    version doesn't know how to reconstruct (e.g. saved by a newer HUGIML
+    with a class this installation doesn't have) is warned about and
+    resolved to None rather than failing the whole load, since prediction
+    does not depend on this value (self.model_ carries the fitted state).
+    """
+    out: dict[str, Any] = {}
+    for key, value in params.items():
+        out[key] = _reconstruct_param_value(key, value)
+    return out
+
+
+def _reconstruct_param_value(key: str, value: Any) -> Any:
+    if isinstance(value, dict) and value.get(_ESTIMATOR_PARAM_MARKER):
+        class_path = str(value.get("class", ""))
+        module_name, _, class_name = class_path.rpartition(".")
+        if not module_name or not any(
+            module_name == m or module_name.startswith(m + ".") for m in _SAFE_MODULES
+        ):
+            logger.warning(
+                "clf_init.json's %r references class %r outside the allowlisted "
+                "reconstruction modules; leaving it as None.",
+                key,
+                class_path,
+            )
+            return None
+        try:
+            import importlib
+
+            module = importlib.import_module(module_name)
+            cls = getattr(module, class_name)
+            inner_params = _reconstruct_params(value.get("params", {}) or {})
+            return cls(**inner_params)
+        except Exception as exc:
+            logger.warning(
+                "Failed to reconstruct %r for clf_init.json's %r (%s); leaving it as "
+                "None. Predictions from the loaded model are unaffected -- only this "
+                "hyperparameter's own value is not restored.",
+                class_path,
+                key,
+                exc,
+            )
+            return None
+    if isinstance(value, dict) and value.get(_UNRECONSTRUCTABLE_PARAM_MARKER):
+        logger.warning(
+            "clf_init.json's %r (%s) was saved as non-reconstructable and cannot be "
+            "restored; leaving it as None. Predictions from the loaded model are "
+            "unaffected -- only this hyperparameter's own value is not restored.",
+            key,
+            value.get("class", "unknown class"),
+        )
+        return None
+    if isinstance(value, dict):
+        return {k: _reconstruct_param_value(f"{key}.{k}", v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_reconstruct_param_value(key, v) for v in value]
+    return value
+
+
 def _npz_bytes(**arrays: np.ndarray) -> bytes:
     """Return the binary content of a numpy .npz file without touching disk."""
     buf = io.BytesIO()
     np.savez_compressed(buf, **arrays)  # type: ignore[arg-type]
     return buf.getvalue()
+
+
+# Markers used by the structured estimator-state encoder.  Arrays remain in
+# estimator_arrays.npz; JSON records contain only references to those arrays.
+_STATE_ARRAY_MARKER = "__hugiml_state_array__"
+_STATE_TUPLE_MARKER = "__hugiml_state_tuple__"
+_STATE_SET_MARKER = "__hugiml_state_set__"
+_STATE_FROZENSET_MARKER = "__hugiml_state_frozenset__"
+_STATE_MAPPING_MARKER = "__hugiml_state_mapping__"
+
+
+def _state_key(prefix: str, name: str) -> str:
+    """Return a stable NPZ key for one structured-state array."""
+    safe = "".join(ch if ch.isalnum() or ch in {"_", "-"} else "_" for ch in name)
+    return f"{prefix}{safe}"
+
+
+def _pack_structured_state(
+    value: Any,
+    arrays: dict[str, np.ndarray],
+    prefix: str,
+) -> Any:
+    """Encode supported fitted state into JSON-compatible records plus arrays.
+
+    This encoder is deliberately narrow: it covers the scalar, container, and
+    NumPy state used by RPTE and sklearn tree internals.  Unsupported objects
+    raise a serialization error rather than silently becoming an opaque payload.
+    """
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, np.generic):
+        return value.item()
+    if isinstance(value, np.ndarray):
+        key = _state_key(prefix, "array")
+        suffix = 0
+        candidate = key
+        while candidate in arrays:
+            suffix += 1
+            candidate = f"{key}_{suffix}"
+        arrays[candidate] = np.asarray(value)
+        return {_STATE_ARRAY_MARKER: candidate}
+    if isinstance(value, tuple):
+        return {
+            _STATE_TUPLE_MARKER: [
+                _pack_structured_state(item, arrays, f"{prefix}t{i}__")
+                for i, item in enumerate(value)
+            ]
+        }
+    if isinstance(value, set):
+        ordered = sorted(value, key=repr)
+        return {
+            _STATE_SET_MARKER: [
+                _pack_structured_state(item, arrays, f"{prefix}s{i}__")
+                for i, item in enumerate(ordered)
+            ]
+        }
+    if isinstance(value, frozenset):
+        ordered = sorted(value, key=repr)
+        return {
+            _STATE_FROZENSET_MARKER: [
+                _pack_structured_state(item, arrays, f"{prefix}f{i}__")
+                for i, item in enumerate(ordered)
+            ]
+        }
+    if isinstance(value, list):
+        return [
+            _pack_structured_state(item, arrays, f"{prefix}l{i}__")
+            for i, item in enumerate(value)
+        ]
+    if isinstance(value, dict):
+        # A list of key/value pairs preserves integer keys and tuple keys used
+        # by fitted RPTE metadata instead of coercing everything to strings.
+        return {
+            _STATE_MAPPING_MARKER: [
+                [
+                    _pack_structured_state(key, arrays, f"{prefix}k{i}__"),
+                    _pack_structured_state(item, arrays, f"{prefix}v{i}__"),
+                ]
+                for i, (key, item) in enumerate(value.items())
+            ]
+        }
+    raise HUGIMLSerializationError(
+        f"Structured estimator state contains unsupported object {type(value).__module__}."
+        f"{type(value).__qualname__}."
+    )
+
+
+def _unpack_structured_state(value: Any, arrays: dict[str, np.ndarray]) -> Any:
+    """Reverse :func:`_pack_structured_state`."""
+    if isinstance(value, list):
+        return [_unpack_structured_state(item, arrays) for item in value]
+    if not isinstance(value, dict):
+        return value
+    if _STATE_ARRAY_MARKER in value:
+        key = value[_STATE_ARRAY_MARKER]
+        if key not in arrays:
+            raise HUGIMLSerializationError(
+                f"Structured estimator array '{key}' is missing from estimator_arrays.npz."
+            )
+        return np.asarray(arrays[key])
+    if _STATE_TUPLE_MARKER in value:
+        return tuple(_unpack_structured_state(item, arrays) for item in value[_STATE_TUPLE_MARKER])
+    if _STATE_SET_MARKER in value:
+        return set(_unpack_structured_state(item, arrays) for item in value[_STATE_SET_MARKER])
+    if _STATE_FROZENSET_MARKER in value:
+        return frozenset(
+            _unpack_structured_state(item, arrays) for item in value[_STATE_FROZENSET_MARKER]
+        )
+    if _STATE_MAPPING_MARKER in value:
+        return {
+            _unpack_structured_state(key, arrays): _unpack_structured_state(item, arrays)
+            for key, item in value[_STATE_MAPPING_MARKER]
+        }
+    return {key: _unpack_structured_state(item, arrays) for key, item in value.items()}
+
+
+def _constructor_state(obj: Any) -> dict[str, Any]:
+    """Collect constructor parameters directly from an object's signature."""
+    import inspect
+
+    params: dict[str, Any] = {}
+    for name, parameter in inspect.signature(type(obj).__init__).parameters.items():
+        if name == "self" or parameter.kind in {
+            inspect.Parameter.VAR_POSITIONAL,
+            inspect.Parameter.VAR_KEYWORD,
+        }:
+            continue
+        if hasattr(obj, name):
+            params[name] = getattr(obj, name)
+    return params
+
+
+def _prefixed_arrays(arrays: dict[str, np.ndarray], prefix: str) -> dict[str, np.ndarray]:
+    """Return arrays below *prefix* with that prefix removed."""
+    if not prefix:
+        return arrays
+    return {key[len(prefix):]: value for key, value in arrays.items() if key.startswith(prefix)}
 
 
 # ---------------------------------------------------------------------------
@@ -262,46 +590,267 @@ def _deserialize_sgd_classifier(config: dict, arrays: dict[str, np.ndarray]) -> 
     return est
 
 
+def _serialize_decision_tree(
+    est: Any,
+    arrays: dict[str, np.ndarray],
+    prefix: str,
+) -> dict[str, Any]:
+    """Serialize a fitted DecisionTreeClassifier as parameters plus tree arrays."""
+    config: dict[str, Any] = {
+        "class": "sklearn.tree.DecisionTreeClassifier",
+        "init_params": _pack_structured_state(
+            est.get_params(deep=False), arrays, f"{prefix}init__"
+        ),
+        "fitted_state": _pack_structured_state(
+            {
+                "classes_": est.classes_,
+                "n_classes_": est.n_classes_,
+                "n_features_in_": est.n_features_in_,
+                "n_outputs_": est.n_outputs_,
+                "max_features_": est.max_features_,
+                "tree_state": est.tree_.__getstate__(),
+            },
+            arrays,
+            f"{prefix}state__",
+        ),
+    }
+    return config
+
+
+def _deserialize_decision_tree(config: dict[str, Any], arrays: dict[str, np.ndarray]) -> Any:
+    import inspect
+
+    from sklearn.tree import DecisionTreeClassifier, _tree
+
+    params = _unpack_structured_state(config["init_params"], arrays)
+    valid = set(inspect.signature(DecisionTreeClassifier.__init__).parameters)
+    est = DecisionTreeClassifier(**{key: value for key, value in params.items() if key in valid})
+    state = _unpack_structured_state(config["fitted_state"], arrays)
+    est.classes_ = np.asarray(state["classes_"])
+    est.n_classes_ = state["n_classes_"]
+    est.n_features_in_ = int(state["n_features_in_"])
+    est.n_outputs_ = int(state["n_outputs_"])
+    est.max_features_ = state["max_features_"]
+    n_classes = np.atleast_1d(est.n_classes_).astype(np.intp, copy=False)
+    tree = _tree.Tree(est.n_features_in_, n_classes, est.n_outputs_)
+    tree.__setstate__(state["tree_state"])
+    est.tree_ = tree
+    return est
+
+
+def _serialize_default_rpte_feature_extractor(
+    extractor: Any,
+    arrays: dict[str, np.ndarray],
+    prefix: str,
+) -> dict[str, Any]:
+    state = dict(extractor.__dict__)
+    trees = list(state.pop("trees_", []))
+    return {
+        "class": "hugiml.rpte_bounded_lookahead_leafwise._DefaultRPTEFeatureExtractor",
+        "init_params": _pack_structured_state(
+            _constructor_state(extractor), arrays, f"{prefix}init__"
+        ),
+        "state": _pack_structured_state(state, arrays, f"{prefix}state__"),
+        "trees": [
+            _serialize_decision_tree(tree, arrays, f"{prefix}tree_{index}__")
+            for index, tree in enumerate(trees)
+        ],
+    }
+
+
+def _deserialize_default_rpte_feature_extractor(
+    config: dict[str, Any], arrays: dict[str, np.ndarray]
+) -> Any:
+    from hugiml.rpte_bounded_lookahead_leafwise import _DefaultRPTEFeatureExtractor
+
+    init_params = _unpack_structured_state(config["init_params"], arrays)
+    extractor = _DefaultRPTEFeatureExtractor(**init_params)
+    extractor.__dict__.update(_unpack_structured_state(config["state"], arrays))
+    extractor.trees_ = [
+        _deserialize_decision_tree(tree_config, arrays)
+        for tree_config in config.get("trees", [])
+    ]
+    return extractor
+
+
+def _serialize_rpte_feature_extractor(
+    extractor: Any,
+    arrays: dict[str, np.ndarray],
+    prefix: str,
+) -> dict[str, Any]:
+    state = dict(extractor.__dict__)
+    default_extractor = state.pop("_default_fe", None)
+    native_trees = state.pop("trees_", [])
+    return {
+        "class": "hugiml.rpte_bounded_lookahead_leafwise.LeafWiseBoundedLookaheadRPTEFeatureExtractor",
+        "init_params": _pack_structured_state(
+            _constructor_state(extractor), arrays, f"{prefix}init__"
+        ),
+        "state": _pack_structured_state(state, arrays, f"{prefix}state__"),
+        "native_trees": _pack_structured_state(
+            native_trees, arrays, f"{prefix}native_trees__"
+        ),
+        "default_extractor": (
+            _serialize_default_rpte_feature_extractor(
+                default_extractor, arrays, f"{prefix}default__"
+            )
+            if default_extractor is not None
+            else None
+        ),
+    }
+
+
+def _deserialize_rpte_feature_extractor(
+    config: dict[str, Any], arrays: dict[str, np.ndarray]
+) -> Any:
+    from hugiml.rpte_bounded_lookahead_leafwise import (
+        LeafWiseBoundedLookaheadRPTEFeatureExtractor,
+    )
+
+    init_params = _unpack_structured_state(config["init_params"], arrays)
+    extractor = LeafWiseBoundedLookaheadRPTEFeatureExtractor(**init_params)
+    extractor.__dict__.update(_unpack_structured_state(config["state"], arrays))
+    extractor.trees_ = _unpack_structured_state(config["native_trees"], arrays)
+    default_config = config.get("default_extractor")
+    extractor._default_fe = (
+        _deserialize_default_rpte_feature_extractor(default_config, arrays)
+        if default_config is not None
+        else None
+    )
+    return extractor
+
+
+def _serialize_rpte(
+    est: Any,
+    arrays: dict[str, np.ndarray],
+    prefix: str,
+) -> dict[str, Any]:
+    state = dict(est.__dict__)
+    feature_extractor = state.pop("fe_", None)
+    logistic = state.pop("logistic_", None)
+    if feature_extractor is None or logistic is None:
+        raise HUGIMLSerializationError("RPTE estimator must be fitted before serialization.")
+
+    logistic_config, logistic_arrays = _serialize_logreg(logistic)
+    logistic_prefix = f"{prefix}logistic__"
+    for key, value in logistic_arrays.items():
+        arrays[f"{logistic_prefix}{key}"] = value
+
+    return {
+        "class": "hugiml.rpte_bounded_lookahead_leafwise.LeafWiseBoundedLookaheadRPTEFeatureLR",
+        "serialization": "structured_rpte_v1",
+        "init_params": _pack_structured_state(
+            est.get_params(deep=False), arrays, f"{prefix}init__"
+        ),
+        "state": _pack_structured_state(state, arrays, f"{prefix}state__"),
+        "feature_extractor": _serialize_rpte_feature_extractor(
+            feature_extractor, arrays, f"{prefix}feature_extractor__"
+        ),
+        "logistic": logistic_config,
+        "logistic_array_prefix": logistic_prefix,
+    }
+
+
+def _deserialize_rpte(config: dict[str, Any], arrays: dict[str, np.ndarray]) -> Any:
+    from hugiml.rpte_bounded_lookahead_leafwise import (
+        LeafWiseBoundedLookaheadRPTEFeatureLR,
+    )
+
+    init_params = _unpack_structured_state(config["init_params"], arrays)
+    est = LeafWiseBoundedLookaheadRPTEFeatureLR(**init_params)
+    est.__dict__.update(_unpack_structured_state(config["state"], arrays))
+    est.fe_ = _deserialize_rpte_feature_extractor(config["feature_extractor"], arrays)
+    logistic_prefix = config["logistic_array_prefix"]
+    est.logistic_ = _deserialize_logreg(
+        config["logistic"], _prefixed_arrays(arrays, logistic_prefix)
+    )
+    return est
+
+
+def _serialize_one_vs_rest(
+    est: Any,
+    arrays: dict[str, np.ndarray],
+    prefix: str,
+) -> dict[str, Any]:
+    state = dict(est.__dict__)
+    estimator_template = state.pop("estimator")
+    estimators = list(state.pop("estimators_", []))
+    label_binarizer = state.pop("label_binarizer_", None)
+    if label_binarizer is None:
+        raise HUGIMLSerializationError(
+            "OneVsRestClassifier must be fitted before serialization."
+        )
+    return {
+        "class": "sklearn.multiclass.OneVsRestClassifier",
+        "serialization": "structured_ovr_v1",
+        "init_params": {
+            "estimator": _json_safe_param_value(estimator_template),
+            "n_jobs": est.n_jobs,
+            "verbose": est.verbose,
+        },
+        "state": _pack_structured_state(state, arrays, f"{prefix}state__"),
+        "label_binarizer_state": _pack_structured_state(
+            label_binarizer.__dict__, arrays, f"{prefix}label_binarizer__"
+        ),
+        "estimators": [
+            _serialize_estimator_into(item, arrays, f"{prefix}estimator_{index}__")
+            for index, item in enumerate(estimators)
+        ],
+    }
+
+
+def _deserialize_one_vs_rest(config: dict[str, Any], arrays: dict[str, np.ndarray]) -> Any:
+    from sklearn.multiclass import OneVsRestClassifier
+    from sklearn.preprocessing import LabelBinarizer
+
+    init_config = config["init_params"]
+    estimator_template = _reconstruct_param_value("estimator", init_config["estimator"])
+    est = OneVsRestClassifier(
+        estimator=estimator_template,
+        n_jobs=init_config.get("n_jobs"),
+        verbose=init_config.get("verbose", 0),
+    )
+    est.__dict__.update(_unpack_structured_state(config["state"], arrays))
+    label_state = _unpack_structured_state(config["label_binarizer_state"], arrays)
+    label_binarizer = LabelBinarizer(
+        neg_label=label_state.get("neg_label", 0),
+        pos_label=label_state.get("pos_label", 1),
+        sparse_output=label_state.get("sparse_output", False),
+    )
+    label_binarizer.__dict__.update(label_state)
+    est.label_binarizer_ = label_binarizer
+    est.estimators_ = [
+        _deserialize_estimator(item, arrays) for item in config.get("estimators", [])
+    ]
+    return est
+
+
 def _serialize_pipeline(est: Any) -> tuple[dict, dict[str, np.ndarray]]:
-    """Serialize a sklearn Pipeline whose final step is LogisticRegression or SGDClassifier."""
-    from sklearn.linear_model import LogisticRegression, SGDClassifier
+    """Serialize a fitted sklearn Pipeline recursively."""
     from sklearn.pipeline import Pipeline
 
     if not isinstance(est, Pipeline):
         raise HUGIMLSerializationError(f"_serialize_pipeline called on {type(est).__name__}")
+    arrays: dict[str, np.ndarray] = {}
+    config = _serialize_pipeline_into(est, arrays, "")
+    return config, arrays
 
+
+def _serialize_pipeline_into(
+    est: Any,
+    arrays: dict[str, np.ndarray],
+    prefix: str,
+) -> dict[str, Any]:
     steps_config = []
-    arrays_all: dict[str, np.ndarray] = {}
-    for name, step in est.steps:
-        if isinstance(step, LogisticRegression):
-            sc, sa = _serialize_logreg(step)
-            steps_config.append({"name": name, "estimator": sc})
-            for k, v in sa.items():
-                arrays_all[f"{name}__{k}"] = v
-        elif isinstance(step, SGDClassifier):
-            sc, sa = _serialize_sgd_classifier(step)
-            steps_config.append({"name": name, "estimator": sc})
-            for k, v in sa.items():
-                arrays_all[f"{name}__{k}"] = v
-        else:
-            logger.debug(
-                "Pipeline step '%s' (%s) cannot be natively serialized; "
-                "falling back to restricted pickle for this step.",
-                name,
-                type(step).__name__,
-            )
-            import pickle  # nosec B403 – payload signed by HMAC on save
-
-            payload = pickle.dumps(step, protocol=5)
-            sc = {
-                "class": type(step).__module__ + "." + type(step).__qualname__,
-                "_pickle_fallback": True,
+    for index, (name, step) in enumerate(est.steps):
+        step_prefix = f"{prefix}{name}__"
+        steps_config.append(
+            {
+                "name": name,
+                "estimator": _serialize_estimator_into(step, arrays, step_prefix),
             }
-            steps_config.append({"name": name, "estimator": sc})
-            arrays_all[f"{name}__pickle_payload"] = np.frombuffer(payload, dtype=np.uint8)
-
-    config = {"class": "sklearn.pipeline.Pipeline", "steps": steps_config}
-    return config, arrays_all
+        )
+    return {"class": "sklearn.pipeline.Pipeline", "steps": steps_config}
 
 
 def _deserialize_pipeline(config: dict, arrays: dict[str, np.ndarray]) -> Any:
@@ -311,80 +860,115 @@ def _deserialize_pipeline(config: dict, arrays: dict[str, np.ndarray]) -> Any:
     for step_cfg in config["steps"]:
         name = step_cfg["name"]
         est_cfg = step_cfg["estimator"]
-        if est_cfg.get("_pickle_fallback"):
+        # New structured configs carry exact array references internally.
+        # Legacy configs used step-name prefixes and are still accepted.
+        if (
+            est_cfg.get("serialization")
+            or est_cfg.get("array_prefix")
+            or est_cfg.get("pickle_array_key")
+            or est_cfg.get("class")
+            in {
+                "hugiml.rpte_bounded_lookahead_leafwise.LeafWiseBoundedLookaheadRPTEFeatureLR",
+                "sklearn.multiclass.OneVsRestClassifier",
+                "sklearn.pipeline.Pipeline",
+            }
+        ):
+            step_est = _deserialize_estimator(est_cfg, arrays)
+        elif est_cfg.get("_pickle_fallback"):
+            # Legacy pipeline archives stored the payload under the step-name
+            # prefix without recording that key in estimator.json.
             payload = arrays[f"{name}__pickle_payload"].tobytes()
             step_est = _safe_unpickle(payload)
-        elif est_cfg.get("class") == "sklearn.linear_model.LogisticRegression":
-            step_arrays = {
-                k.removeprefix(f"{name}__"): v
-                for k, v in arrays.items()
-                if k.startswith(f"{name}__")
-            }
-            step_est = _deserialize_logreg(est_cfg, step_arrays)
-        elif est_cfg.get("class") == "sklearn.linear_model.SGDClassifier":
-            step_arrays = {
-                k.removeprefix(f"{name}__"): v
-                for k, v in arrays.items()
-                if k.startswith(f"{name}__")
-            }
-            step_est = _deserialize_sgd_classifier(est_cfg, step_arrays)
         else:
-            raise HUGIMLSerializationError(
-                f"Cannot deserialize pipeline step '{name}' of class {est_cfg.get('class')}."
-            )
+            step_arrays = {
+                key.removeprefix(f"{name}__"): value
+                for key, value in arrays.items()
+                if key.startswith(f"{name}__")
+            }
+            step_est = _deserialize_estimator(est_cfg, step_arrays)
         steps.append((name, step_est))
     return Pipeline(steps)
 
 
-def _serialize_estimator(
+def _serialize_estimator_into(
     est: Any,
-) -> tuple[dict[str, Any], dict[str, np.ndarray]]:
-    """Serialize a fitted downstream estimator to (config_dict, arrays_dict).
-
-    Supports LogisticRegression and SGDClassifier natively.  Pipelines with
-    those final steps are also supported.  All other estimators fall back to a
-    restricted pickle stored as a uint8 byte array (logged at DEBUG level).
-    """
+    arrays: dict[str, np.ndarray],
+    prefix: str,
+) -> dict[str, Any]:
     from sklearn.linear_model import LogisticRegression, SGDClassifier
+    from sklearn.multiclass import OneVsRestClassifier
     from sklearn.pipeline import Pipeline
 
-    if isinstance(est, LogisticRegression):
-        return _serialize_logreg(est)
-    if isinstance(est, SGDClassifier):
-        return _serialize_sgd_classifier(est)
-    if isinstance(est, Pipeline):
-        return _serialize_pipeline(est)
+    from hugiml.rpte_bounded_lookahead_leafwise import (
+        LeafWiseBoundedLookaheadRPTEFeatureLR,
+    )
 
-    # Generic fallback: restricted pickle
+    if isinstance(est, LogisticRegression):
+        config, local_arrays = _serialize_logreg(est)
+        for key, value in local_arrays.items():
+            arrays[f"{prefix}{key}"] = value
+        if prefix:
+            config["array_prefix"] = prefix
+        return config
+    if isinstance(est, SGDClassifier):
+        config, local_arrays = _serialize_sgd_classifier(est)
+        for key, value in local_arrays.items():
+            arrays[f"{prefix}{key}"] = value
+        if prefix:
+            config["array_prefix"] = prefix
+        return config
+    if isinstance(est, LeafWiseBoundedLookaheadRPTEFeatureLR):
+        return _serialize_rpte(est, arrays, prefix)
+    if isinstance(est, OneVsRestClassifier):
+        return _serialize_one_vs_rest(est, arrays, prefix)
+    if isinstance(est, Pipeline):
+        return _serialize_pipeline_into(est, arrays, prefix)
+
     logger.debug(
-        "Downstream estimator %s is not natively serializable; "
-        "using restricted-pickle fallback.  Consider using LogisticRegression "
-        "or SGDClassifier for a fully pickle-free model artifact.",
+        "Downstream estimator %s has no structured serializer; using the "
+        "restricted custom-estimator fallback.",
         type(est).__name__,
     )
-    import pickle  # nosec B403 – controlled: payload is HMAC-signed on save
+    import pickle  # nosec B403 - compatibility path loaded via _safe_unpickle
 
     payload = pickle.dumps(est, protocol=5)
-    config: dict[str, Any] = {
+    key = f"{prefix}pickle_payload"
+    arrays[key] = np.frombuffer(payload, dtype=np.uint8)
+    return {
         "class": type(est).__module__ + "." + type(est).__qualname__,
         "_pickle_fallback": True,
+        "pickle_array_key": key,
         "n_features_in_": getattr(est, "n_features_in_", None),
     }
-    arrays: dict[str, np.ndarray] = {"pickle_payload": np.frombuffer(payload, dtype=np.uint8)}
+
+
+def _serialize_estimator(est: Any) -> tuple[dict[str, Any], dict[str, np.ndarray]]:
+    """Serialize a fitted downstream estimator to structured config and arrays."""
+    arrays: dict[str, np.ndarray] = {}
+    config = _serialize_estimator_into(est, arrays, "")
     return config, arrays
 
 
 def _deserialize_estimator(config: dict, arrays: dict[str, np.ndarray]) -> Any:
     if config.get("_pickle_fallback"):
-        payload = arrays["pickle_payload"].tobytes()
-        return _safe_unpickle(payload)
+        key = config.get("pickle_array_key", "pickle_payload")
+        return _safe_unpickle(arrays[key].tobytes())
     cls_name = config.get("class", "")
     if cls_name == "sklearn.linear_model.LogisticRegression":
-        return _deserialize_logreg(config, arrays)
+        prefix = config.get("array_prefix", "")
+        return _deserialize_logreg(config, _prefixed_arrays(arrays, prefix))
     if cls_name == "sklearn.linear_model.SGDClassifier":
-        return _deserialize_sgd_classifier(config, arrays)
+        prefix = config.get("array_prefix", "")
+        return _deserialize_sgd_classifier(config, _prefixed_arrays(arrays, prefix))
     if cls_name == "sklearn.pipeline.Pipeline":
         return _deserialize_pipeline(config, arrays)
+    if cls_name == "sklearn.multiclass.OneVsRestClassifier":
+        return _deserialize_one_vs_rest(config, arrays)
+    if cls_name == (
+        "hugiml.rpte_bounded_lookahead_leafwise."
+        "LeafWiseBoundedLookaheadRPTEFeatureLR"
+    ):
+        return _deserialize_rpte(config, arrays)
     raise HUGIMLSerializationError(f"Cannot deserialize estimator of class '{cls_name}'.")
 
 
@@ -518,8 +1102,13 @@ def save_model(clf: Any, path: str | os.PathLike) -> None:
     }
     members["manifest.json"] = _json_dumps(manifest)
 
-    # Init params
-    members["clf_init.json"] = _json_dumps(clf.get_params())
+    # Init params. Not all hyperparameters are JSON-native -- most notably
+    # `base_estimator`, which is an RPTE estimator instance (bare or
+    # OneVsRestClassifier-wrapped) for any model fit via the "performance_ho"
+    # grid's RPTE branch. _json_safe_params summarizes those into a
+    # reconstructable record instead of letting json.dumps raise; see
+    # MODEL_SCHEMA_VERSION's v9 note.
+    members["clf_init.json"] = _json_dumps(_json_safe_params(clf.get_params()))
 
     # Fitted scalar / list state
     fit_state: dict[str, Any] = {
@@ -943,8 +1532,13 @@ def _load_v3(path: str | os.PathLike) -> Any:
 
     patterns_raw = json.loads(members["patterns.json"])
 
-    # Build the classifier (unfitted shell)
-    safe_init = {k: v for k, v in clf_init.items() if k != "base_estimator"}
+    # Build the classifier (unfitted shell). Estimator-valued params (most
+    # notably `base_estimator` -- see MODEL_SCHEMA_VERSION's v9 note) were
+    # written by save_model() as reconstructable {class, params} records
+    # (schema >= 9) rather than the raw value; _reconstruct_params rebuilds
+    # them. For files saved before v9, `base_estimator` was never anything
+    # but None (RPTE didn't exist yet), so this is a no-op for those files.
+    safe_init = _reconstruct_params(clf_init)
     clf = HUGIMLClassifierNative(**safe_init)
 
     # Restore fitted attributes

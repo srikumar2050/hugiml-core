@@ -40,15 +40,31 @@ from sklearn.metrics import (
     roc_curve,
 )
 from sklearn.model_selection import StratifiedKFold
+from sklearn.multiclass import OneVsRestClassifier
 from sklearn.preprocessing import OneHotEncoder
 from sklearn.tree import DecisionTreeClassifier, export_text
 
+from hugiml.dashboard.components.patterns import (
+    _direct_family_counts,
+    _direct_source_count,
+    _get_rpte_feature_flow_audit,
+    _get_rpte_final_term_rows,
+    _get_rpte_rule_rows,
+    _rpte_rules_to_frame,
+    render_rpte_flat_tree_view,
+)
 from hugiml.dashboard.display import dataframe_for_display
 from hugiml.dashboard.runner import _default_params, fit_hugiml_config, score_cases
 from hugiml.hyperparameter_configs import (
     DEFAULT_HUGIML_GRID_NAME,
     get_hugiml_grid,
     list_hugiml_grids,
+)
+from hugiml.rpte_bounded_lookahead_leafwise import (
+    LEAF_CONFIGS as RPTE_LEAF_CONFIGS,
+)
+from hugiml.rpte_bounded_lookahead_leafwise import (
+    LeafWiseBoundedLookaheadRPTEFeatureLR,
 )
 
 
@@ -93,7 +109,11 @@ PARAM_HINTS = {
     "aug_feature_size": "Number of source columns considered for augmented-pair generation.",
     "max_pair_features": "Maximum generated pair features kept for downstream modeling.",
     "ii_partner_size": "Optional number of partner columns used by interaction-information scoring.",
-    "interaction_relaxed_mining": "Allow interaction-information survivor columns into native mining without generated pair features.",
+    "interaction_relaxed_mining": (
+        "Allow interaction-information survivor columns into the root or "
+        "immediate first-child mining position without generated pair features; "
+        "deeper positions receive no new relaxed admission."
+    ),
     "interaction_relaxed_feature_size": "Number of source columns selected for interaction-relaxed mining.",
     "adaptive_binning_sample_frac": "Advanced only: False uses all rows for bin selection; a value in (0, 1] uses a deterministic stratified sample before full-data fitting.",
     "adaptive_binning_sample_random_state": "Random seed for deterministic adaptive-binning sample selection.",
@@ -138,7 +158,7 @@ def _hugiml_valid_feature_modes() -> list[str]:
     the one value it's built around, but Advanced should still expose every
     feature_mode that appears in any registered grid, plus
     original_plus_interactions for explicit user-driven tuning, since that
-    mode isn't part of either named grid today.
+    mode isn't part of any named grid today.
     """
     fallback = ["original_plus_patterns", "patterns_only", "original_plus_interactions"]
     modes: list[str] = []
@@ -180,10 +200,10 @@ def _hugiml_guided_fast_tune_params(grid_name: str | None = None) -> dict[str, A
     """Sentinel configuration consumed by _run_single_model for fast core tuning.
 
     ``grid_name`` selects which named grid in ``hugiml.hyperparameter_configs``
-    drives the sweep -- ``"performance"`` (the default, optimised for
-    predictive performance) or ``"interpretability"`` (restricted to
-    ``feature_mode="patterns_only"`` with relaxed interaction mining, for a
-    model whose explanation surface is the mined patterns alone). No
+    drives the sweep. ``"performance_ho"`` is the default; ``"performance"``
+    restricts the downstream search to LR, ``"interpretability"`` keeps a
+    pattern-only LR surface, and ``"interpretability_ho"`` searches LR versus
+    sequential RPTE over that same pattern-only surface. No
     execution_mode override is set here: tune() already evaluates every
     search candidate under 'production' for speed and refits the returned
     model under 'audit' by default, which is what's wanted, since a
@@ -210,11 +230,76 @@ def _hugiml_interpretability_fast_tune_params() -> dict[str, Any]:
     return _hugiml_guided_fast_tune_params("interpretability")
 
 
+def _summarize_base_estimator(value: Any) -> str:
+    """Short, readable label for a base_estimator value -- 'HUGIML LR'
+    for the built-in logistic-regression branch (base_estimator=None),
+    or the wrapped estimator's class name(s) otherwise (e.g. 'RPTE via
+    OneVsRestClassifier' for performance_ho's hybrid candidate)."""
+    if value is None:
+        return "HUGIML LR"
+    inner = getattr(value, "estimator", None)
+    if inner is not None:
+        return f"{type(inner).__name__} via {type(value).__name__}"
+    return type(value).__name__
+
+
+def _summarize_params_for_display(params: dict[str, Any]) -> str:
+    """Concise, single-line summary of a run's params for a leaderboard
+    cell -- a raw str(dict) is unreadable once a value is a live
+    sklearn estimator (e.g. performance_ho's RPTE base_estimator),
+    whose full repr can run to dozens of lines."""
+    if not params:
+        return "{}"
+    parts = []
+    for key, value in params.items():
+        text = _summarize_base_estimator(value) if key == "base_estimator" else value
+        parts.append(f"{key}={text}")
+    return ", ".join(parts)
+
+
 def _hugiml_grid_count(grid: dict[str, list[Any]]) -> int:
     total = 1
     for values in (grid or {}).values():
         total *= max(1, len(values or []))
     return total
+
+
+def _grid_varies_base_estimator(grid: dict[str, list[Any]]) -> bool:
+    """True when a grid's base_estimator dimension has more than one
+    distinct value (e.g. performance_ho's [None, RPTE-OvR]) -- the
+    signal HUGIMLClassifierNative.tune() itself uses to skip the cached
+    fast-tune path for that grid."""
+    values = (grid or {}).get("base_estimator")
+    return bool(values) and len(values) > 1
+
+
+def _json_safe_value(value: Any) -> Any:
+    """Best-effort JSON-safe rendering of one grid value for st.json()
+    display. Streamlit's st.json() requires actual JSON-serializable
+    data; a grid dimension can legitimately hold live sklearn estimator
+    objects (performance_ho's base_estimator), which are not -- render
+    those as a short human-readable summary instead of crashing."""
+    if value is None or isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, (list, tuple)):
+        return [_json_safe_value(v) for v in value]
+    if isinstance(value, dict):
+        return {str(k): _json_safe_value(v) for k, v in value.items()}
+    if hasattr(value, "get_params"):
+        # A fitted or unfitted sklearn estimator (e.g. RPTE, possibly
+        # wrapped in OneVsRestClassifier): class name plus its own
+        # constructor params, recursively made safe the same way.
+        try:
+            params = {k: _json_safe_value(v) for k, v in value.get_params(deep=False).items()}
+        except Exception:
+            params = {}
+        return {"__estimator__": type(value).__name__, "params": params}
+    return str(value)
+
+
+def _json_safe_grid(grid: dict[str, list[Any]]) -> dict[str, Any]:
+    """A copy of `grid` safe to pass to st.json() -- see _json_safe_value."""
+    return {str(key): _json_safe_value(values) for key, values in (grid or {}).items()}
 
 MODEL_SHORT_NAMES = {
     "Logistic Regression": "LR",
@@ -655,29 +740,56 @@ def _fresh_estimator(estimator: Any) -> Any:
         return copy.deepcopy(estimator)
 
 
-def _cv_predictions(estimator: Any, X: pd.DataFrame, y: np.ndarray, cv: int, random_state: int) -> tuple[np.ndarray, np.ndarray, float | None]:
-    """Manual CV loop that works across sklearn, xgboost, lightgbm, and small datasets."""
-    counts = np.bincount(np.asarray(y, dtype=int))
-    positive_counts = counts[counts > 0]
-    max_splits = int(positive_counts.min()) if len(positive_counts) else 0
-    n_splits = max(2, min(int(cv), max_splits))
-    if n_splits < 2:
-        raise ValueError("Cross-validation needs at least two rows in each target class.")
+def _cv_predictions(
+    estimator: Any,
+    X: pd.DataFrame,
+    y: np.ndarray,
+    cv: int,
+    random_state: int,
+    *,
+    cv_splits: Any = None,
+) -> tuple[np.ndarray, np.ndarray, float | None]:
+    """Return stitched out-of-fold predictions and mean fold ROC-AUC.
 
-    folds = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
-    y_proba = np.zeros(len(y), dtype=float)
-    y_pred = np.zeros(len(y), dtype=int)
+    When a HUGIML tune result exposes ``cv_splits_``, promotion consistency
+    depends on reusing those exact folds rather than constructing a merely
+    equivalent splitter.  Other estimators continue to use the Workbench's
+    deterministic stratified folds.
+    """
+    y_arr = np.asarray(y, dtype=int)
+    if cv_splits:
+        split_iter = [
+            (np.asarray(train_idx, dtype=int), np.asarray(test_idx, dtype=int))
+            for train_idx, test_idx in cv_splits
+        ]
+    else:
+        counts = np.bincount(y_arr)
+        positive_counts = counts[counts > 0]
+        max_splits = int(positive_counts.min()) if len(positive_counts) else 0
+        n_splits = min(int(cv), max_splits)
+        if n_splits < 2:
+            raise ValueError("Cross-validation needs at least two rows in each target class.")
+        folds = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
+        split_iter = list(folds.split(X, y_arr))
+
+    y_proba = np.zeros(len(y_arr), dtype=float)
+    y_pred = np.zeros(len(y_arr), dtype=int)
+    assigned = np.zeros(len(y_arr), dtype=bool)
     aucs: list[float] = []
-    for train_idx, test_idx in folds.split(X, y):
+    for train_idx, test_idx in split_iter:
         fitted = _fresh_estimator(estimator)
-        fitted.fit(X.iloc[train_idx], y[train_idx])
+        fitted.fit(X.iloc[train_idx], y_arr[train_idx])
         fold_proba = _predict_proba_1(fitted, X.iloc[test_idx])
         y_proba[test_idx] = fold_proba
         y_pred[test_idx] = np.asarray(fitted.predict(X.iloc[test_idx]), dtype=int)
+        assigned[test_idx] = True
         try:
-            aucs.append(float(roc_auc_score(y[test_idx], fold_proba)))
+            aucs.append(float(roc_auc_score(y_arr[test_idx], fold_proba)))
         except Exception:
             pass
+    if not bool(assigned.all()):
+        missing = np.flatnonzero(~assigned)
+        raise ValueError(f"CV splits did not produce predictions for {len(missing)} row(s).")
     return y_pred, y_proba, float(np.mean(aucs)) if aucs else None
 
 def _predict_proba_1(model: Any, X: pd.DataFrame) -> np.ndarray:
@@ -744,6 +856,37 @@ def _feature_importance(model: Any, X: pd.DataFrame, max_rows: int = 80) -> pd.D
     richer columns when available and always provides ``feature`` +
     ``importance`` for plotting.
     """
+    # RPTE has a staged representation. Source columns selected in accepted
+    # splits are represented through leaf indicators, while non-tree
+    # original/pattern/augmented columns remain direct LR terms. Rank the
+    # actual final terms before
+    # trying HUGIML's source-feature importance API so the Workbench cannot
+    # mix the two stages.
+    rpte_rows = _get_rpte_final_term_rows(model, include_zero_direct=True)
+    rpte_flow = _get_rpte_feature_flow_audit(model)
+    if rpte_rows and rpte_flow:
+        rules = _rpte_rules_to_frame(rpte_rows)
+        if not rules.empty:
+            rules = rules.copy()
+            rules["feature"] = rules["rule_id"].astype(str) + ": " + rules["rule_preview"].astype(str)
+            rules["importance"] = pd.to_numeric(rules["abs_coefficient"], errors="coerce").fillna(0.0)
+            rules["feature_type"] = np.where(
+                rules.get("is_leaf_term", False),
+                "rpte_rule",
+                np.where(
+                    rules.get("is_direct_source_term", False),
+                    rules.get("source_family", "unknown").map(
+                        {
+                            "original": "original",
+                            "pattern": "pattern",
+                            "augmented_pair": "augmented_pair",
+                        }
+                    ).fillna("rpte_direct_source"),
+                    "rpte_fallback_term",
+                ),
+            )
+            return rules.sort_values("importance", ascending=False).head(max_rows).reset_index(drop=True)
+
     if hasattr(model, "feature_importances") and callable(getattr(model, "feature_importances")):
         try:
             rich = model.feature_importances()
@@ -849,10 +992,29 @@ def _run_single_model(
                 "fit_time_sec": round(time.perf_counter() - started, 4),
                 "artifact": result,
             }
-        y_proba = _predict_proba_1(model, X)
-        y_pred = np.asarray(model.predict(X))
-        metrics = _metric_row(y, y_pred, y_proba)
         cv_score = getattr(result, "best_score_", None)
+        evaluation_scope = "out_of_fold"
+        evaluation_error = None
+        try:
+            y_pred, y_proba, recomputed_cv_score = _cv_predictions(
+                model,
+                X,
+                y,
+                cv,
+                random_state,
+                cv_splits=getattr(result, "cv_splits_", None),
+            )
+            if cv_score is None:
+                cv_score = recomputed_cv_score
+        except Exception as exc:
+            # Keep the run inspectable if an unusual third-party estimator
+            # cannot be cloned.  The scope is carried into Governance so these
+            # fallback numbers can never be mistaken for validation evidence.
+            y_proba = _predict_proba_1(model, X)
+            y_pred = np.asarray(model.predict(X))
+            evaluation_scope = "full_data_refit_fallback"
+            evaluation_error = repr(exc)
+        metrics = _metric_row(y, y_pred, y_proba)
     else:
         estimator = _build_estimator(model_name, params, random_state)
         X_model = _safe_numeric_frame(X)
@@ -861,6 +1023,8 @@ def _run_single_model(
         model.fit(X_model, y)
         metrics = _metric_row(y, y_pred, y_proba)
         X = X_model
+        evaluation_scope = "out_of_fold"
+        evaluation_error = None
 
     metrics["cv_roc_auc"] = _scalar_metric(cv_score)
     artifact = {
@@ -871,6 +1035,10 @@ def _run_single_model(
         "feature_importance": _feature_importance(model, X),
         "feature_frame": X,
         "confusion_matrix": confusion_matrix(y, y_pred),
+        "evaluation_scope": evaluation_scope,
+        "evaluation_error": evaluation_error,
+        "evaluation_cv": int(cv),
+        "evaluation_random_state": int(random_state),
         "implementation": getattr(model, "backend_", "native"),
         "tuning_result": result if model_name == "HUGIML" else None,
     }
@@ -1041,7 +1209,11 @@ def _render_hugiml_config() -> list[dict[str, Any]]:
                     "'performance' searches feature_mode='original_plus_patterns' for "
                     "predictive performance. 'interpretability' restricts the downstream "
                     "model to feature_mode='patterns_only' with relaxed interaction mining, "
-                    "so its explanation surface is the mined patterns alone."
+                    "so its explanation surface is the mined patterns alone. "
+                    "'performance_ho' additionally searches a hybrid downstream branch: half "
+                    "the candidates use HUGIML's built-in logistic regression, half use RPTE "
+                    "(leaf-wise bounded-lookahead trees + logistic regression) for higher-order "
+                    "feature interactions the logistic branch can't represent directly."
                 ),
                 key="wb_hugiml_grid_name",
             )
@@ -1054,11 +1226,19 @@ def _render_hugiml_config() -> list[dict[str, Any]]:
             f"Uses the '{grid_name}' HUGIML hyperparameter grid with `use_fast_path=True`; "
             "adaptive binning is enabled for every candidate."
         )
+        if _grid_varies_base_estimator(grid):
+            st.caption(
+                "This grid varies `base_estimator` (HUGIML logistic regression vs. RPTE). "
+                "The cached fast-tune path supports this: mining is cached per (G, L, topK) as "
+                "usual, and the downstream feature matrix built from it is cached per (G, L, "
+                "topK, feature_mode) and reused across every base_estimator candidate at that "
+                "key -- only the final per-candidate estimator fit repeats."
+            )
         c1, c2 = st.columns([1, 3])
         c1.metric("Candidates", f"{_hugiml_grid_count(grid):,}")
         c2.caption("The Workbench records the selected best configuration after CV tuning.")
         with st.expander("View guided grid", expanded=False):
-            st.json(grid, expanded=False)
+            st.json(_json_safe_grid(grid), expanded=False)
         return [guided]
 
     params["adaptive_binning"] = st.toggle(
@@ -1165,6 +1345,73 @@ def _render_hugiml_config() -> list[dict[str, Any]]:
             "Advanced grid candidates that enable both are omitted."
         )
 
+    st.markdown("##### Downstream estimator")
+    st.caption(
+        "HUGIML's built-in logistic regression fits directly on the mined pattern/original/"
+        "augmented-pair matrix. RPTE (leaf-wise bounded-lookahead trees + logistic regression) "
+        "additionally searches higher-order feature interactions the logistic branch can't "
+        "represent directly -- see the `performance_ho` named grid (Guided mode) for a pre-built "
+        "version of this hybrid search with a validated leaf configuration."
+    )
+    downstream_options = st.multiselect(
+        "Downstream estimator(s) to compare",
+        ["HUGIML logistic regression", "RPTE (bounded-lookahead trees)"],
+        default=["HUGIML logistic regression"],
+        help=(
+            "Select both to run a hybrid search -- one candidate set per mining "
+            "configuration for each selected estimator -- and let CV ROC-AUC pick the winner, "
+            "the same comparison performance_ho makes with a fixed RPTE configuration."
+        ),
+        key="wb_hugiml_downstream_estimators",
+    )
+    base_estimator_values: list[Any] = []
+    if "HUGIML logistic regression" in downstream_options:
+        base_estimator_values.append(None)
+    if "RPTE (bounded-lookahead trees)" in downstream_options:
+        r1, r2, r3, r4 = st.columns(4)
+        leaf_config_options = sorted(RPTE_LEAF_CONFIGS)
+        rpte_leaf_config = r1.selectbox(
+            "RPTE leaf config",
+            leaf_config_options,
+            index=leaf_config_options.index("3xD") if "3xD" in leaf_config_options else 0,
+            help="Leaf budget per tree is LEAF_CONFIGS[leaf_config] * depth -- 3xD is the "
+                 "configuration validated in the performance_ho grid.",
+            key="wb_rpte_leaf_config",
+        )
+        rpte_depth = int(r2.number_input(
+            "RPTE depth", value=4, min_value=1, max_value=10, step=1,
+            help="Effective tree depth cap is 2x this value (root+child microtrees use 2 levels per split).",
+            key="wb_rpte_depth",
+        ))
+        rpte_n_estimators = int(r3.number_input(
+            "RPTE n_estimators", value=10, min_value=1, max_value=100, step=1,
+            help="Maximum boosting rounds; a round is only kept if it lowers deviance, so fewer "
+                 "than this may actually be fit.",
+            key="wb_rpte_n_estimators",
+        ))
+        lookahead_label = r4.selectbox(
+            "RPTE lookahead",
+            ["adaptive", "always on", "always off"],
+            index=0,
+            help="'adaptive' engages the bounded-lookahead microtree search only when no single "
+                 "raw feature has real marginal signal on its own (e.g. pure parity); 'always on' "
+                 "forces it; 'always off' uses the plain sequential (sklearn-tree) backend.",
+            key="wb_rpte_lookahead",
+        )
+        enable_lookahead_value: bool | str = {
+            "adaptive": "adaptive", "always on": True, "always off": False,
+        }[lookahead_label]
+        rpte_estimator = LeafWiseBoundedLookaheadRPTEFeatureLR(
+            leaf_config=rpte_leaf_config,
+            depth=rpte_depth,
+            n_estimators=rpte_n_estimators,
+            enable_lookahead=enable_lookahead_value,
+        )
+        base_estimator_values.append(OneVsRestClassifier(rpte_estimator, n_jobs=1))
+    if not base_estimator_values:
+        st.warning("Select at least one downstream estimator. Falling back to HUGIML logistic regression.")
+        base_estimator_values = [None]
+
     with st.expander("Advanced grid values", expanded=True):
         if params["adaptive_binning"]:
             st.caption("Comma-separated values create multiple candidate HUGIML runs. Blank fields keep the values above. B is locked at -1 while adaptive binning is enabled.")
@@ -1230,6 +1477,7 @@ def _render_hugiml_config() -> list[dict[str, Any]]:
             "max_pair_features": _parse_grid(h5.text_input("Max pair feature values", value=str(params["max_pair_features"]), key="wb_hugiml_max_pair_features_grid"), int),
             "interaction_relaxed_feature_size": _parse_grid(h6.text_input("Relaxed source count values", value=str(params["interaction_relaxed_feature_size"]), key="wb_hugiml_interaction_relaxed_feature_size_grid"), int),
             "ii_partner_size": _parse_optional_int_grid(h7.text_input("Partner count values", value=partner_raw or "None", key="wb_hugiml_ii_partner_size_grid")),
+            "base_estimator": base_estimator_values,
         }
     configs = _expand_param_grid(params, grid)
     if params["adaptive_binning"]:
@@ -1737,11 +1985,7 @@ def _filter_text_table(label: str, df: pd.DataFrame, key: str, *, columns: list[
 
 
 def _render_hugiml_artifacts(model: Any, run_id: str = "hugiml", key_prefix: str = "") -> None:
-    """Render HUGIML interpretability artifacts.
-
-    ``key_prefix`` scopes all Streamlit widget keys to avoid collisions when
-    the same run appears in multiple tabs simultaneously.
-    """
+    """Render fitted HUGIML artifacts without mixing RPTE stages."""
     patterns = _hugiml_patterns_frame(model)
     features = _hugiml_features_frame(model)
 
@@ -1750,9 +1994,168 @@ def _render_hugiml_artifacts(model: Any, run_id: str = "hugiml", key_prefix: str
         composition = _safe_mapping(model.get_model_composition())
     except Exception:
         composition = {}
-
     counts = _safe_mapping(composition.get("downstream_feature_counts"))
     has_counts = _has_items(counts)
+
+    ns = f"{key_prefix}{run_id}" if key_prefix else run_id
+    rpte_rows = _get_rpte_rule_rows(model)
+    flow = _get_rpte_feature_flow_audit(model)
+
+    if flow:
+        statement = str(flow.get("statement") or "")
+        if statement:
+            st.info(statement)
+
+        rpte_rows = _get_rpte_final_term_rows(model, include_zero_direct=True)
+        rpte_df = _rpte_rules_to_frame(rpte_rows)
+        leaf_df = rpte_df.loc[rpte_df.get("is_leaf_term", False)].copy() if not rpte_df.empty else pd.DataFrame()
+        direct_flag = rpte_df.get("is_direct_source_term", False)
+        direct_df = rpte_df.loc[direct_flag].copy() if not rpte_df.empty else pd.DataFrame()
+        final_count = int(flow.get("final_term_count", len(rpte_df)) or len(rpte_df))
+        source_count = int(flow.get("source_feature_count", counts.get("total", len(features))) or 0)
+        tree_count = int(leaf_df["tree"].nunique()) if not leaf_df.empty and leaf_df["tree"].notna().any() else 0
+
+        metric_cols = st.columns(5)
+        metric_cols[0].metric("Final LR terms", f"{final_count:,}")
+        metric_cols[1].metric("RPTE leaf terms", f"{len(leaf_df):,}")
+        metric_cols[2].metric("Direct source terms", f"{_direct_source_count(flow, len(direct_df)):,}")
+        metric_cols[3].metric("RPTE trees", f"{tree_count:,}" if tree_count else "N/A")
+        metric_cols[4].metric("RPTE source inputs", f"{source_count:,}")
+
+        tabs = st.tabs(
+            [
+                "RPTE leaf trees",
+                "Direct original features",
+                "Direct HUG patterns",
+                "Direct augmented pairs",
+                "Representation summary",
+            ],
+            key=f"{ns}_hugiml_inner_tabs",
+        )
+
+        with tabs[0]:
+            st.caption(
+                "Leaf indicators are the root-to-leaf conjunction terms in the final LR. "
+                "Internal split columns do not also appear as direct LR terms."
+            )
+            query = st.text_input(
+                "Search RPTE leaf terms",
+                value="",
+                key=f"{ns}_hugiml_rpte_leaf_search",
+                placeholder="condition, source feature, class, backend...",
+            )
+            effect_filter = st.selectbox(
+                "Leaf effect direction",
+                ["All", "Increases positive-class odds", "Decreases positive-class odds", "Neutral / zero"],
+                key=f"{ns}_hugiml_rpte_leaf_effect",
+            )
+            show_leaf = leaf_df.copy()
+            if query and not show_leaf.empty:
+                mask = show_leaf.astype(str).apply(
+                    lambda col: col.str.contains(query, case=False, na=False)
+                ).any(axis=1)
+                show_leaf = show_leaf.loc[mask]
+            if effect_filter != "All" and not show_leaf.empty:
+                show_leaf = show_leaf.loc[show_leaf["effect"].eq(effect_filter)]
+            render_rpte_flat_tree_view(rpte_rows, show_leaf, key_prefix=f"{ns}_rpte_flat_tree")
+            display_cols = [
+                "class", "tree", "leaf", "effect", "coefficient", "odds_multiplier",
+                "support_rate", "support_count", "n_conditions", "raw_sources", "backend",
+            ]
+            st.dataframe(
+                dataframe_for_display(_safe_stringify_objects(show_leaf[[c for c in display_cols if c in show_leaf.columns]].head(300))),
+                width="stretch",
+                hide_index=True,
+            )
+            with st.expander("Inspect one leaf path condition by condition", expanded=False, key=f"{ns}_rpte_leaf_detail_exp"):
+                if show_leaf.empty:
+                    st.info("No leaf terms match the current filters.")
+                else:
+                    options = list(show_leaf.index)
+                    pick = st.selectbox(
+                        "Leaf term",
+                        options,
+                        format_func=lambda i: f"{show_leaf.loc[i, 'rule_id']} | coef={show_leaf.loc[i, 'coefficient']:.4f}",
+                        key=f"{ns}_rpte_leaf_detail_pick",
+                    )
+                    selected = show_leaf.loc[pick]
+                    st.markdown(f"**Effect:** {selected['effect']}")
+                    st.markdown(
+                        f"**Coefficient:** {selected['coefficient']:.6g} &nbsp; | &nbsp; "
+                        f"**Odds multiplier:** {selected['odds_multiplier']:.6g}"
+                    )
+                    for line in str(selected["condition_steps"]).splitlines():
+                        st.markdown(line)
+
+        family_specs = [
+            (tabs[1], "original", "direct original features", f"{ns}_direct_original_search"),
+            (tabs[2], "pattern", "direct HUG patterns", f"{ns}_direct_pattern_search"),
+            (tabs[3], "augmented_pair", "direct augmented pairs", f"{ns}_direct_augmented_search"),
+        ]
+        for tab, family, label, key in family_specs:
+            with tab:
+                family_df = direct_df.loc[direct_df.get("source_family", pd.Series("", index=direct_df.index)).eq(family)].copy()
+                st.caption(
+                    f"Only {label} that were not selected in any accepted RPTE split are shown. "
+                    "These columns are appended directly to the final LR after the leaf indicators."
+                )
+                if family_df.empty:
+                    st.info(f"No {label} are present in the final LR.")
+                else:
+                    _filter_text_table(
+                        label,
+                        family_df,
+                        key=key,
+                        columns=[
+                            "class", "source_display_name", "source_column", "raw_sources",
+                            "effect", "coefficient", "odds_multiplier", "backend",
+                        ],
+                    )
+
+        with tabs[4]:
+            family_counts = _direct_family_counts(flow)
+            family_counts = family_counts if isinstance(family_counts, dict) else {}
+            summary_rows = [
+                {
+                    "representation": "HUGIML source columns supplied to RPTE",
+                    "count": source_count,
+                    "role": "Candidate split columns",
+                },
+                {
+                    "representation": "RPTE leaf indicators",
+                    "count": len(leaf_df),
+                    "role": "Final LR conjunction terms",
+                },
+                {
+                    "representation": "Direct original columns",
+                    "count": int(family_counts.get("original", (direct_df.get("source_family", pd.Series(dtype=str)) == "original").sum()) or 0),
+                    "role": "Direct final LR terms",
+                },
+                {
+                    "representation": "Direct HUG pattern columns",
+                    "count": int(family_counts.get("pattern", (direct_df.get("source_family", pd.Series(dtype=str)) == "pattern").sum()) or 0),
+                    "role": "Direct final LR terms",
+                },
+                {
+                    "representation": "Direct augmented-pair columns",
+                    "count": int(family_counts.get("augmented_pair", (direct_df.get("source_family", pd.Series(dtype=str)) == "augmented_pair").sum()) or 0),
+                    "role": "Direct final LR terms",
+                },
+                {
+                    "representation": "Final logistic-regression coefficients",
+                    "count": final_count,
+                    "role": "Leaf terms followed by direct source terms",
+                },
+            ]
+            st.dataframe(pd.DataFrame(summary_rows), width="stretch", hide_index=True)
+            if _has_items(composition):
+                with st.expander("Full model composition", expanded=False, key=f"{ns}_model_composition_exp"):
+                    st.json(composition)
+        return
+
+    # Standard HUGIML logistic-regression path: source features are also the
+    # downstream LR terms, so the original four-tab representation remains
+    # appropriate.
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Patterns", f"{len(patterns):,}" if not patterns.empty else "—")
     c2.metric("Original features", f"{_safe_int(counts.get('original')):,}" if has_counts else "—")
@@ -1760,73 +2163,44 @@ def _render_hugiml_artifacts(model: Any, run_id: str = "hugiml", key_prefix: str
     downstream_total = _safe_int(counts.get("total"), len(features)) if has_counts or not features.empty else None
     c4.metric("Downstream total", f"{downstream_total:,}" if downstream_total is not None else "—")
 
-    # Unique key namespace per call site: prefix + run_id.
-    ns = f"{key_prefix}{run_id}" if key_prefix else run_id
-
-    pat_tab, orig_tab, aug_tab, all_tab = st.tabs(
+    tabs = st.tabs(
         ["Patterns", "Original features", "Augmented features", "All downstream features"],
         key=f"{ns}_hugiml_inner_tabs",
     )
-    with pat_tab:
+    with tabs[0]:
         _filter_text_table(
-            "Patterns",
-            patterns,
-            key=f"{ns}_hugiml_pattern_search",
+            "Patterns", patterns, key=f"{ns}_hugiml_pattern_search",
             columns=[
-                "pattern",
-                "pattern_origin",
-                "survivor_led",
-                "survivor_features",
-                "survivor_feature_count",
-                "survivor_min_marginal_ig",
-                "survivor_max_interaction_score",
-                "survivor_best_partners",
-                "utility",
-                "information_gain",
-                "support",
+                "pattern", "pattern_origin", "survivor_led", "survivor_features",
+                "survivor_feature_count", "survivor_min_marginal_ig",
+                "survivor_max_interaction_score", "survivor_best_partners",
+                "utility", "information_gain", "support",
             ],
         )
-    with orig_tab:
-        orig = features[features.get("feature_type", pd.Series(dtype=str)).astype(str).eq("original")] if not features.empty and "feature_type" in features.columns else pd.DataFrame()
+    orig = features[features["feature_type"].astype(str).eq("original")] if not features.empty and "feature_type" in features.columns else pd.DataFrame()
+    with tabs[1]:
         _filter_text_table(
-            "Original features",
-            orig,
-            key=f"{ns}_hugiml_orig_search",
+            "Original features", orig, key=f"{ns}_hugiml_orig_search",
             columns=["display_name", "feature", "importance", "coefficient", "abs_coefficient", "non_missing_rate", "variance"],
         )
-    with aug_tab:
-        aug = features[features.get("feature_type", pd.Series(dtype=str)).astype(str).eq("augmented_pair")] if not features.empty and "feature_type" in features.columns else pd.DataFrame()
+    aug = features[features["feature_type"].astype(str).eq("augmented_pair")] if not features.empty and "feature_type" in features.columns else pd.DataFrame()
+    with tabs[2]:
         _filter_text_table(
-            "Augmented features",
-            aug,
-            key=f"{ns}_hugiml_aug_search",
+            "Augmented features", aug, key=f"{ns}_hugiml_aug_search",
             columns=["display_name", "feature", "importance", "coefficient", "abs_coefficient", "raw_formula", "operation", "inputs", "risk_increases_when", "raw_interpretation"],
         )
-    with all_tab:
+    with tabs[3]:
         _filter_text_table(
-            "Downstream features",
-            features,
-            key=f"{ns}_hugiml_all_search",
+            "Downstream features", features, key=f"{ns}_hugiml_all_search",
             columns=[
-                "feature_type",
-                "display_name",
-                "feature",
-                "pattern_origin",
-                "survivor_led",
-                "survivor_features",
-                "survivor_feature_count",
-                "importance",
-                "coefficient",
-                "abs_coefficient",
-                "support",
-                "non_missing_rate",
-                "variance",
+                "feature_type", "display_name", "feature", "pattern_origin", "survivor_led",
+                "survivor_features", "survivor_feature_count", "importance", "coefficient",
+                "abs_coefficient", "support", "non_missing_rate", "variance",
             ],
         )
         if _has_items(composition):
             with st.expander("Model composition", expanded=False, key=f"{ns}_model_composition_exp"):
                 st.json(composition)
-
 
 def _render_lr_artifacts(model: Any, X: pd.DataFrame | None, key_prefix: str = "") -> None:
     coef_df = _coefficient_frame(model, X)
@@ -2102,15 +2476,15 @@ def _render_rulefit_rule_delta(runs: list[dict[str, Any]]) -> None:
         st.info("Neither selected RuleFit run exposes a rule inventory.")
         return
 
-    base_keys = set(base_rules.get("rule_key", pd.Series(dtype=str)).astype(str))
-    alt_keys = set(alt_rules.get("rule_key", pd.Series(dtype=str)).astype(str))
+    base_keys = set(base_rules.get("term_key", pd.Series(dtype=str)).astype(str))
+    alt_keys = set(alt_rules.get("term_key", pd.Series(dtype=str)).astype(str))
     added = sorted(alt_keys - base_keys)
     removed = sorted(base_keys - alt_keys)
     unchanged = len(base_keys & alt_keys)
 
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Base rules", f"{len(base_keys):,}")
-    m2.metric("Alternate rules", f"{len(alt_keys):,}")
+    m1.metric("Base final terms", f"{len(base_keys):,}")
+    m2.metric("Alternate final terms", f"{len(alt_keys):,}")
     m3.metric("+ Added", f"{len(added):,}")
     m4.metric("− Removed", f"{len(removed):,}")
     st.caption(f"Unchanged rules: {unchanged:,}. Added means present in alternate but not base; removed means present in base but not alternate.")
@@ -2119,7 +2493,7 @@ def _render_rulefit_rule_delta(runs: list[dict[str, Any]]) -> None:
         source = source.set_index("rule_key", drop=False) if not source.empty and "rule_key" in source.columns else pd.DataFrame()
         rows: list[dict[str, Any]] = []
         for key in keys:
-            row = {"change": sign, "status": status, "rule": key}
+            row = {"change": sign, "status": status, "final_term": key}
             if not source.empty and key in source.index:
                 src = source.loc[key]
                 if isinstance(src, pd.DataFrame):
@@ -2225,6 +2599,8 @@ def _render_artifact_comparison(runs: list[dict[str, Any]]) -> None:
         choices.append(("LR coefficients", "Logistic Regression"))
     if model_counts.get("Decision Tree", 0) >= 2:
         choices.append(("DT text tree", "Decision Tree"))
+    if len(_hugiml_runs_using_rpte(runs)) >= 2:
+        choices.append(("RPTE rule conjunctions", "RPTE"))
 
     if not choices:
         st.info("Run at least two successful configurations for HUGIML, RuleFit, LR, or DT to compare their interpretable artifacts.")
@@ -2251,6 +2627,12 @@ def _render_artifact_comparison(runs: list[dict[str, Any]]) -> None:
     elif selected_model == "Decision Tree":
         st.caption("Compare exported decision-tree text for two configurations.")
         _render_dt_tree_comparison(runs)
+    elif selected_model == "RPTE":
+        st.caption(
+            "Compare RPTE rule conjunctions for two HUGIML runs whose downstream estimator is "
+            "RPTE. `+` means added in the alternate run; `−` means removed relative to the base run."
+        )
+        _render_rpte_rule_delta(runs)
 
 
 def _render_hugiml_pattern_delta(runs: list[dict[str, Any]]) -> None:
@@ -2346,6 +2728,124 @@ def _render_hugiml_pattern_delta(runs: list[dict[str, Any]]) -> None:
     st.dataframe(dataframe_for_display(_safe_stringify_objects(show_df)), width="stretch", hide_index=True)
 
 
+def _hugiml_runs_using_rpte(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Successful HUGIML runs whose downstream estimator is RPTE-based
+    (i.e. rpte_rule_table() returns at least one row)."""
+    out = []
+    for run in _successful_runs(runs):
+        if run.get("model") != "HUGIML":
+            continue
+        artifact = run.get("artifact") if isinstance(run.get("artifact"), dict) else {}
+        model = artifact.get("model") if isinstance(artifact, dict) else None
+        if model is not None and _get_rpte_rule_rows(model):
+            out.append(run)
+    return out
+
+
+def _normalised_rpte_rule_inventory(run: dict[str, Any]) -> pd.DataFrame:
+    artifact = run.get("artifact") if isinstance(run.get("artifact"), dict) else {}
+    model = artifact.get("model") if isinstance(artifact, dict) else None
+    if model is None:
+        return pd.DataFrame()
+    rows = _get_rpte_final_term_rows(model, include_zero_direct=True)
+    if not rows:
+        return pd.DataFrame()
+    df = _rpte_rules_to_frame(rows)
+    leaf_key = (
+        df["class"].astype(str) + " | leaf | tree " + df["tree"].astype(str)
+        + " | leaf " + df["leaf"].astype(str) + " | " + df["conjunction"].astype(str)
+    )
+    direct_key = (
+        df["class"].astype(str) + " | " + df["term_type"].astype(str)
+        + " | " + df["source_column"].astype(str)
+    )
+    df["term_key"] = np.where(df["is_leaf_term"], leaf_key, direct_key)
+    return df
+
+
+def _render_rpte_rule_delta(runs: list[dict[str, Any]]) -> None:
+    rpte_runs = _hugiml_runs_using_rpte(runs)
+    if len(rpte_runs) < 2:
+        st.info("Run at least two successful HUGIML configurations with an RPTE downstream estimator to compare rule additions and removals.")
+        return
+
+    run_ids = [str(r.get("run_id")) for r in rpte_runs]
+    runs_by_id = {str(r.get("run_id")): r for r in rpte_runs}
+    c1, c2 = st.columns(2)
+    base_id = c1.selectbox(
+        "Base RPTE run", run_ids, index=0, key="wb_rpte_delta_base",
+        format_func=lambda rid: _pattern_delta_run_label(str(rid), runs_by_id),
+        on_change=_request_results_pattern_delta_tab,
+    )
+    alt_default = 1 if len(run_ids) > 1 else 0
+    alt_id = c2.selectbox(
+        "Alternate RPTE run", run_ids, index=alt_default, key="wb_rpte_delta_alt",
+        format_func=lambda rid: _pattern_delta_run_label(str(rid), runs_by_id),
+        on_change=_request_results_pattern_delta_tab,
+    )
+
+    base_run = next(r for r in rpte_runs if str(r.get("run_id")) == base_id)
+    alt_run = next(r for r in rpte_runs if str(r.get("run_id")) == alt_id)
+    _render_selected_config_pair(base_run, alt_run)
+
+    base_rules = _normalised_rpte_rule_inventory(base_run)
+    alt_rules = _normalised_rpte_rule_inventory(alt_run)
+    if base_rules.empty and alt_rules.empty:
+        st.info("Neither selected run exposes RPTE final-LR terms.")
+        return
+
+    base_keys = set(base_rules.get("term_key", pd.Series(dtype=str)).astype(str))
+    alt_keys = set(alt_rules.get("term_key", pd.Series(dtype=str)).astype(str))
+    added = sorted(alt_keys - base_keys)
+    removed = sorted(base_keys - alt_keys)
+    unchanged = len(base_keys & alt_keys)
+
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Base final terms", f"{len(base_keys):,}")
+    m2.metric("Alternate final terms", f"{len(alt_keys):,}")
+    m3.metric("+ Added", f"{len(added):,}")
+    m4.metric("− Removed", f"{len(removed):,}")
+    st.caption(
+        f"Unchanged final terms: {unchanged:,}. Leaf identities use their conjunctions; direct "
+        "source terms use their source-column identities. Coefficient changes are shown separately "
+        "from additions and removals."
+    )
+
+    def _rows(keys: list[str], status: str, sign: str, source: pd.DataFrame) -> list[dict[str, Any]]:
+        source_idx = source.set_index("term_key", drop=False) if not source.empty and "term_key" in source.columns else pd.DataFrame()
+        rows: list[dict[str, Any]] = []
+        for key in keys:
+            row = {"change": sign, "status": status, "final_term": key}
+            if not source_idx.empty and key in source_idx.index:
+                src = source_idx.loc[key]
+                if isinstance(src, pd.DataFrame):
+                    src = src.iloc[0]
+                for col in ("term_type", "source_family", "backend", "n_conditions", "support_count", "coefficient"):
+                    if col in src:
+                        row[col] = src[col]
+            rows.append(row)
+        return rows
+
+    base_inventory = _rows(sorted(base_keys), "base", "", base_rules)
+    delta = pd.DataFrame(_rows(added, "added", "+", alt_rules) + _rows(removed, "removed", "−", base_rules))
+    all_view = pd.DataFrame(base_inventory + _rows(added, "added", "+", alt_rules) + _rows(removed, "removed", "−", base_rules))
+    if delta.empty:
+        st.success("No final-term differences: the selected RPTE runs expose the same leaf and direct-source term set. Showing the base run below.")
+
+    change_filter = st.radio("Show", ["All", "+ Added", "− Removed"], horizontal=True, key="wb_rpte_delta_filter")
+    if change_filter == "+ Added":
+        show_df = delta[delta["status"].eq("added")].copy() if not delta.empty else pd.DataFrame()
+    elif change_filter == "− Removed":
+        show_df = delta[delta["status"].eq("removed")].copy() if not delta.empty else pd.DataFrame()
+    else:
+        show_df = all_view.copy()
+
+    query = st.text_input("Search final-term delta", value="", key="wb_rpte_delta_search", placeholder="Type to filter leaf or source-term text...")
+    if query:
+        show_df = show_df[show_df.astype(str).apply(lambda col: col.str.contains(query, case=False, na=False)).any(axis=1)]
+    st.dataframe(dataframe_for_display(_safe_stringify_objects(show_df)), width="stretch", hide_index=True)
+
+
 def _render_interpretability_comparison(runs: list[dict[str, Any]]) -> None:
     ok_runs = _successful_runs(runs)
     interpretable = [r for r in ok_runs if r.get("model") in {"HUGIML", "Logistic Regression", "Decision Tree", "EBM", "RuleFit"}]
@@ -2366,7 +2866,12 @@ def _render_interpretability_comparison(runs: list[dict[str, Any]]) -> None:
         elif model_name == "EBM":
             artifact_type = "EBM terms"
         elif model_name == "HUGIML":
-            artifact_type = "Patterns, original features, augmented features"
+            rpte_model = artifact.get("model") if isinstance(artifact, dict) else None
+            artifact_type = (
+                "RPTE leaf terms plus direct original/pattern/augmented LR terms"
+                if rpte_model is not None and _get_rpte_feature_flow_audit(rpte_model)
+                else "Patterns, original features, augmented features"
+            )
         elif model_name == "Logistic Regression":
             artifact_type = "LR coefficients"
         elif model_name == "Decision Tree":
@@ -2419,7 +2924,7 @@ def _render_selected_run_details(selected_run: dict[str, Any], y: np.ndarray) ->
             st.dataframe(pd.DataFrame(cm, index=["Actual 0", "Actual 1"], columns=["Pred 0", "Pred 1"]), width="stretch")
     with right:
         with st.expander("Parameters", expanded=False):
-            st.json(selected_run.get("params", {}))
+            st.json(_json_safe_value(selected_run.get("params", {})))
 
     fi = artifact.get("feature_importance")
     st.markdown("#### Feature importance")
@@ -2428,6 +2933,38 @@ def _render_selected_run_details(selected_run: dict[str, Any], y: np.ndarray) ->
     st.divider()
     st.markdown("#### Model artifact")
     _render_interpretable_artifacts(selected_run, key_prefix="inspect_")
+
+
+def _promoted_evaluation_bundle(selected_run: dict[str, Any], y: Any) -> dict[str, Any]:
+    """Freeze the Workbench evaluation evidence used by Governance.
+
+    Governance must not silently regenerate metrics from the full-data refit:
+    that would compare training diagnostics with the Workbench's CV evidence.
+    The bundle is intentionally self-contained and is copied into session
+    state at promotion time.
+    """
+    artifact = selected_run.get("artifact") if isinstance(selected_run.get("artifact"), dict) else {}
+    y_true = np.asarray(y).reshape(-1)
+    y_pred = np.asarray(artifact.get("y_pred")).reshape(-1) if artifact.get("y_pred") is not None else np.asarray([])
+    y_proba = np.asarray(artifact.get("y_proba"), dtype=float).reshape(-1) if artifact.get("y_proba") is not None else np.asarray([])
+    n = min(len(y_true), len(y_pred), len(y_proba))
+    metric_names = ("cv_roc_auc", "roc_auc", "accuracy", "precision", "recall", "f1")
+    metrics = {name: _scalar_metric(selected_run.get(name)) for name in metric_names}
+    return {
+        "source": "promoted_workbench_run",
+        "scope": str(artifact.get("evaluation_scope") or "unknown"),
+        "cv": artifact.get("evaluation_cv"),
+        "random_state": artifact.get("evaluation_random_state"),
+        "error": artifact.get("evaluation_error"),
+        "run_id": selected_run.get("run_id"),
+        "metrics": metrics,
+        "y_true": y_true[:n].copy(),
+        "y_pred": y_pred[:n].copy(),
+        "y_proba": y_proba[:n].copy(),
+        "confusion_matrix": np.asarray(artifact.get("confusion_matrix")).copy()
+        if artifact.get("confusion_matrix") is not None
+        else None,
+    }
 
 
 def _render_promotion(selected_run: dict[str, Any], ctx: dict[str, Any]) -> None:
@@ -2440,23 +2977,38 @@ def _render_promotion(selected_run: dict[str, Any], ctx: dict[str, Any]) -> None
     artifact = selected_run.get("artifact")
     if isinstance(artifact, dict):
         model = artifact.get("model")
-        pseudo_result = type("WorkbenchHUGIMLResult", (), {})()
-        pseudo_result.best_estimator_ = model
-        pseudo_result.best_params_ = selected_run.get("params", {})
-        pseudo_result.best_score_ = selected_run.get("cv_roc_auc")
-        pseudo_result.results_ = [{"status": "ok", "score": selected_run.get("cv_roc_auc"), **(selected_run.get("params", {}) or {})}]
-        pseudo_result.status_ = "ok"
-        pseudo_result.error_ = None
+        # Preserve the original tuning/CV object whenever available.  The old
+        # promotion path manufactured a one-row pseudo result, which discarded
+        # fold/candidate evidence and could make Governance display a different
+        # result table from the Workbench run that was promoted.
+        source_result = artifact.get("tuning_result")
+        if source_result is None:
+            source_result = type("WorkbenchHUGIMLResult", (), {})()
+            source_result.best_estimator_ = model
+            source_result.best_params_ = selected_run.get("params", {})
+            source_result.best_score_ = selected_run.get("cv_roc_auc")
+            source_result.results_ = [
+                {"status": "ok", "score": selected_run.get("cv_roc_auc"), **(selected_run.get("params", {}) or {})}
+            ]
+            source_result.status_ = "ok"
+            source_result.error_ = None
         try:
             predictions = score_cases(model, ctx["X"])
         except Exception:
             predictions = pd.DataFrame()
+        evaluation = _promoted_evaluation_bundle(selected_run, ctx.get("y"))
         st.session_state["hugiml_promoted_governance_ctx"] = {
             **ctx,
             "cache_key": f"workbench:{selected_run.get('run_id')}",
-            "result": pseudo_result,
+            "result": source_result,
             "model": model,
             "predictions": predictions,
+            "evaluation": evaluation,
+            "promoted_run": {
+                "run_id": selected_run.get("run_id"),
+                "params": copy.deepcopy(selected_run.get("params", {})),
+                "metrics": copy.deepcopy(evaluation.get("metrics", {})),
+            },
             "cv": ctx.get("cv"),
             "random_state": ctx.get("random_state"),
         }
@@ -2628,7 +3180,7 @@ def _render_results(ctx: dict[str, Any]) -> None:
                     "candidates_evaluated": n_candidates,
                     "best_cv_roc_auc": _fmt(best_run.get("cv_roc_auc")),
                     "best_f1": _fmt(best_run.get("f1")),
-                    "best_params": str(best_run.get("params", {})),
+                    "best_params": _summarize_params_for_display(best_run.get("params", {})),
                 })
             st.dataframe(
                 dataframe_for_display(pd.DataFrame(winner_rows)),
@@ -2668,8 +3220,9 @@ def _render_results(ctx: dict[str, Any]) -> None:
                   <p><b>Model drill-down</b> shows the best configuration per model, selected by CV ROC-AUC
                   on held-out validation folds. Metrics (CV ROC-AUC, F1, Precision, Recall) are computed
                   from <em>stitched out-of-fold predictions</em>. Each sample is predicted exactly once on
-                  its held-out CV fold, so no data leaks into the score. The confusion matrix and feature
-                  importance come from a final refit on the complete dataset after cross-validation.</p>
+                  its held-out CV fold, so no data leaks into the score. The confusion matrix uses those same
+                  out-of-fold predictions; feature importance and RPTE rules come from the final refit on the
+                  complete dataset after cross-validation.</p>
                 </div>
                 """,
                 unsafe_allow_html=True,
