@@ -67,6 +67,16 @@ def test_editable_native_build_uses_development_optimization() -> None:
     assert "or _is_editable_build" in setup_source
 
 
+def test_binding_compile_flags_preserve_pybind11_language_level() -> None:
+    setup_source = (ROOT / "setup.py").read_text(encoding="utf-8")
+    assert "def _binding_compile_args" in setup_source
+    assert "_project_algo_args = tuple(algo_args)" in setup_source
+    assert "inherited = [arg for arg in extra_postargs if arg not in _project_algo_args]" in setup_source
+    assert "return [*bind_args, *inherited]" in setup_source
+    assert "extra_postargs = _binding_compile_args(extra_postargs)" in setup_source
+    assert "extra_postargs = bind_args" not in setup_source
+
+
 def test_macos_ci_uses_a_serial_native_editable_build() -> None:
     workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
         encoding="utf-8"

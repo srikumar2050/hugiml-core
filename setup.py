@@ -258,6 +258,17 @@ else:
 # and drives >50% of total build time on single-core dev machines.
 bind_args = _opt_bind + omp_compile
 
+# Pybind11Extension appends language and visibility flags to the list supplied
+# as extra_compile_args. Snapshot the project flags before constructing it.
+_project_algo_args = tuple(algo_args)
+
+
+def _binding_compile_args(extra_postargs: Sequence[Any]) -> list[Any]:
+    """Use binding optimization while retaining toolchain-provided flags."""
+    inherited = [arg for arg in extra_postargs if arg not in _project_algo_args]
+    return [*bind_args, *inherited]
+
+
 # ── Sources ───────────────────────────────────────────────────────────────────
 
 _ALGO_SOURCES = [
@@ -341,7 +352,9 @@ class _SplitOptBuildExt(build_ext):
             pp_opts: list[Any],
         ) -> None:
             if os.path.basename(src) in _BIND_BASENAMES:
-                extra_postargs = bind_args
+                # Keep pybind11 and platform flags such as the C++ language level,
+                # symbol visibility, and deployment target.
+                extra_postargs = _binding_compile_args(extra_postargs)
             orig_compile_one(obj, src, ext_suffix, cc_args, extra_postargs, pp_opts)
 
         def _batched_compile(sources: Sequence[str], *args: Any, **kwargs: Any) -> list[str]:
