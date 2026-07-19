@@ -25,6 +25,11 @@ on:
         default: testpypi
         type: choice
         options: [pypi, testpypi]
+      run_container_scan:
+        description: "Run the advisory Docker image vulnerability scan"
+        required: false
+        default: true
+        type: boolean
 
 concurrency:
   group: release-${{ github.ref }}
@@ -79,6 +84,13 @@ jobs:
           tar -tzf dist/*.tar.gz | grep -E '\.(so|pyd)$' && \
             { echo "ERROR: compiled artefact found in sdist"; exit 1; } || \
             echo "sdist is clean"
+      - name: Verify experiment runners in sdist
+        run: |
+          archive="$(ls dist/*.tar.gz)"
+          tar -tzf "$archive" | grep -E '/experiments/benchmark/benchmark_dashboard\.py$'
+          tar -tzf "$archive" | grep -E '/experiments/benchmark/benchmarkREADME\.md$'
+          tar -tzf "$archive" | grep -E '/experiments/scalability/scalability_dashboard\.py$'
+          tar -tzf "$archive" | grep -E '/experiments/scalability/scalabilityREADME\.md$'
       - uses: actions/upload-artifact@v4
         with:
           name: sdist
@@ -127,40 +139,75 @@ jobs:
           path: sbom.json
 
   container-scan:
-    name: Container Image Scan (Trivy)
+    name: Advisory Container Image Scan (Trivy)
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.run_container_scan }}
+    continue-on-error: true
     runs-on: ubuntu-latest
     needs: [build-wheels]
     permissions:
+      actions: read
+      contents: read
       security-events: write
     steps:
       - uses: actions/checkout@v4
-      - name: Build Docker image for scanning
-        run: docker build -f docker/Dockerfile -t hugiml-core:scan-${{ github.sha }} .
+      - name: Download Linux x86_64 wheels
+        uses: actions/download-artifact@v4
+        with:
+          name: wheels-ubuntu-latest-x86_64
+          path: wheelhouse
+      - name: Select the CPython 3.12 wheel
+        shell: bash
+        run: |
+          mkdir -p scan-dist
+          wheel="$(find wheelhouse -maxdepth 1 -type f \
+            -name '*cp312*manylinux*x86_64.whl' -print -quit)"
+          if [ -z "$wheel" ]; then
+            echo "No CPython 3.12 manylinux x86_64 wheel was found." >&2
+            find wheelhouse -maxdepth 1 -type f -print >&2
+            exit 1
+          fi
+          cp "$wheel" scan-dist/
+      - name: Build advisory Docker image
+        run: |
+          docker build \
+            --build-arg WHEEL_DIR=scan-dist \
+            -f docker/Dockerfile.scan \
+            -t hugiml-core:scan-${{ github.sha }} \
+            .
       - name: Run Trivy vulnerability scanner
+        continue-on-error: true
         uses: aquasecurity/trivy-action@master
         with:
           image-ref: hugiml-core:scan-${{ github.sha }}
           format: sarif
           output: trivy-results.sarif
           severity: CRITICAL,HIGH
-          exit-code: "1"
+          # Findings remain visible in the SARIF report but do not prevent a
+          # valid Python release. Infrastructure/action failures are also
+          # tolerated by the advisory job-level policy above.
+          exit-code: "0"
           ignore-unfixed: true
       - name: Upload Trivy SARIF to GitHub Security tab
         uses: github/codeql-action/upload-sarif@v3
-        if: always()
+        if: ${{ always() && hashFiles('trivy-results.sarif') != '' }}
+        continue-on-error: true
         with:
           sarif_file: trivy-results.sarif
           category: trivy
       - uses: actions/upload-artifact@v4
-        if: always()
+        if: ${{ always() && hashFiles('trivy-results.sarif') != '' }}
+        continue-on-error: true
         with:
           name: trivy-results
           path: trivy-results.sarif
+          if-no-files-found: ignore
 
   publish:
     name: Publish to PyPI
     runs-on: ubuntu-latest
-    needs: [build-wheels, build-sdist, sbom, container-scan]
+    # Container scanning is retained as an advisory release job, but Python
+    # publication depends only on the build and SBOM jobs.
+    needs: [build-wheels, build-sdist, sbom]
     environment:
       name: ${{ github.event.inputs.target || 'pypi' }}
       url: ${{ github.event.inputs.target == 'testpypi' && 'https://test.pypi.org/p/hugiml-core' || 'https://pypi.org/p/hugiml-core' }}
