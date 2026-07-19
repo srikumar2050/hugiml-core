@@ -7555,7 +7555,7 @@ a.anchor-link {
 <span class="kn">from</span> <span class="nn">sklearn.model_selection</span> <span class="kn">import</span> <span class="n">train_test_split</span>
 <span class="kn">from</span> <span class="nn">sklearn.metrics</span> <span class="kn">import</span> <span class="n">roc_auc_score</span><span class="p">,</span> <span class="n">balanced_accuracy_score</span><span class="p">,</span> <span class="n">classification_report</span>
 
-<span class="kn">from</span> <span class="nn">hugiml</span> <span class="kn">import</span> <span class="n">HUGIMLClassifierNative</span>
+<span class="kn">from</span> <span class="nn">hugiml</span> <span class="kn">import</span> <span class="n">HUGIMLClassifier</span>
 
 <span class="n">pd</span><span class="o">.</span><span class="n">set_option</span><span class="p">(</span><span class="s2">"display.max_colwidth"</span><span class="p">,</span> <span class="mi">110</span><span class="p">)</span>
 <span class="n">RANDOM_STATE</span> <span class="o">=</span> <span class="mi">42</span>
@@ -7595,7 +7595,7 @@ a.anchor-link {
     <span class="n">X_small</span><span class="p">,</span> <span class="n">y_small</span><span class="p">,</span> <span class="n">test_size</span><span class="o">=</span><span class="mf">0.25</span><span class="p">,</span> <span class="n">stratify</span><span class="o">=</span><span class="n">y_small</span><span class="p">,</span> <span class="n">random_state</span><span class="o">=</span><span class="n">RANDOM_STATE</span>
 <span class="p">)</span>
 
-<span class="n">clf</span> <span class="o">=</span> <span class="n">HUGIMLClassifierNative</span><span class="p">(</span><span class="n">B</span><span class="o">=</span><span class="mi">5</span><span class="p">,</span> <span class="n">L</span><span class="o">=</span><span class="mi">2</span><span class="p">,</span> <span class="n">G</span><span class="o">=</span><span class="mf">1e-3</span><span class="p">,</span> <span class="n">topK</span><span class="o">=</span><span class="mi">60</span><span class="p">)</span>
+<span class="n">clf</span> <span class="o">=</span> <span class="n">HUGIMLClassifier</span><span class="p">(</span><span class="n">B</span><span class="o">=</span><span class="mi">5</span><span class="p">,</span> <span class="n">L</span><span class="o">=</span><span class="mi">2</span><span class="p">,</span> <span class="n">G</span><span class="o">=</span><span class="mf">1e-3</span><span class="p">,</span> <span class="n">topK</span><span class="o">=</span><span class="mi">60</span><span class="p">)</span>
 <span class="n">clf</span><span class="o">.</span><span class="n">fit</span><span class="p">(</span><span class="n">X_train</span><span class="p">,</span> <span class="n">y_train</span><span class="p">)</span>
 
 <span class="n">proba</span> <span class="o">=</span> <span class="n">clf</span><span class="o">.</span><span class="n">predict_proba</span><span class="p">(</span><span class="n">X_test</span><span class="p">)[:,</span> <span class="mi">1</span><span class="p">]</span>

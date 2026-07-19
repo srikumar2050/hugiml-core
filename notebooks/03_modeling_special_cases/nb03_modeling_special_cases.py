@@ -19,7 +19,7 @@ from sklearn.datasets import load_iris, make_classification
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import classification_report, balanced_accuracy_score, roc_auc_score
 
-from hugiml import HUGIMLClassifierNative
+from hugiml import HUGIMLClassifier
 from hugiml.multiclass import MulticlassHUGReport, make_imbalanced_pipeline, encode_high_cardinality, apply_encoding
 from hugiml.adaptive import HUGIMLAdaptive
 from hugiml.pruning import PatternEditor
@@ -40,7 +40,7 @@ y_mc = pd.Series(iris.target, name="species")
 X_tr, X_te, y_tr, y_te = train_test_split(
     X_mc, y_mc, test_size=0.25, stratify=y_mc, random_state=RANDOM_STATE
 )
-clf_mc = HUGIMLClassifierNative(B=5, L=2, G=1e-3, topK=50)
+clf_mc = HUGIMLClassifier(B=5, L=2, G=1e-3, topK=50)
 clf_mc.fit(X_tr, y_tr)
 preds = clf_mc.predict(X_te)
 print(classification_report(y_te, preds, target_names=iris.target_names))
@@ -69,12 +69,12 @@ X_tr, X_te, y_tr, y_te = train_test_split(
     X_imb, y_imb, test_size=0.25, stratify=y_imb, random_state=RANDOM_STATE
 )
 
-plain = HUGIMLClassifierNative(B=6, L=2, G=5e-3, topK=80)
+plain = HUGIMLClassifier(B=6, L=2, G=5e-3, topK=80)
 plain.fit(X_tr, y_tr)
 plain_pred = plain.predict(X_te)
 plain_score = plain.predict_proba(X_te)[:, 1]
 
-balanced = make_imbalanced_pipeline(HUGIMLClassifierNative(B=6, L=2, G=5e-3, topK=80), strategy="class_weight")
+balanced = make_imbalanced_pipeline(HUGIMLClassifier(B=6, L=2, G=5e-3, topK=80), strategy="class_weight")
 balanced.fit(X_tr, y_tr)
 bal_pred = balanced.predict(X_te)
 bal_score = balanced.predict_proba(X_te)[:, 1]
@@ -123,7 +123,7 @@ cat_cols = X_tr_enc.select_dtypes(include=["object", "category"]).columns.tolist
 int_cols = X_tr_enc.select_dtypes(include=["int", "int32", "int64"]).columns.tolist()
 flt_cols = [c for c in X_tr_enc.columns if c not in cat_cols + int_cols]
 
-hc = HUGIMLClassifierNative(
+hc = HUGIMLClassifier(
     allCols=[int_cols, flt_cols, cat_cols],
     origColumns=X_tr_enc.columns.tolist(),
     B=6,

@@ -26,7 +26,7 @@ from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import LogisticRegression
 from sklearn.ensemble import RandomForestClassifier
 
-from hugiml import HUGIMLClassifierNative
+from hugiml import HUGIMLClassifier
 
 RANDOM_STATE = 42
 MAX_ROWS_FOR_CV = 500
@@ -116,7 +116,7 @@ def hug_for_frame(X_train):
     cat_cols = X_train.select_dtypes(include=["object", "category", "bool"]).columns.tolist()
     int_cols = X_train.select_dtypes(include=["int", "int32", "int64"]).columns.tolist()
     flt_cols = [c for c in X_train.columns if c not in cat_cols + int_cols]
-    return HUGIMLClassifierNative(
+    return HUGIMLClassifier(
         allCols=[int_cols, flt_cols, cat_cols],
         origColumns=X_train.columns.tolist(),
         B=-1,
@@ -366,7 +366,7 @@ def make_tuned_model(model_name, params, X_train):
         cat_cols = X_train.select_dtypes(include=["object", "category", "bool"]).columns.tolist()
         int_cols = X_train.select_dtypes(include=["int", "int32", "int64"]).columns.tolist()
         flt_cols = [c for c in X_train.columns if c not in cat_cols + int_cols]
-        return HUGIMLClassifierNative(
+        return HUGIMLClassifier(
             allCols=[int_cols, flt_cols, cat_cols],
             origColumns=X_train.columns.tolist(),
             n_jobs=1,

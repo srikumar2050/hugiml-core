@@ -24,7 +24,7 @@ from sklearn.metrics import (
 warnings.filterwarnings("ignore")
 
 try:
-    from hugiml import HUGIMLClassifierNative
+    from hugiml import HUGIMLClassifier
 except ImportError as exc:
     raise ImportError(
         "This notebook requires hugiml-core. Install it with: pip install hugiml-core"
@@ -66,7 +66,7 @@ def main():
     df = pd.read_csv(DATA_PATH)
     X_train, X_test, y_train, y_test, idx_train, idx_test = fit_hugiml_model(df)
 
-    clf = HUGIMLClassifierNative(
+    clf = HUGIMLClassifier(
         B=10,
         L=2,
         G=0.00005,

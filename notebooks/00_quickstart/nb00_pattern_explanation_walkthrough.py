@@ -23,7 +23,7 @@ from sklearn.datasets import load_breast_cancer
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import roc_auc_score, balanced_accuracy_score, classification_report
 
-from hugiml import HUGIMLClassifierNative
+from hugiml import HUGIMLClassifier
 
 pd.set_option("display.max_colwidth", 110)
 RANDOM_STATE = 42
@@ -46,7 +46,7 @@ X_train, X_test, y_train, y_test = train_test_split(
     X_small, y_small, test_size=0.25, stratify=y_small, random_state=RANDOM_STATE
 )
 
-clf = HUGIMLClassifierNative(B=5, L=2, G=1e-3, topK=60)
+clf = HUGIMLClassifier(B=5, L=2, G=1e-3, topK=60)
 clf.fit(X_train, y_train)
 
 proba = clf.predict_proba(X_test)[:, 1]

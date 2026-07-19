@@ -13,7 +13,7 @@ from sklearn.metrics import (roc_auc_score, classification_report,
 
 warnings.filterwarnings("ignore")
 
-from hugiml import HUGIMLClassifierNative
+from hugiml import HUGIMLClassifier
 from hugiml.calibration import evaluate_calibration
 from hugiml.metrics import compute_all_metrics
 from hugiml.pruning import PatternEditor
@@ -118,7 +118,7 @@ random split here – but production workflows should use:
   • PSI-monitored feature distributions to detect vintage drift
 """)
 
-clf_base = HUGIMLClassifierNative(B=15, L=1, G=5e-4, topK=100)
+clf_base = HUGIMLClassifier(B=15, L=1, G=5e-4, topK=100)
 
 # prepareXy must be called on the FULL dataset before any split
 X_enc, y_enc = clf_base.prepareXy(X, y)
@@ -138,7 +138,7 @@ print(f"Train: {len(X_tr)}  |  Calibration: {len(X_cal)}  |  Test: {len(X_te)}")
 print("\n--- Part 3: Model Training ---")
 
 # Baseline model (patterns_only – default)
-clf = HUGIMLClassifierNative(B=15, L=1, G=5e-4, topK=100,
+clf = HUGIMLClassifier(B=15, L=1, G=5e-4, topK=100,
                               feature_mode="patterns_only")
 X_enc2, y_enc2 = clf.prepareXy(X, y)
 X_tr2, X_tmp2, y_tr2, y_tmp2 = train_test_split(
@@ -151,7 +151,7 @@ clf.fit(X_tr2, y_tr2)
 print(f"Baseline (patterns_only): {len(clf.get_hug_features())} patterns")
 
 # Hybrid model (original_plus_patterns)
-clf_hybrid = HUGIMLClassifierNative(B=15, L=1, G=5e-4, topK=100,
+clf_hybrid = HUGIMLClassifier(B=15, L=1, G=5e-4, topK=100,
                                      feature_mode="original_plus_patterns")
 X_enc3, y_enc3 = clf_hybrid.prepareXy(X, y)
 X_tr3, X_tmp3, y_tr3, y_tmp3 = train_test_split(

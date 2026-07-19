@@ -21,7 +21,7 @@ import pandas as pd
 from sklearn.model_selection import train_test_split
 
 try:
-    from hugiml import HUGIMLClassifierNative
+    from hugiml import HUGIMLClassifier
 except Exception as exc:  
     raise RuntimeError(
         "hugiml-core is required for this notebook/script. Install with `pip install hugiml-core`. "
@@ -103,7 +103,7 @@ def train_hugiml(X: pd.DataFrame, y: pd.Series):
     X_train, X_test, y_train, y_test, idx_train, idx_test = train_test_split(
         X, y, X.index, test_size=0.30, random_state=RANDOM_STATE, stratify=y
     )
-    clf = HUGIMLClassifierNative(B=8, L=1, G=1e-4, topK=80, adaptive_binning=True, verbose=False, n_jobs=1)
+    clf = HUGIMLClassifier(B=8, L=1, G=1e-4, topK=80, adaptive_binning=True, verbose=False, n_jobs=1)
     clf.fit(X_train, y_train)
     risk_score = clf.predict_proba(X_test)[:, 1]
     return clf, X_train, X_test, y_train, y_test, idx_train, idx_test, risk_score

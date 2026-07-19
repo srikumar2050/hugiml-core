@@ -14,7 +14,7 @@ from sklearn.metrics import (
 )
 warnings.filterwarnings("ignore")
 
-from hugiml import HUGIMLClassifierNative
+from hugiml import HUGIMLClassifier
 from hugiml.calibration import evaluate_calibration
 from hugiml.metrics import compute_all_metrics
 from hugiml.pruning import PatternEditor
@@ -95,7 +95,7 @@ clinically far more serious than a false positive (unnecessary follow-up).
 Operating threshold is selected to achieve recall >= {MIN_CLINICAL_RECALL:.0%}.
 """)
 
-clf_prep = HUGIMLClassifierNative(B=10, L=1, G=1e-4, topK=120)
+clf_prep = HUGIMLClassifier(B=10, L=1, G=1e-4, topK=120)
 X_enc, y_enc = clf_prep.prepareXy(X, y)
 
 X_tr, X_tmp, y_tr, y_tmp = train_test_split(
@@ -110,7 +110,7 @@ print(f"Train:{len(X_tr)} (mal:{y_tr.sum()})  Cal:{len(X_cal)}  Test:{len(X_te)}
 print("\n--- Part 3: feature_mode Comparison ---")
 mode_res = {}
 for mode in ["patterns_only", "original_plus_patterns"]:
-    c = HUGIMLClassifierNative(B=10, L=1, G=1e-4, topK=120, feature_mode=mode)
+    c = HUGIMLClassifier(B=10, L=1, G=1e-4, topK=120, feature_mode=mode)
     Xe, ye = c.prepareXy(X, y)
     Xtr2,Xtmp2,ytr2,ytmp2 = train_test_split(Xe,ye,test_size=0.40,stratify=ye,random_state=RANDOM_STATE)
     Xcal2,Xte2,ycal2,yte2 = train_test_split(Xtmp2,ytmp2,test_size=0.50,stratify=ytmp2,random_state=RANDOM_STATE)

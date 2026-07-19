@@ -13,7 +13,7 @@ from sklearn.metrics import (
 )
 warnings.filterwarnings("ignore")
 
-from hugiml import HUGIMLClassifierNative
+from hugiml import HUGIMLClassifier
 from hugiml.calibration import evaluate_calibration
 from hugiml.metrics import compute_all_metrics
 from hugiml.pruning import PatternEditor
@@ -119,7 +119,7 @@ fraud_model = int(y.sum())
 print(f"Modeling pop : {len(X):,}  |  Fraud: {fraud_model} ({y.mean():.4%})")
 
 # 60 / 20 / 20  train / calibration / test
-clf_prep = HUGIMLClassifierNative(B=10, L=1, G=1e-4, topK=100)
+clf_prep = HUGIMLClassifier(B=10, L=1, G=1e-4, topK=100)
 X_enc, y_enc = clf_prep.prepareXy(X, y)
 
 X_tr, X_tmp, y_tr, y_tmp = train_test_split(
@@ -137,7 +137,7 @@ print("\n--- Part 3: feature_mode Comparison ---")
 
 mode_results = {}
 for mode in ["patterns_only", "original_plus_patterns"]:
-    c = HUGIMLClassifierNative(B=10, L=1, G=1e-4, topK=100, feature_mode=mode)
+    c = HUGIMLClassifier(B=10, L=1, G=1e-4, topK=100, feature_mode=mode)
     Xe, ye = c.prepareXy(X, y)
     Xtr2, Xtmp2, ytr2, ytmp2 = train_test_split(Xe, ye, test_size=0.40,
                                                    stratify=ye, random_state=RANDOM_STATE)

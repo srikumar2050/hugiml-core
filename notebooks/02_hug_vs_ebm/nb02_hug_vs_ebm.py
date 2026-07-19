@@ -35,7 +35,7 @@ from sklearn.metrics import (
 )
 from sklearn.calibration import calibration_curve
 
-from hugiml import HUGIMLClassifierNative
+from hugiml import HUGIMLClassifier
 from interpret.glassbox import ExplainableBoostingClassifier
 
 RANDOM_STATE = 42
@@ -113,7 +113,7 @@ plt.show()
 # In[4]:
 
 
-hug = HUGIMLClassifierNative(B=8, L=2, G=2e-3, topK=120)
+hug = HUGIMLClassifier(B=8, L=2, G=2e-3, topK=120)
 hug.fit(X_train, y_train)
 
 hug_score = hug.predict_proba(X_test)[:, 1]
