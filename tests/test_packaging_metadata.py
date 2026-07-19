@@ -59,3 +59,22 @@ def test_container_scan_is_retained_but_does_not_gate_python_publication() -> No
     assert "hashFiles('trivy-results.sarif') != ''" in scan_block
     assert "needs: [build-wheels, build-sdist, sbom]" in publish_block
     assert "container-scan" not in publish_block.split("steps:", 1)[0]
+
+
+def test_editable_native_build_uses_development_optimization() -> None:
+    setup_source = (ROOT / "setup.py").read_text(encoding="utf-8")
+    assert 'arg in {"editable_wheel", "develop"}' in setup_source
+    assert "or _is_editable_build" in setup_source
+
+
+def test_macos_ci_uses_a_serial_native_editable_build() -> None:
+    workflow = (ROOT / ".github" / "workflows" / "ci.yml").read_text(
+        encoding="utf-8"
+    )
+    assert 'echo "CC=/usr/bin/clang"' in workflow
+    assert 'echo "CXX=/usr/bin/clang++"' in workflow
+    assert 'echo "ARCHFLAGS=-arch $(uname -m)"' in workflow
+    assert 'echo "HUGIML_NO_BREW_LIBOMP=1"' in workflow
+    assert 'echo "HUGIML_FAST_BUILD=1"' in workflow
+    assert 'echo "HUGIML_BUILD_BATCH_SIZE=1"' in workflow
+    assert 'echo "HUGIML_BUILD_JOBS=1"' in workflow

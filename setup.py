@@ -17,6 +17,7 @@
 Build modes
 -----------
 Local development (fast, O0 binding TUs + O1 algo TUs):
+    python -m pip install -e .
     python scripts/build_batched.py --inplace
 
     # Or explicitly:
@@ -155,15 +156,6 @@ elif is_macos:
 
     libomp_prefix = _candidate_libomp_prefix()
     if libomp_prefix:
-        # Homebrew libomp follows the machine architecture. A universal Python
-        # installation may otherwise request both arm64 and x86_64 for an
-        # editable build while linking against one native OpenMP installation.
-        # Explicit ARCHFLAGS and HUGIML_LIBOMP_ROOT settings remain authoritative.
-        if not os.environ.get("ARCHFLAGS") and not os.environ.get("HUGIML_LIBOMP_ROOT"):
-            machine_arch = platform.machine().lower()
-            if machine_arch in {"arm64", "x86_64"}:
-                os.environ["ARCHFLAGS"] = f"-arch {machine_arch}"
-
         deployment_target = os.environ.get("MACOSX_DEPLOYMENT_TARGET", "").strip()
         libomp_dylib = os.path.join(libomp_prefix, "lib", "libomp.dylib")
         libomp_minos = _macos_dylib_minos(libomp_dylib) if os.path.exists(libomp_dylib) else ""
@@ -214,10 +206,15 @@ else:
 # ── Build mode ────────────────────────────────────────────────────────────────
 # When invoked as "python setup.py build_ext --inplace" (local dev),
 # default to HUGIML_FAST_BUILD to avoid long O2 waits.
-# pip / build-backend invocations use the full O2 release path.
+# Editable wheels use the development path; normal wheels use full O2.
 
 _is_direct_build = "build_ext" in sys.argv
-_fast = bool(os.environ.get("HUGIML_FAST_BUILD") or _is_direct_build)
+_is_editable_build = any(arg in {"editable_wheel", "develop"} for arg in sys.argv)
+_fast = bool(
+    os.environ.get("HUGIML_FAST_BUILD")
+    or _is_direct_build
+    or _is_editable_build
+)
 
 
 def _env_int(name: str, default: int, *, minimum: int = 0) -> int:
