@@ -17,8 +17,6 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder
 
 
-
-
 def _benchmark_module_stub() -> ModuleType:
     module = ModuleType("benchmark_dashboard")
     module.__spec__ = importlib.util.spec_from_loader("benchmark_dashboard", loader=None)
@@ -87,8 +85,6 @@ assert spec and spec.loader
 cc18 = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = cc18
 spec.loader.exec_module(cc18)
-
-
 
 
 class ArrayOnlyClassifier(BaseEstimator, ClassifierMixin):

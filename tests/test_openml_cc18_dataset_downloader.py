@@ -5,7 +5,6 @@ import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
-
 REPO_ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = REPO_ROOT / "experiments" / "benchmark" / "download_openml_cc18_datasets.py"
 
