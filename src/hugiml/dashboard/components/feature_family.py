@@ -212,7 +212,17 @@ def feature_family_summary(model: Any, X: pd.DataFrame | None = None) -> pd.Data
     n_aug = len(_as_list(getattr(model, "augmented_pair_transforms_", [])))
 
     if has_leaf_terms:
-        role = "RPTE source family; split-used columns feed leaf indicators and non-tree columns remain direct LR terms"
+        if flow.get("patterns_above_order_two_are_direct_only"):
+            role = (
+                "RPTE source family; patterns above order two are direct-only, "
+                "while originals, generated pairs, and lower-order patterns may feed "
+                "leaf indicators"
+            )
+        else:
+            role = (
+                "RPTE source family; split-used columns feed leaf indicators and "
+                "remaining columns may stay direct"
+            )
         direct = representation in _RPTE_LEAF_DIRECT_REPRESENTATIONS
     elif raw_fallback:
         role = "Direct final-LR source family in RPTE emergency fallback"

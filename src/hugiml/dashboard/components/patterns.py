@@ -81,7 +81,8 @@ def _rpte_sub_estimators_for_audit(model: Any) -> list[tuple[Any, Any]]:
     sub_estimators = list(raw_sub_estimators) if raw_sub_estimators is not None else []
     if sub_estimators:
         raw_labels = getattr(estimator, "classes_", None)
-        labels = list(raw_labels) if raw_labels is not None else []
+        classes = list(raw_labels) if raw_labels is not None else []
+        labels = [classes[-1]] if len(sub_estimators) == 1 and len(classes) == 2 else classes
         return [
             (sub, labels[index] if index < len(labels) else index)
             for index, sub in enumerate(sub_estimators)
@@ -93,6 +94,38 @@ def _rpte_sub_estimators_for_audit(model: Any) -> list[tuple[Any, Any]]:
         label = classes[-1] if classes else None
         return [(estimator, label)]
     return []
+
+
+def _get_rpte_alias_rows(model: Any) -> list[dict[str, Any]]:
+    """Return fitted leaf-pattern canonicalization records."""
+    fn = getattr(model, "rpte_representation_aliases", None)
+    if callable(fn):
+        try:
+            return [dict(row) for row in (fn() or [])]
+        except Exception:
+            pass
+    rows: list[dict[str, Any]] = []
+    for sub, class_label in _rpte_sub_estimators_for_audit(model):
+        method = getattr(sub, "representation_alias_table", None)
+        if not callable(method):
+            continue
+        try:
+            aliases = method() or []
+        except Exception:
+            continue
+        for alias in aliases:
+            item = dict(alias)
+            item.setdefault("class", class_label)
+            rows.append(item)
+    return rows
+
+
+def _rpte_uses_direct_only_higher_order_patterns(model: Any) -> bool:
+    """Whether fitted RPTE estimators keep patterns above order two out of trees."""
+    return any(
+        bool(getattr(sub, "higher_order_patterns_direct_only_", False))
+        for sub, _class_label in _rpte_sub_estimators_for_audit(model)
+    )
 
 
 def _rpte_source_feature_names(model: Any) -> list[str]:
@@ -253,7 +286,9 @@ def _get_rpte_feature_flow_audit(model: Any) -> dict[str, Any]:
             explicit = {**dict(embedded), **explicit}
 
     rows = _get_rpte_final_term_rows(model, include_zero_direct=True)
+    alias_rows = _get_rpte_alias_rows(model)
     sub_estimators = _rpte_sub_estimators_for_audit(model)
+    direct_only_higher_order = _rpte_uses_direct_only_higher_order_patterns(model)
     if not rows and not sub_estimators and not explicit:
         return {}
     backends = {str(row.get("backend") or "unknown") for row in rows}
@@ -300,18 +335,26 @@ def _get_rpte_feature_flow_audit(model: Any) -> dict[str, Any]:
     elif direct_count > 0 or direct_rows:
         representation = "rpte_leaves_plus_direct_terms"
         statement = (
-            "The final LR uses RPTE leaf indicators plus HUGIML source columns that were not "
-            "selected in any accepted RPTE split. Direct source terms can be originals, "
-            "HUG patterns, or augmented pairs."
-        )
+            "The final LR uses RPTE leaf indicators plus direct HUGIML source terms. "
+            + (
+                "Patterns above order two are direct-only; originals, generated pairs, and "
+                "lower-order patterns may be tree primitives. "
+                if direct_only_higher_order
+                else ""
+            )
+            + (
+                "Structurally equivalent leaf-pattern aliases are represented once."
+                if alias_rows
+                else ""
+            )
+        ).strip()
         uses_leaf_rules = True
         uses_source_directly = True
     else:
         representation = "rpte_leaf_rules"
-        statement = (
-            "The final LR uses only RPTE root-to-leaf conjunction indicators. Original "
-            "features, HUG patterns, and augmented pairs are RPTE tree inputs, not direct LR terms."
-        )
+        statement = "The final LR uses only RPTE root-to-leaf conjunction indicators."
+        if direct_only_higher_order:
+            statement += " Patterns above order two are not used as tree primitives."
         uses_leaf_rules = True
         uses_source_directly = False
 
@@ -331,11 +374,13 @@ def _get_rpte_feature_flow_audit(model: Any) -> dict[str, Any]:
         "direct_source_nonzero_term_count": int(sum(abs(float(row.get("final_logistic_coefficient") or 0.0)) >= 1e-12 for row in direct_rows)),
         "direct_source_family_counts": direct_family_counts,
         "tree_used_source_feature_count": tree_used_count,
+        "suppressed_leaf_pattern_alias_count": len(alias_rows),
         "source_feature_count": int(counts.get("total", 0) or len(source_names)),
         "source_feature_counts": counts,
         "final_lr_uses_leaf_rules": uses_leaf_rules,
         "final_lr_uses_source_features_directly": uses_source_directly,
         "source_features_are_tree_inputs": uses_leaf_rules,
+        "patterns_above_order_two_are_direct_only": direct_only_higher_order,
         "statement": statement,
     }
     return {**explicit, **inferred}

@@ -8,11 +8,11 @@ Bounded lookahead (enable_lookahead=True). Each tree is grown natively
 (see `_hugiml_core.rpte_grow_tree` in native/rpte_tree.cpp): leaf-wise
 best-first, trying an ordinary greedy stump at each leaf first and
 falling back to a bounded depth-two microtree search when the stump's
-held-out gain stalls. A microtree's root is a raw-feature pair (mined
-by HUGIML or synthesized on the fly) and its child is a single raw
-feature or another pair, optionally extended one more level for
-5-way/6-way interactions. A candidate is committed only when its
-probe-set gain clears both fixed thresholds and a Bonferroni-corrected
+held-out gain stalls. A microtree's root is a two-source feature supplied by
+HUGIML or synthesized on the fly, and its child is a single raw feature or
+another pair, optionally extended one more level for 5-way/6-way interactions.
+A candidate is committed only when its
+probe-set gain clears the configured thresholds and a Bonferroni-corrected
 statistical-significance bar. This module's role is orchestration: it
 drives the boosting loop, resolves HUGIML's feature catalog into the
 raw-feature-index form the native engine expects, and renders the
@@ -41,10 +41,15 @@ gradient of binomial deviance (r_i = y_i - sigmoid(F(x_i))); each
 tree's leaf values are the exact per-leaf Newton step, and a tree is
 kept only if a backtracking line search verifies it lowers deviance.
 
-Final downstream model. The L1 logistic layer receives every accepted tree
-leaf indicator plus each supplied HUGIML downstream column that was not selected
-in an accepted tree split. A supplied feature is therefore represented either
-directly or through RPTE leaf conjunctions, never both.
+Representation roles. Original columns, augmented pairs, and mined patterns of
+order one or two are eligible for RPTE tree growth. Mined patterns above order
+two are direct-only sparse terms. They cannot become tree roots, children, or
+ordinary splits. The final L1 logistic layer receives every
+accepted tree leaf indicator plus each supplied downstream column that was not
+selected in an accepted split. If an unused mined pattern of any order has the same positive atom
+conjunction, raw-feature ownership, and fitted support as a leaf, the direct
+copy is suppressed and recorded as an alias. Each fitted component is
+represented once in the final LR.
 
 Split acceptance. A partition's information gain is, via Wilks'
 theorem, asymptotically a chi-squared statistic. Because the lookahead
@@ -57,6 +62,7 @@ for the calibration this module relies on.
 
 from __future__ import annotations
 
+import hashlib
 import re
 from dataclasses import dataclass
 from typing import Any, Callable
@@ -284,6 +290,29 @@ def leaf_path_conditions(
     return list(reversed(conditions))
 
 
+def _leaf_path_feature_indices(
+    tree: DecisionTreeClassifier, leaf_id: int
+) -> list[int]:
+    """Return local split-feature indices on one sklearn tree leaf path."""
+    tree_ = tree.tree_
+    parent: dict[int, int] = {}
+    for node in range(tree_.node_count):
+        left, right = tree_.children_left[node], tree_.children_right[node]
+        if left != -1:
+            parent[int(left)] = node
+        if right != -1:
+            parent[int(right)] = node
+    features: list[int] = []
+    node = int(leaf_id)
+    while node in parent:
+        parent_node = parent[node]
+        feature = int(tree_.feature[parent_node])
+        if feature >= 0:
+            features.append(feature)
+        node = parent_node
+    return list(reversed(features))
+
+
 def leaf_path_conditions_with_thresholds(
     tree: DecisionTreeClassifier, leaf_id: int, feature_names: list[str]
 ) -> list[tuple[str, float, bool]]:
@@ -309,9 +338,7 @@ def leaf_path_conditions_with_thresholds(
 
 
 def _pattern_atoms(name: str) -> list[tuple[str, str]] | None:
-    """Parse a HUGIML pattern column name like "pattern:x0=1, x1=1" into
-    its atomic (feature, value) requirements, or None if `name` isn't a
-    pattern column."""
+    """Parse a simple equality-only HUGIML pattern column name."""
     match = _PATTERN_LABEL.match(name)
     if match is None:
         return None
@@ -322,6 +349,95 @@ def _pattern_atoms(name: str) -> list[tuple[str, str]] | None:
         feature, value = term.rsplit("=", 1)
         atoms.append((feature, value))
     return atoms
+
+
+def _normalized_atom_value(value: Any) -> tuple[str, object]:
+    text = str(value).strip()
+    try:
+        number = float(text)
+    except (TypeError, ValueError):
+        return ("text", text)
+    if np.isfinite(number):
+        return ("number", float(number))
+    return ("text", text)
+
+
+def _pattern_atom_signature(
+    name: str,
+    pattern_metadata: dict[str, Any],
+) -> tuple[tuple[object, ...], ...] | None:
+    """Return a canonical atom signature for a mined pattern column."""
+    info = pattern_metadata.get(name)
+    raw_atoms = info.get("atoms", []) if isinstance(info, dict) else []
+    tokens: list[tuple[object, ...]] = []
+    if raw_atoms:
+        for atom in raw_atoms:
+            if not isinstance(atom, dict):
+                return None
+            feature = str(atom.get("feature") or "").strip()
+            operation = str(atom.get("operator") or "").strip()
+            if not feature:
+                return None
+            if operation == "equals":
+                tokens.append(
+                    ("equals", feature, *_normalized_atom_value(atom.get("value")))
+                )
+            elif operation == "interval":
+                try:
+                    lower = float(atom.get("lower"))
+                    upper = float(atom.get("upper"))
+                except (TypeError, ValueError):
+                    return None
+                tokens.append(
+                    (
+                        "interval",
+                        feature,
+                        lower,
+                        upper,
+                        bool(atom.get("lower_inclusive", True)),
+                        bool(atom.get("upper_inclusive", False)),
+                    )
+                )
+            elif operation == "present":
+                tokens.append(("present", feature))
+            else:
+                return None
+    else:
+        parsed = _pattern_atoms(name)
+        if parsed is None:
+            return None
+        tokens.extend(
+            ("equals", str(feature), *_normalized_atom_value(value))
+            for feature, value in parsed
+        )
+    return tuple(sorted(set(tokens), key=repr)) if tokens else None
+
+
+def _leaf_pattern_signature(
+    conditions: list[tuple[str, float, bool]],
+    pattern_metadata: dict[str, Any],
+) -> tuple[tuple[object, ...], ...] | None:
+    """Return the exact positive-atom conjunction represented by a leaf path."""
+    tokens: list[tuple[object, ...]] = []
+    for column_name, threshold, is_right in conditions:
+        name = str(column_name)
+        if name.startswith("pattern:"):
+            if not is_right or not (0.0 <= float(threshold) < 1.0):
+                return None
+            signature = _pattern_atom_signature(name, pattern_metadata)
+            if signature is None:
+                return None
+            tokens.extend(signature)
+            continue
+        dummy = _orig_dummy_atom(name)
+        if dummy is not None:
+            if not is_right or not (0.0 <= float(threshold) < 1.0):
+                return None
+            feature, value = dummy
+            tokens.append(("equals", feature, *_normalized_atom_value(value)))
+            continue
+        return None
+    return tuple(sorted(set(tokens), key=repr)) if tokens else None
 
 
 def _orig_dummy_atom(name: str) -> tuple[str, str] | None:
@@ -632,6 +748,7 @@ class _DefaultRPTEFeatureExtractor:
         random_state: int = 42,
         owner_by_column: dict[int, frozenset[str]] | None = None,
         reserve_raw_features: bool = True,
+        eligible_columns: tuple[int, ...] | list[int] | None = None,
     ):
         if leaf_config not in LEAF_CONFIGS:
             raise ValueError(
@@ -653,15 +770,9 @@ class _DefaultRPTEFeatureExtractor:
         # LeafWiseBoundedLookaheadRPTEFeatureExtractor._fit_default_backend,
         # which always supplies it), this backend reserves by raw-feature
         # NAME -- once any tree uses a column derived from "age", every
-        # later tree is blocked from using orig:age, any pattern containing
-        # age, any augmented pair containing age, and any RPTE-synthesized
-        # pair containing age, matching the bounded-lookahead backend's
-        # ownership model. Without name-based grouping, two trees could
-        # each claim a different downstream column that both derive from
-        # the same raw feature (orig:age, pattern:age=[50,60),
-        # augmented_pair:age*income are three columns, one raw source),
-        # understating how much that feature is actually reused and
-        # double-counting its apparent importance.
+        # later tree is blocked from using another tree-eligible column with
+        # the same raw source. Exact leaf-pattern aliases are canonicalized
+        # before the final logistic layer.
         #
         # When owner_by_column is None (standalone use outside a HUGIML-
         # fitted context), reservation falls back to plain column-index
@@ -671,6 +782,11 @@ class _DefaultRPTEFeatureExtractor:
         # their accuracy/diversity tradeoff.
         self.owner_by_column = dict(owner_by_column) if owner_by_column else None
         self.reserve_raw_features = bool(reserve_raw_features)
+        self.eligible_columns = (
+            tuple(sorted({int(idx) for idx in eligible_columns}))
+            if eligible_columns is not None
+            else None
+        )
         self.reserved_raw_features_: list[set[str]] = []
 
     def fit_leaves(self, X, y) -> sparse.csr_matrix:
@@ -679,13 +795,18 @@ class _DefaultRPTEFeatureExtractor:
         y01 = np.asarray(y, dtype=float)
         y01 = (y01 == y01.max()).astype(np.int8)
         n_cols = X.shape[1]
+        base_columns = (
+            list(range(n_cols))
+            if self.eligible_columns is None
+            else [idx for idx in self.eligible_columns if 0 <= idx < n_cols]
+        )
         use_raw_ownership = self.owner_by_column is not None and self.reserve_raw_features
         if use_raw_ownership:
             available_raw: set[str] = set()
-            for idx in range(n_cols):
+            for idx in base_columns:
                 available_raw |= self.owner_by_column.get(idx, frozenset({str(idx)}))
         else:
-            available: set[int] = set(range(n_cols))
+            available: set[int] = set(base_columns)
         self.trees_, self.tree_columns_, self.leaf_vocab_ = [], [], []
         self.tree_leaf_values_: list[dict[int, float]] = []
         self.reserved_raw_features_ = []
@@ -694,7 +815,7 @@ class _DefaultRPTEFeatureExtractor:
             if use_raw_ownership:
                 columns = [
                     idx
-                    for idx in range(n_cols)
+                    for idx in base_columns
                     if not self.owner_by_column.get(idx, frozenset())
                     or self.owner_by_column[idx].issubset(available_raw)
                 ]
@@ -764,16 +885,8 @@ class _DefaultRPTEFeatureExtractor:
         (one per leaf-match column, in fit_leaves' column order) back into
         human-readable root-to-leaf conjunctions, sorted by |coefficient|.
 
-        When the extractor was fit on a feature space that mixes raw
-        features with mined HUGIML pattern columns (as feature_mode=
-        "original_plus_patterns" does), a leaf's path can legally include
-        both a pattern condition and one of that pattern's own constituent
-        raw conditions -- the tree doesn't know one determines the other, so
-        it may split on both even though one is then logically redundant
-        (see simplify_conditions). Every rule here has already had that
-        redundancy removed, so each surviving condition is genuinely
-        independent information, not just a technically-true restatement of
-        another condition already in the same rule.
+        Patterns above order two stay outside tree growth. The simplification
+        step keeps order-one and order-two pattern paths concise.
         """
         if not self.trees_:
             raise ValueError("rule_table() needs fit_leaves() to have run first.")
@@ -1003,12 +1116,9 @@ class LeafWiseBoundedLookaheadRPTEFeatureExtractor:
     ):
         self.feature_names_ = list(feature_names)
         self.augmented_catalog_ = [dict(item) for item in augmented_catalog]
-        # Raw-feature provenance for mined HUG pattern columns -- see
-        # HUGIMLClassifierNative.get_pattern_provenance(). Used below to
-        # reserve a pattern's actual constituent raw features (not just
-        # the pattern's own column name), so a later tree can't sidestep
-        # reservation by reusing a different pattern built from the same
-        # underlying raw feature.
+        # Raw-feature ownership for mined HUG pattern columns. Patterns above
+        # order two are direct-only; order-one and order-two patterns remain
+        # eligible for tree growth.
         self.pattern_provenance_ = dict(pattern_provenance or {})
         # Standardization (mean, scale) and median-imputation value per raw
         # original feature. Used by rule_table()/unified_rule_table() to
@@ -1024,30 +1134,22 @@ class LeafWiseBoundedLookaheadRPTEFeatureExtractor:
         return np.asarray(X, dtype=np.float64)
 
     def _metadata(self, n_cols: int):
-        """Resolves HUGIML's downstream column catalog into the raw-
-        feature-index form the native engine needs, plus the original
-        name-based ownership map _DefaultRPTEFeatureExtractor still uses
-        (kept for the fallback chain, which is unrelated to the native
-        lookahead engine).
+        """Resolve downstream columns into explicit RPTE representation roles.
 
-        Returns (names, raw_indices, roots, owner_by_column_names,
-        reservable_names, owner_by_column_native, initial_available_native,
-        raw_name_by_index):
-          names: display name per downstream column.
-          raw_indices: column indices whose name starts with "orig:".
-          roots: (index, name, (source_a_name, source_b_name), operation)
-            for every column usable as a lookahead root -- an existing
-            HUGIML augmented pair, or a 2-raw-feature mined pattern.
-          owner_by_column_names / reservable_names: name-keyed ownership,
-            for _DefaultRPTEFeatureExtractor's own reservation logic.
-          owner_by_column_native: raw-column-index ownership per column,
-            for the native engine -- a column with no resolvable raw
-            provenance owns itself (its own index), so it still gets
-            reserved exactly once even though it can't be tied to a
-            specific raw feature.
-          initial_available_native: every ownership token that appears in
-            owner_by_column_native, i.e. the reservation pool a fit starts
-            with.
+        Mined patterns above order two are direct-only terms. Original columns,
+        augmented-pair columns, order-one and order-two patterns, and opaque
+        non-pattern columns remain eligible for tree growth. Raw-index ownership
+        is supplied to the native engine, and name-based ownership is used by
+        the sequential backend and final alias canonicalization.
+
+        Returns
+        -------
+        tuple
+            ``(names, raw_indices, roots, owner_by_column_names,
+            reservable_names, owner_by_column_native,
+            initial_available_native, raw_name_by_index,
+            tree_eligible_columns, direct_only_pattern_columns,
+            pattern_columns)``.
         """
         names = (
             list(self.feature_names_)
@@ -1070,46 +1172,96 @@ class LeafWiseBoundedLookaheadRPTEFeatureExtractor:
             f"augmented_pair:{item.get('name')}": item for item in self.augmented_catalog_
         }
         roots: list[tuple[int, str, tuple[str, str], str]] = []
+        tree_eligible_columns: set[int] = set(range(n_cols))
+        direct_only_pattern_columns: list[int] = []
+        pattern_columns: list[int] = []
         reservable_names = set(raw_name_by_index.values())
 
         for idx, name in enumerate(names):
             if idx in raw_index_set:
                 continue
-            item = catalog_by_name.get(str(name))
+            text_name = str(name)
+            item = catalog_by_name.get(text_name)
             if item is not None:
                 inputs = tuple(map(str, item.get("inputs", [])))
                 if len(inputs) == 2:
                     operation = str(item.get("operation", ""))
                     owner_by_column_names[idx] = frozenset(inputs)
+                    reservable_names.update(inputs)
                     resolved = [raw_index_by_name[s] for s in inputs if s in raw_index_by_name]
-                    owner_by_column_native[idx] = sorted(set(resolved)) if len(resolved) == 2 else [idx]
-                    roots.append((idx, str(name), (inputs[0], inputs[1]), operation))
+                    owner_by_column_native[idx] = (
+                        sorted(set(resolved)) if len(resolved) == 2 else [idx]
+                    )
+                    roots.append((idx, text_name, (inputs[0], inputs[1]), operation))
                     continue
-            raw_entry = self.pattern_provenance_.get(str(name))
+
+            raw_entry = self.pattern_provenance_.get(text_name)
             if isinstance(raw_entry, dict):
                 pattern_sources = tuple(str(f) for f in raw_entry.get("raw_features", ()))
+                try:
+                    pattern_order = int(raw_entry.get("order", len(pattern_sources)))
+                except (TypeError, ValueError):
+                    pattern_order = len(pattern_sources)
             elif raw_entry:
                 pattern_sources = tuple(str(f) for f in raw_entry)
+                pattern_order = len(pattern_sources)
             else:
                 pattern_sources = ()
-            if pattern_sources:
-                owner_by_column_names[idx] = frozenset(pattern_sources)
-                reservable_names.update(pattern_sources)
-                resolved = [raw_index_by_name[s] for s in pattern_sources if s in raw_index_by_name]
-                owner_by_column_native[idx] = (
-                    sorted(set(resolved)) if len(resolved) == len(pattern_sources) else [idx]
-                )
-                if len(pattern_sources) == 2:
-                    roots.append((idx, str(name), (pattern_sources[0], pattern_sources[1]), "pattern"))
+                pattern_order = 0
+            is_pattern = text_name.startswith("pattern:") or raw_entry is not None
+            if is_pattern:
+                pattern_columns.append(idx)
+                if pattern_sources:
+                    owner_by_column_names[idx] = frozenset(pattern_sources)
+                    reservable_names.update(pattern_sources)
+                    resolved = [
+                        raw_index_by_name[source]
+                        for source in pattern_sources
+                        if source in raw_index_by_name
+                    ]
+                    owner_by_column_native[idx] = (
+                        sorted(set(resolved))
+                        if len(resolved) == len(pattern_sources)
+                        else [idx]
+                    )
+                else:
+                    owner_by_column_names[idx] = frozenset({text_name})
+                    owner_by_column_native[idx] = [idx]
+                    # Opaque pattern column with no resolved raw sources: record its
+                    # own name so remaining_raw_features_ accounts for it.
+                    reservable_names.add(text_name)
+                if pattern_order > 2:
+                    direct_only_pattern_columns.append(idx)
+                    tree_eligible_columns.discard(idx)
+                elif pattern_order == 2 and len(pattern_sources) == 2:
+                    roots.append(
+                        (
+                            idx,
+                            text_name,
+                            (pattern_sources[0], pattern_sources[1]),
+                            "pattern",
+                        )
+                    )
                 continue
-            own_name = str(name)
-            owner_by_column_names.setdefault(idx, frozenset({own_name}))
-            reservable_names.add(own_name)
+
+            owner_by_column_names[idx] = frozenset({text_name})
+            reservable_names.add(text_name)
             owner_by_column_native[idx] = [idx]
 
+        tree_eligible = sorted(tree_eligible_columns)
         initial_available_native: set[int] = set()
-        for owners in owner_by_column_native:
-            initial_available_native.update(owners)
+        for idx in tree_eligible:
+            initial_available_native.update(owner_by_column_native[idx])
+
+        self.tree_eligible_input_indices_ = np.asarray(tree_eligible, dtype=np.int64)
+        self.direct_only_pattern_indices_ = np.asarray(
+            sorted(direct_only_pattern_columns), dtype=np.int64
+        )
+        self.pattern_input_indices_ = np.asarray(sorted(pattern_columns), dtype=np.int64)
+        self.higher_order_patterns_direct_only_ = True
+        self.owner_by_column_names_ = dict(owner_by_column_names)
+        self.owner_by_column_native_ = [list(owners) for owners in owner_by_column_native]
+        self.raw_name_by_index_ = dict(raw_name_by_index)
 
         return (
             names,
@@ -1120,6 +1272,9 @@ class LeafWiseBoundedLookaheadRPTEFeatureExtractor:
             owner_by_column_native,
             initial_available_native,
             raw_name_by_index,
+            tree_eligible,
+            sorted(direct_only_pattern_columns),
+            sorted(pattern_columns),
         )
 
     def _fit_default_backend(
@@ -1128,6 +1283,7 @@ class LeafWiseBoundedLookaheadRPTEFeatureExtractor:
         y: np.ndarray,
         reason: str,
         owner_by_column: dict[int, frozenset[str]] | None = None,
+        eligible_columns: list[int] | tuple[int, ...] | None = None,
     ) -> sparse.csr_matrix:
         """Dispatch to _DefaultRPTEFeatureExtractor (sequential RPTE, no
         augmented-pair/microtree machinery) and record why -- shared by all
@@ -1143,10 +1299,9 @@ class LeafWiseBoundedLookaheadRPTEFeatureExtractor:
              greedy tree ensemble might still find SOMETHING even where
              bounded lookahead's stricter, more specific criteria found
              nothing. Reserves by raw-feature NAME across its own trees
-             when `owner_by_column` is supplied -- the same ownership model the bounded-lookahead backend
-             uses, rather than merely reserving whole downstream columns
-             (which would let, say, orig:age and pattern:age=[50,60) be
-             claimed by two different trees despite sharing a raw source).
+             when `owner_by_column` is supplied -- the same ownership model
+             the bounded-lookahead backend uses for original and generated-pair
+             tree primitives.
           2. If sequential RPTE ALSO can't find a single valid split
              (raises ValueError -- happens on genuinely tiny samples,
              e.g. Longley's n=16, where min_samples_leaf/min_probe_leaf
@@ -1197,6 +1352,7 @@ class LeafWiseBoundedLookaheadRPTEFeatureExtractor:
                 random_state=self.random_state,
                 owner_by_column=owner_by_column,
                 reserve_raw_features=self.reserve_raw_features,
+                eligible_columns=eligible_columns,
             )
             leaves = self._default_fe.fit_leaves(Xd, y)
             self.is_degenerate_ = False
@@ -1240,16 +1396,22 @@ class LeafWiseBoundedLookaheadRPTEFeatureExtractor:
             owner_by_column_native,
             available_native,
             raw_name_by_index,
+            tree_eligible_columns,
+            _direct_only_pattern_columns,
+            _pattern_columns,
         ) = self._metadata(Xd.shape[1])
         self.default_backend_reason_: str | None = None
         self._raw_feature_fallback_ = False
 
         if not roots:
-            # No augmented pairs at all to build a microtree root from --
-            # see _fit_default_backend's docstring. Unconditional: even
-            # enable_lookahead=True can't do its intended job here.
             self.remaining_raw_features_ = set(available_names)
-            return self._fit_default_backend(Xd, y, "no_augmented_pairs", owner_by_column_names)
+            return self._fit_default_backend(
+                Xd,
+                y,
+                "no_augmented_pairs",
+                owner_by_column_names,
+                tree_eligible_columns,
+            )
 
         use_lookahead = self.enable_lookahead
         if use_lookahead == "adaptive":
@@ -1266,7 +1428,11 @@ class LeafWiseBoundedLookaheadRPTEFeatureExtractor:
 
         if not use_lookahead:
             return self._fit_default_backend(
-                Xd, y, "enable_lookahead_false_or_adaptive_strong_marginal_signal", owner_by_column_names
+                Xd,
+                y,
+                "enable_lookahead_false_or_adaptive_strong_marginal_signal",
+                owner_by_column_names,
+                tree_eligible_columns,
             )
 
         self._default_fe = None
@@ -1294,8 +1460,9 @@ class LeafWiseBoundedLookaheadRPTEFeatureExtractor:
             # used. Once used, permanent for the rest of this fit.
             eligible_columns = [
                 idx
-                for idx in range(Xd.shape[1])
-                if not owner_by_column_native[idx] or set(owner_by_column_native[idx]).issubset(available_raw)
+                for idx in tree_eligible_columns
+                if not owner_by_column_native[idx]
+                or set(owner_by_column_native[idx]).issubset(available_raw)
             ]
             if not eligible_columns:
                 return None
@@ -1379,7 +1546,13 @@ class LeafWiseBoundedLookaheadRPTEFeatureExtractor:
             # raises -- it tries sequential RPTE first, then degrades
             # further on its own if even that fails.
             self.remaining_raw_features_ = set(available_names)
-            return self._fit_default_backend(Xd, y, "lookahead_degenerate", owner_by_column_names)
+            return self._fit_default_backend(
+                Xd,
+                y,
+                "lookahead_degenerate",
+                owner_by_column_names,
+                tree_eligible_columns,
+            )
         self.remaining_raw_features_ = {
             raw_name_by_index.get(tok, names[tok] if tok < len(names) else str(tok))
             for tok in available_raw
@@ -1407,6 +1580,171 @@ class LeafWiseBoundedLookaheadRPTEFeatureExtractor:
                 return sparse.csr_matrix(Xd)
             return sparse.csr_matrix(np.ones((Xd.shape[0], 1), dtype=np.float32))
         return self._leaf_matrix(Xd)
+
+    def leaf_column_descriptors(self) -> list[dict[str, Any]]:
+        """Describe extracted leaf columns in the exact matrix column order."""
+        if self._default_fe is not None:
+            return [
+                {
+                    "leaf_feature_index": column_index,
+                    "tree_index": tree_index,
+                    "leaf_index": int(leaf_id),
+                    "backend": "sequential_default",
+                }
+                for column_index, (tree_index, leaf_id) in enumerate(
+                    (tree_index, leaf_id)
+                    for tree_index, vocab in enumerate(self._default_fe.leaf_vocab_)
+                    for leaf_id in vocab
+                )
+            ]
+        if bool(getattr(self, "_raw_feature_fallback_", False)):
+            return [
+                {
+                    "leaf_feature_index": idx,
+                    "tree_index": None,
+                    "leaf_index": idx,
+                    "backend": "raw_hugiml_features",
+                }
+                for idx in range(len(self.feature_names_))
+            ]
+        if bool(getattr(self, "is_degenerate_", False)):
+            return [
+                {
+                    "leaf_feature_index": 0,
+                    "tree_index": None,
+                    "leaf_index": None,
+                    "backend": "constant",
+                }
+            ]
+        return [
+            {
+                "leaf_feature_index": column_index,
+                "tree_index": tree_index,
+                "leaf_index": int(leaf_id),
+                "backend": "bounded_lookahead",
+            }
+            for column_index, (tree_index, leaf_id) in enumerate(
+                (tree_index, leaf_id)
+                for tree_index, vocab in enumerate(self.tree_leaf_ids_)
+                for leaf_id in vocab
+            )
+        ]
+
+    def leaf_pattern_signatures(
+        self,
+    ) -> list[tuple[tuple[object, ...], ...] | None]:
+        """Canonical positive-atom signatures aligned with leaf matrix columns."""
+        metadata = dict(getattr(self, "pattern_provenance_", {}))
+        if self._default_fe is not None:
+            signatures: list[tuple[tuple[object, ...], ...] | None] = []
+            for tree, columns, vocab in zip(
+                self._default_fe.trees_,
+                self._default_fe.tree_columns_,
+                self._default_fe.leaf_vocab_,
+            ):
+                names = [
+                    self.feature_names_[idx]
+                    if 0 <= int(idx) < len(self.feature_names_)
+                    else f"x{idx}"
+                    for idx in columns
+                ]
+                for leaf_id in vocab:
+                    signatures.append(
+                        _leaf_pattern_signature(
+                            leaf_path_conditions_with_thresholds(tree, int(leaf_id), names), metadata
+                        )
+                    )
+            return signatures
+        if bool(getattr(self, "_raw_feature_fallback_", False)):
+            return [None for _ in range(len(self.feature_names_))]
+        if bool(getattr(self, "is_degenerate_", False)):
+            return [None]
+
+        signatures = []
+        for tree_index, (tree_dict, vocab) in enumerate(
+            zip(self.trees_, self.tree_leaf_ids_)
+        ):
+            names = (
+                self._tree_names_[tree_index]
+                if tree_index < len(self._tree_names_)
+                else list(self.feature_names_)
+            )
+            conditions = _walk_native_tree_leaf_conditions(tree_dict)
+            for leaf_id in vocab:
+                rendered = [
+                    (
+                        names[feature_idx]
+                        if 0 <= int(feature_idx) < len(names)
+                        else f"col{feature_idx}",
+                        float(threshold),
+                        bool(is_right),
+                    )
+                    for feature_idx, threshold, is_right in conditions.get(
+                        int(leaf_id), []
+                    )
+                ]
+                signatures.append(_leaf_pattern_signature(rendered, metadata))
+        return signatures
+
+    def leaf_raw_owner_sets(self) -> list[frozenset[str]]:
+        """Raw-feature ownership for each extracted leaf matrix column."""
+        if self._default_fe is not None:
+            default_fe = self._default_fe
+            owner_by_column = default_fe.owner_by_column or {}
+            owners: list[frozenset[str]] = []
+            for tree, columns, vocab in zip(
+                default_fe.trees_, default_fe.tree_columns_, default_fe.leaf_vocab_
+            ):
+                for leaf_id in vocab:
+                    raw: set[str] = set()
+                    for local_idx in _leaf_path_feature_indices(tree, int(leaf_id)):
+                        if 0 <= local_idx < len(columns):
+                            global_idx = int(columns[local_idx])
+                            raw.update(
+                                owner_by_column.get(global_idx, frozenset({str(global_idx)}))
+                            )
+                    owners.append(frozenset(raw))
+            return owners
+
+        owner_by_column = dict(getattr(self, "owner_by_column_names_", {}))
+        if bool(getattr(self, "_raw_feature_fallback_", False)):
+            return [
+                owner_by_column.get(idx, frozenset({str(idx)}))
+                for idx in range(len(self.feature_names_))
+            ]
+        if bool(getattr(self, "is_degenerate_", False)):
+            return [frozenset()]
+
+        raw_name_by_index = dict(getattr(self, "raw_name_by_index_", {}))
+        base_count = len(self.feature_names_)
+
+        def _owner_names(tree_dict: dict[str, Any], feature_idx: int) -> frozenset[str]:
+            if feature_idx < base_count:
+                return owner_by_column.get(feature_idx, frozenset({str(feature_idx)}))
+            spec_idx = feature_idx - base_count
+            specs = tree_dict.get("synthetic_specs", [])
+            if not 0 <= spec_idx < len(specs):
+                return frozenset({str(feature_idx)})
+            raw: set[str] = set()
+            for token in specs[spec_idx].get("owners", []):
+                token = int(token)
+                if token in raw_name_by_index:
+                    raw.add(raw_name_by_index[token])
+                elif token in owner_by_column:
+                    raw.update(owner_by_column[token])
+                else:
+                    raw.add(str(token))
+            return frozenset(raw)
+
+        owners = []
+        for tree_dict, vocab in zip(self.trees_, self.tree_leaf_ids_):
+            conditions = _walk_native_tree_leaf_conditions(tree_dict)
+            for leaf_id in vocab:
+                raw: set[str] = set()
+                for feature_idx, _threshold, _is_right in conditions.get(int(leaf_id), []):
+                    raw.update(_owner_names(tree_dict, int(feature_idx)))
+                owners.append(frozenset(raw))
+        return owners
 
     def growth_summary(self) -> list[dict[str, Any]]:
         """Only meaningful when this fit actually used the bounded-
@@ -1660,20 +1998,158 @@ class LeafWiseBoundedLookaheadRPTEFeatureLR(ClassifierMixin, BaseEstimator):
                     used.add(idx)
         return used
 
+    @staticmethod
+    def _binary_support(
+        matrix_csc: sparse.csc_matrix, column_index: int
+    ) -> np.ndarray | None:
+        """Return sorted support rows for a nonconstant binary indicator column."""
+        start = int(matrix_csc.indptr[column_index])
+        end = int(matrix_csc.indptr[column_index + 1])
+        rows = np.asarray(matrix_csc.indices[start:end], dtype=np.int64)
+        data = np.asarray(matrix_csc.data[start:end], dtype=float)
+        if rows.size == 0 or rows.size == matrix_csc.shape[0]:
+            return None
+        if data.size != rows.size or not np.allclose(data, 1.0, rtol=0.0, atol=1e-12):
+            return None
+        return rows
+
+    @staticmethod
+    def _support_digest(rows: np.ndarray) -> bytes:
+        contiguous = np.ascontiguousarray(rows, dtype=np.int64)
+        return hashlib.blake2b(contiguous.view(np.uint8), digest_size=16).digest()
+
+    def _find_leaf_pattern_aliases(
+        self,
+        X_csr: sparse.csr_matrix,
+        leaves: sparse.csr_matrix,
+        direct_candidates: list[int],
+    ) -> list[dict[str, Any]]:
+        """Find structurally equivalent leaf and direct-pattern representations."""
+        if bool(getattr(self.fe_, "_raw_feature_fallback_", False)):
+            return []
+        pattern_indices = set(
+            int(idx) for idx in getattr(self.fe_, "pattern_input_indices_", [])
+        )
+        pattern_candidates = [idx for idx in direct_candidates if idx in pattern_indices]
+        if not pattern_candidates or leaves.shape[1] == 0:
+            return []
+
+        pattern_matrix = X_csr[:, pattern_candidates].tocsc(copy=True)
+        pattern_matrix.sum_duplicates()
+        pattern_matrix.eliminate_zeros()
+        pattern_matrix.sort_indices()
+        leaves_csc = leaves.tocsc(copy=True)
+        leaves_csc.sum_duplicates()
+        leaves_csc.eliminate_zeros()
+        leaves_csc.sort_indices()
+
+        owner_by_column = dict(getattr(self.fe_, "owner_by_column_names_", {}))
+        leaf_owners = self.fe_.leaf_raw_owner_sets()
+        leaf_signatures = self.fe_.leaf_pattern_signatures()
+        descriptors = self.fe_.leaf_column_descriptors()
+        names = list(self.hugiml_feature_names or [])
+        metadata = dict(self.hugiml_pattern_provenance or {})
+        buckets: dict[
+            tuple[frozenset[str], tuple[tuple[object, ...], ...], int, bytes],
+            list[tuple[int, np.ndarray]],
+        ] = {}
+        for local_idx, input_idx in enumerate(pattern_candidates):
+            owners = frozenset(owner_by_column.get(input_idx, frozenset()))
+            name = names[input_idx] if input_idx < len(names) else f"col{input_idx}"
+            signature = _pattern_atom_signature(str(name), metadata)
+            if not owners or signature is None:
+                continue
+            support = self._binary_support(pattern_matrix, local_idx)
+            if support is None:
+                continue
+            key = (
+                owners,
+                signature,
+                int(support.size),
+                self._support_digest(support),
+            )
+            buckets.setdefault(key, []).append((input_idx, support))
+
+        aliases: list[dict[str, Any]] = []
+        suppressed: set[int] = set()
+        for leaf_idx in range(leaves_csc.shape[1]):
+            owners = leaf_owners[leaf_idx] if leaf_idx < len(leaf_owners) else frozenset()
+            signature = (
+                leaf_signatures[leaf_idx]
+                if leaf_idx < len(leaf_signatures)
+                else None
+            )
+            if not owners or signature is None:
+                continue
+            support = self._binary_support(leaves_csc, leaf_idx)
+            if support is None:
+                continue
+            key = (
+                owners,
+                signature,
+                int(support.size),
+                self._support_digest(support),
+            )
+            descriptor = (
+                dict(descriptors[leaf_idx])
+                if leaf_idx < len(descriptors)
+                else {"leaf_feature_index": leaf_idx}
+            )
+            for input_idx, candidate_support in buckets.get(key, []):
+                if input_idx in suppressed or not np.array_equal(support, candidate_support):
+                    continue
+                suppressed.add(input_idx)
+                name = names[input_idx] if input_idx < len(names) else f"col{input_idx}"
+                aliases.append(
+                    {
+                        "alias_role": "suppressed_direct_pattern",
+                        "canonical_role": "rpte_leaf",
+                        "reason": "equivalent_leaf_pattern_conjunction",
+                        "downstream_feature_index": int(input_idx),
+                        "downstream_feature": str(name),
+                        "raw_sources": sorted(owners),
+                        "support_count": int(support.size),
+                        **descriptor,
+                    }
+                )
+        return aliases
+
     def _fit_final_feature_layout(
         self,
         X_csr: sparse.csr_matrix,
         leaves: sparse.csr_matrix,
     ) -> sparse.csr_matrix:
-        """Record the leaf/direct partition and build the final LR matrix."""
+        """Build a canonical leaf/direct final-LR representation."""
         self.n_input_features_ = int(X_csr.shape[1])
         self.n_features_in_ = self.n_input_features_
         self.n_leaf_features_ = int(leaves.shape[1])
 
         used = self._tree_used_input_columns(self.fe_, self.n_input_features_)
         self.tree_used_input_indices_ = np.asarray(sorted(used), dtype=np.int64)
-        direct = sorted(set(range(self.n_input_features_)) - used)
+        direct_candidates = sorted(set(range(self.n_input_features_)) - used)
+        self.candidate_direct_input_indices_ = np.asarray(
+            direct_candidates, dtype=np.int64
+        )
+        aliases = self._find_leaf_pattern_aliases(X_csr, leaves, direct_candidates)
+        suppressed = {int(item["downstream_feature_index"]) for item in aliases}
+        direct = [idx for idx in direct_candidates if idx not in suppressed]
         self.direct_input_indices_ = np.asarray(direct, dtype=np.int64)
+        self.suppressed_direct_alias_indices_ = np.asarray(
+            sorted(suppressed), dtype=np.int64
+        )
+        self.suppressed_direct_aliases_ = aliases
+        self.tree_eligible_input_indices_ = np.asarray(
+            getattr(self.fe_, "tree_eligible_input_indices_", []), dtype=np.int64
+        )
+        self.direct_only_pattern_indices_ = np.asarray(
+            getattr(self.fe_, "direct_only_pattern_indices_", []), dtype=np.int64
+        )
+        self.pattern_input_indices_ = np.asarray(
+            getattr(self.fe_, "pattern_input_indices_", []), dtype=np.int64
+        )
+        self.higher_order_patterns_direct_only_ = bool(
+            getattr(self.fe_, "higher_order_patterns_direct_only_", False)
+        )
 
         if self.direct_input_indices_.size:
             final_X = sparse.hstack(
@@ -1769,6 +2245,11 @@ class LeafWiseBoundedLookaheadRPTEFeatureLR(ClassifierMixin, BaseEstimator):
         self.logistic_.fit(final_X, y)
         return self
 
+    def representation_alias_table(self) -> list[dict[str, Any]]:
+        """Return direct pattern columns suppressed as exact RPTE leaf aliases."""
+        check_is_fitted(self, "logistic_")
+        return [dict(item) for item in getattr(self, "suppressed_direct_aliases_", [])]
+
     def predict_proba(self, X) -> np.ndarray:
         check_is_fitted(self, "logistic_")
         return self.logistic_.predict_proba(self._final_lr_matrix(X))
@@ -1800,9 +2281,9 @@ class LeafWiseBoundedLookaheadRPTEFeatureLR(ClassifierMixin, BaseEstimator):
         Tree rows include the class label, tree and leaf indices, backend,
         structured split conditions, raw source lineage, training support,
         downstream logistic coefficient, centered contribution, and Newton
-        leaf value. Direct-term rows identify supplied features that were not
-        used in an accepted tree split and were retained by the final sparse
-        logistic layer.
+        leaf value. Direct-term rows identify supplied features retained by the
+        final sparse logistic layer after tree-use and exact-alias
+        canonicalization.
 
         ``centered_tree_contribution`` expresses a leaf coefficient relative
         to its tree's support-weighted coefficient baseline. This avoids
@@ -2038,7 +2519,7 @@ class LeafWiseBoundedLookaheadRPTEFeatureLR(ClassifierMixin, BaseEstimator):
             # search materializes mid-fit get appended to this tree's own
             # column-name list as they're created (see
             # _native_tree_column_names), so a synthetic root's real name
-            # is only ever found there, not in the fixed HUGIML-mining-
+            # is only ever found there, not in the original HUGIML-mining-
             # time name list.
             tree_names = fe._tree_names_[tree_index]
             for local_idx, leaf_id in enumerate(vocab):

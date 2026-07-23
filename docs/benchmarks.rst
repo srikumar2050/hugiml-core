@@ -16,6 +16,31 @@ real-world experiment panel. Root-level ``experiments/`` runners are included
 in the source distribution and source checkout; they are not installed as
 wheel package modules.
 
+OpenML-CC18 benchmark
+---------------------
+
+The repository also includes an OpenML-CC18 workflow covering 36 classification
+datasets. It uses each OpenML task's official train/test indices for the outer
+evaluation and keeps preprocessing and optional parameter selection inside the
+corresponding training partition. This preserves the benchmark protocol while
+keeping the comparison reproducible from an offline dataset cache.
+
+The workflow consists of:
+
+* ``experiments/benchmark/download_openml_cc18_datasets.py`` for downloading and
+  validating the task data and split manifests;
+* ``experiments/benchmark/run_openml_cc18_offline_benchmark.py`` for resumable
+  task/model evaluation and static dashboard assembly; and
+* ``experiments/benchmark/openml_cc18_benchmarkREADME.md`` for operational
+  commands, cache layout, model selection, and result-file details.
+
+The generated ``openml_cc18_benchmark_dashboard.html`` summarizes paired AUC,
+runtime, model inspection units, instance inspection effort, task coverage,
+configuration details, and dataset-level results. HUGIML is compared with the
+selected available baselines under the same outer task splits. The workflow is
+resumable: completed task/model pairs are retained, while incomplete split
+attempts can be evaluated again without duplicating completed result rows.
+
 You can run the benchmark module directly or use the installed console script:
 
 .. code-block:: bash

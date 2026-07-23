@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Versioned serialization and SBOM generation for HUGIMLClassifierNative.
+"""Versioned serialization and SBOM generation for HUGIMLClassifier.
 
 Format (v3+ — current writer)
 -----------------------------
@@ -1077,7 +1077,7 @@ def save_model(clf: Any, path: str | os.PathLike) -> None:
 
     Parameters
     ----------
-    clf : HUGIMLClassifierNative
+    clf : HUGIMLClassifier
         A fitted classifier.
     path : str or Path
 
@@ -1415,7 +1415,7 @@ def load_model(
 
     Returns
     -------
-    HUGIMLClassifierNative
+    HUGIMLClassifier
 
     Raises
     ------
@@ -1518,7 +1518,7 @@ def _load_v3(path: str | os.PathLike) -> Any:
         return dict(loaded)
 
     # ── Reconstruct the classifier ────────────────────────────────────────────
-    from hugiml.classifier import FitMetadata, HUGIMLClassifierNative
+    from hugiml.classifier import FitMetadata, HUGIMLClassifier
 
     clf_init = json.loads(members["clf_init.json"])
     clf_fit = json.loads(members["clf_fit.json"])
@@ -1539,7 +1539,7 @@ def _load_v3(path: str | os.PathLike) -> Any:
     # them. For files saved before v9, `base_estimator` was never anything
     # but None (RPTE didn't exist yet), so this is a no-op for those files.
     safe_init = _reconstruct_params(clf_init)
-    clf = HUGIMLClassifierNative(**safe_init)
+    clf = HUGIMLClassifier(**safe_init)
 
     # Restore fitted attributes
     clf.n_features_in_ = int(clf_fit["n_features_in_"])

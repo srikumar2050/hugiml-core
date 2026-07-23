@@ -6,16 +6,41 @@ Overview
 
 The Residual Pattern Tree Ensemble (RPTE) is an optional downstream model for
 HUGIML. HUGIML first creates an interpretable supplied-feature representation
-from original features, mined patterns, and configured pair features. RPTE then
-learns a boosted ensemble of shallow trees over that representation and fits a
-sparse L1 logistic layer over the accepted terminal leaves and any supplied
-features not used by the trees.
+from original features, mined patterns, and configured pair features. Original
+features, generated pairs, and order-one/two patterns may enter RPTE trees, while
+patterns above order two remain direct sparse terms. A sparse L1 logistic
+layer is then fitted over accepted terminal leaves and remaining direct terms.
 
 RPTE is intended for cases where a linear combination of HUGIML terms is too
 restrictive, particularly when predictive evidence appears only through
 higher-order relationships. It remains intrinsically inspectable: the fitted
 model is represented by explicit root-to-leaf conjunctions and explicit direct
 terms rather than by a separate post-hoc explanation model.
+
+Conceptual model
+----------------
+
+RPTE separates representation learning into three interpretable stages:
+
+#. **Supplied HUGIML terms.** Original features, mined patterns, and configured
+   pair features form the candidate representation. Patterns of order one or
+   two may participate in tree growth; higher-order patterns remain direct
+   sparse terms.
+#. **Residual pattern trees.** Shallow trees are added sequentially against the
+   current classification residuals. A tree captures a bounded conjunction of
+   supplied terms, and every accepted terminal leaf becomes an explicit binary
+   rule feature.
+#. **Sparse final combination.** An L1 logistic layer combines the accepted leaf
+   rules with supplied terms that were not used by a tree. When a leaf and an
+   unused mined pattern describe the same atom conjunction, raw-feature
+   ownership, and training support, RPTE retains the leaf as the canonical term
+   and records the pattern as an alias.
+
+This structure makes the prediction path reviewable at both global and
+instance levels. Reviewers can inspect which direct terms remain, which leaf
+rules were accepted, how each rule was formed, its support, its coefficient,
+and which rules activate for a particular row. The alias table preserves
+representation provenance without inflating model or inspection-unit counts.
 
 How tree growth works
 ---------------------
@@ -26,9 +51,12 @@ standard tree against the current boosting residuals.
 ``enable_lookahead=True`` uses the native bounded-lookahead grower. At each
 eligible leaf it first evaluates an ordinary split. When that split has
 insufficient held-out gain, RPTE can evaluate a compact root-and-child
-microtree. The root may combine a pair of raw sources, and the first child may
-use a single source or another pair. Configured deeper leaf structures can
-extend this bounded search one additional level for higher-order relationships.
+microtree. The root may use an augmented pair supplied by HUGIML or a raw pair synthesized
+inside the native search, and the first child may use a single source or another
+pair. Configured deeper leaf structures can extend this bounded search one
+additional level for higher-order relationships. Mined pair patterns are root
+candidates when the configured ``lookahead_ops`` admits
+``"pattern"``; patterns above order two are excluded from all tree positions.
 
 This is interaction relaxation through the first child split: weak marginal
 features are not admitted globally. They are considered only inside a bounded
@@ -44,15 +72,25 @@ Boosting and final sparse layer
 
 Each accepted tree is fitted to the current binomial-deviance residuals. RPTE
 computes Newton leaf values and applies a backtracking step, retaining a tree
-only when the empirical deviance decreases. The final L1 logistic estimator
-receives:
+only when the empirical deviance decreases. The final L1 logistic estimator receives:
 
 * one indicator for every accepted terminal leaf; and
-* every supplied HUGIML column that was not selected in an accepted tree split.
+* every supplied downstream column that was not selected in an accepted tree
+  split, subject to structural alias canonicalization.
 
-A supplied feature is therefore represented either as a direct term or through
-an RPTE leaf conjunction, not both. This avoids double-counting the same source
-while preserving useful linear evidence outside the trees.
+Mining depth ``L`` above two does not expand RPTE's tree grammar. Singleton and
+pair patterns retain their existing eligibility, while patterns of order three
+or greater are direct-only. Original columns and augmented or synthesized pair
+columns remain eligible for tree growth.
+
+Before fitting the final logistic layer, RPTE compares unused mined pattern
+indicators with terminal leaves. A direct pattern is omitted only when the leaf
+represents the same positive atom conjunction, both representations have the
+same raw-feature ownership, and their nonconstant binary support is identical on
+the fitting data. The retained leaf is the canonical term,
+and ``representation_alias_table()`` records the omitted pattern, matching leaf,
+raw sources, and support. This prevents L1 coefficient allocation and complexity
+counts from representing the same fitted component twice.
 
 Interpretability
 ----------------
@@ -70,7 +108,9 @@ levels:
 Tree rows retain their backend identity (sequential or bounded lookahead),
 source-feature lineage, split thresholds, support, coefficient, odds
 multiplier, and centered contribution. Direct rows identify whether the source
-is an original feature, mined pattern, or augmented pair. Governance and LLM
+is an original feature, mined pattern, or augmented pair. Canonicalized
+leaf-pattern aliases are exposed separately because they are audit records, not
+independent fitted coefficients. Governance and LLM
 evidence layers consume these same structured records, so dashboard summaries
 remain traceable to the fitted model.
 

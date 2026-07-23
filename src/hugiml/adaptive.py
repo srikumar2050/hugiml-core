@@ -16,7 +16,7 @@
 Per-feature adaptive binning for HUG-IML — ``HUGIMLAdaptive``.
 
 ``HUGIMLAdaptive`` is a thin, sklearn-compatible subclass of
-``HUGIMLClassifierNative`` that hard-wires ``adaptive_binning=True`` and
+``HUGIMLClassifier`` that hard-wires ``adaptive_binning=True`` and
 exposes a simplified constructor (no ``B``, ``allCols``, or ``origColumns``
 parameters — those are managed internally).
 
@@ -66,7 +66,7 @@ Example::
 
 Diagnostic plots (``plot_bin_profiles``, ``ig_heatmap``) and fitted
 attributes (``per_feature_b_``, ``ig_scores_``, ``_bin_edges_``) are
-defined on ``HUGIMLClassifierNative`` and inherited here.
+defined on ``HUGIMLClassifier`` and inherited here.
 """
 
 from __future__ import annotations
@@ -83,7 +83,7 @@ from hugiml._binning import (  # noqa: F401  (public re-export)
     _quantile_edges,
     _select_b,
 )
-from hugiml.classifier import HUGIMLClassifierNative
+from hugiml.classifier import HUGIMLClassifier
 
 __all__ = [
     "HUGIMLAdaptive",
@@ -95,16 +95,16 @@ __all__ = [
 ]
 
 
-class HUGIMLAdaptive(HUGIMLClassifierNative):
+class HUGIMLAdaptive(HUGIMLClassifier):
     """HUG-IML with per-feature adaptive binning via elbow-stopping IG search.
 
-    Thin subclass of ``HUGIMLClassifierNative`` with ``adaptive_binning=True``
+    Thin subclass of ``HUGIMLClassifier`` with ``adaptive_binning=True``
     hard-wired and a simplified constructor that omits parameters which are
     managed internally (``B``, ``allCols``, ``origColumns``).
 
     All public methods, fitted attributes, serialisation, monitoring, drift
     detection, and explanation helpers are inherited from
-    ``HUGIMLClassifierNative``.  No logic is duplicated.
+    ``HUGIMLClassifier``.  No logic is duplicated.
 
     Parameters
     ----------
@@ -129,7 +129,7 @@ class HUGIMLAdaptive(HUGIMLClassifierNative):
     max_fit_seconds : float or None
         Wall-clock budget for the pattern-mining stage of fit().
 
-    Attributes (after fit — inherited from HUGIMLClassifierNative)
+    Attributes (after fit — inherited from HUGIMLClassifier)
     --------------------------------------------------------------
     per_feature_b_ : dict[str, int]
         Chosen bin count per numerical feature.
@@ -173,7 +173,7 @@ class HUGIMLAdaptive(HUGIMLClassifierNative):
     @classmethod
     def default_param_grid(cls) -> dict[str, list]:
         """Return the default compact tuning grid inherited from the native classifier."""
-        return HUGIMLClassifierNative.default_param_grid()
+        return HUGIMLClassifier.default_param_grid()
 
     # ── sklearn protocol ──────────────────────────────────────────────────────
 
@@ -202,7 +202,7 @@ class HUGIMLAdaptive(HUGIMLClassifierNative):
     def fit(self, X_train: Any, y_train: Any) -> HUGIMLAdaptive:
         """Fit with per-feature adaptive binning.
 
-        Delegates entirely to ``HUGIMLClassifierNative.fit`` with
+        Delegates entirely to ``HUGIMLClassifier.fit`` with
         ``adaptive_binning=True``.  When ``X_train`` is a plain ndarray and
         ``prepareXy`` has supplied column names, names from
         ``feature_names_in_`` are applied so that feature-name-aware
@@ -237,8 +237,8 @@ class HUGIMLAdaptive(HUGIMLClassifierNative):
         """Backward-compatibility alias.
 
         Old code that accessed ``adaptive_clf.clf_`` to reach the inner
-        ``HUGIMLClassifierNative`` now gets ``self``, because
-        ``HUGIMLAdaptive`` *is* a ``HUGIMLClassifierNative``.
+        ``HUGIMLClassifier`` now gets ``self``, because
+        ``HUGIMLAdaptive`` *is* a ``HUGIMLClassifier``.
         All methods and fitted attributes are directly on ``self``.
         """
         return self

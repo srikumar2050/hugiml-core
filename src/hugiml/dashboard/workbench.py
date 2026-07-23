@@ -556,6 +556,114 @@ class RuleFitClassifierAdapter:
         self._fit_internal_rulefit(X_df, y)
         return self
 
+    def _internal_rule_text(self, estimator: Any, leaf_id: int) -> str:
+        tree = estimator.tree_
+        feature_names = list(getattr(self, "feature_names_", []))
+        stack: list[tuple[int, list[str]]] = [(0, [])]
+        while stack:
+            node_id, conditions = stack.pop()
+            if node_id == int(leaf_id):
+                return " and ".join(conditions) or "true"
+            left = int(tree.children_left[node_id])
+            right = int(tree.children_right[node_id])
+            if left == right:
+                continue
+            feature_index = int(tree.feature[node_id])
+            feature_name = (
+                feature_names[feature_index]
+                if 0 <= feature_index < len(feature_names)
+                else f"x{feature_index}"
+            )
+            threshold = float(tree.threshold[node_id])
+            stack.append(
+                (right, [*conditions, f"{feature_name} > {threshold:.17g}"])
+            )
+            stack.append(
+                (left, [*conditions, f"{feature_name} <= {threshold:.17g}"])
+            )
+        return f"leaf_{int(leaf_id)}"
+
+    def _internal_rule_rows(self) -> list[dict[str, Any]]:
+        coefficients = np.asarray(self.linear_model_.coef_, dtype=float)
+        if coefficients.ndim == 1:
+            coefficients = coefficients.reshape(1, -1)
+        combined = coefficients[0]
+        feature_names = list(getattr(self, "feature_names_", []))
+        n_features = len(feature_names)
+        rows: list[dict[str, Any]] = [
+            {"rule": name, "type": "linear", "coef": float(combined[index])}
+            for index, name in enumerate(feature_names)
+        ]
+
+        estimators = np.asarray(self.tree_model_.estimators_, dtype=object).reshape(-1)
+        offset = n_features
+        for estimator, categories in zip(estimators, self.rule_encoder_.categories_):
+            for category in categories:
+                leaf_id = int(float(category))
+                coefficient = float(combined[offset])
+                rows.append(
+                    {
+                        "rule": self._internal_rule_text(estimator, leaf_id),
+                        "type": "rule",
+                        "coef": coefficient,
+                    }
+                )
+                offset += 1
+        return rows
+
+    def get_rules(self) -> pd.DataFrame:
+        if getattr(self, "backend_", "") == "sklearn-rulefit-style":
+            return pd.DataFrame(self._internal_rule_rows())
+
+        model = getattr(self, "model_", None)
+        get_rules = getattr(model, "get_rules", None)
+        if callable(get_rules):
+            rules = get_rules()
+            if isinstance(rules, pd.DataFrame):
+                return rules
+            if hasattr(rules, "to_dict"):
+                return pd.DataFrame(rules.to_dict(orient="records"))
+            return pd.DataFrame(list(rules))
+
+        rows: list[dict[str, Any]] = []
+        for rule in list(getattr(model, "rules_", []) or []):
+            coefficient = getattr(rule, "coef", None)
+            if coefficient is None:
+                args = getattr(rule, "args", None)
+                if args is not None and len(args):
+                    coefficient = args[0]
+            rows.append(
+                {
+                    "rule": str(getattr(rule, "rule", rule)),
+                    "type": "rule",
+                    "coef": coefficient,
+                }
+            )
+        return pd.DataFrame(rows)
+
+    def transform(self, X: pd.DataFrame) -> np.ndarray:
+        if getattr(self, "backend_", "") == "sklearn-rulefit-style":
+            X_values = pd.DataFrame(X).astype(float).to_numpy(dtype=float)
+            leaves = self.tree_model_.apply(X_values)
+            if leaves.ndim == 3:
+                leaves = leaves[:, :, 0]
+            return np.asarray(
+                self.rule_encoder_.transform(leaves.astype(str)),
+                dtype=float,
+            )
+
+        model = getattr(self, "model_", None)
+        transform = getattr(model, "transform", None)
+        if not callable(transform):
+            raise AttributeError("The fitted RuleFit backend does not expose transform().")
+        frame = pd.DataFrame(X).astype(float)
+        for values in (frame, frame.to_numpy(dtype=float)):
+            try:
+                return np.asarray(transform(values), dtype=float)
+            except Exception:
+                continue
+        raise ValueError("The fitted RuleFit backend could not transform the supplied rows.")
+
     def _internal_design(self, X: pd.DataFrame) -> np.ndarray:
         X_values = pd.DataFrame(X).astype(float).to_numpy(dtype=float)
         leaves = self.tree_model_.apply(X_values)
@@ -1360,7 +1468,7 @@ def _render_hugiml_config() -> list[dict[str, Any]]:
         help=(
             "Select both to run a hybrid search -- one candidate set per mining "
             "configuration for each selected estimator -- and let CV ROC-AUC pick the winner, "
-            "the same comparison performance_ho makes with a fixed RPTE configuration."
+            "the same comparison performance_ho makes with a single RPTE configuration."
         ),
         key="wb_hugiml_downstream_estimators",
     )
@@ -1509,7 +1617,7 @@ def _render_generic_config(model_name: str) -> list[dict[str, Any]]:
         ["Single", "Hyperparameter grid"],
         horizontal=True,
         key=f"wb_{key}_mode",
-        help="Single runs one fixed configuration. Hyperparameter grid sweeps comma-separated values and selects the best on validation CV ROC-AUC.",
+        help="Single runs one configuration. Hyperparameter grid sweeps comma-separated values and selects the best on validation CV ROC-AUC.",
     )
 
     if model_name == "Logistic Regression":

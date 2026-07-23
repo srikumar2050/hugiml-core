@@ -4,6 +4,21 @@ All notable changes to hugiml-core are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
+## [1.1.19] - 2026-07-23
+
+### Added
+
+- Added a reproducible OpenML-CC18 benchmark workflow and static dashboard covering 36 classification datasets with official task-defined splits.
+- Added rich, on-demand data profiling to the Dash workbench, including role-aware previews, quality summaries, missingness, distributions, correlations, and target associations.
+
+### Changed
+
+- Improved the RPTE representation path by retaining higher-order patterns as direct terms and consolidating equivalent leaf and pattern terms into one canonical component with auditable aliases, preventing duplicate interpretation and complexity counts.
+- Refactored ``classifier.py`` into focused internal modules while preserving the public estimator API, sklearn behavior, serialization, and package imports.
+- Added consistent Default, Guided, and Advanced model configuration modes and a dedicated Results complexity view in the Dash interface.
+- Aligned EBM inspection complexity with the other interpretable models by expanding active interaction score cells by source-feature arity at both model and instance levels.
+
+---
 ## [1.1.18] - 2026-07-19
 
 ### Added

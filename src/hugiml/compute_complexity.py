@@ -22,14 +22,16 @@ The public interface uses three coherent levels:
 
 ``model inspection units``
     Expanded evidence required to inspect the complete fitted model, such as
-    HUG source elements, all active root-to-leaf conditions, active EBM cells,
-    or RuleFit literals.
+    HUG source elements, all active root-to-leaf conditions, arity-weighted
+    active EBM score cells, or RuleFit literals.
 
 ``instance inspection units``
     Expanded evidence reviewed for one prediction. Tree models count the
     reached contributing path in each tree. HUGIML RPTE adds active direct terms. HUGIML
     linear models count every active original/direct term and only the active
-    pattern or augmented-pair terms with non-zero row-specific values.
+    pattern or augmented-pair terms with non-zero row-specific values. EBM
+    terms are expanded by source-feature arity: a main effect contributes one
+    unit, a pairwise interaction two, and a higher-order term its arity.
 
 Calling :func:`get_complexity` without a mode returns model inspection units.
 Use :func:`get_instance_inspection_units` to obtain one integer count per row,
@@ -1177,29 +1179,91 @@ def _ebm_complexity_report(model: Any, tolerance: float) -> dict[str, Any] | Non
     if scores is None:
         return None
 
+    score_tables = list(scores)
+    term_arities = _ebm_term_arities(model, len(score_tables))
+    if term_arities is None:
+        return None
+
     active_terms = 0
     active_cells = 0
+    inspection_units = 0
     cells_by_term: list[int] = []
-    for term_scores in list(scores):
+    inspection_units_by_term: list[int] = []
+    for term_scores, arity in zip(score_tables, term_arities):
         values = np.asarray(term_scores, dtype=float)
         active = np.isfinite(values) & (np.abs(values) > tolerance)
         cell_count = int(np.sum(active))
+        expanded_count = cell_count * int(arity)
         cells_by_term.append(cell_count)
+        inspection_units_by_term.append(expanded_count)
         if cell_count:
             active_terms += 1
             active_cells += cell_count
+            inspection_units += expanded_count
     return _base_report(
         model_type="explainable_boosting_machine",
         model_value=active_terms,
         model_unit="active_additive_terms",
-        model_inspection_value=active_cells,
-        model_inspection_unit="all_active_term_score_cells",
+        model_inspection_value=inspection_units,
+        model_inspection_unit="arity_weighted_active_term_score_cells",
         model_details={
             "available_term_count": int(len(cells_by_term)),
             "coefficient_tolerance": tolerance,
         },
-        model_inspection_details={"active_cells_by_term": cells_by_term},
+        model_inspection_details={
+            "active_cell_count": int(active_cells),
+            "active_cells_by_term": cells_by_term,
+            "term_arities": term_arities.astype(int).tolist(),
+            "inspection_units_by_term": inspection_units_by_term,
+        },
     )
+
+
+def _ebm_term_arities(model: Any, n_terms: int) -> np.ndarray | None:
+    """Return the number of source predictors represented by each EBM term."""
+    term_features = getattr(model, "term_features_", None)
+    if term_features is not None:
+        try:
+            terms = list(term_features)
+        except TypeError:
+            terms = []
+        if len(terms) == n_terms:
+            arities: list[int] = []
+            for term in terms:
+                if isinstance(term, (str, bytes)) or np.isscalar(term):
+                    arity = 1
+                else:
+                    try:
+                        arity = len(term)
+                    except TypeError:
+                        arity = 1
+                if arity < 1:
+                    return None
+                arities.append(int(arity))
+            return np.asarray(arities, dtype=np.int64)
+
+    term_scores = getattr(model, "term_scores_", None)
+    if term_scores is None:
+        return None
+    try:
+        scores = list(term_scores)
+    except TypeError:
+        return None
+    if len(scores) != n_terms:
+        return None
+
+    classes = np.asarray(getattr(model, "classes_", []))
+    n_classes = int(classes.size)
+    arities = []
+    for score_table in scores:
+        table = np.asarray(score_table)
+        arity = int(table.ndim)
+        if n_classes > 2 and arity > 1 and table.shape[-1] == n_classes:
+            arity -= 1
+        if arity < 1:
+            return None
+        arities.append(arity)
+    return np.asarray(arities, dtype=np.int64)
 
 
 def _ebm_instance_inspection_units(
@@ -1227,7 +1291,11 @@ def _ebm_instance_inspection_units(
         )
     else:
         return None
-    return np.sum(active, axis=1, dtype=np.int64)
+
+    term_arities = _ebm_term_arities(model, active.shape[1])
+    if term_arities is None:
+        return None
+    return np.asarray(active, dtype=np.int64) @ term_arities
 
 
 def _rulefit_rows(model: Any) -> list[dict[str, Any]] | None:

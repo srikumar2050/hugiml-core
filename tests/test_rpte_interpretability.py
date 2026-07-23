@@ -214,6 +214,7 @@ def test_pattern_provenance_structured_and_correctly_split():
     provenance = clf.get_pattern_provenance()
     for name, entry in provenance.items():
         assert entry["family"] == "pattern"
+        assert entry["order"] == len(entry["raw_features"])
         assert set(entry["raw_features"]) <= {"INCOME", "INCOMESQ", "AGE"}, (
             f"spurious raw feature parsed from {name!r}: {entry['raw_features']}"
         )

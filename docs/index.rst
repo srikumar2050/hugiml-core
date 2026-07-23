@@ -14,31 +14,38 @@ Why HUGIML?
 
 * **Intrinsic interpretability:** learned HUG patterns are the model representation, not an after-the-fact explanation.
 * **Regulated-domain fit:** model cards, audit artifacts, pruning trails, calibration, drift monitoring, and deployment helpers are included.
-* **Native performance:** computationally intensive mining, transaction construction, interaction-information scoring, pair-aware adaptive binning, matrix construction, and RPTE tree search are C++ accelerated with optional OpenMP support. Version 1.1.18 adds the RPTE downstream model, bounded interaction lookahead, expanded benchmark analysis, and a Dash governance interface while retaining the complete 1.1.x feature set.
+* **Native performance:** computationally intensive mining, transaction construction, interaction-information scoring, pair-aware adaptive binning, matrix construction, and RPTE tree search are C++ accelerated with optional OpenMP support. Version 1.1.19 improves RPTE representation clarity, modularizes the classifier implementation, and adds rich on-demand data profiling to the Dash workbench while retaining the complete 1.1.x feature set.
 * **Python ergonomics:** the estimator follows the scikit-learn API and works with pandas DataFrames or NumPy arrays.
 
 
 Current release focus
 ---------------------
 
-The 1.1.18 release extends HUGIML with an optional Residual Pattern Tree Ensemble
-(RPTE) downstream model and broader governance tooling:
+The 1.1.19 release strengthens model representation, maintainability, and data
+review without changing the public estimator contract:
 
-* Learns higher-order relationships with shallow boosted trees over HUGIML's
-  supplied feature representation.
-* Uses an adaptive sequential or bounded-lookahead path. The lookahead path can
-  relax interaction selection through the first child split when individual
-  features are weak but their joint structure is useful.
-* Exposes accepted tree paths, direct source terms, coefficients, support,
-  provenance, and prediction-level inspection units for intrinsic review.
-* Adds a Dash-based Governance Studio while retaining the lightweight
-  Streamlit interface.
-* Extends benchmark analysis to 100 diverse datasets: 50 real-world and 50
-  synthetic datasets.
+* RPTE retains higher-order mined patterns as direct sparse terms and
+  consolidates an equivalent leaf-pattern representation into one canonical
+  model component. The omitted representation remains available as an audit
+  alias, so interpretation and complexity views do not count the same fitted
+  component twice.
+* The classifier implementation is organized into focused internal modules for
+  preparation, training, feature assembly, prediction, interpretation,
+  inspection, tuning, and estimator state. ``HUGIMLClassifier`` and
+  ``HUGIMLClassifierNative`` keep the same public behavior.
+* The Dash workbench includes a compact data-profile preview and an expandable,
+  on-demand profile with sample or full-data scope, raw-data and model-input
+  views, variable roles, quality findings, missingness, distributions,
+  correlations, and target associations.
+* A reproducible OpenML-CC18 workflow evaluates 36 classification datasets on
+  their official task-defined splits and assembles a static comparison dashboard
+  with performance, runtime, and inspection-efficiency summaries.
+* Dashboard model configuration uses consistent Default, Guided, and Advanced
+  run modes for HUGIML and comparison estimators.
 
 The complete 1.1.x documentation remains in this guide, including execution
-modes, adaptive binning, feature modes, augmented-pair features, mining
-controls, explanations, monitoring, deployment, and benchmark workflows.
+modes, adaptive binning, feature modes, augmented-pair features, RPTE,
+mining controls, explanations, monitoring, deployment, and benchmark workflows.
 
 Installation
 ------------
@@ -87,6 +94,7 @@ The implementation is based on:
    :caption: API reference
 
    api
+   classifier_architecture
 
 .. toctree::
    :maxdepth: 1

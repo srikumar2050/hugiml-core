@@ -24,6 +24,12 @@ import dash
 import dash_bootstrap_components as dbc
 from dash import Input, Output, State, callback_context, dcc, html, no_update
 
+from hugiml.dashboard.dash_components.data_profile import (
+    get_profile_dataset,
+    profile_reference_matches,
+    profile_section,
+    register_profile_callbacks,
+)
 from hugiml.dashboard.dash_components.data_utils import (
     DEMO_DATASETS,
     cache_key,
@@ -169,6 +175,7 @@ def _workbench_data_setup():
                 ],
                 className="setup-command-grid",
             ),
+            profile_section(),
             html.Div(
                 id="upload-panel",
                 style={"display": "none"},
@@ -416,17 +423,43 @@ def _prepare_data_context(
     sensitive_columns,
     cv,
     random_state,
+    profile_reference=None,
 ):
     """Create and cache the dataset context used by a Workbench experiment run."""
     cv = int(cv or 3)
     random_state = int(random_state or 2026)
+    registered = (
+        get_profile_dataset(profile_reference)
+        if profile_reference_matches(
+            profile_reference, source, demo_key, upload_contents, upload_name
+        )
+        else None
+    )
     if source == "demo":
-        data = load_demo(demo_key or "credit")
+        if registered is None:
+            data = load_demo(demo_key or "credit")
+        else:
+            raw = registered["frame"]
+            roles = dict(registered.get("roles", {}))
+            X, y, case_ids, meta = prepare_model_frame(
+                raw,
+                target=roles["target"],
+                id_column=roles.get("id_column"),
+                excluded_columns=roles.get("excluded_columns", []),
+            )
+            data = {
+                "mode": registered.get("label", f"Demo: {demo_key or 'credit'}"),
+                "X": X,
+                "y": np.asarray(y, dtype=int),
+                "case_ids": case_ids,
+                "roles": roles,
+                "meta": meta,
+            }
         key = cache_key(f"demo:{demo_key or 'credit'}", cv, random_state)
     else:
-        if upload_contents is None:
+        if registered is None and upload_contents is None:
             raise ValueError("Upload a file before running the selected models.")
-        raw = read_upload(upload_contents, upload_name or "file")
+        raw = registered["frame"] if registered is not None else read_upload(upload_contents, upload_name or "file")
         upload_fingerprint = fingerprint(raw)
         target = target or raw.columns[0]
         id_column = None if id_column == "__none__" else id_column
@@ -481,6 +514,7 @@ def create_app(debug=False):
         register_callbacks(app)
     except Exception:
         pass
+    register_profile_callbacks(app)
     return app
 
 

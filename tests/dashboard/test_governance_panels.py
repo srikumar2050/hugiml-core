@@ -13,6 +13,7 @@ from pathlib import Path
 
 import numpy as np
 import pandas as pd
+import pytest
 
 
 class _FakeContext:
@@ -30,7 +31,30 @@ def _noop(*args, **kwargs):
     return None
 
 
-def _install_fake_streamlit(monkeypatch):
+@pytest.fixture
+def module_registry():
+    original: dict[str, types.ModuleType] = {}
+    initially_absent: set[str] = set()
+
+    def update(name: str, value: types.ModuleType | None = None, *, remove: bool = False):
+        if name not in original and name not in initially_absent:
+            if name in sys.modules:
+                original[name] = sys.modules[name]
+            else:
+                initially_absent.add(name)
+        if remove:
+            sys.modules.pop(name, None)
+        elif value is not None:
+            sys.modules[name] = value
+
+    yield update
+
+    for name in initially_absent:
+        sys.modules.pop(name, None)
+    sys.modules.update(original)
+
+
+def _install_fake_streamlit(module_registry):
     fake = types.ModuleType("streamlit")
     fake.session_state = {}
     fake.markdown = _noop
@@ -54,13 +78,13 @@ def _install_fake_streamlit(monkeypatch):
     fake.container = lambda *args, **kwargs: _FakeContext()
     fake.expander = lambda *args, **kwargs: _FakeContext()
     fake.column_config = types.SimpleNamespace(TextColumn=lambda *args, **kwargs: None)
-    monkeypatch.setitem(sys.modules, "streamlit", fake)
+    module_registry("streamlit", fake)
     return fake
 
 
-def _import_with_fake_streamlit(monkeypatch, module_name: str):
-    _install_fake_streamlit(monkeypatch)
-    sys.modules.pop(module_name, None)
+def _import_with_fake_streamlit(module_registry, module_name: str):
+    _install_fake_streamlit(module_registry)
+    module_registry(module_name, remove=True)
     return importlib.import_module(module_name)
 
 
@@ -88,8 +112,8 @@ def test_pattern_inventory_wires_support_and_coverage_audit():
     assert "rows with zero pattern coverage" in source
 
 
-def test_adaptive_binning_table_melts_ig_scores(monkeypatch):
-    ge = _import_with_fake_streamlit(monkeypatch, "hugiml.dashboard.components.governance_evidence")
+def test_adaptive_binning_table_melts_ig_scores(module_registry):
+    ge = _import_with_fake_streamlit(module_registry, "hugiml.dashboard.components.governance_evidence")
 
     class Model:
         per_feature_b_ = {"annual_income": 7, "age": 3}
@@ -102,8 +126,8 @@ def test_adaptive_binning_table_melts_ig_scores(monkeypatch):
     assert chosen["ig_score"].iloc[0] == 0.31
 
 
-def test_feature_shape_uses_singleton_coefficients_and_zero_fills_edges(monkeypatch):
-    ge = _import_with_fake_streamlit(monkeypatch, "hugiml.dashboard.components.governance_evidence")
+def test_feature_shape_uses_singleton_coefficients_and_zero_fills_edges(module_registry):
+    ge = _import_with_fake_streamlit(module_registry, "hugiml.dashboard.components.governance_evidence")
 
     class Model:
         _bin_edges_ = {"income": [38500.0, 55000.0, 80000.0, 100000.0]}
@@ -140,16 +164,16 @@ def test_feature_effect_profile_source_uses_log_odds_not_utility():
     assert "utility/coefficient-like" not in source
 
 
-def test_validation_results_rename_generic_score(monkeypatch):
-    perf = _import_with_fake_streamlit(monkeypatch, "hugiml.dashboard.components.performance")
+def test_validation_results_rename_generic_score(module_registry):
+    perf = _import_with_fake_streamlit(module_registry, "hugiml.dashboard.components.performance")
     df = perf.normalize_validation_results(pd.DataFrame({"score": [0.81], "L": [2]}))
     assert "validation_roc_auc" in df.columns
     assert "score" not in df.columns
     assert df["validation_roc_auc"].iloc[0] == 0.81
 
 
-def test_augmented_pair_effects_marks_large_raw_effect(monkeypatch):
-    ge = _import_with_fake_streamlit(monkeypatch, "hugiml.dashboard.components.governance_evidence")
+def test_augmented_pair_effects_marks_large_raw_effect(module_registry):
+    ge = _import_with_fake_streamlit(module_registry, "hugiml.dashboard.components.governance_evidence")
 
     class Model:
         def explain_augmented_pair_effects(self):
@@ -166,8 +190,8 @@ def test_augmented_pair_effects_marks_large_raw_effect(monkeypatch):
     assert bool(df.loc[df["feature"].eq("pair_large"), "large_raw_effect"].iloc[0])
 
 
-def test_population_coverage_frame_uses_training_hup_matrix(monkeypatch):
-    patterns = _import_with_fake_streamlit(monkeypatch, "hugiml.dashboard.components.patterns")
+def test_population_coverage_frame_uses_training_hup_matrix(module_registry):
+    patterns = _import_with_fake_streamlit(module_registry, "hugiml.dashboard.components.patterns")
 
     class Model:
         x_train_hup_ = np.array([[0, 0, 0], [1, 0, 0], [1, 1, 1], [1, 1, 1]])
@@ -179,8 +203,8 @@ def test_population_coverage_frame_uses_training_hup_matrix(monkeypatch):
     assert at_least_one == 0.75
 
 
-def test_render_pattern_support_coverage_audit_executes_support_distribution(monkeypatch):
-    patterns = _import_with_fake_streamlit(monkeypatch, "hugiml.dashboard.components.patterns")
+def test_render_pattern_support_coverage_audit_executes_support_distribution(module_registry):
+    patterns = _import_with_fake_streamlit(module_registry, "hugiml.dashboard.components.patterns")
 
     class Model:
         x_train_hup_ = np.array([[0, 0, 0], [1, 0, 0], [1, 1, 1], [1, 1, 1]])
@@ -191,8 +215,8 @@ def test_render_pattern_support_coverage_audit_executes_support_distribution(mon
     assert result["coverage"].loc[result["coverage"]["threshold"].eq(0), "fraction_of_training_rows"].iloc[0] == 0.25
 
 
-def test_cv_monitoring_frames_parse_report(monkeypatch):
-    drift = _import_with_fake_streamlit(monkeypatch, "hugiml.dashboard.components.drift")
+def test_cv_monitoring_frames_parse_report(module_registry):
+    drift = _import_with_fake_streamlit(module_registry, "hugiml.dashboard.components.drift")
     report = {
         "test_scores": [{"auc": 0.7}, {"roc_auc": 0.8}],
         "fold_drift": [{"income": 0.02}, {"income": 0.04, "age": {"psi": 0.01}}],
@@ -228,8 +252,8 @@ def test_no_skip_markers_in_dashboard_tests():
         assert offenders == [], "\n".join(offenders)
 
 
-def test_representation_audit_helpers_accept_numpy_array_metadata(monkeypatch):
-    ge = _import_with_fake_streamlit(monkeypatch, "hugiml.dashboard.components.governance_evidence")
+def test_representation_audit_helpers_accept_numpy_array_metadata(module_registry):
+    ge = _import_with_fake_streamlit(module_registry, "hugiml.dashboard.components.governance_evidence")
 
     class Model:
         adaptive_binning = np.array([True])
@@ -257,8 +281,8 @@ def test_representation_audit_helpers_accept_numpy_array_metadata(monkeypatch):
     assert df.loc[df["feature"].eq("income"), "chosen_B"].iloc[0] == 7
 
 
-def test_feature_family_audit_accepts_numpy_role_arrays(monkeypatch):
-    ff = _import_with_fake_streamlit(monkeypatch, "hugiml.dashboard.components.feature_family")
+def test_feature_family_audit_accepts_numpy_role_arrays(module_registry):
+    ff = _import_with_fake_streamlit(module_registry, "hugiml.dashboard.components.feature_family")
 
     class Model:
         feature_names_in_ = np.array(["id", "income", "age"])
@@ -304,8 +328,8 @@ def test_validation_page_passes_model_x_y_to_performance():
     assert 'evaluation=ctx.get("evaluation")' in app
 
 
-def test_performance_diagnostics_compute_confusion_brier_and_thresholds(monkeypatch):
-    perf = _import_with_fake_streamlit(monkeypatch, "hugiml.dashboard.components.performance")
+def test_performance_diagnostics_compute_confusion_brier_and_thresholds(module_registry):
+    perf = _import_with_fake_streamlit(module_registry, "hugiml.dashboard.components.performance")
 
     class Model:
         def predict_proba(self, X):
@@ -328,8 +352,8 @@ def test_data_quality_passes_model_to_missingness_and_fairness():
     assert 'X=ctx["X"]' in app
 
 
-def test_fairness_computes_group_prediction_rates_and_sensitive_pattern_flags(monkeypatch):
-    fairness = _import_with_fake_streamlit(monkeypatch, "hugiml.dashboard.components.fairness")
+def test_fairness_computes_group_prediction_rates_and_sensitive_pattern_flags(module_registry):
+    fairness = _import_with_fake_streamlit(module_registry, "hugiml.dashboard.components.fairness")
 
     class Model:
         def predict_proba(self, X):
@@ -347,8 +371,8 @@ def test_fairness_computes_group_prediction_rates_and_sensitive_pattern_flags(mo
     assert flags["pattern"].astype(str).str.contains("group").any()
 
 
-def test_overview_reads_fit_metadata_and_dynamic_evidence_status(monkeypatch):
-    overview = _import_with_fake_streamlit(monkeypatch, "hugiml.dashboard.components.overview")
+def test_overview_reads_fit_metadata_and_dynamic_evidence_status(module_registry):
+    overview = _import_with_fake_streamlit(module_registry, "hugiml.dashboard.components.overview")
 
     class Meta:
         n_patterns = 12
@@ -376,8 +400,8 @@ def test_overview_reads_fit_metadata_and_dynamic_evidence_status(monkeypatch):
     assert status_df.loc[status_df["area"].eq("Pattern inventory"), "status"].iloc[0] == "Available"
 
 
-def test_missingness_surfaces_model_edges_and_binary_categorical_cols(monkeypatch):
-    missingness = _import_with_fake_streamlit(monkeypatch, "hugiml.dashboard.components.missingness")
+def test_missingness_surfaces_model_edges_and_binary_categorical_cols(module_registry):
+    missingness = _import_with_fake_streamlit(module_registry, "hugiml.dashboard.components.missingness")
 
     class Model:
         _missing_col_edges_ = {"income": [0, 1]}
@@ -389,8 +413,8 @@ def test_missingness_surfaces_model_edges_and_binary_categorical_cols(monkeypatc
     assert bool(df.loc[df["feature"].eq("flag"), "binary_inferred_categorical"].iloc[0])
 
 
-def test_config_compare_result_row_includes_fit_timing(monkeypatch):
-    cc = _import_with_fake_streamlit(monkeypatch, "hugiml.dashboard.components.config_compare")
+def test_config_compare_result_row_includes_fit_timing(module_registry):
+    cc = _import_with_fake_streamlit(module_registry, "hugiml.dashboard.components.config_compare")
 
     class Meta:
         total_fit_ms = 987
@@ -428,8 +452,8 @@ def test_representation_audit_wires_survivor_led_pattern_audit():
     assert 'render_survivor_led_pattern_audit(ctx["model"])' in app
 
 
-def test_survivor_led_pattern_frame_filters_audit_rows(monkeypatch):
-    ge = _import_with_fake_streamlit(monkeypatch, "hugiml.dashboard.components.governance_evidence")
+def test_survivor_led_pattern_frame_filters_audit_rows(module_registry):
+    ge = _import_with_fake_streamlit(module_registry, "hugiml.dashboard.components.governance_evidence")
 
     class Model:
         def get_pattern_info(self):
@@ -454,8 +478,8 @@ def test_survivor_led_pattern_frame_filters_audit_rows(monkeypatch):
     assert df["survivor_feature_count"].tolist() == [1]
 
 
-def test_survivor_led_pattern_render_executes(monkeypatch):
-    ge = _import_with_fake_streamlit(monkeypatch, "hugiml.dashboard.components.governance_evidence")
+def test_survivor_led_pattern_render_executes(module_registry):
+    ge = _import_with_fake_streamlit(module_registry, "hugiml.dashboard.components.governance_evidence")
 
     class Model:
         def get_pattern_info(self):
@@ -474,8 +498,8 @@ def test_survivor_led_pattern_render_executes(monkeypatch):
     assert bool(df["survivor_led"].iloc[0])
 
 
-def test_feature_family_pattern_audit_surfaces_survivor_led_columns(monkeypatch):
-    ff = _import_with_fake_streamlit(monkeypatch, "hugiml.dashboard.components.feature_family")
+def test_feature_family_pattern_audit_surfaces_survivor_led_columns(module_registry):
+    ff = _import_with_fake_streamlit(module_registry, "hugiml.dashboard.components.feature_family")
 
     class Model:
         def get_pattern_info(self):
@@ -498,3 +522,18 @@ def test_feature_family_pattern_audit_surfaces_survivor_led_columns(monkeypatch)
     row = df.loc[df["pattern_origin"].eq("interaction_relaxed")].iloc[0]
     assert bool(row["survivor_led"])
     assert row["survivor_features"] == "x1"
+
+
+def test_binary_one_vs_rest_audit_uses_positive_class_label(module_registry):
+    patterns = _import_with_fake_streamlit(
+        module_registry, "hugiml.dashboard.components.patterns"
+    )
+    submodel = types.SimpleNamespace(logistic_=object())
+    wrapper = types.SimpleNamespace(
+        classes_=np.asarray(["negative", "positive"]),
+        estimators_=[submodel],
+    )
+
+    rows = patterns._rpte_sub_estimators_for_audit(wrapper)
+
+    assert rows == [(submodel, "positive")]

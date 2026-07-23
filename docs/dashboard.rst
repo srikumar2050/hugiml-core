@@ -27,11 +27,36 @@ Workbench workflow
 ------------------
 
 * Choose a demo dataset or upload a tabular file.
-* Review and adjust target, identifier, protected, date, numeric, categorical, and excluded columns.
+* Review the compact dataset preview, expand the on-demand data profile, and adjust target, identifier, protected, date, numeric, categorical, and excluded columns.
 * Configure HUGIML, the optional RPTE downstream model, and comparison models; advanced controls include adaptive binning, representation choices, and RPTE tree-growth settings.
 * Run a single configuration or a small candidate grid.
 * Compare models using validation metrics and timing information.
 * Inspect feature roles, pattern evidence, case-level explanations, policy checks, and governance summaries.
+
+Data profiling
+--------------
+
+The Setup area includes a compact preview followed by a collapsed profiling
+section. Expanding the section computes the profile only when it is needed.
+The default sample is deterministic and limited to 10,000 rows; the full-data
+option is available when the selected dataset is larger than that limit.
+
+Two views serve different review purposes:
+
+``Raw data``
+   Profiles the uploaded or selected dataset as supplied, including target,
+   identifiers, protected fields, dates, predictors, and excluded columns.
+
+``Model input``
+   Profiles only the columns that remain eligible for model preparation after
+   target, identifier, protected, date, and excluded roles are applied. The
+   profile states which columns were removed and why.
+
+The profile includes dataset-level quality findings, variable roles and
+semantic types, missingness patterns, numeric and categorical distributions,
+correlation summaries, and target associations when a valid target is selected.
+The same registered source frame is reused during model preparation so the
+preview, profile, and experiment runner refer to the same rows.
 
 Evidence views
 --------------

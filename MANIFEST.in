@@ -14,7 +14,7 @@ recursive-include native *.cpp *.hpp
 recursive-include src/hugiml *.py py.typed
 recursive-include tests *.py *.csv *.data
 recursive-include benchmarks *.py *.json
-recursive-include experiments *.py *.md *.cmd
+recursive-include experiments *.py *.md *.cmd *.txt
 recursive-include docs *.md *.rst *.py *.css *.png *.txt
 recursive-include docker Dockerfile* *.py *.yml
 recursive-include kubernetes *.yaml

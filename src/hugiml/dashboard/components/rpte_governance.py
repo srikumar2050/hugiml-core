@@ -20,6 +20,7 @@ from hugiml.dashboard.components.patterns import (
     _direct_input_coefficients,
     _direct_input_indices,
     _direct_source_count,
+    _get_rpte_alias_rows,
     _get_rpte_feature_flow_audit,
     _get_rpte_rule_rows,
     _is_direct_source_row,
@@ -300,6 +301,10 @@ def rpte_source_inventory_frame(model: Any) -> pd.DataFrame:
     direct_groups: dict[str, pd.DataFrame] = {
         str(name): group for name, group in direct.groupby("source_column", dropna=False)
     } if not direct.empty else {}
+    alias_rows = _get_rpte_alias_rows(model)
+    alias_groups: dict[str, list[dict[str, Any]]] = {}
+    for alias in alias_rows:
+        alias_groups.setdefault(str(alias.get("downstream_feature") or ""), []).append(alias)
 
     rows: list[dict[str, Any]] = []
     for idx, name in enumerate(names):
@@ -314,15 +319,24 @@ def rpte_source_inventory_frame(model: Any) -> pd.DataFrame:
         )
         family = source_family(name)
         used_in_split = bool(used)
+        alias_group = alias_groups.get(name, [])
+        alias_count = len(alias_group)
         direct_in_lr = direct_count > 0 or flow.get("final_representation") == "hugiml_source_features"
         if used_in_split and direct_in_lr:
             role = "Used in RPTE splits for at least one class and carried directly for another class"
+        elif direct_in_lr and alias_count:
+            role = (
+                "Carried directly for some classes and represented by an equivalent "
+                "RPTE leaf for others"
+            )
         elif used_in_split:
             role = "Used in accepted RPTE splits; represented through leaf indicators"
+        elif alias_count:
+            role = "Mined pattern represented by an equivalent RPTE leaf"
         elif direct_in_lr:
-            role = "Not selected by accepted RPTE splits; carried directly into final LR"
+            role = "Direct source term in the final LR"
         else:
-            role = "Supplied to RPTE but not present in exposed final terms"
+            role = "Supplied downstream column not present in exposed final terms"
         rows.append(
             {
                 "source_index": idx,
@@ -336,6 +350,8 @@ def rpte_source_inventory_frame(model: Any) -> pd.DataFrame:
                 "trees_using_column": int(used.get("trees_using_column", 0) or 0),
                 "condition_occurrences": int(used.get("condition_occurrences", 0) or 0),
                 "direct_final_lr_term": direct_in_lr,
+                "suppressed_as_leaf_alias": alias_count > 0,
+                "leaf_alias_count": alias_count,
                 "direct_term_count": direct_count,
                 "direct_nonzero_term_count": int(direct_group["nonzero"].sum()) if direct_group is not None else 0,
                 "direct_term_classes": ", ".join(sorted(set(direct_classes))),
@@ -408,16 +424,73 @@ def rpte_representation_flow_frame(model: Any, X: pd.DataFrame | None = None) ->
     used_count = int(source["used_in_fitted_split"].sum()) if not source.empty else int(flow.get("tree_used_source_feature_count", 0) or 0)
     leaf_count = int(flow.get("leaf_rule_count", 0) or 0)
     direct_count = _direct_source_count(flow)
+    alias_count = int(flow.get("suppressed_leaf_pattern_alias_count", 0) or 0)
     final_count = int(flow.get("final_term_count", flow.get("coefficient_count", leaf_count + direct_count)) or 0)
     rep = flow.get("final_representation")
+    source_role = (
+        "Patterns above order two are direct-only; originals, generated pairs, and "
+        "lower-order patterns may be RPTE tree primitives"
+        if flow.get("patterns_above_order_two_are_direct_only")
+        else "Original, pattern, and generated-pair columns supplied downstream"
+    )
     return pd.DataFrame(
         [
-            {"stage": 1, "representation": "Raw model inputs", "count": raw_count, "role": "Inputs to preprocessing, HUG mining, and generated-pair construction", "direct_final_lr_terms": False},
-            {"stage": 2, "representation": "HUGIML source columns supplied to RPTE", "count": source_count, "role": "Original, pattern, and augmented columns considered by RPTE", "direct_final_lr_terms": rep == "hugiml_source_features"},
-            {"stage": 3, "representation": "Source columns used in accepted RPTE splits", "count": used_count, "role": "Represented indirectly through the fitted tree leaves", "direct_final_lr_terms": False},
-            {"stage": 4, "representation": "RPTE leaf indicators", "count": leaf_count, "role": "One-hot root-to-leaf conjunction indicators", "direct_final_lr_terms": rep == "rpte_leaf_rules" or rep in _RPTE_LEAF_DIRECT_REPRESENTATIONS},
-            {"stage": 5, "representation": "Direct source columns carried into LR", "count": direct_count, "role": "Supplied source columns not used by an accepted split; appended after leaf indicators", "direct_final_lr_terms": rep in _RPTE_LEAF_DIRECT_REPRESENTATIONS or rep == "hugiml_source_features"},
-            {"stage": 6, "representation": "Final logistic-regression coefficients", "count": final_count, "role": (
+            {
+                "stage": 1,
+                "representation": "Raw model inputs",
+                "count": raw_count,
+                "role": "Inputs to preprocessing, HUG mining, and generated-pair construction",
+                "direct_final_lr_terms": False,
+            },
+            {
+                "stage": 2,
+                "representation": "HUGIML source columns supplied downstream",
+                "count": source_count,
+                "role": source_role,
+                "direct_final_lr_terms": rep == "hugiml_source_features",
+            },
+            {
+                "stage": 3,
+                "representation": "Source columns used in accepted RPTE splits",
+                "count": used_count,
+                "role": "Tree-eligible source columns represented through fitted tree leaves",
+                "direct_final_lr_terms": False,
+            },
+            {
+                "stage": 4,
+                "representation": "RPTE leaf indicators",
+                "count": leaf_count,
+                "role": "One-hot root-to-leaf conjunction indicators",
+                "direct_final_lr_terms": (
+                    rep == "rpte_leaf_rules"
+                    or rep in _RPTE_LEAF_DIRECT_REPRESENTATIONS
+                ),
+            },
+            {
+                "stage": 5,
+                "representation": "Canonicalized leaf-pattern aliases",
+                "count": alias_count,
+                "role": (
+                    "Structurally equivalent mined pattern copies omitted because the matching "
+                    "RPTE leaf is retained"
+                ),
+                "direct_final_lr_terms": False,
+            },
+            {
+                "stage": 6,
+                "representation": "Direct source columns carried into LR",
+                "count": direct_count,
+                "role": "Direct terms remaining after tree-use and structural canonicalization",
+                "direct_final_lr_terms": (
+                    rep in _RPTE_LEAF_DIRECT_REPRESENTATIONS
+                    or rep == "hugiml_source_features"
+                ),
+            },
+            {
+                "stage": 7,
+                "representation": "Final logistic-regression coefficients",
+                "count": final_count,
+                "role": (
                 "Leaf coefficients followed by direct source coefficients"
                 if rep in _RPTE_LEAF_DIRECT_REPRESENTATIONS
                 else "Coefficients aligned one-to-one with RPTE leaf indicators"
@@ -449,6 +522,9 @@ def rpte_model_comparison_row(label: str, model: Any, score: float | None, X: pd
         "rpte_source_used_in_splits": int(source["used_in_fitted_split"].sum()) if not source.empty else 0,
         "rpte_leaf_terms": int(flow.get("leaf_rule_count", 0) or 0),
         "rpte_direct_source_terms": _direct_source_count(flow),
+        "rpte_suppressed_leaf_pattern_aliases": int(
+            flow.get("suppressed_leaf_pattern_alias_count", 0) or 0
+        ),
         "final_lr_terms": int(flow.get("final_term_count", flow.get("coefficient_count", 0)) or 0),
         "rpte_backend": str(flow.get("backend", "")),
         "final_representation": str(flow.get("final_representation", "")),

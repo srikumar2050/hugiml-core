@@ -417,15 +417,42 @@ def test_optional_model_shapes_include_instance_counts_without_optional_imports(
 
     ebm = FakeExplainableBoostingClassifier()
     assert get_complexity(ebm, "model units") == 2
-    assert get_complexity(ebm) == 3
-    assert get_complexity(ebm, "model inspection units") == 3
-    np.testing.assert_array_equal(get_instance_inspection_units(ebm, X), [1, 1, 1])
+    assert get_complexity(ebm) == 4
+    assert get_complexity(ebm, "model inspection units") == 4
+    np.testing.assert_array_equal(get_instance_inspection_units(ebm, X), [2, 1, 2])
 
     rulefit = FakeRuleFitClassifier()
     assert get_complexity(rulefit, "model units") == 2
     assert get_complexity(rulefit) == 3
     assert get_complexity(rulefit, "model inspection units") == 3
     np.testing.assert_array_equal(get_instance_inspection_units(rulefit, X), [1, 3, 1])
+
+
+
+def test_ebm_interaction_arity_expands_inspection_but_not_model_units():
+    class EBMWithHigherOrderTerms:
+        term_features_ = [(0,), (0, 1), (0, 1, 2)]
+        term_scores_ = [
+            np.asarray([0.0, 1.0]),
+            np.asarray([[0.0, 2.0], [0.0, 0.0]]),
+            np.asarray([[[0.0, 0.0], [0.0, 3.0]], [[0.0, 0.0], [0.0, 0.0]]]),
+        ]
+
+        def eval_terms(self, X):
+            n = len(X)
+            return np.tile(np.asarray([[1.0, 2.0, 3.0]]), (n, 1))
+
+    model = EBMWithHigherOrderTerms()
+    X = np.zeros((2, 3), dtype=float)
+    report = get_complexity_report(model, X=X)
+
+    assert report is not None
+    assert report["model_units"]["value"] == 3
+    assert report["model_inspection_units"]["value"] == 6
+    assert report["model_inspection_units"]["active_cells_by_term"] == [1, 1, 1]
+    assert report["model_inspection_units"]["term_arities"] == [1, 2, 3]
+    assert report["model_inspection_units"]["inspection_units_by_term"] == [1, 2, 3]
+    np.testing.assert_array_equal(get_instance_inspection_units(model, X), [6, 6])
 
 
 def test_unsupported_model_returns_none():

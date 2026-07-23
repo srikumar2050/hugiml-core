@@ -6,6 +6,16 @@ The canonical release notes live in ``CHANGELOG.md`` at the repository root. Kee
 Recent releases
 ---------------
 
+1.1.19 — 2026-07-23
+~~~~~~~~~~~~~~~~~~~
+
+* Added a reproducible OpenML-CC18 benchmark workflow and static dashboard for 36 classification datasets using official task-defined splits.
+* Added rich, on-demand Dash data profiling with role-aware previews, quality findings, missingness, distributions, correlations, and target associations.
+* Improved RPTE representation handling by retaining higher-order patterns as direct terms and consolidating equivalent leaf and pattern terms into one canonical component with auditable aliases.
+* Refactored the classifier implementation into focused internal modules while preserving the public estimator API, sklearn behavior, serialization, and package imports.
+* Added consistent Default, Guided, and Advanced model configuration modes and a dedicated Results complexity view in the Dash interface.
+* Aligned EBM inspection complexity with the other interpretable models by expanding active interaction score cells by source-feature arity at both model and instance levels.
+
 1.1.18 — 2026-07-19
 ~~~~~~~~~~~~~~~~~~~
 

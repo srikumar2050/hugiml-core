@@ -1,6 +1,6 @@
 """Dash Workbench experiment setup and result presentation.
 
-The setup view supports Auto, Guided, and Advanced HUGIML configurations,
+The setup view supports Default, Guided, and Advanced configurations for every model,
 separate baseline controls, experiment execution, and promotion to Governance.
 """
 
@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import copy
 import itertools
+import warnings
 from typing import Any
 
 import dash_bootstrap_components as dbc
@@ -18,7 +19,26 @@ from dash import Input, Output, State, dcc, html, no_update
 from sklearn.metrics import precision_recall_curve, roc_curve
 from sklearn.tree import export_text
 
+from hugiml.compute_complexity import get_complexity_report
 from hugiml.dashboard.dash_components.charts import bar_h, coef_waterfall
+from hugiml.dashboard.dash_components.model_modes import (
+    COMPARISON_MODEL_KEYS as _COMPARISON_MODEL_KEYS,
+)
+from hugiml.dashboard.dash_components.model_modes import (
+    DASH_GUIDED_GRIDS as _DASH_GUIDED_GRIDS,
+)
+from hugiml.dashboard.dash_components.model_modes import (
+    comparison_guided_grid as _comparison_guided_grid,
+)
+from hugiml.dashboard.dash_components.model_modes import (
+    comparison_guided_grid_names as _comparison_guided_grid_names,
+)
+from hugiml.dashboard.dash_components.model_modes import (
+    guided_model_tune_params as _guided_model_tune_params,
+)
+from hugiml.dashboard.dash_components.model_modes import (
+    run_dash_experiments as _run,
+)
 from hugiml.dashboard.dash_components.pages._shared import err, info, mc, sn, warn
 from hugiml.dashboard.dash_components.tables import make_table
 from hugiml.dashboard.workbench import (
@@ -47,9 +67,6 @@ from hugiml.dashboard.workbench import (
     _scalar_metric,
     _successful_runs,
     _summarize_params_for_display,
-)
-from hugiml.dashboard.workbench import (
-    run_experiments as _run,
 )
 
 try:
@@ -162,17 +179,20 @@ def _configuration_combination_count(
     ebm_i,
     rf2_ts,
     rf2_mr,
+    model_modes=None,
+    guided_grid_names=None,
 ):
-    """Return the number of selected model-parameter combinations."""
+    """Return the number of outer model runs represented by the setup."""
+    model_modes = dict(model_modes or {})
+    guided_grid_names = dict(guided_grid_names or {})
     total = 0
     for model_name in selected:
         if model_name == "HUGIML":
-            if hug_mode == "auto":
+            if hug_mode in {"default", "auto"}:
                 total += 1
                 continue
             if hug_mode == "guided":
-                guided = _hugiml_guided_fast_tune_params(grid_name)
-                total += max(1, int(_hugiml_grid_count(guided.get("param_grid", {}))))
+                total += 1
                 continue
 
             feature_modes = _selected_values(adv_fm, ["original_plus_patterns"])
@@ -212,7 +232,20 @@ def _configuration_combination_count(
             candidates = _expand_candidates({}, grid)
             candidates, _ = _filter_hugiml_interaction_configs(candidates)
             total += len(candidates)
-        elif model_name == "Logistic Regression":
+            continue
+        else:
+            comparison_mode = str(model_modes.get(model_name, "advanced"))
+            if comparison_mode == "default":
+                total += 1
+                continue
+            if comparison_mode == "guided":
+                guided_grid = _comparison_guided_grid(model_name, guided_grid_names.get(model_name))
+                if not guided_grid:
+                    raise ValueError(f"No guided grid is available for {model_name}.")
+                total += 1
+                continue
+
+        if model_name == "Logistic Regression":
             total += len(_csv_values(lr_C, float, 1.0, "Logistic C")) * len(
                 _csv_values(lr_mi, int, 1000, "Logistic max_iter")
             )
@@ -328,11 +361,11 @@ def _hugiml_config():
                 dbc.RadioItems(
                     id="wb-hug-mode",
                     options=[
-                        {"label": "Auto (best defaults)", "value": "auto"},
+                        {"label": "Default", "value": "default"},
                         {"label": "Guided (named grid)", "value": "guided"},
                         {"label": "Advanced (candidate grid)", "value": "advanced"},
                     ],
-                    value="auto",
+                    value="default",
                     inline=True,
                     inputStyle={"marginRight": "5px", "marginLeft": "10px"},
                     className="mb-2",
@@ -342,7 +375,7 @@ def _hugiml_config():
                     id="wb-auto-box",
                     children=[
                         html.Small(
-                            "Runs one best-default HUGIML configuration with adaptive binning enabled.",
+                            "Runs one HUGIML configuration with the recommended defaults.",
                             className="text-muted",
                         ),
                     ],
@@ -352,7 +385,7 @@ def _hugiml_config():
                     style={"display": "none"},
                     children=[
                         html.Small(
-                            "Uses a named HUGIML core hyperparameter grid through the cached tuning path.",
+                            "Runs one HUGIML model and selects its final parameters from the named grid.",
                             className="text-muted d-block mb-2",
                         ),
                         html.Label("Grid", className="form-label"),
@@ -572,6 +605,8 @@ def _hugiml_config():
 # ─── Baseline configs (each model separate) ────────────────────────────────────
 def _generic_config():
     help_text = _candidate_help(
+        "Default runs one preset configuration. Guided runs one model and selects the best "
+        "parameters from a named grid. Advanced expands every candidate permutation. "
         "Use 0 for an unlimited tree depth and -1 for an unlimited LightGBM depth."
     )
 
@@ -590,103 +625,180 @@ def _generic_config():
             className="setup-field",
         )
 
+    def model_body(key, model_name, advanced_fields):
+        names = _comparison_guided_grid_names(model_name)
+        default_grid = names[0] if names else "standard"
+        return html.Div(
+            [
+                dbc.RadioItems(
+                    id=f"wb-mode-{key}",
+                    options=[
+                        {"label": "Default", "value": "default"},
+                        {"label": "Guided (named grid)", "value": "guided"},
+                        {"label": "Advanced (candidate grid)", "value": "advanced"},
+                    ],
+                    value="default",
+                    inline=True,
+                    inputStyle={"marginRight": "5px", "marginLeft": "10px"},
+                    className="mb-2",
+                    style={"fontSize": ".78rem"},
+                ),
+                html.Div(
+                    html.Small(
+                        "Runs one preset configuration.",
+                        className="text-muted",
+                    ),
+                    id=f"wb-default-{key}-box",
+                ),
+                html.Div(
+                    [
+                        html.Small(
+                            "Runs one model and returns the refitted estimator with the best grid parameters.",
+                            className="text-muted d-block mb-2",
+                        ),
+                        html.Label("Grid", className="form-label"),
+                        dcc.Dropdown(
+                            id=f"wb-guided-grid-{key}",
+                            options=[
+                                {"label": name.replace("_", " ").title(), "value": name}
+                                for name in names
+                            ],
+                            value=default_grid,
+                            clearable=False,
+                            className="compact-dropdown",
+                        ),
+                        html.Div(
+                            id=f"wb-guided-grid-info-{key}",
+                            className="mt-2",
+                        ),
+                    ],
+                    id=f"wb-guided-{key}-box",
+                    style={"display": "none"},
+                ),
+                html.Div(
+                    [
+                        html.Div(
+                            advanced_fields,
+                            className=f"candidate-grid candidate-grid-{'two' if len(advanced_fields) == 2 else 'three'}",
+                        ),
+                    ],
+                    id=f"wb-advanced-{key}-box",
+                    style={"display": "none"},
+                ),
+            ]
+        )
+
+    items = [
+        (
+            "lr",
+            "Logistic Regression",
+            [
+                field("C value(s)", "wb-lr-C", 1.0, "0.1, 1.0, 10"),
+                field("max_iter value(s)", "wb-lr-mi", 1000, "500, 1000"),
+            ],
+        ),
+        (
+            "dt",
+            "Decision Tree",
+            [
+                field("max_depth value(s)", "wb-dt-d", 4, "3, 4, 0"),
+                field("min_samples_leaf value(s)", "wb-dt-l", 1, "1, 2, 5"),
+            ],
+        ),
+        (
+            "rf",
+            "Random Forest",
+            [
+                field("n_estimators value(s)", "wb-rf-n", 200, "100, 200"),
+                field("max_depth value(s)", "wb-rf-d", 0, "4, 8, 0"),
+                field("min_samples_leaf value(s)", "wb-rf-l", 1, "1, 2"),
+            ],
+        ),
+        (
+            "xgb",
+            "XGBoost",
+            [
+                field("n_estimators value(s)", "wb-xgb-n", 200, "100, 200"),
+                field("max_depth value(s)", "wb-xgb-d", 4, "3, 4, 6"),
+                field("learning_rate value(s)", "wb-xgb-lr", 0.05, "0.03, 0.05, 0.1"),
+            ],
+        ),
+        (
+            "lgbm",
+            "LightGBM",
+            [
+                field("n_estimators value(s)", "wb-lgbm-n", 200, "100, 200"),
+                field("max_depth value(s)", "wb-lgbm-d", -1, "4, 8, -1"),
+                field("learning_rate value(s)", "wb-lgbm-lr", 0.05, "0.03, 0.05, 0.1"),
+            ],
+        ),
+        (
+            "ebm",
+            "EBM (Explainable Boosting Machine)",
+            [
+                field("max_bins value(s)", "wb-ebm-b", 32, "16, 32, 64"),
+                field("interactions value(s)", "wb-ebm-i", 5, "0, 5, 10"),
+            ],
+        ),
+        (
+            "rulefit",
+            "RuleFit",
+            [
+                field("tree_size value(s)", "wb-rf2-ts", 4, "3, 4, 5"),
+                field("max_rules value(s)", "wb-rf2-mr", 100, "50, 100, 200"),
+            ],
+        ),
+    ]
+    fields_by_key = {key: fields for key, _, fields in items}
+    accordion_items = [
+        dbc.AccordionItem(
+            model_body("lr", _COMPARISON_MODEL_KEYS["lr"], fields_by_key["lr"]),
+            title="Logistic Regression",
+            item_id="lr",
+            id="wb-param-lr",
+        ),
+        dbc.AccordionItem(
+            model_body("dt", _COMPARISON_MODEL_KEYS["dt"], fields_by_key["dt"]),
+            title="Decision Tree",
+            item_id="dt",
+            id="wb-param-dt",
+        ),
+        dbc.AccordionItem(
+            model_body("rf", _COMPARISON_MODEL_KEYS["rf"], fields_by_key["rf"]),
+            title="Random Forest",
+            item_id="rf",
+            id="wb-param-rf",
+        ),
+        dbc.AccordionItem(
+            model_body("xgb", _COMPARISON_MODEL_KEYS["xgb"], fields_by_key["xgb"]),
+            title="XGBoost",
+            item_id="xgb",
+            id="wb-param-xgb",
+        ),
+        dbc.AccordionItem(
+            model_body("lgbm", _COMPARISON_MODEL_KEYS["lgbm"], fields_by_key["lgbm"]),
+            title="LightGBM",
+            item_id="lgbm",
+            id="wb-param-lgbm",
+        ),
+        dbc.AccordionItem(
+            model_body("ebm", _COMPARISON_MODEL_KEYS["ebm"], fields_by_key["ebm"]),
+            title="EBM (Explainable Boosting Machine)",
+            item_id="ebm",
+            id="wb-param-ebm",
+        ),
+        dbc.AccordionItem(
+            model_body("rulefit", _COMPARISON_MODEL_KEYS["rulefit"], fields_by_key["rulefit"]),
+            title="RuleFit",
+            item_id="rulefit",
+            id="wb-param-rulefit",
+        ),
+    ]
     return html.Div(
         [
             help_text,
             dbc.Accordion(
-                [
-                    dbc.AccordionItem(
-                        html.Div(
-                            [
-                                field("C value(s)", "wb-lr-C", 1.0, "0.1, 1.0, 10"),
-                                field("max_iter value(s)", "wb-lr-mi", 1000, "500, 1000"),
-                            ],
-                            className="candidate-grid candidate-grid-two",
-                        ),
-                        title="Logistic Regression",
-                        item_id="lr",
-                        id="wb-param-lr",
-                    ),
-                    dbc.AccordionItem(
-                        html.Div(
-                            [
-                                field("max_depth value(s)", "wb-dt-d", 4, "3, 4, 0"),
-                                field("min_samples_leaf value(s)", "wb-dt-l", 1, "1, 2, 5"),
-                            ],
-                            className="candidate-grid candidate-grid-two",
-                        ),
-                        title="Decision Tree",
-                        item_id="dt",
-                        id="wb-param-dt",
-                    ),
-                    dbc.AccordionItem(
-                        html.Div(
-                            [
-                                field("n_estimators value(s)", "wb-rf-n", 200, "100, 200"),
-                                field("max_depth value(s)", "wb-rf-d", 0, "4, 8, 0"),
-                                field("min_samples_leaf value(s)", "wb-rf-l", 1, "1, 2"),
-                            ],
-                            className="candidate-grid candidate-grid-three",
-                        ),
-                        title="Random Forest",
-                        item_id="rf",
-                        id="wb-param-rf",
-                    ),
-                    dbc.AccordionItem(
-                        html.Div(
-                            [
-                                field("n_estimators value(s)", "wb-xgb-n", 200, "100, 200"),
-                                field("max_depth value(s)", "wb-xgb-d", 4, "3, 4, 6"),
-                                field(
-                                    "learning_rate value(s)", "wb-xgb-lr", 0.05, "0.03, 0.05, 0.1"
-                                ),
-                            ],
-                            className="candidate-grid candidate-grid-three",
-                        ),
-                        title="XGBoost",
-                        item_id="xgb",
-                        id="wb-param-xgb",
-                    ),
-                    dbc.AccordionItem(
-                        html.Div(
-                            [
-                                field("n_estimators value(s)", "wb-lgbm-n", 200, "100, 200"),
-                                field("max_depth value(s)", "wb-lgbm-d", -1, "4, 8, -1"),
-                                field(
-                                    "learning_rate value(s)", "wb-lgbm-lr", 0.05, "0.03, 0.05, 0.1"
-                                ),
-                            ],
-                            className="candidate-grid candidate-grid-three",
-                        ),
-                        title="LightGBM",
-                        item_id="lgbm",
-                        id="wb-param-lgbm",
-                    ),
-                    dbc.AccordionItem(
-                        html.Div(
-                            [
-                                field("max_bins value(s)", "wb-ebm-b", 32, "16, 32, 64"),
-                                field("interactions value(s)", "wb-ebm-i", 5, "0, 5, 10"),
-                            ],
-                            className="candidate-grid candidate-grid-two",
-                        ),
-                        title="EBM (Explainable Boosting Machine)",
-                        item_id="ebm",
-                        id="wb-param-ebm",
-                    ),
-                    dbc.AccordionItem(
-                        html.Div(
-                            [
-                                field("tree_size value(s)", "wb-rf2-ts", 4, "3, 4, 5"),
-                                field("max_rules value(s)", "wb-rf2-mr", 100, "50, 100, 200"),
-                            ],
-                            className="candidate-grid candidate-grid-two",
-                        ),
-                        title="RuleFit",
-                        item_id="rulefit",
-                        id="wb-param-rulefit",
-                    ),
-                ],
+                accordion_items,
                 start_collapsed=True,
                 flush=True,
                 className="mb-3",
@@ -1337,8 +1449,8 @@ def _run_config_values(run):
         values["downstream_estimator"] = _downstream_estimator_label(run)
 
     params = run.get("params") if isinstance(run.get("params"), dict) else {}
-    if params.get("mode") == "guided_fast_tune":
-        values["mode"] = "Guided fast tune"
+    if params.get("mode") in {"guided_fast_tune", "guided_tune"}:
+        values["mode"] = params.get("display_name") or "Guided tune"
         values["candidate_count"] = params.get("candidate_count")
         values["fast_path_used"] = params.get("fast_path_used")
         selected = (
@@ -1718,6 +1830,449 @@ def _leaderboard_panel(runs):
     return html.Div(children)
 
 
+def _human_complexity_unit(value):
+    text = str(value or "").strip().replace("_", " ")
+    return text or "N/A"
+
+
+def _complexity_section_value(report, section, key="value"):
+    if not isinstance(report, dict):
+        return None
+    values = report.get(section)
+    if not isinstance(values, dict):
+        return None
+    return _scalar_metric(values.get(key))
+
+
+def _complexity_report_for_run(run):
+    artifact = run.get("artifact") if isinstance(run.get("artifact"), dict) else {}
+    cache_key = "_dash_complexity_report"
+    error_key = "_dash_complexity_error"
+    if cache_key in artifact:
+        return artifact.get(cache_key), artifact.get(error_key)
+
+    model = artifact.get("model")
+    X_model = artifact.get("feature_frame")
+    if model is None:
+        artifact[cache_key] = None
+        artifact[error_key] = "The fitted model artifact is unavailable."
+        return None, artifact[error_key]
+
+    try:
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message=r"X has feature names, but .* was fitted without feature names",
+                category=UserWarning,
+            )
+            report = get_complexity_report(model, X=X_model)
+        error = None if report is not None else "This fitted model does not expose countable structure."
+    except Exception as exc:
+        report = None
+        error = repr(exc)
+    artifact[cache_key] = report
+    artifact[error_key] = error
+    return report, error
+
+
+def _complexity_frame(runs):
+    rows = []
+    for model_name, run in _best_run_per_model(runs).items():
+        report, diagnostic = _complexity_report_for_run(run)
+        model_units = report.get("model_units", {}) if isinstance(report, dict) else {}
+        model_inspection = (
+            report.get("model_inspection_units", {}) if isinstance(report, dict) else {}
+        )
+        instance = report.get("instance_inspection_units", {}) if isinstance(report, dict) else {}
+        instance_available = bool(instance.get("available")) if isinstance(instance, dict) else False
+        instance_mean = (
+            _scalar_metric(instance.get("mean", instance.get("value")))
+            if instance_available
+            else None
+        )
+        ci_lower = _scalar_metric(instance.get("ci_lower")) if instance_available else None
+        ci_upper = _scalar_metric(instance.get("ci_upper")) if instance_available else None
+        ci_margin = None
+        if instance_mean is not None and ci_lower is not None and ci_upper is not None:
+            ci_margin = max(instance_mean - ci_lower, ci_upper - instance_mean, 0.0)
+        rows.append(
+            {
+                "model": _model_short(model_name),
+                "run_id": str(run.get("run_id", "")),
+                "cv_roc_auc": _scalar_metric(run.get("cv_roc_auc")),
+                "model_type": _human_complexity_unit(
+                    report.get("model_type") if isinstance(report, dict) else None
+                ),
+                "model_units": _complexity_section_value(report, "model_units"),
+                "model_units_basis": _human_complexity_unit(model_units.get("unit")),
+                "model_inspection_units": _complexity_section_value(
+                    report, "model_inspection_units"
+                ),
+                "model_inspection_basis": _human_complexity_unit(
+                    model_inspection.get("unit")
+                ),
+                "instance_inspection_mean": instance_mean,
+                "instance_ci_lower": ci_lower,
+                "instance_ci_upper": ci_upper,
+                "instance_ci_margin": ci_margin,
+                "instance_min": _scalar_metric(instance.get("min"))
+                if instance_available
+                else None,
+                "instance_max": _scalar_metric(instance.get("max"))
+                if instance_available
+                else None,
+                "instance_n": int(instance.get("n_samples", 0) or 0)
+                if instance_available
+                else 0,
+                "diagnostic": diagnostic,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def _complexity_metric_label(row, column, decimals=0):
+    value = _scalar_metric(row.get(column))
+    if value is None:
+        return "N/A"
+    formatted = f"{value:,.{decimals}f}" if decimals else f"{value:,.0f}"
+    return f"{row.get('model', 'Model')} · {formatted}"
+
+
+def _format_instance_inspection(row):
+    mean = _scalar_metric(row.get("instance_inspection_mean"))
+    if mean is None:
+        return ""
+    lower = _scalar_metric(row.get("instance_ci_lower"))
+    upper = _scalar_metric(row.get("instance_ci_upper"))
+    if lower is None or upper is None:
+        return f"{mean:,.2f}"
+    return f"{mean:,.2f} ({lower:,.2f}–{upper:,.2f})"
+
+
+def _lowest_complexity(frame, column, decimals=0):
+    if frame.empty or column not in frame.columns:
+        return "N/A"
+    available = frame.loc[pd.to_numeric(frame[column], errors="coerce").notna()].copy()
+    if available.empty:
+        return "N/A"
+    available[column] = pd.to_numeric(available[column], errors="coerce")
+    row = available.sort_values(column, ascending=True).iloc[0]
+    return _complexity_metric_label(row, column, decimals=decimals)
+
+
+def _complexity_bar(frame, column, title, xlabel, *, error_column=None):
+    if frame.empty or column not in frame.columns:
+        return info(f"{title} is unavailable for the completed runs.")
+    plot = frame.copy()
+    plot[column] = pd.to_numeric(plot[column], errors="coerce")
+    plot = plot.dropna(subset=[column]).sort_values(column, ascending=True)
+    if plot.empty:
+        return info(f"{title} is unavailable for the completed runs.")
+    colors = [
+        "#2563eb" if "HUGIML" in str(label).upper() else "#AFA9EC"
+        for label in plot["model"]
+    ]
+    figure = bar_h(
+        plot[column].tolist(),
+        plot["model"].tolist(),
+        title=title,
+        color=colors,
+        xlabel=xlabel,
+        h=max(245, len(plot) * 30 + 75),
+    )
+    if error_column and error_column in plot.columns:
+        errors = pd.to_numeric(plot[error_column], errors="coerce").fillna(0.0).tolist()
+        figure.data[0].update(
+            error_x={
+                "type": "data",
+                "array": errors,
+                "visible": True,
+                "color": "#888780",
+                "thickness": 1.1,
+            }
+        )
+    return dcc.Graph(figure=figure, config={"displayModeBar": False})
+
+
+def _complexity_tradeoff_chart(frame):
+    if frame.empty:
+        return info("The performance-complexity trade-off is unavailable.")
+    plot = frame.copy()
+    for column in ("model_inspection_units", "cv_roc_auc"):
+        plot[column] = pd.to_numeric(plot[column], errors="coerce")
+    plot = plot.dropna(subset=["model_inspection_units", "cv_roc_auc"])
+    if plot.empty:
+        return info("The performance-complexity trade-off is unavailable.")
+    colors = [
+        "#2563eb" if "HUGIML" in str(label).upper() else "#534AB7"
+        for label in plot["model"]
+    ]
+    figure = go.Figure(
+        go.Scatter(
+            x=plot["model_inspection_units"],
+            y=plot["cv_roc_auc"],
+            mode="markers+text",
+            text=plot["model"],
+            textposition="top center",
+            marker={"size": 11, "color": colors, "line": {"width": 1, "color": "#ffffff"}},
+            customdata=plot[["run_id"]].to_numpy(),
+            hovertemplate=(
+                "%{text}<br>Model inspection units: %{x:.3g}"
+                "<br>CV ROC-AUC: %{y:.4f}<br>Run: %{customdata[0]}<extra></extra>"
+            ),
+        )
+    )
+    figure.update_layout(
+        title={"text": "Performance vs model inspection effort", "font": {"size": 13}},
+        xaxis_title="Model inspection units (lower is simpler)",
+        yaxis_title="CV ROC-AUC (higher is better)",
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        height=max(390, len(plot) * 24 + 175),
+        margin={"t": 50, "b": 55, "l": 60, "r": 20},
+        font={"family": "Inter, sans-serif", "size": 11},
+        showlegend=False,
+    )
+    figure.update_xaxes(gridcolor="rgba(128,128,128,.10)")
+    figure.update_yaxes(gridcolor="rgba(128,128,128,.10)")
+    return dcc.Graph(figure=figure, config={"displayModeBar": False})
+
+
+def _complexity_methodology(frame):
+    basis = pd.DataFrame()
+    if not frame.empty:
+        basis = frame[
+            [
+                "model",
+                "model_type",
+                "model_units_basis",
+                "model_inspection_basis",
+            ]
+        ].rename(
+            columns={
+                "model": "Model",
+                "model_type": "Detected structure",
+                "model_units_basis": "Model units count",
+                "model_inspection_basis": "Model inspection units count",
+            }
+        )
+    return dbc.Accordion(
+        [
+            dbc.AccordionItem(
+                [
+                    html.P(
+                        "The three measures use the same abstraction levels across models, while the "
+                        "underlying component counted at each level follows the fitted model family.",
+                        className="setup-help",
+                    ),
+                    html.Ul(
+                        [
+                            html.Li(
+                                [
+                                    html.Strong("Model units: "),
+                                    "count active coarse components in the complete fitted model, such "
+                                    "as terms, terminal leaves, or rules.",
+                                ]
+                            ),
+                            html.Li(
+                                [
+                                    html.Strong("Model inspection units: "),
+                                    "expand the complete model into the evidence an inspector must "
+                                    "review, such as source elements, rule literals, score cells, or all "
+                                    "root-to-leaf conditions.",
+                                ]
+                            ),
+                            html.Li(
+                                [
+                                    html.Strong("Instance inspection units: "),
+                                    "count only the expanded evidence used for each prediction. The "
+                                    "dashboard reports the row-level mean and a 95% Student-t confidence "
+                                    "interval over the Workbench dataset.",
+                                ]
+                            ),
+                        ],
+                        className="setup-help",
+                    ),
+                    html.Pre(
+                        "model units = count(active fitted components)\n"
+                        "model inspection units = sum(expanded evidence across the full model)\n"
+                        "instance inspection units[i] = sum(expanded evidence used for row i)\n"
+                        "active coefficient/output threshold = 1e-12",
+                        className="parameter-pre",
+                    ),
+                    html.P(
+                        "Linear models count active terms; trees count terminal leaves and path "
+                        "conditions; EBM counts active additive terms and expands non-zero term-score "
+                        "cells by source-feature arity; RuleFit counts active terms, rules, and literals; "
+                        "terms or RPTE paths back to their source evidence.",
+                        className="setup-help",
+                    ),
+                    html.P(
+                        "For an EBM prediction, eval_terms(X) selects one score cell per additive "
+                        "term. Inspection units expand that selected cell by the term's source-feature "
+                        "arity: a main effect counts as one, a pairwise interaction as two, and a "
+                        "higher-order interaction by its arity. The intercept is not counted.",
+                        className="setup-help",
+                    ),
+                    html.H6("Counting basis detected for these runs", className="results-card-title"),
+                    make_table(basis, tid="wb-complexity-basis", height="260px"),
+                ],
+                title="How complexity is computed",
+            )
+        ],
+        start_collapsed=True,
+        flush=True,
+        className="mt-3",
+    )
+
+
+def _complexity_panel(runs):
+    frame = _complexity_frame(runs)
+    if frame.empty:
+        return info("No successful fitted models are available for complexity assessment.")
+
+    assessed = int(
+        (
+            frame["model_units"].notna()
+            | frame["model_inspection_units"].notna()
+            | frame["instance_inspection_mean"].notna()
+        ).sum()
+    )
+    cards = dbc.Row(
+        [
+            dbc.Col(mc("Models assessed", f"{assessed:,}/{len(frame):,}"), md=3, className="mb-2"),
+            dbc.Col(
+                mc("Lowest model units", _lowest_complexity(frame, "model_units")),
+                md=3,
+                className="mb-2",
+            ),
+            dbc.Col(
+                mc(
+                    "Lowest model inspection",
+                    _lowest_complexity(frame, "model_inspection_units"),
+                ),
+                md=3,
+                className="mb-2",
+            ),
+            dbc.Col(
+                mc(
+                    "Lowest mean instance inspection",
+                    _lowest_complexity(frame, "instance_inspection_mean", decimals=2),
+                ),
+                md=3,
+                className="mb-2",
+            ),
+        ]
+    )
+
+    complexity_charts = dbc.Row(
+        [
+            dbc.Col(
+                html.Div(
+                    _complexity_bar(
+                        frame,
+                        "model_units",
+                        "Model units",
+                        "Active model components (lower is simpler)",
+                    ),
+                    className="results-side-card h-100",
+                ),
+                md=4,
+                className="mb-3",
+            ),
+            dbc.Col(
+                html.Div(
+                    _complexity_bar(
+                        frame,
+                        "model_inspection_units",
+                        "Model inspection units",
+                        "Full-model evidence units (lower is simpler)",
+                    ),
+                    className="results-side-card h-100",
+                ),
+                md=4,
+                className="mb-3",
+            ),
+            dbc.Col(
+                html.Div(
+                    _complexity_bar(
+                        frame,
+                        "instance_inspection_mean",
+                        "Mean instance inspection units",
+                        "Prediction-specific evidence units (95% CI)",
+                        error_column="instance_ci_margin",
+                    ),
+                    className="results-side-card h-100",
+                ),
+                md=4,
+                className="mb-3",
+            ),
+        ],
+        className="mt-2",
+    )
+    tradeoff_row = dbc.Row(
+        [
+            dbc.Col(
+                html.Div(
+                    _complexity_tradeoff_chart(frame),
+                    className="results-side-card",
+                ),
+                lg=9,
+                md=12,
+                className="mb-3",
+            )
+        ],
+        className="align-items-start",
+    )
+
+    display = pd.DataFrame(
+        {
+            "Model": frame["model"],
+            "Run": frame["run_id"],
+            "CV ROC-AUC": frame["cv_roc_auc"],
+            "Model units": frame["model_units"],
+            "Model inspection units": frame["model_inspection_units"],
+            "Mean instance inspection units (95% CI)": frame.apply(
+                _format_instance_inspection,
+                axis=1,
+            ),
+            "Rows": frame["instance_n"].replace(0, np.nan),
+        }
+    )
+    unavailable = frame.loc[frame["diagnostic"].notna(), ["model", "diagnostic"]].rename(
+        columns={"model": "Model", "diagnostic": "Reason"}
+    )
+    children = [
+        sn(
+            "Values are computed for the best successful configuration of each model. Lower "
+            "counts mean less fitted structure or evidence to inspect at the corresponding level. "
+            "The AUC trade-off uses model inspection units; the detected model-family basis is shown "
+            "below."
+        ),
+        cards,
+        complexity_charts,
+        tradeoff_row,
+        html.H6("Raw complexity values", className="results-card-title"),
+        make_table(display, tid="wb-complexity-table", height="320px"),
+        _complexity_methodology(frame),
+    ]
+    if not unavailable.empty:
+        children.append(
+            dbc.Accordion(
+                [
+                    dbc.AccordionItem(
+                        make_table(unavailable, tid="wb-complexity-unavailable", height=None),
+                        title=f"Complexity computation details ({len(unavailable)})",
+                    )
+                ],
+                start_collapsed=True,
+                flush=True,
+                className="mt-2",
+            )
+        )
+    return html.Div(children)
+
+
 def _results_panel(ctx):
     runs = _WB.get("runs", [])
     if not runs:
@@ -1742,6 +2297,11 @@ def _results_panel(ctx):
     tabs = dbc.Tabs(
         [
             dbc.Tab(_leaderboard_panel(runs), label="Leaderboard", tab_id="wb-res-leaderboard"),
+            dbc.Tab(
+                dcc.Loading(html.Div(id="wb-complexity-output"), type="circle"),
+                label="Complexity",
+                tab_id="wb-res-complexity",
+            ),
             dbc.Tab(_curve_panel(runs, ctx), label="Compare curves", tab_id="wb-res-curves"),
             dbc.Tab(
                 _interpretability_panel(runs),
@@ -1830,6 +2390,15 @@ def register_callbacks(app):
     from hugiml.dashboard.dash_app import _CTX, _prepare_data_context
 
     @app.callback(
+        Output("wb-complexity-output", "children"),
+        Input("wb-res-tabs", "active_tab"),
+    )
+    def _render_complexity_tab(active_tab):
+        if active_tab != "wb-res-complexity":
+            return no_update
+        return _complexity_panel(_WB.get("runs", []))
+
+    @app.callback(
         Output("wb-auto-box", "style"),
         Output("wb-guided-box", "style"),
         Output("wb-adv-box", "style"),
@@ -1838,10 +2407,50 @@ def register_callbacks(app):
     def _hug_mode(mode):
         h = {"display": "none"}
         return (
-            {} if mode == "auto" else h,
+            {} if mode in {"default", "auto"} else h,
             {} if mode == "guided" else h,
             {} if mode == "advanced" else h,
         )
+
+    def _register_comparison_mode_callbacks(key, model_name):
+        @app.callback(
+            Output(f"wb-default-{key}-box", "style"),
+            Output(f"wb-guided-{key}-box", "style"),
+            Output(f"wb-advanced-{key}-box", "style"),
+            Input(f"wb-mode-{key}", "value"),
+        )
+        def _comparison_mode_visibility(mode):
+            hidden = {"display": "none"}
+            return (
+                {} if mode == "default" else hidden,
+                {} if mode == "guided" else hidden,
+                {} if mode == "advanced" else hidden,
+            )
+
+        @app.callback(
+            Output(f"wb-guided-grid-info-{key}", "children"),
+            Input(f"wb-guided-grid-{key}", "value"),
+        )
+        def _comparison_grid_info(grid_name):
+            grid = _comparison_guided_grid(model_name, grid_name)
+            if not grid:
+                return html.Div()
+            candidates = 1
+            for values in grid.values():
+                candidates *= max(1, len(list(values)))
+            return html.Div(
+                [
+                    html.Span("1 model run", className="chip"),
+                    html.Span(
+                        f"{candidates:,} internal candidates",
+                        className="chip",
+                        style={"marginLeft": "4px"},
+                    ),
+                ]
+            )
+
+    for _comparison_key, _comparison_model_name in _COMPARISON_MODEL_KEYS.items():
+        _register_comparison_mode_callbacks(_comparison_key, _comparison_model_name)
 
     @app.callback(Output("wb-grid-info", "children"), Input("wb-grid-name", "value"))
     def _ginfo(gn):
@@ -1856,7 +2465,10 @@ def register_callbacks(app):
         c = [
             html.Div(
                 [
-                    html.Span(f"{nc:,} candidates", className="chip"),
+                    html.Span("1 model run", className="chip"),
+                    html.Span(
+                        f"{nc:,} internal candidates", className="chip", style={"marginLeft": "4px"}
+                    ),
                     html.Span(gn, className="chip", style={"marginLeft": "4px"}),
                 ],
                 style={"marginBottom": "6px"},
@@ -1920,6 +2532,20 @@ def register_callbacks(app):
         Input("wb-ebm-i", "value"),
         Input("wb-rf2-ts", "value"),
         Input("wb-rf2-mr", "value"),
+        Input("wb-mode-lr", "value"),
+        Input("wb-mode-dt", "value"),
+        Input("wb-mode-rf", "value"),
+        Input("wb-mode-xgb", "value"),
+        Input("wb-mode-lgbm", "value"),
+        Input("wb-mode-ebm", "value"),
+        Input("wb-mode-rulefit", "value"),
+        Input("wb-guided-grid-lr", "value"),
+        Input("wb-guided-grid-dt", "value"),
+        Input("wb-guided-grid-rf", "value"),
+        Input("wb-guided-grid-xgb", "value"),
+        Input("wb-guided-grid-lgbm", "value"),
+        Input("wb-guided-grid-ebm", "value"),
+        Input("wb-guided-grid-rulefit", "value"),
     )
     def _selected_model_controls(
         baselines,
@@ -1955,8 +2581,40 @@ def register_callbacks(app):
         ebm_i,
         rf2_ts,
         rf2_mr,
+        mode_lr,
+        mode_dt,
+        mode_rf,
+        mode_xgb,
+        mode_lgbm,
+        mode_ebm,
+        mode_rulefit,
+        grid_lr,
+        grid_dt,
+        grid_rf,
+        grid_xgb,
+        grid_lgbm,
+        grid_ebm,
+        grid_rulefit,
     ):
         selected = set(baselines or []) | set(ensembles or []) | set(interpretable or [])
+        model_modes = {
+            "Logistic Regression": mode_lr,
+            "Decision Tree": mode_dt,
+            "Random Forest": mode_rf,
+            "XGBoost": mode_xgb,
+            "LightGBM": mode_lgbm,
+            "EBM": mode_ebm,
+            "RuleFit": mode_rulefit,
+        }
+        guided_grid_names = {
+            "Logistic Regression": grid_lr,
+            "Decision Tree": grid_dt,
+            "Random Forest": grid_rf,
+            "XGBoost": grid_xgb,
+            "LightGBM": grid_lgbm,
+            "EBM": grid_ebm,
+            "RuleFit": grid_rulefit,
+        }
 
         def visible(model_name):
             return {} if model_name in selected else {"display": "none"}
@@ -2008,6 +2666,8 @@ def register_callbacks(app):
                     ebm_i,
                     rf2_ts,
                     rf2_mr,
+                    model_modes=model_modes,
+                    guided_grid_names=guided_grid_names,
                 )
                 label = (
                     "Run 1 model combination" if count == 1 else f"Run {count:,} model combinations"
@@ -2043,6 +2703,7 @@ def register_callbacks(app):
         State("ul-id", "value"),
         State("ul-excl", "value"),
         State("ul-sens", "value"),
+        State("st-profile-dataset", "data"),
         State("in-cv", "value"),
         State("in-seed", "value"),
         State("wb-hug-mode", "value"),
@@ -2078,6 +2739,20 @@ def register_callbacks(app):
         State("wb-ebm-i", "value"),
         State("wb-rf2-ts", "value"),
         State("wb-rf2-mr", "value"),
+        State("wb-mode-lr", "value"),
+        State("wb-mode-dt", "value"),
+        State("wb-mode-rf", "value"),
+        State("wb-mode-xgb", "value"),
+        State("wb-mode-lgbm", "value"),
+        State("wb-mode-ebm", "value"),
+        State("wb-mode-rulefit", "value"),
+        State("wb-guided-grid-lr", "value"),
+        State("wb-guided-grid-dt", "value"),
+        State("wb-guided-grid-rf", "value"),
+        State("wb-guided-grid-xgb", "value"),
+        State("wb-guided-grid-lgbm", "value"),
+        State("wb-guided-grid-ebm", "value"),
+        State("wb-guided-grid-rulefit", "value"),
         prevent_initial_call=True,
     )
     def _wb_run(
@@ -2090,6 +2765,7 @@ def register_callbacks(app):
         id_column,
         excluded_columns,
         sensitive_columns,
+        profile_reference,
         cv,
         random_state,
         hug_mode,
@@ -2125,6 +2801,20 @@ def register_callbacks(app):
         ebm_i,
         rf2_ts,
         rf2_mr,
+        mode_lr,
+        mode_dt,
+        mode_rf,
+        mode_xgb,
+        mode_lgbm,
+        mode_ebm,
+        mode_rulefit,
+        grid_lr,
+        grid_dt,
+        grid_rf,
+        grid_xgb,
+        grid_lgbm,
+        grid_ebm,
+        grid_rulefit,
     ):
         if not nc:
             return no_update, no_update, no_update
@@ -2148,6 +2838,7 @@ def register_callbacks(app):
                 sensitive_columns,
                 cv,
                 random_state,
+                profile_reference=profile_reference,
             )
         except Exception as exc:
             return warn(str(exc)), no_update, no_update
@@ -2156,11 +2847,29 @@ def register_callbacks(app):
         cv = int(full.get("cv", 3))
         random_state = int(full.get("random_state", 2026))
         param_map = {}
+        model_modes = {
+            "Logistic Regression": mode_lr,
+            "Decision Tree": mode_dt,
+            "Random Forest": mode_rf,
+            "XGBoost": mode_xgb,
+            "LightGBM": mode_lgbm,
+            "EBM": mode_ebm,
+            "RuleFit": mode_rulefit,
+        }
+        guided_grid_names = {
+            "Logistic Regression": grid_lr,
+            "Decision Tree": grid_dt,
+            "Random Forest": grid_rf,
+            "XGBoost": grid_xgb,
+            "LightGBM": grid_lgbm,
+            "EBM": grid_ebm,
+            "RuleFit": grid_rulefit,
+        }
         try:
             for category, names in selected.items():
                 for model_name in names:
                     if model_name == "HUGIML":
-                        if hug_mode == "auto":
+                        if hug_mode in {"default", "auto"}:
                             param_map[model_name] = [_hugiml_auto_params()]
                         elif hug_mode == "guided":
                             param_map[model_name] = [_hugiml_guided_fast_tune_params(grid_name)]
@@ -2233,88 +2942,110 @@ def register_callbacks(app):
                                     "augmented pairs and relaxed mining in the same candidate."
                                 )
                             param_map[model_name] = candidates
-                    elif model_name == "Logistic Regression":
-                        base = {"C": 1.0, "max_iter": 1000}
-                        param_map[model_name] = _expand_candidates(
-                            base,
-                            {
-                                "C": _csv_values(lr_C, float, 1.0, "Logistic C"),
-                                "max_iter": _csv_values(lr_mi, int, 1000, "Logistic max_iter"),
-                            },
-                        )
-                    elif model_name == "Decision Tree":
-                        depths = _csv_values(dt_d, int, 4, "Decision-tree max_depth")
-                        param_map[model_name] = _expand_candidates(
-                            {"max_depth": 4, "min_samples_leaf": 1},
-                            {
-                                "max_depth": [
-                                    None if int(value) == 0 else int(value) for value in depths
-                                ],
-                                "min_samples_leaf": _csv_values(
-                                    dt_l, int, 1, "Decision-tree min_samples_leaf"
-                                ),
-                            },
-                        )
-                    elif model_name == "Random Forest":
-                        depths = _csv_values(rf_d, int, 0, "Random-forest max_depth")
-                        param_map[model_name] = _expand_candidates(
-                            {"n_estimators": 200, "max_depth": None, "min_samples_leaf": 1},
-                            {
-                                "n_estimators": _csv_values(
-                                    rf_n, int, 200, "Random-forest n_estimators"
-                                ),
-                                "max_depth": [
-                                    None if int(value) == 0 else int(value) for value in depths
-                                ],
-                                "min_samples_leaf": _csv_values(
-                                    rf_l, int, 1, "Random-forest min_samples_leaf"
-                                ),
-                            },
-                        )
-                    elif model_name == "XGBoost":
-                        param_map[model_name] = _expand_candidates(
-                            {"n_estimators": 200, "max_depth": 4, "learning_rate": 0.05},
-                            {
-                                "n_estimators": _csv_values(
-                                    xgb_n, int, 200, "XGBoost n_estimators"
-                                ),
-                                "max_depth": _csv_values(xgb_d, int, 4, "XGBoost max_depth"),
-                                "learning_rate": _csv_values(
-                                    xgb_lr, float, 0.05, "XGBoost learning_rate"
-                                ),
-                            },
-                        )
-                    elif model_name == "LightGBM":
-                        param_map[model_name] = _expand_candidates(
-                            {"n_estimators": 200, "max_depth": -1, "learning_rate": 0.05},
-                            {
-                                "n_estimators": _csv_values(
-                                    lgbm_n, int, 200, "LightGBM n_estimators"
-                                ),
-                                "max_depth": _csv_values(lgbm_d, int, -1, "LightGBM max_depth"),
-                                "learning_rate": _csv_values(
-                                    lgbm_lr, float, 0.05, "LightGBM learning_rate"
-                                ),
-                            },
-                        )
-                    elif model_name == "EBM":
-                        param_map[model_name] = _expand_candidates(
-                            {"max_bins": 32, "interactions": 5},
-                            {
-                                "max_bins": _csv_values(ebm_b, int, 32, "EBM max_bins"),
-                                "interactions": _csv_values(ebm_i, int, 5, "EBM interactions"),
-                            },
-                        )
-                    elif model_name == "RuleFit":
-                        param_map[model_name] = _expand_candidates(
-                            {"tree_size": 4, "max_rules": 100},
-                            {
-                                "tree_size": _csv_values(rf2_ts, int, 4, "RuleFit tree_size"),
-                                "max_rules": _csv_values(rf2_mr, int, 100, "RuleFit max_rules"),
-                            },
-                        )
                     else:
-                        param_map[model_name] = [_default_model_params(model_name)]
+                        comparison_mode = str(model_modes.get(model_name, "default"))
+                        if comparison_mode == "default":
+                            param_map[model_name] = [_default_model_params(model_name)]
+                            continue
+                        if comparison_mode == "guided":
+                            selected_grid = str(
+                                guided_grid_names.get(model_name)
+                                or next(iter(_DASH_GUIDED_GRIDS.get(model_name, {"standard": {}})))
+                            )
+                            named_grid = _comparison_guided_grid(model_name, selected_grid)
+                            if not named_grid:
+                                raise ValueError(f"No guided grid is available for {model_name}.")
+                            param_map[model_name] = [
+                                _guided_model_tune_params(model_name, selected_grid, named_grid)
+                            ]
+                            continue
+
+                        if model_name == "Logistic Regression":
+                            base = {"C": 1.0, "max_iter": 1000}
+                            param_map[model_name] = _expand_candidates(
+                                base,
+                                {
+                                    "C": _csv_values(lr_C, float, 1.0, "Logistic C"),
+                                    "max_iter": _csv_values(lr_mi, int, 1000, "Logistic max_iter"),
+                                },
+                            )
+                        elif model_name == "Decision Tree":
+                            depths = _csv_values(dt_d, int, 4, "Decision-tree max_depth")
+                            param_map[model_name] = _expand_candidates(
+                                {"max_depth": 4, "min_samples_leaf": 1},
+                                {
+                                    "max_depth": [
+                                        None if int(value) == 0 else int(value) for value in depths
+                                    ],
+                                    "min_samples_leaf": _csv_values(
+                                        dt_l, int, 1, "Decision-tree min_samples_leaf"
+                                    ),
+                                },
+                            )
+                        elif model_name == "Random Forest":
+                            depths = _csv_values(rf_d, int, 0, "Random-forest max_depth")
+                            param_map[model_name] = _expand_candidates(
+                                {
+                                    "n_estimators": 200,
+                                    "max_depth": None,
+                                    "min_samples_leaf": 1,
+                                },
+                                {
+                                    "n_estimators": _csv_values(
+                                        rf_n, int, 200, "Random-forest n_estimators"
+                                    ),
+                                    "max_depth": [
+                                        None if int(value) == 0 else int(value) for value in depths
+                                    ],
+                                    "min_samples_leaf": _csv_values(
+                                        rf_l, int, 1, "Random-forest min_samples_leaf"
+                                    ),
+                                },
+                            )
+                        elif model_name == "XGBoost":
+                            param_map[model_name] = _expand_candidates(
+                                {"n_estimators": 200, "max_depth": 4, "learning_rate": 0.05},
+                                {
+                                    "n_estimators": _csv_values(
+                                        xgb_n, int, 200, "XGBoost n_estimators"
+                                    ),
+                                    "max_depth": _csv_values(xgb_d, int, 4, "XGBoost max_depth"),
+                                    "learning_rate": _csv_values(
+                                        xgb_lr, float, 0.05, "XGBoost learning_rate"
+                                    ),
+                                },
+                            )
+                        elif model_name == "LightGBM":
+                            param_map[model_name] = _expand_candidates(
+                                {"n_estimators": 200, "max_depth": -1, "learning_rate": 0.05},
+                                {
+                                    "n_estimators": _csv_values(
+                                        lgbm_n, int, 200, "LightGBM n_estimators"
+                                    ),
+                                    "max_depth": _csv_values(lgbm_d, int, -1, "LightGBM max_depth"),
+                                    "learning_rate": _csv_values(
+                                        lgbm_lr, float, 0.05, "LightGBM learning_rate"
+                                    ),
+                                },
+                            )
+                        elif model_name == "EBM":
+                            param_map[model_name] = _expand_candidates(
+                                {"max_bins": 32, "interactions": 5},
+                                {
+                                    "max_bins": _csv_values(ebm_b, int, 32, "EBM max_bins"),
+                                    "interactions": _csv_values(ebm_i, int, 5, "EBM interactions"),
+                                },
+                            )
+                        elif model_name == "RuleFit":
+                            param_map[model_name] = _expand_candidates(
+                                {"tree_size": 4, "max_rules": 100},
+                                {
+                                    "tree_size": _csv_values(rf2_ts, int, 4, "RuleFit tree_size"),
+                                    "max_rules": _csv_values(rf2_mr, int, 100, "RuleFit max_rules"),
+                                },
+                            )
+                        else:
+                            param_map[model_name] = [_default_model_params(model_name)]
         except ValueError as exc:
             return warn(str(exc)), no_update, {"ck": context_key}
 

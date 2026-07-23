@@ -30,6 +30,7 @@ warnings.filterwarnings("ignore")
 SCRIPT_DIR = Path(__file__).resolve().parent
 RESULTS_DIR_NAME = "results"
 DEFAULT_TEMPLATE_NAME = "hugiml_benchmark_analysis_dashboard.html"
+DATASET_FEATURE_POLICY = "statsmodels_data_columns_only_no_source_index_v1"
 
 
 def _find_repo_root(start: Path) -> Path | None:
@@ -84,6 +85,7 @@ except ImportError:
     LGBMClassifier = None
 from scipy.stats import friedmanchisquare, rankdata, wilcoxon
 from scipy.stats import t as student_t
+from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.compose import ColumnTransformer, make_column_selector
 from sklearn.datasets import (
     load_breast_cancer,
@@ -108,6 +110,7 @@ from sklearn.metrics import (
     roc_auc_score,
 )
 from sklearn.model_selection import GridSearchCV, ParameterGrid, StratifiedKFold, train_test_split
+from sklearn.multiclass import OneVsRestClassifier
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder
 
@@ -183,6 +186,37 @@ except Exception:
         return Pipeline([("prep", prep), ("model", model)])
 
 
+def _dense_numeric_array(X: Any) -> np.ndarray:
+    """Return a writable dense numeric matrix without dataframe feature labels."""
+    if hasattr(X, "toarray"):
+        X = X.toarray()
+    array = np.array(X, dtype=np.float32, order="C", copy=True)
+    if array.ndim != 2:
+        raise ValueError(f"Expected a two-dimensional feature matrix, received shape {array.shape}")
+    return array
+
+
+class DenseArrayTransformer(BaseEstimator, TransformerMixin):
+    """Convert preprocessed baseline features to an unlabeled numeric matrix."""
+
+    def fit(self, X: Any, y: Any = None) -> "DenseArrayTransformer":
+        return self
+
+    def transform(self, X: Any) -> np.ndarray:
+        return _dense_numeric_array(X)
+
+
+def baseline_pipeline(estimator: Any) -> Pipeline:
+    """Build a baseline pipeline whose estimator receives only a numeric array."""
+    wrapped = _wrap_non_hugiml_pipeline(estimator)
+    steps = list(getattr(wrapped, "steps", []))
+    if not steps or steps[-1][0] != "model":
+        raise TypeError("Baseline preprocessing must return a Pipeline ending in a 'model' step")
+    if any(name == "array" for name, _ in steps[:-1]):
+        return Pipeline(steps)
+    return Pipeline([*steps[:-1], ("array", DenseArrayTransformer()), steps[-1]])
+
+
 def _make_ohe_encoder():
     """Dense OHE used for non-HUGIML baselines."""
     try:
@@ -231,15 +265,15 @@ def _fit_transform_non_hugiml(
     X_other = prep.transform(X_other_src) if X_other_src is not None else None
     elapsed = time.perf_counter() - t0
     return (
-        np.asarray(X_fit, dtype=np.float32),
-        (None if X_other is None else np.asarray(X_other, dtype=np.float32)),
+        _dense_numeric_array(X_fit),
+        (None if X_other is None else _dense_numeric_array(X_other)),
         prep,
         elapsed,
     )
 
 
 def _transform_with_preprocessor(prep: ColumnTransformer, X: pd.DataFrame) -> np.ndarray:
-    return np.asarray(prep.transform(X), dtype=np.float32)
+    return _dense_numeric_array(prep.transform(X))
 
 
 def _preprocessor_feature_count(prep: ColumnTransformer, fallback: int) -> int:
@@ -374,6 +408,10 @@ except Exception:
                 "min_samples_leaf": [1, 5],
                 "max_features": ["sqrt", 0.5],
             },
+            "LogisticRegression": {
+                "C": [0.01, 0.1, 1.0, 10.0],
+                "penalty": ["l1", "l2"],
+            },
             "EBM": {
                 "learning_rate": [0.01, 0.05],
                 "max_bins": [32, 64],
@@ -413,6 +451,19 @@ except Exception:
         return copy.deepcopy(grids[model])
 
 
+_BASELINE_GRID_PROVIDER = get_baseline_grid
+
+
+def get_baseline_grid(model: str) -> dict[str, list[Any]]:
+    """Return the benchmark grid for a supported baseline family."""
+    if model == "LogisticRegression":
+        return {
+            "C": [0.01, 0.1, 1.0, 10.0],
+            "penalty": ["l1", "l2"],
+        }
+    return copy.deepcopy(_BASELINE_GRID_PROVIDER(model))
+
+
 def baseline_constant_parameters(model: str) -> dict[str, Any]:
     settings = {
         "XGBoost": {
@@ -428,6 +479,11 @@ def baseline_constant_parameters(model: str) -> dict[str, Any]:
         },
         "RandomForest": {
             "n_jobs": 1,
+            "random_state": RANDOM_STATE,
+        },
+        "LogisticRegression": {
+            "solver": "liblinear",
+            "max_iter": 2000,
             "random_state": RANDOM_STATE,
         },
         "EBM": {
@@ -458,6 +514,7 @@ MODEL_ORDER = [
     "LightGBM complexity-budgeted",
     "RandomForest standard",
     "RandomForest complexity-budgeted",
+    "Logistic Regression",
     "EBM",
     "RuleFit",
 ]
@@ -719,6 +776,14 @@ def _model_feature_count(model, fallback: int) -> int:
 
 
 def _statsmodels_df(name: str) -> pd.DataFrame:
+    """Load only declared statsmodels data columns, never the row index.
+
+    ``load_pandas().data`` may use a RangeIndex, a named entity index (for
+    example, state names), or a time index.  Materialising that index as a
+    feature leaks row identity/order into cross-validation and can materially
+    bias benchmark results.  The benchmark therefore discards the source index
+    unconditionally and keeps only columns explicitly supplied as data.
+    """
     if sm is None:
         raise RuntimeError(
             "statsmodels is required for this dataset. Install statsmodels or exclude "
@@ -730,7 +795,8 @@ def _statsmodels_df(name: str) -> pd.DataFrame:
         raise RuntimeError(
             f"statsmodels dataset {name!r} is not available in this statsmodels version."
         ) from exc
-    return dataset_obj.load_pandas().data.reset_index(drop=False)
+    data = dataset_obj.load_pandas().data
+    return pd.DataFrame(data).reset_index(drop=True).copy(deep=True)
 
 
 def _synthetic_frame(
@@ -1322,7 +1388,7 @@ def load_dataset(name: str) -> tuple[pd.DataFrame, np.ndarray, str]:
         return *_clean_xy(X, y), "Real-world"
     if name == "ElNinoHighAnnualTemp":
         df = _statsmodels_df("elnino")
-        months = [c for c in df.columns if c not in ["YEAR", "index"]]
+        months = [c for c in df.columns if c != "YEAR"]
         y = _binary_from_median(df[months].mean(axis=1))
         X = df.copy()
         return *_clean_xy(X, y), "Real-world"
@@ -1753,7 +1819,7 @@ def _tune_pipeline_gridsearch(
 ) -> tuple[Any, dict[str, Any], float, float, dict[str, Any]]:
     inner_splits = _validated_stratified_splits(y_tr, inner_splits, label="Inner tuning CV")
     grid_dict = _candidate_grid_dict(candidates)
-    clf0 = _wrap_non_hugiml_pipeline(builder({}))
+    clf0 = baseline_pipeline(builder({}))
     if not grid_dict:
         t0 = time.perf_counter()
         clf0.fit(X_tr, y_tr)
@@ -1803,7 +1869,7 @@ def _tune_budgeted_pipeline_inner_cv(
             X_i_va = X_tr.iloc[va_idx] if isinstance(X_tr, pd.DataFrame) else X_tr[va_idx]
             y_i_tr, y_i_va = y_tr[tr_idx], y_tr[va_idx]
             try:
-                clf = _wrap_non_hugiml_pipeline(builder(params))
+                clf = baseline_pipeline(builder(params))
                 clf.fit(X_i_tr, y_i_tr)
                 fold_scores.append(safe_auc(y_i_va, probas(clf, X_i_va)))
                 comp = complexity_fn(clf) if complexity_fn else None
@@ -1821,7 +1887,7 @@ def _tune_budgeted_pipeline_inner_cv(
     last_error = None
     for score, _, params in ordered:
         try:
-            clf = _wrap_non_hugiml_pipeline(builder(params))
+            clf = baseline_pipeline(builder(params))
             t_fit = time.perf_counter()
             clf.fit(X_tr, y_tr)
             final_refit_ms = (time.perf_counter() - t_fit) * 1000.0
@@ -1842,7 +1908,7 @@ def _fit_default_model(
     X_tr: pd.DataFrame,
     y_tr: np.ndarray,
 ) -> tuple[Any, float, float]:
-    clf = builder({}) if model == "HUGIML" else _wrap_non_hugiml_pipeline(builder({}))
+    clf = builder({}) if model == "HUGIML" else baseline_pipeline(builder({}))
     t0 = time.perf_counter()
     clf.fit(X_tr, y_tr)
     fit_ms = (time.perf_counter() - t0) * 1000.0
@@ -2263,8 +2329,13 @@ def get_model_spec(
     xgb_grid = list(ParameterGrid(get_baseline_grid("XGBoost")))
     lgb_grid = list(ParameterGrid(get_baseline_grid("LightGBM")))
     rf_grid = list(ParameterGrid(get_baseline_grid("RandomForest")))
+    lr_grid = list(ParameterGrid(get_baseline_grid("LogisticRegression") or {})) or [{}]
     ebm_grid = list(ParameterGrid(get_baseline_grid("EBM") or {})) or [{}]
-    rulefit_grid = list(ParameterGrid(get_baseline_grid("RuleFit") or {})) or [{}]
+    raw_rulefit_grid = list(ParameterGrid(get_baseline_grid("RuleFit") or {})) or [{}]
+    rulefit_grid = [
+        {f"estimator__{key}": value for key, value in candidate.items()}
+        for candidate in raw_rulefit_grid
+    ]
     xgb_budget_grid = list(ParameterGrid(get_budgeted_baseline_grid("XGBoost")))
     lgb_budget_grid = list(ParameterGrid(get_budgeted_baseline_grid("LightGBM")))
     rf_budget_grid = list(ParameterGrid(get_budgeted_baseline_grid("RandomForest")))
@@ -2278,6 +2349,11 @@ def get_model_spec(
     def rf_builder(params):
         return RandomForestClassifier(**baseline_constant_parameters("RandomForest"), **params)
 
+    def lr_builder(params):
+        pp = baseline_constant_parameters("LogisticRegression")
+        pp.update(params)
+        return LogisticRegression(**pp)
+
     def ebm_builder(params):
         if ExplainableBoostingClassifier is None:
             raise ImportError("interpret.glassbox.ExplainableBoostingClassifier is required for EBM")
@@ -2289,11 +2365,16 @@ def get_model_spec(
         if RuleFitClassifier is None:
             raise ImportError("imodels.RuleFitClassifier is required for RuleFit")
         pp = baseline_constant_parameters("RuleFit")
-        pp.update(params)
+        pp.update(
+            {
+                str(key).replace("estimator__", "", 1): value
+                for key, value in dict(params or {}).items()
+            }
+        )
         # Keep max_rules authoritative. imodels ignores max_rules when alpha
         # is explicitly numeric, so alpha remains None for every candidate.
         pp["alpha"] = None
-        return RuleFitClassifier(**pp)
+        return OneVsRestClassifier(RuleFitClassifier(**pp), n_jobs=1)
 
     specs = {
         "XGB standard": (xgb_grid, xgb_builder, _model_inspection_complexity, None),
@@ -2302,6 +2383,7 @@ def get_model_spec(
         "XGB complexity-budgeted": (xgb_budget_grid, xgb_builder, _model_inspection_complexity, BUDGET),
         "LightGBM complexity-budgeted": (lgb_budget_grid, lgb_builder, _model_inspection_complexity, BUDGET),
         "RandomForest complexity-budgeted": (rf_budget_grid, rf_builder, _model_inspection_complexity, BUDGET),
+        "Logistic Regression": (lr_grid, lr_builder, _model_inspection_complexity, None),
         "EBM": (ebm_grid, ebm_builder, _model_inspection_complexity, None),
         "RuleFit": (rulefit_grid, rulefit_builder, _model_inspection_complexity, None),
     }
@@ -2341,8 +2423,8 @@ def run_pair(
     )
     n_splits = _validated_stratified_splits(y, n_splits, label="Outer benchmark CV")
     cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
-    fold_rows: list[dict[str, Any]] = []
-    model_feature_counts: list[int] = []
+    rows_by_fold: dict[int, dict[str, Any]] = {}
+    feature_counts_by_fold: dict[int, int] = {}
     fold_checkpoint_path: Path | None = None
     if fold_checkpoint_dir is not None:
         fold_checkpoint_dir = Path(fold_checkpoint_dir)
@@ -2351,6 +2433,7 @@ def run_pair(
             "dataset": dataset, "model": model, "hugiml_scenario": hugiml_scenario,
             "row_cap": row_cap, "n_splits": n_splits, "inner_splits": inner_splits,
             "tune": tune, "random_state": random_state,
+            "dataset_feature_policy": DATASET_FEATURE_POLICY,
         }
         token = hashlib.sha256(json.dumps(identity, sort_keys=True, default=str).encode()).hexdigest()[:20]
         fold_checkpoint_path = fold_checkpoint_dir / f"{token}.json"
@@ -2358,15 +2441,43 @@ def run_pair(
             try:
                 saved = json.loads(fold_checkpoint_path.read_text())
                 if saved.get("identity") == identity:
-                    fold_rows = list(saved.get("fold_rows", []))
-                    model_feature_counts = [int(v) for v in saved.get("model_feature_counts", [])]
+                    for row in saved.get("fold_rows", []):
+                        if row.get("fold") is not None:
+                            rows_by_fold[int(row["fold"])] = dict(row)
+                    raw_counts = saved.get("model_feature_counts", {})
+                    if isinstance(raw_counts, dict):
+                        feature_counts_by_fold = {
+                            int(key): int(value) for key, value in raw_counts.items()
+                        }
+                    elif isinstance(raw_counts, list):
+                        successful_folds = sorted(
+                            fold_id
+                            for fold_id, row in rows_by_fold.items()
+                            if int(row.get("error_count", 0) or 0) == 0
+                            and row.get("roc_auc") is not None
+                        )
+                        feature_counts_by_fold = {
+                            fold_id: int(value)
+                            for fold_id, value in zip(successful_folds, raw_counts)
+                        }
             except Exception:
-                fold_rows = []
-                model_feature_counts = []
-    completed_fold_ids = {int(r.get("fold")) for r in fold_rows if r.get("fold") is not None}
+                rows_by_fold = {}
+                feature_counts_by_fold = {}
+    successful_fold_ids = {
+        fold_id
+        for fold_id, row in rows_by_fold.items()
+        if (
+            row.get("status") == "ok"
+            or (
+                row.get("status") is None
+                and int(row.get("error_count", 0) or 0) == 0
+                and row.get("roc_auc") is not None
+            )
+        )
+    }
 
     for fold_idx, (tr_idx, te_idx) in enumerate(cv.split(X, y)):
-        if fold_idx in completed_fold_ids:
+        if fold_idx in successful_fold_ids:
             continue
         X_train_native = _force_writable_frame(X.iloc[tr_idx].reset_index(drop=True))
         X_test_native = _force_writable_frame(X.iloc[te_idx].reset_index(drop=True))
@@ -2465,7 +2576,7 @@ def run_pair(
             selection_info["complexity_report_json"] = json.dumps(
                 complexity_report or {}, sort_keys=True, default=str
             )
-            model_feature_counts.append(_model_feature_count(clf, raw_features))
+            feature_count = _model_feature_count(clf, raw_features)
             effective_budget = budget
             fold_row = _evaluate_outer_fold(
                 clf,
@@ -2530,24 +2641,35 @@ def run_pair(
                 "outer_n_splits": int(n_splits),
                 "inner_n_splits": int(inner_splits) if tune else None,
                 "random_state": int(random_state),
+                "status": "ok" if error_count == 0 else "error",
                 "error_count": error_count,
                 "last_error": last_error,
             }
         )
-        fold_rows.append(fold_row)
-        fold_rows.sort(key=lambda r: int(r.get("fold", 999999)))
+        rows_by_fold[int(fold_idx)] = fold_row
+        if error_count == 0:
+            feature_counts_by_fold[int(fold_idx)] = int(feature_count)
+        else:
+            feature_counts_by_fold.pop(int(fold_idx), None)
+        fold_rows = [rows_by_fold[key] for key in sorted(rows_by_fold)]
         if fold_checkpoint_path is not None:
             checkpoint_payload = {
                 "identity": identity,
                 "fold_rows": fold_rows,
-                "model_feature_counts": model_feature_counts,
+                "model_feature_counts": {
+                    str(key): feature_counts_by_fold[key]
+                    for key in sorted(feature_counts_by_fold)
+                },
             }
             tmp = fold_checkpoint_path.with_suffix(fold_checkpoint_path.suffix + ".tmp")
             tmp.write_text(json.dumps(checkpoint_payload, indent=2, default=_json_default))
             tmp.replace(fold_checkpoint_path)
 
-    fold_rows.sort(key=lambda r: int(r.get("fold", 999999)))
+    fold_rows = [rows_by_fold[key] for key in sorted(rows_by_fold)]
     row = _aggregate_fold_rows(fold_rows)
+    model_feature_counts = [
+        feature_counts_by_fold[key] for key in sorted(feature_counts_by_fold)
+    ]
     model_features = int(round(float(np.nanmean(model_feature_counts)))) if model_feature_counts else raw_features
     preprocessing_policy = (
         "HUGIML native categorical"
@@ -2637,6 +2759,7 @@ def grid_snapshot() -> dict[str, Any]:
             "XGBoost": get_baseline_grid("XGBoost"),
             "LightGBM": get_baseline_grid("LightGBM"),
             "RandomForest": get_baseline_grid("RandomForest"),
+            "LogisticRegression": get_baseline_grid("LogisticRegression"),
             "EBM": get_baseline_grid("EBM"),
             "RuleFit": get_baseline_grid("RuleFit"),
         },
@@ -2647,7 +2770,7 @@ def grid_snapshot() -> dict[str, Any]:
         },
         "baseline_constant_parameters": {
             model: baseline_constant_parameters(model)
-            for model in ["XGBoost", "LightGBM", "RandomForest", "EBM", "RuleFit"]
+            for model in ["XGBoost", "LightGBM", "RandomForest", "LogisticRegression", "EBM", "RuleFit"]
         },
         "execution_mode_base_setting": "production",
     }
@@ -2710,7 +2833,7 @@ def methodology_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
     budgeted_grids = dict(snapshot.get("baseline_budgeted_grids", {}) or {})
     constant_parameters = dict(snapshot.get("baseline_constant_parameters", {}) or {})
 
-    for name in ["XGBoost", "LightGBM", "RandomForest", "EBM", "RuleFit"]:
+    for name in ["XGBoost", "LightGBM", "RandomForest", "LogisticRegression", "EBM", "RuleFit"]:
         standard_grids.setdefault(name, get_baseline_grid(name))
         constant_parameters.setdefault(name, baseline_constant_parameters(name))
     for name in ["XGBoost", "LightGBM", "RandomForest"]:
@@ -2773,6 +2896,7 @@ def methodology_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
         ("XGB complexity-budgeted", "XGBoost", True),
         ("LightGBM complexity-budgeted", "LightGBM", True),
         ("RandomForest complexity-budgeted", "RandomForest", True),
+        ("Logistic Regression", "LogisticRegression", False),
         ("EBM", "EBM", False),
         ("RuleFit", "RuleFit", False),
     ]
@@ -2789,7 +2913,13 @@ def methodology_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
             "Model inspection units sum the conditions across every complete root-to-leaf "
             "path in the fitted forest."
         ),
-        "EBM": "Model inspection units count finite nonzero term-score cells.",
+        "LogisticRegression": (
+            "Model inspection units count nonzero coefficients across fitted class models."
+        ),
+        "EBM": (
+            "Model inspection units count finite nonzero term-score cells expanded by "
+            "source-feature arity, so pairwise interaction cells contribute two units."
+        ),
         "RuleFit": (
             "Model inspection units count active linear terms and every condition in each "
             "active rule."
@@ -2836,6 +2966,7 @@ def methodology_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
     preprocessing = [
         "HUGIML receives the native pandas table, including categorical columns, and performs its own binning and pattern construction inside each training fold.",
         "Non-HUGIML models use a fold-local pipeline: numeric median imputation; categorical most-frequent imputation followed by dense one-hot encoding with unknown categories ignored.",
+        "Source dataframe indexes are discarded before modelling; statsmodels-backed tasks use only columns declared in load_pandas().data.",
         "Preprocessing is fitted only on the relevant training partition. No test-fold information is used for preprocessing or parameter selection.",
         "fit_seconds measures the selected estimator's final outer-fold refit; tune_seconds measures inner-CV search; predict_seconds measures outer-test inference.",
     ]
@@ -2867,6 +2998,7 @@ def load_checkpoint(path: Path) -> dict[str, Any]:
             "dataset_names": DATASET_NAMES,
             "model_order": MODEL_ORDER,
             "grid_snapshot": grid_snapshot(),
+            "dataset_feature_policy": DATASET_FEATURE_POLICY,
         },
         "results": [],
     }
@@ -2908,6 +3040,19 @@ def completed_keys(payload: dict[str, Any]) -> set[tuple[str, str, str | None]]:
         _pair_key(str(r.get("dataset")), str(r.get("model")), _hugiml_scenario_for_row(r))
         for r in payload.get("results", [])
     }
+
+
+def _validate_resume_feature_policy(payload: dict[str, Any]) -> None:
+    """Reject checkpoints whose rows may have used a source index as a feature."""
+    if not payload.get("results"):
+        return
+    observed = payload.get("metadata", {}).get("dataset_feature_policy")
+    if observed != DATASET_FEATURE_POLICY:
+        raise RuntimeError(
+            "The existing checkpoint predates source-index exclusion and may contain "
+            "index-biased statsmodels results. Start a fresh run with --fresh or use a "
+            "new --out-dir/--checkpoint before enabling --resume."
+        )
 
 
 def _scope_label_for_dataset(dataset: str, dataset_group: str | None = None) -> str:
@@ -2956,6 +3101,29 @@ def _scope_side_rows(df_scope: pd.DataFrame) -> tuple[list[dict[str, Any]], pd.D
     return side_rows, pd.DataFrame(side_rows)
 
 
+def _model_inspection_complexity_series(frame: pd.DataFrame) -> pd.Series:
+    """Use the model-inspection field when present and complexity otherwise."""
+    fallback = pd.to_numeric(
+        frame.get("complexity", pd.Series(index=frame.index, dtype=float)),
+        errors="coerce",
+    )
+    if "complexity_model_inspection_units" not in frame:
+        return fallback
+    primary = pd.to_numeric(
+        frame["complexity_model_inspection_units"], errors="coerce"
+    )
+    return primary.combine_first(fallback)
+
+
+def _model_inspection_complexity_value(row: pd.Series) -> float | None:
+    """Return one row's model-inspection value, using complexity when needed."""
+    primary = row.get("complexity_model_inspection_units")
+    if primary is not None and not pd.isna(primary):
+        return float(primary)
+    fallback = row.get("complexity")
+    return None if fallback is None or pd.isna(fallback) else float(fallback)
+
+
 def _summary_for_scope(df_scope: pd.DataFrame, scope: str) -> dict[str, Any]:
     """Compute model-level summary rows for one scope: overall, real-world, or synthetic."""
     df_scope = df_scope[df_scope["model"].isin(MODEL_ORDER)].copy()
@@ -2982,10 +3150,7 @@ def _summary_for_scope(df_scope: pd.DataFrame, scope: str) -> dict[str, Any]:
         acc = pd.to_numeric(sub.get("accuracy", pd.Series(dtype=float)), errors="coerce")
         fit = pd.to_numeric(sub.get("fit_seconds", pd.Series(dtype=float)), errors="coerce")
         pair = pd.to_numeric(sub.get("pair_seconds", pd.Series(dtype=float)), errors="coerce")
-        comp = pd.to_numeric(
-            sub.get("complexity_model_inspection_units", sub.get("complexity", pd.Series(dtype=float))),
-            errors="coerce",
-        ).dropna()
+        comp = _model_inspection_complexity_series(sub).dropna()
         model_units = pd.to_numeric(
             sub.get("complexity_model_units", pd.Series(dtype=float)), errors="coerce"
         ).dropna()
@@ -3151,13 +3316,24 @@ def _infer_complexity_budget(row: dict[str, Any]) -> float | None:
     return None
 
 
+_DASHBOARD_UNUSED_FOLD_FIELDS = frozenset(
+    {
+        "best_params_by_fold_json",
+        "fold_rows_json",
+        "complexity_report_by_fold_json",
+    }
+)
+
+
 def _normalize_detail_rows_for_assembly(details: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Ensure older checkpoints expose fields required by dashboard assembly."""
+    """Normalize checkpoint rows and omit fold payloads unused by dashboard assembly."""
     normalized: list[dict[str, Any]] = []
     for row in details:
         item = dict(row)
         if "complexity_budget" not in item or _safe_number_or_none(item.get("complexity_budget")) is None:
             item["complexity_budget"] = _infer_complexity_budget(item)
+        for field in _DASHBOARD_UNUSED_FOLD_FIELDS:
+            item.pop(field, None)
         normalized.append(item)
     return normalized
 
@@ -3204,10 +3380,7 @@ def _make_data_single(details: list[dict[str, Any]]) -> dict[str, Any]:
     for m in MODEL_ORDER:
         sub = df[df.model == m]
         vals = pd.to_numeric(sub["auc"], errors="coerce")
-        comp = pd.to_numeric(
-            sub.get("complexity_model_inspection_units", sub["complexity"]),
-            errors="coerce",
-        ).dropna()
+        comp = _model_inspection_complexity_series(sub).dropna()
         model_units = pd.to_numeric(
             sub.get("complexity_model_units", pd.Series(dtype=float)), errors="coerce"
         ).dropna()
@@ -3397,9 +3570,7 @@ def _make_data_single(details: list[dict[str, Any]]) -> dict[str, Any]:
                 "model_units": None
                 if pd.isna(r.get("complexity_model_units"))
                 else float(r.get("complexity_model_units")),
-                "model_inspection_units": None
-                if pd.isna(r.get("complexity_model_inspection_units", r["complexity"]))
-                else float(r.get("complexity_model_inspection_units", r["complexity"])),
+                "model_inspection_units": _model_inspection_complexity_value(r),
                 "instance_inspection_units_mean": None
                 if pd.isna(r.get("complexity_instance_inspection_units_mean"))
                 else float(r.get("complexity_instance_inspection_units_mean")),
@@ -4706,8 +4877,8 @@ def render_html(
     real_count = len(REAL_DATASET_NAMES)
     synthetic_count = len(SYNTHETIC_DATASET_NAMES)
     text = re.sub(
-        r"A \d+-dataset tabular classification benchmark comparing HUGIML with tuned XGBoost,\s*LightGBM, RandomForest, EBM, and RuleFit baselines\.",
-        f"A {dataset_count}-dataset tabular classification benchmark ({real_count} real-world + {synthetic_count} synthetic) comparing HUGIML with tuned XGBoost, LightGBM, RandomForest, EBM, and RuleFit baselines.",
+        r"A \d+-dataset tabular classification benchmark comparing HUGIML with tuned XGBoost,\s*LightGBM, RandomForest, logistic regression, EBM, and RuleFit baselines\.",
+        f"A {dataset_count}-dataset tabular classification benchmark ({real_count} real-world + {synthetic_count} synthetic) comparing HUGIML with tuned XGBoost, LightGBM, RandomForest, logistic regression, EBM, and RuleFit baselines.",
         text,
         flags=re.S,
     )
@@ -4715,7 +4886,7 @@ def render_html(
     text = re.sub(r'<div class="callout info" id="templateStatus">.*?</div>', '', text, flags=re.S)
     static_replacements = {
         "A 40-dataset tabular classification benchmark comparing HUGIML with tuned XGBoost,\n        LightGBM, and RandomForest baselines.":
-            f"A {dataset_count}-dataset tabular classification benchmark ({real_count} real-world + {synthetic_count} synthetic) comparing HUGIML with tuned XGBoost,\n        LightGBM, RandomForest, EBM, and RuleFit baselines.",
+            f"A {dataset_count}-dataset tabular classification benchmark ({real_count} real-world + {synthetic_count} synthetic) comparing HUGIML with tuned XGBoost,\n        LightGBM, RandomForest, logistic regression, EBM, and RuleFit baselines.",
         "HUGIML topK: 30 / 50 / 100": "HUGIML topK: 50 / 100",
         "Models: 7": f"Models: {len(MODEL_ORDER)}",
         "Leaves for tree ensembles; selected patterns for HUGIML":
@@ -5076,6 +5247,8 @@ def main(argv=None) -> int:
     _rpte_inner = getattr(_rpte_candidates[0], "estimator", _rpte_candidates[0])
     assert _rpte_inner.get_params().get("leaf_config") == "3xD"
     assert len(list(ParameterGrid(grid))) == 16
+    lr_grid = get_baseline_grid("LogisticRegression")
+    assert set(lr_grid) == {"C", "penalty"}
     ebm_grid = get_baseline_grid("EBM")
     assert ebm_grid.get("learning_rate") == [0.01, 0.05]
     assert ebm_grid.get("max_bins") == [32, 64]
@@ -5108,6 +5281,8 @@ def main(argv=None) -> int:
     assert BUDGET == 200.0
 
     payload = load_checkpoint(checkpoint)
+    if args.resume:
+        _validate_resume_feature_policy(payload)
     payload["metadata"].update(
         {
             "random_state": RANDOM_STATE,
@@ -5120,6 +5295,7 @@ def main(argv=None) -> int:
             "grid_snapshot": grid_snapshot(),
             "hugiml_dashboard_scenarios": HUGIML_SCENARIOS,
             "default_hugiml_dashboard_scenario": DEFAULT_DASHBOARD_HUGIML_SCENARIO,
+            "dataset_feature_policy": DATASET_FEATURE_POLICY,
         }
     )
     done = completed_keys(payload) if args.resume else set()

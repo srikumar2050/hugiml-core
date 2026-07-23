@@ -6,6 +6,7 @@ import base64
 import hashlib
 import io
 import json
+from collections import OrderedDict
 
 import numpy as np
 import pandas as pd
@@ -172,9 +173,11 @@ def _make_claims(seed=2028, n=720):
 
 
 _MAKERS = {"credit": _make_credit, "churn": _make_churn, "claims": _make_claims}
+_UPLOAD_FRAME_CACHE: OrderedDict[str, pd.DataFrame] = OrderedDict()
 
 
-def load_demo(key="credit"):
+def load_demo_raw(key="credit"):
+    """Return a raw demo frame, its column roles, and display label."""
     spec = DEMO_DATASETS.get(key, DEMO_DATASETS["credit"])
     maker = _MAKERS.get(key, _make_credit)
     raw, _ = maker()
@@ -184,6 +187,11 @@ def load_demo(key="credit"):
         excluded_columns=list(spec["excluded_columns"]),
         sensitive_columns=list(spec["sensitive_columns"]),
     )
+    return raw, roles, f"Demo: {spec['label']}"
+
+
+def load_demo(key="credit"):
+    raw, roles, label = load_demo_raw(key)
     X, y, cids, meta = prepare_model_frame(
         raw,
         target=roles["target"],
@@ -191,7 +199,7 @@ def load_demo(key="credit"):
         excluded_columns=roles["excluded_columns"],
     )
     return {
-        "mode": f"Demo: {spec['label']}",
+        "mode": label,
         "X": X,
         "y": np.asarray(y, dtype=int),
         "case_ids": cids,
@@ -201,18 +209,34 @@ def load_demo(key="credit"):
 
 
 def read_upload(content, filename):
+    """Parse an uploaded frame once and reuse it across Dash callbacks."""
+    digest = hashlib.sha256()
+    digest.update(str(filename).encode())
+    digest.update(b"\0")
+    digest.update(content.encode())
+    cache_id = digest.hexdigest()
+    cached = _UPLOAD_FRAME_CACHE.get(cache_id)
+    if cached is not None:
+        _UPLOAD_FRAME_CACHE.move_to_end(cache_id)
+        return cached.copy(deep=False)
     _, b64 = content.split(",", 1)
     data = base64.b64decode(b64)
     nm = filename.lower()
     if nm.endswith(".csv"):
-        return pd.read_csv(io.BytesIO(data))
-    if nm.endswith(".tsv"):
-        return pd.read_csv(io.BytesIO(data), sep="\t")
-    if nm.endswith((".xlsx", ".xls")):
-        return pd.read_excel(io.BytesIO(data), sheet_name=0)
-    if nm.endswith((".parquet", ".pq")):
-        return pd.read_parquet(io.BytesIO(data))
-    raise ValueError(f"Unsupported: {filename}")
+        frame = pd.read_csv(io.BytesIO(data))
+    elif nm.endswith(".tsv"):
+        frame = pd.read_csv(io.BytesIO(data), sep="\t")
+    elif nm.endswith((".xlsx", ".xls")):
+        frame = pd.read_excel(io.BytesIO(data), sheet_name=0)
+    elif nm.endswith((".parquet", ".pq")):
+        frame = pd.read_parquet(io.BytesIO(data))
+    else:
+        raise ValueError(f"Unsupported: {filename}")
+    _UPLOAD_FRAME_CACHE[cache_id] = frame
+    _UPLOAD_FRAME_CACHE.move_to_end(cache_id)
+    while len(_UPLOAD_FRAME_CACHE) > 4:
+        _UPLOAD_FRAME_CACHE.popitem(last=False)
+    return frame.copy(deep=False)
 
 
 def fingerprint(df):
