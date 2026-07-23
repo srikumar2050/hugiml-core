@@ -53,9 +53,9 @@ jobs:
           - os: windows-latest
             cibw_archs: AMD64
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with: { python-version: "3.11" }
 
       - run: pip install cibuildwheel==2.20.0
@@ -65,7 +65,7 @@ jobs:
         env:
           CIBW_ARCHS: ${{ matrix.cibw_archs }}
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: wheels-${{ matrix.os }}-${{ matrix.cibw_archs || matrix.os }}
           path: wheelhouse/*.whl
@@ -74,8 +74,8 @@ jobs:
     name: Build sdist
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with: { python-version: "3.11" }
       - run: pip install build
       - run: python -m build --sdist
@@ -91,7 +91,7 @@ jobs:
           tar -tzf "$archive" | grep -E '/experiments/benchmark/benchmarkREADME\.md$'
           tar -tzf "$archive" | grep -E '/experiments/scalability/scalability_dashboard\.py$'
           tar -tzf "$archive" | grep -E '/experiments/scalability/scalabilityREADME\.md$'
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: sdist
           path: dist/*.tar.gz
@@ -101,8 +101,8 @@ jobs:
     runs-on: ubuntu-latest
     needs: [build-sdist]
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v6
+      - uses: actions/setup-python@v6
         with: { python-version: "3.11" }
       - run: pip install build
       - name: Generate SBOM
@@ -133,7 +133,7 @@ jobs:
               json.dump(sbom, f, indent=2)
           print("SBOM generated")
           EOF
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: sbom
           path: sbom.json
@@ -149,9 +149,9 @@ jobs:
       contents: read
       security-events: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
       - name: Download Linux x86_64 wheels
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: wheels-ubuntu-latest-x86_64
           path: wheelhouse
@@ -188,13 +188,13 @@ jobs:
           exit-code: "0"
           ignore-unfixed: true
       - name: Upload Trivy SARIF to GitHub Security tab
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         if: ${{ always() && hashFiles('trivy-results.sarif') != '' }}
         continue-on-error: true
         with:
           sarif_file: trivy-results.sarif
           category: trivy
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: ${{ always() && hashFiles('trivy-results.sarif') != '' }}
         continue-on-error: true
         with:
@@ -217,23 +217,23 @@ jobs:
       attestations: write
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       - name: Download all wheels
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           pattern: wheels-*
           path: dist/
           merge-multiple: true
 
       - name: Download sdist
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: sdist
           path: dist/
 
       - name: Download SBOM
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: sbom
           path: sbom/
@@ -242,7 +242,7 @@ jobs:
         run: ls -la dist/
 
       - name: Generate build provenance attestations
-        uses: actions/attest-build-provenance@v1
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: dist/*
 
