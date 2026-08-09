@@ -89,6 +89,11 @@ jobs:
           archive="$(ls dist/*.tar.gz)"
           tar -tzf "$archive" | grep -E '/experiments/benchmark/benchmark_dashboard\.py$'
           tar -tzf "$archive" | grep -E '/experiments/benchmark/benchmarkREADME\.md$'
+          tar -tzf "$archive" | grep -E '/experiments/benchmark/openml_cc18/run_openml_cc18_offline_benchmark\.py$'
+          tar -tzf "$archive" | grep -E '/experiments/benchmark/pmlbmini/run_pmlbmini_offline_benchmark\.py$'
+          tar -tzf "$archive" | grep -E '/experiments/benchmark/tabzilla/run_tabzilla_offline_benchmark\.py$'
+          tar -tzf "$archive" | grep -E '/experiments/benchmark/tabarena/run_tabarena_offline_benchmark\.py$'
+          tar -tzf "$archive" | grep -E '/experiments/benchmark/tabarena/tabarena_results/benchmark_results\.json$'
           tar -tzf "$archive" | grep -E '/experiments/scalability/scalability_dashboard\.py$'
           tar -tzf "$archive" | grep -E '/experiments/scalability/scalabilityREADME\.md$'
       - uses: actions/upload-artifact@v7
