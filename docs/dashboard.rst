@@ -69,7 +69,7 @@ The dashboard includes the full workbench experience plus governance evidence pa
 * Augmented-pair traceability for product, absolute-difference, sum, and signed-difference features used by the downstream estimator.
 * Interaction-relaxed mining evidence, including survivor-source counts, best partners, and survivor-led pattern flags where available.
 * Feature-family review across original, pattern, augmented, RPTE tree-leaf, and RPTE direct-term representations.
-* RPTE governance views for backend choice, accepted tree paths, direct source terms, coefficients, support, provenance, complexity, and instance inspection.
+* RPTE governance views for backend choice, accepted tree paths, direct source terms, coefficients, support, source metadata, complexity, and instance inspection.
 * Pattern inventory, coefficient review, support coverage, and population-coverage summaries.
 * Case-level prediction review with active pattern evidence.
 * Missingness, drift, monitoring report parsing, and fairness-oriented checks.

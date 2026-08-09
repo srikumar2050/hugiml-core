@@ -15,6 +15,12 @@ recursive-include src/hugiml *.py py.typed
 recursive-include tests *.py *.csv *.data
 recursive-include benchmarks *.py *.json
 recursive-include experiments *.py *.md *.cmd *.txt
+exclude experiments/benchmark/analyze_checkpoint_results.py
+include experiments/benchmark/internal_results_100datasets/benchmark_results.json
+include experiments/benchmark/openml_cc18/openml_cc18_results/benchmark_results.json
+include experiments/benchmark/pmlbmini/pmlbmini_results/benchmark_results.json
+include experiments/benchmark/tabzilla/tabzilla_results/benchmark_results.json
+include experiments/benchmark/tabarena/tabarena_results/benchmark_results.json
 recursive-include docs *.md *.rst *.py *.css *.png *.txt
 recursive-include docker Dockerfile* *.py *.yml
 recursive-include kubernetes *.yaml
@@ -22,6 +28,7 @@ recursive-include scripts *.py *.sh
 
 prune experiments/benchmark/results
 prune experiments/scalability/results
+prune docs/_build
 
 prune build
 prune dist

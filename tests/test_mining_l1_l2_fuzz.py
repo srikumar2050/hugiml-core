@@ -176,7 +176,7 @@ def test_l2_many_duplicate_columns_high_conflict_rate():
         assert len(cols) == len(set(cols))
 
 
-# ── L2 augmented-pair variants (touched by the same l2_ig_global fix) ─────
+# ── L2 augmented-pair variants sharing the l2_ig_global behavior ──────────
 
 @pytest.mark.parametrize("seed,n,p,n_cls,K,G,n_bins", CONFIGS[:10])
 def test_l2_augmented_v1_degenerate_matches_ordinary_l2(seed, n, p, n_cls, K, G, n_bins):

@@ -163,6 +163,12 @@ class PatternEditor:
             ]
         if hasattr(clf, "x_train_hup_") and clf.x_train_hup_ is not None:
             clf.x_train_hup_ = clf.x_train_hup_[:, keep_idx]
+        for attr in (
+            "_downstream_feature_names_full_",
+            "_downstream_lr_canonical_mask_",
+            "_downstream_lr_canonicalization_",
+        ):
+            clf.__dict__.pop(attr, None)
 
         self._audit_log.append(
             RemovalRecord(
@@ -293,11 +299,14 @@ class PatternEditor:
             "_original_feature_scores_downstream_",
             "_original_selected_feature_names_downstream_",
             "_original_feature_names_downstream_full_",
+            "_downstream_lr_canonical_mask_",
+            "_downstream_lr_canonicalization_",
         ):
             clf.__dict__.pop(attr, None)
         clf._current_y_for_downstream_topk_ = y_arr
         X_downstream = clf._make_downstream_features(X_tr, clf.x_train_hup_, fit=True)
         X_downstream = clf._apply_strict_topk_budget_fit(X_downstream, y_arr)
+        X_downstream = clf._canonicalize_lr_downstream_fit(X_downstream)
         clf.x_train_downstream_ = X_downstream
         try:
             clf._cache_downstream_feature_metadata()
@@ -354,6 +363,7 @@ class PatternEditor:
         hup_cal = csr_matrix(clf.transform(X_cal), dtype=np.float32)
         X_downstream_cal = clf._make_downstream_features(X_cal, hup_cal, fit=False)
         X_downstream_cal = clf._apply_strict_topk_budget_transform(X_downstream_cal)
+        X_downstream_cal = clf._apply_lr_downstream_canonical_transform(X_downstream_cal)
         y_arr = np.asarray(y_cal, dtype=np.int64)
 
         inner_clf = clf.model_.named_steps["clf"]
@@ -446,9 +456,7 @@ class PatternEditor:
         ``remove()`` and related PatternEditor methods.
         """
         clf = self._working_clf
-        try:
-            imp = clf.feature_importances().copy()
-        except Exception:
+        if not self._refitted:
             names = list(getattr(clf, "get_downstream_features", lambda: [])())
             imp = pd.DataFrame({"feature": names})
             imp["display_name"] = names
@@ -460,6 +468,21 @@ class PatternEditor:
                 else "original"
                 for name in names
             ]
+        else:
+            try:
+                imp = clf.feature_importances().copy()
+            except Exception:
+                names = list(getattr(clf, "get_downstream_features", lambda: [])())
+                imp = pd.DataFrame({"feature": names})
+                imp["display_name"] = names
+                imp["feature_type"] = [
+                    "pattern"
+                    if str(name).startswith("pattern:")
+                    else "augmented_pair"
+                    if str(name).startswith("augmented_pair:")
+                    else "original"
+                    for name in names
+                ]
         imp["editable"] = imp["feature_type"].eq("pattern")
         imp["editor_scope"] = np.where(
             imp["editable"], "editable_pattern", "downstream_context_only"

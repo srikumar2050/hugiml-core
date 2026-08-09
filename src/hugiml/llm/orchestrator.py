@@ -35,6 +35,7 @@ from hugiml.pruning import PatternEditor
 
 from .dataset_registry import DatasetRegistry
 from .docs_index import DocumentationSearchIndex, build_docs_answer, build_docs_context
+from .evidence import downstream_redundancy_audit_rows
 from .schemas import ActionRequest, ActionResult, refusal_result
 
 
@@ -74,7 +75,9 @@ class HUGIMLActionOrchestrator:
         )
         self.sessions: dict[str, ModelSession] = {}
         self.last_session_id: str | None = None
-        self._dataset_answer_cache: dict[tuple[str, int], tuple[dict[str, Any], dict[str, list[dict[str, Any]]], str]] = {}
+        self._dataset_answer_cache: dict[
+            tuple[str, int], tuple[dict[str, Any], dict[str, list[dict[str, Any]]], str]
+        ] = {}
 
     def execute(self, request: ActionRequest | dict[str, Any]) -> ActionResult:
         if isinstance(request, dict):
@@ -165,7 +168,9 @@ class HUGIMLActionOrchestrator:
             try:
                 X, _y, _info = self.registry.load_dataset(request.dataset or "")
                 tables["predictor_overview"] = _predictor_overview_rows(X)
-                tables["summary_statistics"] = _summary_statistics_rows(X, limit=max(request.limit, 12))
+                tables["summary_statistics"] = _summary_statistics_rows(
+                    X, limit=max(request.limit, 12)
+                )
             except Exception as exc:
                 desc["summary_statistics_error"] = str(exc)
             message = _dataset_decision_summary(desc, tables)
@@ -198,7 +203,9 @@ class HUGIMLActionOrchestrator:
 
     def _action_tune_hyperparameters(self, request: ActionRequest) -> ActionResult:
         session = self._fit_session(request, tune=True)
-        return self._session_result(session, request.action, "Tuned and selected HUGIML model.", request=request)
+        return self._session_result(
+            session, request.action, "Tuned and selected HUGIML model.", request=request
+        )
 
     def _action_compare_model_configs(self, request: ActionRequest) -> ActionResult:
         X, y, info = self.registry.load_dataset(request.dataset or "")
@@ -207,8 +214,11 @@ class HUGIMLActionOrchestrator:
         counts = pd.Series(y).value_counts(dropna=False)
         stratify = y if len(counts) > 1 and int(counts.min()) >= 2 else None
         X_train, X_test, y_train, y_test = train_test_split(
-            X, y, test_size=float(request.params.get("test_size", 0.25)),
-            random_state=self.random_state, stratify=stratify,
+            X,
+            y,
+            test_size=float(request.params.get("test_size", 0.25)),
+            random_state=self.random_state,
+            stratify=stratify,
         )
         base_params = self._params_for_strategy(request.strategy)
         configs = request.params.get("model_params_list") or []
@@ -225,53 +235,96 @@ class HUGIMLActionOrchestrator:
             model = HUGIMLClassifier(**params)
             model.fit(X_train, y_train)
             metrics = self._evaluate(model, X_test, y_test, request.metric)
-            metrics.update({
-                "n_train": int(len(y_train)),
-                "n_rows_used": int(run_scope.get("rows_used", len(y))),
-                "source_rows": int(run_scope.get("source_rows", len(y))),
-                "sampled_for_chat": bool(run_scope.get("sampled", False)),
-            })
+            metrics.update(
+                {
+                    "n_train": int(len(y_train)),
+                    "n_rows_used": int(run_scope.get("rows_used", len(y))),
+                    "source_rows": int(run_scope.get("source_rows", len(y))),
+                    "sampled_for_chat": bool(run_scope.get("sampled", False)),
+                }
+            )
             label = str(config.get("label") or params.get("feature_mode") or f"config_{i}")
-            row = {"configuration": label, **_compact_param_row(params), **_compact_metric_row(metrics)}
+            row = {
+                "configuration": label,
+                **_compact_param_row(params),
+                **_compact_metric_row(metrics),
+            }
             try:
                 composition = model.get_model_composition()
-                row.update({
-                    "downstream_features": composition.get("n_downstream_features"),
-                    "patterns_mined": composition.get("n_patterns_mined"),
-                    "original_features": (composition.get("downstream_feature_counts") or {}).get("original"),
-                    "pattern_features": (composition.get("downstream_feature_counts") or {}).get("pattern"),
-                    "augmented_pair_features": (composition.get("downstream_feature_counts") or {}).get("augmented_pair"),
-                })
+                row.update(
+                    {
+                        "downstream_features": composition.get("n_downstream_features"),
+                        "patterns_mined": composition.get("n_patterns_mined"),
+                        "original_features": (
+                            composition.get("downstream_feature_counts") or {}
+                        ).get("original"),
+                        "pattern_features": (
+                            composition.get("downstream_feature_counts") or {}
+                        ).get("pattern"),
+                        "augmented_pair_features": (
+                            composition.get("downstream_feature_counts") or {}
+                        ).get("augmented_pair"),
+                    }
+                )
             except Exception:
                 pass
             rows.append(row)
             sid = self._new_session_id(f"{info.name}-{label}")
-            sessions.append(ModelSession(
-                session_id=sid, dataset=info.name, target=target, info=info.to_dict(),
-                X_train=X_train, X_test=X_test, y_train=np.asarray(y_train), y_test=np.asarray(y_test),
-                model=model, metrics={**metrics, "chosen_params": params, "run_label": label},
-            ))
+            sessions.append(
+                ModelSession(
+                    session_id=sid,
+                    dataset=info.name,
+                    target=target,
+                    info=info.to_dict(),
+                    X_train=X_train,
+                    X_test=X_test,
+                    y_train=np.asarray(y_train),
+                    y_test=np.asarray(y_test),
+                    model=model,
+                    metrics={**metrics, "chosen_params": params, "run_label": label},
+                )
+            )
         primary = request.metric or "roc_auc"
-        best_idx = max(range(len(rows)), key=lambda idx: _score_for_selection(sessions[idx].metrics, primary))
+        best_idx = max(
+            range(len(rows)), key=lambda idx: _score_for_selection(sessions[idx].metrics, primary)
+        )
         session = sessions[best_idx]
         self.sessions[session.session_id] = session
         self.last_session_id = session.session_id
         self._write_session_manifest(session)
-        message = _comparison_decision_summary(info.name, rows, primary, rows[best_idx].get("configuration"))
+        message = _comparison_decision_summary(
+            info.name, rows, primary, rows[best_idx].get("configuration")
+        )
         writer_model = str(request.params.get("_writer_model") or "").strip()
         if writer_model:
-            message = _polish_run_answer(
-                writer_model=writer_model,
-                question=request.question or "Compare these HUGIML model configurations.",
-                draft=message,
-                run_context=json.dumps({"comparison": rows, "selected_session": session.session_id}, indent=2, default=str),
-            ) or message
+            message = (
+                _polish_run_answer(
+                    writer_model=writer_model,
+                    question=request.question or "Compare these HUGIML model configurations.",
+                    draft=message,
+                    run_context=json.dumps(
+                        {"comparison": rows, "selected_session": session.session_id},
+                        indent=2,
+                        default=str,
+                    ),
+                )
+                or message
+            )
         return ActionResult(
             ok=True,
             action=request.action,
             message=message,
-            data={"session_id": session.session_id, "selected_configuration": rows[best_idx].get("configuration"), "dataset": info.name, "run_scope": run_scope},
-            tables={"configuration_comparison": rows, "metrics": [session.metrics], "model_configuration": _model_config_rows(session)},
+            data={
+                "session_id": session.session_id,
+                "selected_configuration": rows[best_idx].get("configuration"),
+                "dataset": info.name,
+                "run_scope": run_scope,
+            },
+            tables={
+                "configuration_comparison": rows,
+                "metrics": [session.metrics],
+                "model_configuration": _model_config_rows(session),
+            },
         )
 
     def _action_generate_predictions(self, request: ActionRequest) -> ActionResult:
@@ -333,10 +386,15 @@ class HUGIMLActionOrchestrator:
                 # string while preserving its fitted representation role.
                 formatted = []
                 for row in sorted(
-                    rpte_rows, key=lambda r: abs(r.get("final_logistic_coefficient") or 0.0), reverse=True
+                    rpte_rows,
+                    key=lambda r: abs(r.get("final_logistic_coefficient") or 0.0),
+                    reverse=True,
                 )[: request.limit]:
                     conditions = row.get("conditions") or []
-                    terms = [c.get("raw_condition") or c.get("downstream_condition") or "?" for c in conditions]
+                    terms = [
+                        c.get("raw_condition") or c.get("downstream_condition") or "?"
+                        for c in conditions
+                    ]
                     formatted.append(
                         {
                             "class": row.get("class"),
@@ -348,7 +406,9 @@ class HUGIMLActionOrchestrator:
                             "tree_index": row.get("tree_index"),
                             "leaf_index": row.get("leaf_index"),
                             "backend": row.get("backend"),
-                            "conjunction": " AND ".join(str(t) for t in terms) if terms else "(linear term)",
+                            "conjunction": " AND ".join(str(t) for t in terms)
+                            if terms
+                            else "(linear term)",
                             "coefficient": row.get("final_logistic_coefficient"),
                             "support_count": row.get("support_count"),
                         }
@@ -359,6 +419,9 @@ class HUGIMLActionOrchestrator:
         except Exception as exc:
             data["rpte_rule_conjunctions_error"] = str(exc)
         tables["model_configuration"] = _model_config_rows(session)
+        redundancy_rows = downstream_redundancy_audit_rows(session.model)
+        if redundancy_rows:
+            tables["downstream_redundancy_audit"] = redundancy_rows
         try:
             composition = session.model.get_model_composition()
             data["model_composition"] = composition
@@ -375,12 +438,15 @@ class HUGIMLActionOrchestrator:
         summary = _decision_summary(session, tables, question=request.question or "")
         writer_model = str(request.params.get("_writer_model") or "").strip()
         if writer_model:
-            summary = _polish_run_answer(
-                writer_model=writer_model,
-                question=request.question or "Summarize the active HUGIML model findings.",
-                draft=summary,
-                run_context=_run_context_for_writer(session, tables, data),
-            ) or summary
+            summary = (
+                _polish_run_answer(
+                    writer_model=writer_model,
+                    question=request.question or "Summarize the active HUGIML model findings.",
+                    draft=summary,
+                    run_context=_run_context_for_writer(session, tables, data),
+                )
+                or summary
+            )
         data["summary"] = summary
         return ActionResult(
             ok=True,
@@ -422,10 +488,11 @@ class HUGIMLActionOrchestrator:
         clone.params = {**request.params, "focus": "overview"}
         return self._action_explain_model(clone)
 
-    def _configuration_result(
-        self, session: ModelSession, request: ActionRequest
-    ) -> ActionResult:
+    def _configuration_result(self, session: ModelSession, request: ActionRequest) -> ActionResult:
         tables = {"model_configuration": _model_config_rows(session)}
+        redundancy_rows = downstream_redundancy_audit_rows(session.model)
+        if redundancy_rows:
+            tables["downstream_redundancy_audit"] = redundancy_rows
         data: dict[str, Any] = {
             "session_id": session.session_id,
             "dataset": session.dataset,
@@ -452,7 +519,9 @@ class HUGIMLActionOrchestrator:
         metric = request.metric or session.metrics.get("primary_metric")
         score = session.metrics.get(metric) if metric else session.metrics.get("primary_score")
         label = str(metric or "primary metric").replace("_", " ")
-        score_text = f"{float(score):.4f}" if isinstance(score, (int, float, np.number)) else str(score)
+        score_text = (
+            f"{float(score):.4f}" if isinstance(score, (int, float, np.number)) else str(score)
+        )
         return ActionResult(
             ok=True,
             action=request.action,
@@ -526,9 +595,7 @@ class HUGIMLActionOrchestrator:
             tables=tables,
         )
 
-    def _pattern_rules_result(
-        self, session: ModelSession, request: ActionRequest
-    ) -> ActionResult:
+    def _pattern_rules_result(self, session: ModelSession, request: ActionRequest) -> ActionResult:
         tables: dict[str, list[dict[str, Any]]] = {
             "model_configuration": _model_config_rows(session)
         }
@@ -555,9 +622,7 @@ class HUGIMLActionOrchestrator:
             tables=tables,
         )
 
-    def _augmented_pair_result(
-        self, session: ModelSession, request: ActionRequest
-    ) -> ActionResult:
+    def _augmented_pair_result(self, session: ModelSession, request: ActionRequest) -> ActionResult:
         tables: dict[str, list[dict[str, Any]]] = {
             "model_configuration": _model_config_rows(session)
         }
@@ -601,9 +666,7 @@ class HUGIMLActionOrchestrator:
         }
         data: dict[str, Any] = {"session_id": session.session_id, "dataset": session.dataset}
         enabled = bool(getattr(session.model, "interaction_relaxed_mining", False))
-        survivors = list(
-            getattr(session.model, "interaction_relaxed_mining_survivors_", []) or []
-        )
+        survivors = list(getattr(session.model, "interaction_relaxed_mining_survivors_", []) or [])
         if survivors:
             tables["interaction_relaxed_survivors"] = [
                 {key: _jsonable(value) for key, value in row.items()}
@@ -613,9 +676,9 @@ class HUGIMLActionOrchestrator:
         try:
             pattern_info = session.model.get_pattern_info()
             if "survivor_led" in pattern_info.columns:
-                survivor_patterns = pattern_info[
-                    pattern_info["survivor_led"].astype(bool)
-                ].head(request.limit)
+                survivor_patterns = pattern_info[pattern_info["survivor_led"].astype(bool)].head(
+                    request.limit
+                )
                 if not survivor_patterns.empty:
                     tables["interaction_relaxed_patterns"] = _df_records(survivor_patterns)
         except Exception:
@@ -742,8 +805,7 @@ class HUGIMLActionOrchestrator:
             },
             tables={
                 "rpte_rule_conjunctions": [
-                    {key: _jsonable(value) for key, value in row.items()}
-                    for row in formatted
+                    {key: _jsonable(value) for key, value in row.items()} for row in formatted
                 ],
                 "model_configuration": _model_config_rows(session),
             },
@@ -756,10 +818,12 @@ class HUGIMLActionOrchestrator:
         result = self._action_generate_predictions(request)
         drivers = self._prediction_drivers_result(session, request)
         result.tables.update(drivers.tables)
-        result.data.update({
-            "driver_summary": drivers.message,
-            "downstream_branch": drivers.data.get("downstream_branch"),
-        })
+        result.data.update(
+            {
+                "driver_summary": drivers.message,
+                "downstream_branch": drivers.data.get("downstream_branch"),
+            }
+        )
         result.message = f"{result.message}\n\n{drivers.message}"
         return result
 
@@ -788,8 +852,14 @@ class HUGIMLActionOrchestrator:
                     "patterns_after": after,
                     "patterns_removed": before - after,
                     "reason": reason,
-                    "metric_before_pruning": previous_metrics.get(request.metric or previous_metrics.get("primary_metric"), previous_metrics.get("primary_score")),
-                    "metric_after_pruning": metrics.get(request.metric or metrics.get("primary_metric"), metrics.get("primary_score")),
+                    "metric_before_pruning": previous_metrics.get(
+                        request.metric or previous_metrics.get("primary_metric"),
+                        previous_metrics.get("primary_score"),
+                    ),
+                    "metric_after_pruning": metrics.get(
+                        request.metric or metrics.get("primary_metric"),
+                        metrics.get("primary_score"),
+                    ),
                     "primary_metric": metrics.get("primary_metric"),
                 }
             ],
@@ -803,17 +873,32 @@ class HUGIMLActionOrchestrator:
         message = _pruning_decision_summary(session, before, after, reason, metrics)
         writer_model = str(request.params.get("_writer_model") or "").strip()
         if writer_model:
-            message = _polish_run_answer(
-                writer_model=writer_model,
-                question=request.question or "Summarize the pruning result.",
-                draft=message,
-                run_context=json.dumps({"pruning_summary": tables["pruning_summary"], "metrics_before": previous_metrics, "metrics_after": metrics}, indent=2, default=str),
-            ) or message
+            message = (
+                _polish_run_answer(
+                    writer_model=writer_model,
+                    question=request.question or "Summarize the pruning result.",
+                    draft=message,
+                    run_context=json.dumps(
+                        {
+                            "pruning_summary": tables["pruning_summary"],
+                            "metrics_before": previous_metrics,
+                            "metrics_after": metrics,
+                        },
+                        indent=2,
+                        default=str,
+                    ),
+                )
+                or message
+            )
         return ActionResult(
             ok=True,
             action=request.action,
             message=message,
-            data={"session_id": session.session_id, "patterns_before": before, "patterns_after": after},
+            data={
+                "session_id": session.session_id,
+                "patterns_before": before,
+                "patterns_after": after,
+            },
             tables=tables,
         )
 
@@ -840,21 +925,33 @@ class HUGIMLActionOrchestrator:
         )
         card_path = out_dir / "model_card.md"
         card.save(str(card_path), fmt="md")
-        manifest = package_audit_artifacts(session.model, model_id=model_id, output_dir=str(out_dir), model_card=card)
+        manifest = package_audit_artifacts(
+            session.model, model_id=model_id, output_dir=str(out_dir), model_card=card
+        )
         session.artifacts.update({"model_card_md": str(card_path), "audit_manifest": str(manifest)})
         message = _governance_decision_summary(session, card_path, manifest)
         writer_model = str(request.params.get("_writer_model") or "").strip()
         if writer_model:
-            message = _polish_run_answer(
-                writer_model=writer_model,
-                question=request.question or "Summarize the governance artifacts.",
-                draft=message,
-                run_context=json.dumps({
-                    "session_id": session.session_id,
-                    "metrics": session.metrics,
-                    "artifacts": {"model_card_md": str(card_path), "audit_manifest": str(manifest)},
-                }, indent=2, default=str),
-            ) or message
+            message = (
+                _polish_run_answer(
+                    writer_model=writer_model,
+                    question=request.question or "Summarize the governance artifacts.",
+                    draft=message,
+                    run_context=json.dumps(
+                        {
+                            "session_id": session.session_id,
+                            "metrics": session.metrics,
+                            "artifacts": {
+                                "model_card_md": str(card_path),
+                                "audit_manifest": str(manifest),
+                            },
+                        },
+                        indent=2,
+                        default=str,
+                    ),
+                )
+                or message
+            )
         return ActionResult(
             ok=True,
             action=request.action,
@@ -877,12 +974,15 @@ class HUGIMLActionOrchestrator:
         answer = build_docs_answer(question, hits)
         writer_model = str(request.params.get("_writer_model") or "").strip()
         if writer_model:
-            answer = _polish_docs_answer(
-                writer_model=writer_model,
-                question=question,
-                draft=answer,
-                docs_context=build_docs_context(question, hits),
-            ) or answer
+            answer = (
+                _polish_docs_answer(
+                    writer_model=writer_model,
+                    question=question,
+                    draft=answer,
+                    docs_context=build_docs_context(question, hits),
+                )
+                or answer
+            )
         source_refs = [hit.to_dict() for hit in hits[:4]]
         return ActionResult(
             ok=True,
@@ -968,12 +1068,14 @@ class HUGIMLActionOrchestrator:
             chosen = dict(params)
             if downstream is not None:
                 chosen["downstream_constraint"] = downstream
-        metrics.update({
-            "n_train": int(len(y_train)),
-            "n_rows_used": int(run_scope.get("rows_used", len(y))),
-            "source_rows": int(run_scope.get("source_rows", len(y))),
-            "sampled_for_chat": bool(run_scope.get("sampled", False)),
-        })
+        metrics.update(
+            {
+                "n_train": int(len(y_train)),
+                "n_rows_used": int(run_scope.get("rows_used", len(y))),
+                "source_rows": int(run_scope.get("source_rows", len(y))),
+                "sampled_for_chat": bool(run_scope.get("sampled", False)),
+            }
+        )
         sid = self._new_session_id(info.name)
         session = ModelSession(
             session_id=sid,
@@ -1039,8 +1141,10 @@ class HUGIMLActionOrchestrator:
             # A named grid is authoritative. Do not leak representation flags
             # from a high-level strategy into a grid that does not define them.
             params = {"n_jobs": 1, **candidate}
+            benchmark_lr_C = float(params.pop("lr_C", 1.0))
             try:
                 model = HUGIMLClassifier(**params)
+                model._benchmark_lr_C = benchmark_lr_C
                 model.fit(X_train, y_train)
                 metrics = self._evaluate(model, X_test, y_test, metric)
                 score = _score_for_selection(metrics, primary)
@@ -1051,7 +1155,7 @@ class HUGIMLActionOrchestrator:
                 best_score = score
                 best_model = locals().get("model")
                 best_metrics = metrics
-                best_params = dict(params)
+                best_params = {**params, "lr_C": benchmark_lr_C}
         if best_model is None:
             raise RuntimeError("All HUGIML tuning candidates failed.")
 
@@ -1125,7 +1229,9 @@ class HUGIMLActionOrchestrator:
             "n_jobs": 1,
         }
 
-    def _evaluate(self, model: Any, X_test: pd.DataFrame, y_test: np.ndarray, metric: str | None) -> dict[str, Any]:
+    def _evaluate(
+        self, model: Any, X_test: pd.DataFrame, y_test: np.ndarray, metric: str | None
+    ) -> dict[str, Any]:
         pred = model.predict(X_test)
         metrics: dict[str, Any] = {
             "n_test": int(len(y_test)),
@@ -1168,13 +1274,24 @@ class HUGIMLActionOrchestrator:
         sid = request.session_id or self.last_session_id
         if not sid or sid not in self.sessions:
             if request.dataset:
-                return self._fit_session(ActionRequest(action="build_model", dataset=request.dataset), tune=False)
+                return self._fit_session(
+                    ActionRequest(action="build_model", dataset=request.dataset), tune=False
+                )
             raise KeyError("No active model session. Build or tune a model first.")
         return self.sessions[sid]
 
-    def _session_result(self, session: ModelSession, action: str, prefix: str, request: ActionRequest | None = None) -> ActionResult:
-        tables: dict[str, list[dict[str, Any]]] = {"metrics": [session.metrics], "model_configuration": _model_config_rows(session)}
-        data: dict[str, Any] = {"session_id": session.session_id, "dataset": session.dataset, "target": session.target}
+    def _session_result(
+        self, session: ModelSession, action: str, prefix: str, request: ActionRequest | None = None
+    ) -> ActionResult:
+        tables: dict[str, list[dict[str, Any]]] = {
+            "metrics": [session.metrics],
+            "model_configuration": _model_config_rows(session),
+        }
+        data: dict[str, Any] = {
+            "session_id": session.session_id,
+            "dataset": session.dataset,
+            "target": session.target,
+        }
         try:
             tables["feature_importance"] = _df_records(session.model.feature_importances().head(10))
         except Exception:
@@ -1186,14 +1303,19 @@ class HUGIMLActionOrchestrator:
         except Exception:
             pass
         message = _build_result_summary(prefix, session, tables)
-        writer_model = str(((request.params if request else {}) or {}).get("_writer_model") or "").strip()
+        writer_model = str(
+            ((request.params if request else {}) or {}).get("_writer_model") or ""
+        ).strip()
         if writer_model:
-            message = _polish_run_answer(
-                writer_model=writer_model,
-                question=(request.question if request else None) or prefix,
-                draft=message,
-                run_context=_run_context_for_writer(session, tables, data),
-            ) or message
+            message = (
+                _polish_run_answer(
+                    writer_model=writer_model,
+                    question=(request.question if request else None) or prefix,
+                    draft=message,
+                    run_context=_run_context_for_writer(session, tables, data),
+                )
+                or message
+            )
         data["summary"] = message
         return ActionResult(
             ok=True,
@@ -1227,7 +1349,9 @@ class HUGIMLActionOrchestrator:
             "metrics": session.metrics,
             "created_at": session.created_at,
         }
-        (path / "manifest.json").write_text(json.dumps(manifest, indent=2, default=str), encoding="utf-8")
+        (path / "manifest.json").write_text(
+            json.dumps(manifest, indent=2, default=str), encoding="utf-8"
+        )
 
 
 def generate_qna_html(
@@ -1248,7 +1372,9 @@ def generate_qna_html(
 
     metrics = (build_result.tables.get("metrics") or [{}])[0]
     feature_rows = explain_result.tables.get("feature_importance", [])[:12]
-    prediction_rows = (prediction_result.tables.get("predictions", []) if prediction_result else [])[:8]
+    prediction_rows = (
+        prediction_result.tables.get("predictions", []) if prediction_result else []
+    )[:8]
     prune_rows = prune_result.tables.get("pruning_summary", [])
     prune_summary = prune_rows[0] if prune_rows else {}
     class_rows = [
@@ -1279,12 +1405,14 @@ def generate_qna_html(
                 f"The active dataset is <b>{html.escape(str(dataset_description.get('name')))}</b>. "
                 f"It has <b>{html.escape(str(rows))}</b> rows, <b>{html.escape(str(features))}</b> features, "
                 f"and target column <code>{html.escape(str(target))}</code>."
-                + _metric_cards([
-                    ("Rows", rows),
-                    ("Features", features),
-                    ("Target", target),
-                    ("Source", dataset_description.get("source", "registered")),
-                ])
+                + _metric_cards(
+                    [
+                        ("Rows", rows),
+                        ("Features", features),
+                        ("Target", target),
+                        ("Source", dataset_description.get("source", "registered")),
+                    ]
+                )
                 + _svg_bar_chart(class_rows, title="Class balance")
                 + _svg_dataset_profile_chart(dataset_description)
             ),
@@ -1298,12 +1426,14 @@ def generate_qna_html(
             "question": "Build a HUGIML model and tune it for a strong held-out score.",
             "answer": (
                 html.escape(build_result.message)
-                + _metric_cards([
-                    (str(primary_metric).upper(), primary_score),
-                    ("ROC AUC", roc_auc),
-                    ("Accuracy", accuracy),
-                    ("F1", f1),
-                ])
+                + _metric_cards(
+                    [
+                        (str(primary_metric).upper(), primary_score),
+                        ("ROC AUC", roc_auc),
+                        ("Accuracy", accuracy),
+                        ("F1", f1),
+                    ]
+                )
                 + _svg_metric_profile_chart(metrics)
                 + _html_table(build_result.tables.get("metrics", []), max_rows=1, max_cols=8)
                 + _confusion_matrix_html(confusion)
@@ -1318,8 +1448,12 @@ def generate_qna_html(
             "question": "Which features or patterns are driving the predictions?",
             "answer": (
                 html.escape(explain_result.data.get("summary", explain_result.message))
-                + _svg_diverging_importance_chart(feature_rows, title="Top feature / pattern influence")
-                + _svg_bar_chart(_importance_chart_rows(feature_rows), title="Absolute influence ranking")
+                + _svg_diverging_importance_chart(
+                    feature_rows, title="Top feature / pattern influence"
+                )
+                + _svg_bar_chart(
+                    _importance_chart_rows(feature_rows), title="Absolute influence ranking"
+                )
                 + _html_table(feature_rows, max_rows=8, max_cols=7)
             ),
         },
@@ -1334,7 +1468,11 @@ def generate_qna_html(
                 "The workbench returns structured tables alongside the plain-language answer. "
                 "These tables are generated from HUGIML session artifacts, not free-form text."
                 + _svg_prediction_chart(prediction_rows)
-                + _html_table(prediction_rows or explain_result.tables.get("feature_importance", []), max_rows=8, max_cols=8)
+                + _html_table(
+                    prediction_rows or explain_result.tables.get("feature_importance", []),
+                    max_rows=8,
+                    max_cols=8,
+                )
             ),
         },
         {
@@ -1346,14 +1484,18 @@ def generate_qna_html(
             "question": "Can you simplify the model for review without retraining from scratch?",
             "answer": (
                 html.escape(prune_result.message)
-                + _metric_cards([
-                    ("Before", prune_summary.get("patterns_before", "—")),
-                    ("After", prune_summary.get("patterns_after", "—")),
-                    ("Removed", prune_summary.get("patterns_removed", "—")),
-                    ("Score after", _fmt_html_num(prune_summary.get("metric_after_pruning"))),
-                ])
+                + _metric_cards(
+                    [
+                        ("Before", prune_summary.get("patterns_before", "—")),
+                        ("After", prune_summary.get("patterns_after", "—")),
+                        ("Removed", prune_summary.get("patterns_removed", "—")),
+                        ("Score after", _fmt_html_num(prune_summary.get("metric_after_pruning"))),
+                    ]
+                )
                 + _svg_before_after_chart(prune_summary)
-                + _svg_metric_profile_chart((prune_result.tables.get("metrics") or [{}])[0], title="Metrics after pruning")
+                + _svg_metric_profile_chart(
+                    (prune_result.tables.get("metrics") or [{}])[0], title="Metrics after pruning"
+                )
                 + _html_table(prune_rows, max_rows=3, max_cols=7)
             ),
         },
@@ -1366,12 +1508,14 @@ def generate_qna_html(
             "question": "Generate something the review board can file.",
             "answer": (
                 html.escape(governance_result.message)
-                + _metric_cards([
-                    ("Model score", primary_score),
-                    ("Pattern rows shown", pattern_total),
-                    ("Audit status", "packaged" if governance_result.ok else "check"),
-                    ("Interface scope", "HUGIML only"),
-                ])
+                + _metric_cards(
+                    [
+                        ("Model score", primary_score),
+                        ("Pattern rows shown", pattern_total),
+                        ("Audit status", "packaged" if governance_result.ok else "check"),
+                        ("Interface scope", "HUGIML only"),
+                    ]
+                )
                 + _svg_governance_flow_chart()
                 + "<p>The model card and audit manifest are emitted by existing HUGIML governance APIs. "
                 "The chat layer does not edit code, run shell commands, or invoke baseline models.</p>"
@@ -1464,7 +1608,7 @@ def generate_qna_html(
   <h1>{html.escape(title)}</h1>
   <p class="dek">A polished end-to-end walkthrough for a focused NLP interface: select data, build and tune a HUGIML model, inspect outputs, simplify the rule set, and produce governance artifacts. User-facing language stays practical; implementation details stay behind the scenes.</p>
   <div class="meta-row">
-    <span class="meta-chip">dataset <b>{html.escape(str(dataset_description.get('name')))}</b></span>
+    <span class="meta-chip">dataset <b>{html.escape(str(dataset_description.get("name")))}</b></span>
     <span class="meta-chip">rows <b>{html.escape(str(rows))}</b></span>
     <span class="meta-chip">features <b>{html.escape(str(features))}</b></span>
     <span class="meta-chip">modeling <b>HUGIML only</b></span>
@@ -1504,11 +1648,11 @@ def generate_qna_html(
 
 def _qa_section(section: dict[str, Any]) -> str:
     return f"""
-<section class="stage" id="{html.escape(section['id'])}">
-  <div class="stage-head"><span class="stage-num">{html.escape(section['num'])}</span><h2>{html.escape(section['title'])}</h2></div>
-  <p class="stage-note">{html.escape(section['note'])}</p>
-  <div class="bubble q"><div class="tag q">Q</div><div class="bubble-body"><div class="speaker-label">You</div><p>{html.escape(section['question'])}</p></div></div>
-  <div class="bubble a"><div class="tag a">A</div><div class="bubble-body"><div class="speaker-label">Assistant</div>{section['answer']}</div></div>
+<section class="stage" id="{html.escape(section["id"])}">
+  <div class="stage-head"><span class="stage-num">{html.escape(section["num"])}</span><h2>{html.escape(section["title"])}</h2></div>
+  <p class="stage-note">{html.escape(section["note"])}</p>
+  <div class="bubble q"><div class="tag q">Q</div><div class="bubble-body"><div class="speaker-label">You</div><p>{html.escape(section["question"])}</p></div></div>
+  <div class="bubble a"><div class="tag a">A</div><div class="bubble-body"><div class="speaker-label">Assistant</div>{section["answer"]}</div></div>
 </section>
 """
 
@@ -1563,9 +1707,7 @@ def _svg_bar_chart(rows: list[dict[str, Any]], title: str) -> str:
     return (
         f"<div class='chart-card'><div class='chart-title'>{html.escape(title)}</div>"
         f"<svg viewBox='0 0 {width} {height}' role='img' aria-label='{html.escape(title)}' width='100%' height='{height}'>"
-        "<style>rect{fill:#2C6E63;opacity:.82;}</style>"
-        + "".join(svg_rows)
-        + "</svg></div>"
+        "<style>rect{fill:#2C6E63;opacity:.82;}</style>" + "".join(svg_rows) + "</svg></div>"
     )
 
 
@@ -1580,7 +1722,9 @@ def _svg_dataset_profile_chart(desc: dict[str, Any]) -> str:
     return _svg_bar_chart(rows, title="Dataset profile checks")
 
 
-def _svg_metric_profile_chart(metrics: dict[str, Any], title: str = "Held-out metric profile") -> str:
+def _svg_metric_profile_chart(
+    metrics: dict[str, Any], title: str = "Held-out metric profile"
+) -> str:
     rows = []
     for key, label in (
         ("roc_auc", "ROC AUC"),
@@ -1601,7 +1745,9 @@ def _svg_metric_profile_chart(metrics: dict[str, Any], title: str = "Held-out me
 def _svg_diverging_importance_chart(rows: list[dict[str, Any]], title: str) -> str:
     clean = []
     for row in rows[:12]:
-        label = str(row.get("display_name") or row.get("pattern") or row.get("feature") or "pattern")
+        label = str(
+            row.get("display_name") or row.get("pattern") or row.get("feature") or "pattern"
+        )
         raw = row.get("coefficient", row.get("importance", row.get("abs_coefficient", 0)))
         try:
             value = float(raw)
@@ -1617,8 +1763,8 @@ def _svg_diverging_importance_chart(rows: list[dict[str, Any]], title: str) -> s
     row_h = 29
     height = 40 + row_h * len(clean)
     bits = [
-        f"<line x1='{mid}' y1='26' x2='{mid}' y2='{height-12}' stroke='#5B6358' stroke-dasharray='3 4'></line>",
-        f"<text class='bar-label' x='{mid}' y='{height-2}' text-anchor='middle'>0</text>",
+        f"<line x1='{mid}' y1='26' x2='{mid}' y2='{height - 12}' stroke='#5B6358' stroke-dasharray='3 4'></line>",
+        f"<text class='bar-label' x='{mid}' y='{height - 2}' text-anchor='middle'>0</text>",
     ]
     for i, (label, value) in enumerate(clean):
         y = 32 + i * row_h
@@ -1635,9 +1781,9 @@ def _svg_diverging_importance_chart(rows: list[dict[str, Any]], title: str) -> s
         short = html.escape(label[:64])
         full = html.escape(label, quote=True)
         bits.append(
-            f"<text class='bar-label' x='0' y='{y+13}'><title>{full}</title>{short}</text>"
+            f"<text class='bar-label' x='0' y='{y + 13}'><title>{full}</title>{short}</text>"
             + rect
-            + f"<text class='bar-value' x='{value_x}' y='{y+13}' text-anchor='{anchor}'>{_fmt_html_num(value)}</text>"
+            + f"<text class='bar-value' x='{value_x}' y='{y + 13}' text-anchor='{anchor}'>{_fmt_html_num(value)}</text>"
         )
     return (
         f"<div class='chart-card'><div class='chart-title'>{html.escape(title)}</div>"
@@ -1664,7 +1810,7 @@ def _svg_prediction_chart(rows: list[dict[str, Any]]) -> str:
         except Exception:
             continue
         if np.isfinite(value):
-            clean.append((f"row {i+1}", max(0.0, min(1.0, value))))
+            clean.append((f"row {i + 1}", max(0.0, min(1.0, value))))
     if not clean:
         return ""
     width = 760
@@ -1672,7 +1818,7 @@ def _svg_prediction_chart(rows: list[dict[str, Any]]) -> str:
     base_y = 136
     gap = 78
     bits = [
-        f"<line x1='48' y1='{base_y}' x2='{width-30}' y2='{base_y}' stroke='#5B6358'></line>",
+        f"<line x1='48' y1='{base_y}' x2='{width - 30}' y2='{base_y}' stroke='#5B6358'></line>",
         "<text class='bar-label' x='4' y='44'>1.0</text><line x1='48' y1='40' x2='730' y2='40' stroke='#C7CFC0' stroke-dasharray='3 4'></line>",
         "<text class='bar-label' x='4' y='138'>0.0</text>",
     ]
@@ -1682,8 +1828,8 @@ def _svg_prediction_chart(rows: list[dict[str, Any]]) -> str:
         y = base_y - bar_h
         bits.append(
             f"<rect x='{x}' y='{y}' width='34' height='{bar_h}' fill='#B5651D' opacity='.86'></rect>"
-            f"<text class='bar-value' x='{x+17}' y='{max(18, y-6)}' text-anchor='middle'>{value:.2f}</text>"
-            f"<text class='bar-label' x='{x+17}' y='158' text-anchor='middle'>{html.escape(label)}</text>"
+            f"<text class='bar-value' x='{x + 17}' y='{max(18, y - 6)}' text-anchor='middle'>{value:.2f}</text>"
+            f"<text class='bar-label' x='{x + 17}' y='158' text-anchor='middle'>{html.escape(label)}</text>"
         )
     return (
         "<div class='chart-card'><div class='chart-title'>Prediction probability snapshot</div>"
@@ -1694,11 +1840,14 @@ def _svg_prediction_chart(rows: list[dict[str, Any]]) -> str:
 
 
 def _svg_before_after_chart(summary: dict[str, Any]) -> str:
-    return _svg_bar_chart([
-        {"label": "Before pruning", "value": summary.get("patterns_before", 0)},
-        {"label": "After pruning", "value": summary.get("patterns_after", 0)},
-        {"label": "Removed", "value": summary.get("patterns_removed", 0)},
-    ], title="Pattern count before and after pruning")
+    return _svg_bar_chart(
+        [
+            {"label": "Before pruning", "value": summary.get("patterns_before", 0)},
+            {"label": "After pruning", "value": summary.get("patterns_after", 0)},
+            {"label": "Removed", "value": summary.get("patterns_removed", 0)},
+        ],
+        title="Pattern count before and after pruning",
+    )
 
 
 def _svg_governance_flow_chart() -> str:
@@ -1716,11 +1865,13 @@ def _svg_governance_flow_chart() -> str:
         x = 24 + i * 198
         bits.append(
             f"<rect x='{x}' y='35' width='{card_w}' height='72' fill='#fff' stroke='#C7CFC0'></rect>"
-            f"<text x='{x+14}' y='62' class='bar-value'>{html.escape(title)}</text>"
-            f"<text x='{x+14}' y='86' class='bar-label'>{html.escape(caption)}</text>"
+            f"<text x='{x + 14}' y='62' class='bar-value'>{html.escape(title)}</text>"
+            f"<text x='{x + 14}' y='86' class='bar-label'>{html.escape(caption)}</text>"
         )
         if i < len(items) - 1:
-            bits.append(f"<path d='M{x+card_w+8} 71 L{x+card_w+28} 71' stroke='#B5651D' stroke-width='2'></path><path d='M{x+card_w+28} 71 L{x+card_w+21} 65 M{x+card_w+28} 71 L{x+card_w+21} 77' stroke='#B5651D' stroke-width='2' fill='none'></path>")
+            bits.append(
+                f"<path d='M{x + card_w + 8} 71 L{x + card_w + 28} 71' stroke='#B5651D' stroke-width='2'></path><path d='M{x + card_w + 28} 71 L{x + card_w + 21} 65 M{x + card_w + 28} 71 L{x + card_w + 21} 77' stroke='#B5651D' stroke-width='2' fill='none'></path>"
+            )
     return (
         "<div class='chart-card'><div class='chart-title'>Governance package flow</div>"
         f"<svg viewBox='0 0 {width} {height}' role='img' aria-label='Governance package flow' width='100%' height='{height}'>"
@@ -1736,8 +1887,14 @@ def _confusion_matrix_html(matrix: list[list[Any]] | None) -> str:
     for i, row in enumerate(matrix[:2]):
         for j, value in enumerate(row[:2]):
             klass = "cool" if i == j else "hot"
-            cells.append(f"<div class='cell {klass}'><span>actual {i} · pred {j}</span><b>{html.escape(str(value))}</b></div>")
-    return "<div class='chart-card'><div class='chart-title'>Confusion matrix</div><div class='matrix'>" + "".join(cells) + "</div></div>"
+            cells.append(
+                f"<div class='cell {klass}'><span>actual {i} · pred {j}</span><b>{html.escape(str(value))}</b></div>"
+            )
+    return (
+        "<div class='chart-card'><div class='chart-title'>Confusion matrix</div><div class='matrix'>"
+        + "".join(cells)
+        + "</div></div>"
+    )
 
 
 def _coerce_html_matrix(value: Any) -> list[list[Any]] | None:
@@ -1746,10 +1903,15 @@ def _coerce_html_matrix(value: Any) -> list[list[Any]] | None:
     if isinstance(value, str):
         try:
             import ast
+
             value = ast.literal_eval(value)
         except Exception:
             return None
-    if isinstance(value, (list, tuple)) and value and all(isinstance(row, (list, tuple)) for row in value):
+    if (
+        isinstance(value, (list, tuple))
+        and value
+        and all(isinstance(row, (list, tuple)) for row in value)
+    ):
         return [list(row) for row in value]
     return None
 
@@ -1762,7 +1924,6 @@ def _fmt_html_num(value: Any) -> str:
         return f"{val:.4f}"
     except Exception:
         return "n/a" if value is None else str(value)
-
 
 
 def _sample_tuning_candidates(
@@ -1840,9 +2001,7 @@ def _normalise_downstream_request(value: Any) -> str | None:
         return "rpte"
     if name in {"lr", "logistic", "logistic_regression", "linear", "none"}:
         return "logistic_regression"
-    raise ValueError(
-        "downstream_estimator must be 'rpte' or 'logistic_regression'."
-    )
+    raise ValueError("downstream_estimator must be 'rpte' or 'logistic_regression'.")
 
 
 def _resolve_downstream_estimator(name: str) -> Any:
@@ -1859,10 +2018,20 @@ def _resolve_downstream_estimator(name: str) -> Any:
 
 def _extract_model_params_from_request(params: dict[str, Any]) -> dict[str, Any]:
     allowed = {
-        "B", "L", "G", "topK", "adaptive_binning", "feature_mode",
-        "augmented_pair_transforms", "interaction_relaxed_mining", "aug_feature_size",
-        "interaction_relaxed_feature_size", "n_jobs", "execution_mode",
-        "topk_budget_strict", "convert_binary_to_categorical",
+        "B",
+        "L",
+        "G",
+        "topK",
+        "adaptive_binning",
+        "feature_mode",
+        "augmented_pair_transforms",
+        "interaction_relaxed_mining",
+        "aug_feature_size",
+        "interaction_relaxed_feature_size",
+        "n_jobs",
+        "execution_mode",
+        "topk_budget_strict",
+        "convert_binary_to_categorical",
     }
     model_params = dict(params.get("model_params", {}) or {})
     for key in allowed:
@@ -1872,12 +2041,32 @@ def _extract_model_params_from_request(params: dict[str, Any]) -> dict[str, Any]
 
 
 def _compact_metric_row(metrics: dict[str, Any]) -> dict[str, Any]:
-    keys = ["primary_metric", "primary_score", "roc_auc", "average_precision", "accuracy", "balanced_accuracy", "precision", "recall", "f1", "n_test"]
+    keys = [
+        "primary_metric",
+        "primary_score",
+        "roc_auc",
+        "average_precision",
+        "accuracy",
+        "balanced_accuracy",
+        "precision",
+        "recall",
+        "f1",
+        "n_test",
+    ]
     return {key: metrics.get(key) for key in keys if metrics.get(key) is not None}
 
 
 def _compact_param_row(params: dict[str, Any]) -> dict[str, Any]:
-    keys = ["feature_mode", "B", "L", "G", "topK", "adaptive_binning", "augmented_pair_transforms", "interaction_relaxed_mining"]
+    keys = [
+        "feature_mode",
+        "B",
+        "L",
+        "G",
+        "topK",
+        "adaptive_binning",
+        "augmented_pair_transforms",
+        "interaction_relaxed_mining",
+    ]
     return {key: params.get(key) for key in keys if key in params}
 
 
@@ -1888,9 +2077,7 @@ def _safe_rpte_rule_rows(model: Any) -> list[dict[str, Any]]:
         return []
 
 
-def _format_rpte_rule_rows(
-    rows: list[dict[str, Any]], limit: int
-) -> list[dict[str, Any]]:
+def _format_rpte_rule_rows(rows: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
     formatted: list[dict[str, Any]] = []
     for row in sorted(
         rows,
@@ -1899,9 +2086,7 @@ def _format_rpte_rule_rows(
     )[:limit]:
         conditions = row.get("conditions") or []
         terms = [
-            condition.get("raw_condition")
-            or condition.get("downstream_condition")
-            or "?"
+            condition.get("raw_condition") or condition.get("downstream_condition") or "?"
             for condition in conditions
         ]
         formatted.append(
@@ -1916,9 +2101,7 @@ def _format_rpte_rule_rows(
                 "leaf_index": row.get("leaf_index"),
                 "backend": row.get("backend"),
                 "rule": (
-                    " AND ".join(str(term) for term in terms)
-                    if terms
-                    else "(direct source term)"
+                    " AND ".join(str(term) for term in terms) if terms else "(direct source term)"
                 ),
                 "coefficient": row.get("final_logistic_coefficient"),
                 "odds_multiplier": row.get("odds_multiplier"),
@@ -1993,7 +2176,9 @@ def _model_composition_rows(composition: dict[str, Any]) -> list[dict[str, Any]]
     return rows
 
 
-def _representation_breakdown_tables(session: ModelSession, limit: int) -> dict[str, list[dict[str, Any]]]:
+def _representation_breakdown_tables(
+    session: ModelSession, limit: int
+) -> dict[str, list[dict[str, Any]]]:
     tables: dict[str, list[dict[str, Any]]] = {}
     try:
         imp = session.model.feature_importances()
@@ -2010,13 +2195,17 @@ def _representation_breakdown_tables(session: ModelSession, limit: int) -> dict[
         pass
     try:
         features = list(session.model.get_downstream_features())
-        grouped: dict[str, list[dict[str, Any]]] = {"original": [], "pattern": [], "augmented_pair": []}
+        grouped: dict[str, list[dict[str, Any]]] = {
+            "original": [],
+            "pattern": [],
+            "augmented_pair": [],
+        }
         for name in features:
             text = str(name)
             if text.startswith("orig:"):
                 grouped["original"].append({"feature": text[5:]})
             elif text.startswith("augmented_pair:"):
-                grouped["augmented_pair"].append({"feature": text[len("augmented_pair:"):]})
+                grouped["augmented_pair"].append({"feature": text[len("augmented_pair:") :]})
             else:
                 grouped["pattern"].append({"feature": text.removeprefix("pattern:")})
         if "original_feature_details" not in tables and grouped["original"]:
@@ -2033,9 +2222,21 @@ def _representation_breakdown_tables(session: ModelSession, limit: int) -> dict[
 def _predictor_overview_rows(X: pd.DataFrame) -> list[dict[str, Any]]:
     numeric_cols = X.select_dtypes(include=[np.number]).columns.tolist()
     rows = [
-        {"role": "numeric_predictors", "count": len(numeric_cols), "examples": ", ".join(map(str, numeric_cols[:10]))},
-        {"role": "categorical_predictors", "count": int(X.shape[1] - len(numeric_cols)), "examples": ", ".join(map(str, [c for c in X.columns if c not in numeric_cols][:10]))},
-        {"role": "total_predictors", "count": int(X.shape[1]), "examples": ", ".join(map(str, X.columns[:10]))},
+        {
+            "role": "numeric_predictors",
+            "count": len(numeric_cols),
+            "examples": ", ".join(map(str, numeric_cols[:10])),
+        },
+        {
+            "role": "categorical_predictors",
+            "count": int(X.shape[1] - len(numeric_cols)),
+            "examples": ", ".join(map(str, [c for c in X.columns if c not in numeric_cols][:10])),
+        },
+        {
+            "role": "total_predictors",
+            "count": int(X.shape[1]),
+            "examples": ", ".join(map(str, X.columns[:10])),
+        },
     ]
     return rows
 
@@ -2045,22 +2246,31 @@ def _summary_statistics_rows(X: pd.DataFrame, *, limit: int = 12) -> list[dict[s
     numeric = X.select_dtypes(include=[np.number]).head(0).columns.tolist()
     for col in numeric[:limit]:
         series = pd.to_numeric(X[col], errors="coerce")
-        rows.append({
-            "feature": str(col), "type": "numeric", "missing_fraction": round(float(series.isna().mean()), 6),
-            "mean": round(float(series.mean()), 6) if series.notna().any() else None,
-            "std": round(float(series.std()), 6) if series.notna().sum() > 1 else None,
-            "min": round(float(series.min()), 6) if series.notna().any() else None,
-            "max": round(float(series.max()), 6) if series.notna().any() else None,
-            "unique": int(series.nunique(dropna=True)),
-        })
+        rows.append(
+            {
+                "feature": str(col),
+                "type": "numeric",
+                "missing_fraction": round(float(series.isna().mean()), 6),
+                "mean": round(float(series.mean()), 6) if series.notna().any() else None,
+                "std": round(float(series.std()), 6) if series.notna().sum() > 1 else None,
+                "min": round(float(series.min()), 6) if series.notna().any() else None,
+                "max": round(float(series.max()), 6) if series.notna().any() else None,
+                "unique": int(series.nunique(dropna=True)),
+            }
+        )
     remaining = [c for c in X.columns if c not in numeric]
     for col in remaining[: max(0, limit - len(rows))]:
         series = X[col]
         mode = series.mode(dropna=True)
-        rows.append({
-            "feature": str(col), "type": "categorical", "missing_fraction": round(float(series.isna().mean()), 6),
-            "unique": int(series.nunique(dropna=True)), "most_common": _jsonable(mode.iloc[0]) if not mode.empty else None,
-        })
+        rows.append(
+            {
+                "feature": str(col),
+                "type": "categorical",
+                "missing_fraction": round(float(series.isna().mean()), 6),
+                "unique": int(series.nunique(dropna=True)),
+                "most_common": _jsonable(mode.iloc[0]) if not mode.empty else None,
+            }
+        )
     return rows
 
 
@@ -2071,7 +2281,8 @@ def _dataset_decision_summary(desc: dict[str, Any], tables: dict[str, list[dict[
     balance = tables.get("class_balance") or []
     predictors = tables.get("predictor_overview") or []
     lines = [
-        f"### Dataset summary — `{desc.get('name')}`", "",
+        f"### Dataset summary — `{desc.get('name')}`",
+        "",
         "**Shape and target**",
         f"- Rows: **{rows}**",
         f"- Predictors: **{features}**",
@@ -2082,21 +2293,35 @@ def _dataset_decision_summary(desc: dict[str, Any], tables: dict[str, list[dict[
         for row in balance:
             lines.append(f"| {row.get('class')} | {row.get('count')} |")
     if predictors:
-        lines.extend(["", "**Predictor groups**", "", "| Group | Count | Examples |", "|---|---:|---|"])
+        lines.extend(
+            ["", "**Predictor groups**", "", "| Group | Count | Examples |", "|---|---:|---|"]
+        )
         for row in predictors:
-            lines.append(f"| {row.get('role')} | {row.get('count')} | {row.get('examples') or ''} |")
+            lines.append(
+                f"| {row.get('role')} | {row.get('count')} | {row.get('examples') or ''} |"
+            )
     if tables.get("missing_top"):
-        lines.append("\n**Data quality note**\n- Some predictors contain missing values; review the missingness table before modeling.")
+        lines.append(
+            "\n**Data quality note**\n- Some predictors contain missing values; review the missingness table before modeling."
+        )
     else:
-        lines.append("\n**Data quality note**\n- No non-zero missingness was found in the top missingness scan.")
+        lines.append(
+            "\n**Data quality note**\n- No non-zero missingness was found in the top missingness scan."
+        )
     return "\n".join(lines).strip()
 
 
-def _build_result_summary(prefix: str, session: ModelSession, tables: dict[str, list[dict[str, Any]]]) -> str:
+def _build_result_summary(
+    prefix: str, session: ModelSession, tables: dict[str, list[dict[str, Any]]]
+) -> str:
     metrics = session.metrics or {}
     lines = [
-        f"### {prefix} — `{session.dataset}`", "",
-        "**Run configuration**", "", "| Parameter | Value |", "|---|---|",
+        f"### {prefix} — `{session.dataset}`",
+        "",
+        "**Run configuration**",
+        "",
+        "| Parameter | Value |",
+        "|---|---|",
     ]
     for row in tables.get("model_configuration", [])[:12]:
         lines.append(f"| {row.get('parameter')} | `{row.get('value')}` |")
@@ -2111,10 +2336,14 @@ def _build_result_summary(prefix: str, session: ModelSession, tables: dict[str, 
     return "\n".join(lines).strip()
 
 
-def _comparison_decision_summary(dataset: str, rows: list[dict[str, Any]], primary: str, selected: Any) -> str:
+def _comparison_decision_summary(
+    dataset: str, rows: list[dict[str, Any]], primary: str, selected: Any
+) -> str:
     lines = [
-        f"### Configuration comparison — `{dataset}`", "",
-        f"Compared **{len(rows)}** HUGIML configurations on the same held-out split. The selected active session is **{selected}** using `{primary}`.", "",
+        f"### Configuration comparison — `{dataset}`",
+        "",
+        f"Compared **{len(rows)}** HUGIML configurations on the same held-out split. The selected active session is **{selected}** using `{primary}`.",
+        "",
         "| Configuration | Feature mode | Primary score | ROC AUC | Precision | Recall | F1 | Downstream features |",
         "|---|---|---:|---:|---:|---:|---:|---:|",
     ]
@@ -2124,16 +2353,26 @@ def _comparison_decision_summary(dataset: str, rows: list[dict[str, Any]], prima
             f"{_fmt_markdown_num(row.get('roc_auc'))} | {_fmt_markdown_num(row.get('precision'))} | {_fmt_markdown_num(row.get('recall'))} | "
             f"{_fmt_markdown_num(row.get('f1'))} | {_fmt_markdown_num(row.get('downstream_features'))} |"
         )
-    lines.extend(["", "**Decision note**", "- Prefer the configuration that meets the business metric target while keeping the representation small enough for review."])
+    lines.extend(
+        [
+            "",
+            "**Decision note**",
+            "- Prefer the configuration that meets the business metric target while keeping the representation small enough for review.",
+        ]
+    )
     return "\n".join(lines).strip()
 
 
-def _decision_summary(session: ModelSession, tables: dict[str, list[dict[str, Any]]], *, question: str = "") -> str:
+def _decision_summary(
+    session: ModelSession, tables: dict[str, list[dict[str, Any]]], *, question: str = ""
+) -> str:
     metrics = session.metrics or {}
     primary_metric = str(metrics.get("primary_metric") or "primary_score")
     primary_score = metrics.get("primary_score")
     metric_rows = _metric_rows(metrics)
-    driver_rows = _driver_rows(tables.get("feature_importance") or tables.get("pattern_info") or [], limit=6)
+    driver_rows = _driver_rows(
+        tables.get("feature_importance") or tables.get("pattern_info") or [], limit=6
+    )
     confusion_note = _confusion_note(metrics.get("confusion_matrix"))
     band = _score_band(primary_score)
     config_rows = tables.get("model_configuration") or []
@@ -2149,9 +2388,13 @@ def _decision_summary(session: ModelSession, tables: dict[str, list[dict[str, An
         lines.append(f"- {confusion_note}")
     if driver_rows:
         top = driver_rows[0]
-        lines.append(f"- The strongest reported driver is **{top['driver']}** with effect/importance **{top['effect']}**.")
+        lines.append(
+            f"- The strongest reported driver is **{top['driver']}** with effect/importance **{top['effect']}**."
+        )
     else:
-        lines.append("- Feature/pattern driver details were not available from the fitted model object.")
+        lines.append(
+            "- Feature/pattern driver details were not available from the fitted model object."
+        )
 
     # Surface the hyperparameters that were actually used unconditionally
     # (not just when the question explicitly asks for them). This is cheap
@@ -2161,7 +2404,9 @@ def _decision_summary(session: ModelSession, tables: dict[str, list[dict[str, An
     # depending on an LLM polish pass that previously did not
     # received the configuration table in its context.
     if config_rows:
-        lines.extend(["", "**Model configuration used**", "", "| Parameter | Value |", "|---|---:|"])
+        lines.extend(
+            ["", "**Model configuration used**", "", "| Parameter | Value |", "|---|---:|"]
+        )
         for row in config_rows:
             lines.append(f"| {row.get('parameter')} | `{row.get('value')}` |")
 
@@ -2170,23 +2415,35 @@ def _decision_summary(session: ModelSession, tables: dict[str, list[dict[str, An
         lines.append(f"| {label} | {_fmt_markdown_num(value)} |")
 
     if driver_rows:
-        lines.extend(["", "**Main drivers to review**", "", "| Rank | Driver | Effect / importance | Support |", "|---:|---|---:|---:|"])
+        lines.extend(
+            [
+                "",
+                "**Main drivers to review**",
+                "",
+                "| Rank | Driver | Effect / importance | Support |",
+                "|---:|---|---:|---:|",
+            ]
+        )
         for row in driver_rows:
-            lines.append(f"| {row['rank']} | {row['driver']} | {row['effect']} | {row['support']} |")
+            lines.append(
+                f"| {row['rank']} | {row['driver']} | {row['effect']} | {row['support']} |"
+            )
 
-    lines.extend([
-        "",
-        "**Interpretability / governance implications**",
-        "- Treat the top drivers as the first review queue: check whether they are domain-valid, stable, and free of sensitive/proxy leakage.",
-        "- If a driver is invalid or too brittle, use the pruning workflow to remove it and compare metrics before/after pruning.",
-        "- Do not approve the model from score alone; pair the validation metrics with pattern review and a model-card/audit package.",
-        "",
-        "**Recommended next steps**",
-        "1. Review the highest-impact patterns/features with a domain owner.",
-        "2. Generate predictions for a small held-out sample and inspect false positives/false negatives.",
-        "3. Prune low-support or policy-invalid patterns, then compare the new score and pattern count.",
-        "4. Generate governance artifacts once the evidence is acceptable.",
-    ])
+    lines.extend(
+        [
+            "",
+            "**Interpretability / governance implications**",
+            "- Treat the top drivers as the first review queue: check whether they are domain-valid, stable, and free of sensitive/proxy leakage.",
+            "- If a driver is invalid or too brittle, use the pruning workflow to remove it and compare metrics before/after pruning.",
+            "- Do not approve the model from score alone; pair the validation metrics with pattern review and a model-card/audit package.",
+            "",
+            "**Recommended next steps**",
+            "1. Review the highest-impact patterns/features with a domain owner.",
+            "2. Generate predictions for a small held-out sample and inspect false positives/false negatives.",
+            "3. Prune low-support or policy-invalid patterns, then compare the new score and pattern count.",
+            "4. Generate governance artifacts once the evidence is acceptable.",
+        ]
+    )
     return "\n".join(lines).strip()
 
 
@@ -2232,12 +2489,14 @@ def _driver_rows(rows: list[dict[str, Any]], *, limit: int = 6) -> list[dict[str
             if row.get("pattern_support") is not None
             else row.get("coverage")
         )
-        out.append({
-            "rank": str(i),
-            "driver": _trim_markdown(str(driver), 120),
-            "effect": _fmt_markdown_num(effect),
-            "support": _fmt_markdown_num(support),
-        })
+        out.append(
+            {
+                "rank": str(i),
+                "driver": _trim_markdown(str(driver), 120),
+                "effect": _fmt_markdown_num(effect),
+                "support": _fmt_markdown_num(support),
+            }
+        )
     return out
 
 
@@ -2287,53 +2546,61 @@ def _trim_markdown(value: str, limit: int) -> str:
     return clean[: limit - 1].rstrip() + "…"
 
 
-def _pruning_decision_summary(session: ModelSession, before: int, after: int, reason: str, metrics: dict[str, Any]) -> str:
+def _pruning_decision_summary(
+    session: ModelSession, before: int, after: int, reason: str, metrics: dict[str, Any]
+) -> str:
     removed = before - after
     metric = metrics.get("primary_metric") or "primary_score"
     score = metrics.get("primary_score")
-    return "\n".join([
-        f"### Pruning result — `{session.dataset}`",
-        "",
-        "**What changed**",
-        f"- Removed **{removed}** pattern(s): **{before} → {after}**.",
-        "- Refit the downstream classifier after pruning.",
-        f"- Review reason: {reason}",
-        "",
-        "**Performance after pruning**",
-        "",
-        "| Metric | Value |",
-        "|---|---:|",
-        f"| {metric} | {_fmt_markdown_num(score)} |",
-        f"| Accuracy | {_fmt_markdown_num(metrics.get('accuracy'))} |",
-        f"| F1 | {_fmt_markdown_num(metrics.get('f1'))} |",
-        "",
-        "**Decision note**",
-        "Use this as a before/after governance checkpoint. If the performance change is acceptable, keep the pruned model and package the audit artifacts; otherwise inspect which removed patterns carried signal.",
-    ]).strip()
+    return "\n".join(
+        [
+            f"### Pruning result — `{session.dataset}`",
+            "",
+            "**What changed**",
+            f"- Removed **{removed}** pattern(s): **{before} → {after}**.",
+            "- Refit the downstream classifier after pruning.",
+            f"- Review reason: {reason}",
+            "",
+            "**Performance after pruning**",
+            "",
+            "| Metric | Value |",
+            "|---|---:|",
+            f"| {metric} | {_fmt_markdown_num(score)} |",
+            f"| Accuracy | {_fmt_markdown_num(metrics.get('accuracy'))} |",
+            f"| F1 | {_fmt_markdown_num(metrics.get('f1'))} |",
+            "",
+            "**Decision note**",
+            "Use this as a before/after governance checkpoint. If the performance change is acceptable, keep the pruned model and package the audit artifacts; otherwise inspect which removed patterns carried signal.",
+        ]
+    ).strip()
 
 
 def _governance_decision_summary(session: ModelSession, card_path: Path, manifest: Any) -> str:
-    return "\n".join([
-        f"### Governance artifacts — `{session.dataset}`",
-        "",
-        "Generated a model-card file and audit manifest for the active HUGIML session.",
-        "",
-        "**What reviewers now have**",
-        f"- Session: `{session.session_id}`",
-        f"- Target: `{session.target}`",
-        f"- Primary score: **{_fmt_markdown_num(session.metrics.get('primary_score'))}** using `{session.metrics.get('primary_metric')}`",
-        f"- Model card: `{card_path}`",
-        f"- Audit manifest: `{manifest}`",
-        "",
-        "**Review checklist**",
-        "1. Confirm intended use and out-of-scope use are correct.",
-        "2. Review top patterns/features for proxy or policy issues.",
-        "3. Confirm pruning history is justified and retained.",
-        "4. Approve only after external/domain validation is complete.",
-    ]).strip()
+    return "\n".join(
+        [
+            f"### Governance artifacts — `{session.dataset}`",
+            "",
+            "Generated a model-card file and audit manifest for the active HUGIML session.",
+            "",
+            "**What reviewers now have**",
+            f"- Session: `{session.session_id}`",
+            f"- Target: `{session.target}`",
+            f"- Primary score: **{_fmt_markdown_num(session.metrics.get('primary_score'))}** using `{session.metrics.get('primary_metric')}`",
+            f"- Model card: `{card_path}`",
+            f"- Audit manifest: `{manifest}`",
+            "",
+            "**Review checklist**",
+            "1. Confirm intended use and out-of-scope use are correct.",
+            "2. Review top patterns/features for proxy or policy issues.",
+            "3. Confirm pruning history is justified and retained.",
+            "4. Approve only after external/domain validation is complete.",
+        ]
+    ).strip()
 
 
-def _run_context_for_writer(session: ModelSession, tables: dict[str, list[dict[str, Any]]], data: dict[str, Any]) -> str:
+def _run_context_for_writer(
+    session: ModelSession, tables: dict[str, list[dict[str, Any]]], data: dict[str, Any]
+) -> str:
     payload = {
         "session_id": session.session_id,
         "dataset": session.dataset,
@@ -2411,7 +2678,7 @@ def _grounded_summary(metrics: dict[str, Any], tables: dict[str, list[dict[str, 
         top = rpte[0]
         parts.append(
             "The downstream estimator is RPTE; its highest-weight rule is "
-            f"\"{top.get('conjunction', 'n/a')}\" with coefficient {top.get('coefficient', 'n/a')}."
+            f'"{top.get("conjunction", "n/a")}" with coefficient {top.get("coefficient", "n/a")}.'
         )
     elif fi:
         top = fi[0]
@@ -2452,7 +2719,11 @@ def _jsonable(value: Any) -> Any:
         # than a plain value -- summarize instead of passing through an
         # object json.dumps can't serialize.
         inner = getattr(value, "estimator", None)
-        label = f"{type(inner).__name__} via {type(value).__name__}" if inner is not None else type(value).__name__
+        label = (
+            f"{type(inner).__name__} via {type(value).__name__}"
+            if inner is not None
+            else type(value).__name__
+        )
         return {"__estimator__": label}
     try:
         if pd.isna(value):
@@ -2468,11 +2739,27 @@ def _html_table(rows: list[dict[str, Any]], max_rows: int = 10, max_cols: int = 
     rows = rows[:max_rows]
     keys: list[str] = []
     preferred = [
-        "pattern", "feature", "display_name", "feature_type", "coefficient",
-        "abs_coefficient", "support", "pattern_support", "n_test", "accuracy",
-        "balanced_accuracy", "f1", "roc_auc", "primary_metric", "primary_score",
-        "patterns_before", "patterns_after", "patterns_removed", "reason",
-        "metric_after_pruning", "chosen_params",
+        "pattern",
+        "feature",
+        "display_name",
+        "feature_type",
+        "coefficient",
+        "abs_coefficient",
+        "support",
+        "pattern_support",
+        "n_test",
+        "accuracy",
+        "balanced_accuracy",
+        "f1",
+        "roc_auc",
+        "primary_metric",
+        "primary_score",
+        "patterns_before",
+        "patterns_after",
+        "patterns_removed",
+        "reason",
+        "metric_after_pruning",
+        "chosen_params",
     ]
     for key in preferred:
         if any(key in row for row in rows) and key not in keys:
@@ -2506,6 +2793,7 @@ def _html_cell(value: Any, max_chars: int = 110) -> str:
     elif isinstance(value, (dict, list, tuple)):
         try:
             import json
+
             text = json.dumps(value, ensure_ascii=False, sort_keys=True)
         except Exception:
             text = str(value)

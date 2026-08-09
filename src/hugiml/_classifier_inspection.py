@@ -115,7 +115,7 @@ class _InspectionMixin:
         return out if np.isfinite(out) else float("nan")
 
     def _pattern_survivor_audit(self, pattern_entry: Any) -> dict[str, object]:
-        """Return survivor-led provenance for one mined pattern."""
+        """Return survivor-led source mapping for one mined pattern."""
         survivor_lookup = self._survivor_audit_lookup()
         source_features = self._pattern_source_features(pattern_entry)
         survivor_features = [name for name in source_features if name in survivor_lookup]
@@ -199,7 +199,7 @@ class _InspectionMixin:
         """Summary DataFrame with one row per mined HUG pattern.
 
         Columns include pattern, utility, information_gain, support, and
-        survivor-led provenance when interaction-relaxed mining is enabled.
+        survivor-led source mapping when interaction-relaxed mining is enabled.
 
         This is an audit/governance table.  Unlike ``get_hug_features()``, it
         requires the retained training pattern matrix to compute support and
@@ -264,7 +264,7 @@ class _InspectionMixin:
     def get_downstream_features(self) -> list[str]:
         """Return names aligned with the downstream estimator input columns.
 
-        The returned names include a namespace prefix so feature provenance is
+        The returned names include a namespace prefix so feature source mapping is
         explicit: ``orig:`` for original features, ``pattern:`` for mined HUG
         patterns, and ``augmented_pair:`` for augmented pair transforms.  When
         ``topk_budget_strict=True``, the returned list is already filtered to

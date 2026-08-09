@@ -64,9 +64,7 @@ def render_complexity(model: Any = None, *args, **kwargs) -> None:
         model_units = get_complexity(model, "model units")
         model_inspection_units = get_complexity(model, "model inspection units")
         instance_summary = (complexity_report or {}).get("instance_inspection_units", {})
-        instance_mean = (
-            instance_summary.get("mean") if instance_summary.get("available") else None
-        )
+        instance_mean = instance_summary.get("mean") if instance_summary.get("available") else None
         instance_ci_lower = (
             instance_summary.get("ci_lower") if instance_summary.get("available") else None
         )
@@ -74,9 +72,7 @@ def render_complexity(model: Any = None, *args, **kwargs) -> None:
             instance_summary.get("ci_upper") if instance_summary.get("available") else None
         )
         instance_confidence = (
-            instance_summary.get("confidence_level")
-            if instance_summary.get("available")
-            else None
+            instance_summary.get("confidence_level") if instance_summary.get("available") else None
         )
     except Exception:
         complexity_report = None
@@ -114,6 +110,54 @@ def render_complexity(model: Any = None, *args, **kwargs) -> None:
         st.markdown("#### Complexity report")
         st.json(complexity_report)
 
+        redundancy = complexity_report.get("downstream_redundancy_audit", {})
+        if redundancy:
+            st.markdown("#### Downstream redundancy audit")
+            a1, a2, a3 = st.columns(3)
+            a1.metric("VIF threshold", redundancy.get("vif_threshold", "N/A"))
+            a2.metric(
+                "Representation R² threshold",
+                redundancy.get("representation_r2_threshold", "N/A"),
+            )
+            a3.metric(
+                "VIF-flagged columns",
+                redundancy.get("vif_columns_above_threshold", "N/A"),
+            )
+            b1, b2, b3 = st.columns(3)
+            b1.metric("Input columns", redundancy.get("input_columns", "N/A"))
+            b2.metric("Retained columns", redundancy.get("retained_columns", "N/A"))
+            b3.metric(
+                "Removed exact redundancy",
+                sum(
+                    int(redundancy.get(key) or 0)
+                    for key in (
+                        "removed_constant_columns",
+                        "removed_duplicate_columns",
+                        "removed_complementary_columns",
+                    )
+                ),
+            )
+            removal_rows = pd.DataFrame(
+                [
+                    {"reason": label, "removed_columns": redundancy.get(key, 0)}
+                    for label, key in (
+                        ("Constant columns", "removed_constant_columns"),
+                        ("Duplicate columns", "removed_duplicate_columns"),
+                        ("Complementary columns", "removed_complementary_columns"),
+                        ("High-VIF patterns", "removed_high_vif_pattern_columns"),
+                        (
+                            "High-VIF augmented pairs",
+                            "removed_high_vif_augmented_pair_columns",
+                        ),
+                    )
+                ]
+            )
+            st.dataframe(dataframe_for_display(removal_rows), width="stretch", hide_index=True)
+            st.caption(
+                "Computed from the fitted training partition only. Validation and "
+                "test rows apply the stored retained-column mask."
+            )
+
     st.markdown("#### Explicit configuration")
     st.json(config)
 
@@ -128,10 +172,25 @@ def render_complexity(model: Any = None, *args, **kwargs) -> None:
         st.json(rpte_structure)
 
     rows = [
-        {"regime": "patterns_only", "inspection_meaning": "Representation is limited to selected HUG pattern features."},
-        {"regime": "original_plus_patterns", "inspection_meaning": "Original business features are retained alongside HUG pattern features."},
-        {"regime": "original_plus_interactions", "inspection_meaning": "Original features plus multi-feature HUG interactions."},
-        {"regime": "strict budget", "inspection_meaning": "Optional mode that caps the final representation for compactness-sensitive deployments."},
-        {"regime": "base_estimator=RPTE", "inspection_meaning": "Downstream branch adds boosted-tree higher-order interactions on top of the mined representation; explained via rpte_rule_table(), not feature_importances()."},
+        {
+            "regime": "patterns_only",
+            "inspection_meaning": "Representation is limited to selected HUG pattern features.",
+        },
+        {
+            "regime": "original_plus_patterns",
+            "inspection_meaning": "Original business features are retained alongside HUG pattern features.",
+        },
+        {
+            "regime": "original_plus_interactions",
+            "inspection_meaning": "Original features plus multi-feature HUG interactions.",
+        },
+        {
+            "regime": "strict budget",
+            "inspection_meaning": "Optional mode that caps the final representation for compactness-sensitive deployments.",
+        },
+        {
+            "regime": "base_estimator=RPTE",
+            "inspection_meaning": "Downstream branch adds boosted-tree higher-order interactions on top of the mined representation; explained via rpte_rule_table(), not feature_importances().",
+        },
     ]
     st.dataframe(dataframe_for_display(pd.DataFrame(rows)), width="stretch", hide_index=True)

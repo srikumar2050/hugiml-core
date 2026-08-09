@@ -451,14 +451,14 @@ def package_audit_artifacts(
         except Exception:
             logger.debug("explainability_report.to_json() failed.", exc_info=True)
 
-    # Compute a hash of the pattern labels for provenance
+    # Compute a hash of the pattern labels for traceability.
     try:
         pattern_labels = classifier.get_hug_features()
         label_str = json.dumps(sorted(pattern_labels), sort_keys=True)
         training_hash = hashlib.sha256(label_str.encode()).hexdigest()[:16]
     except Exception:
         logger.warning(
-            "Training hash computation failed; provenance will be 'unavailable'.", exc_info=True
+            "Training hash computation failed; the training hash is unavailable.", exc_info=True
         )
         training_hash = "unavailable"
 

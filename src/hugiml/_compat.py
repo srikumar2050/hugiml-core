@@ -42,7 +42,7 @@ HUGIMLClassifierNative targets the following sklearn surface:
   passing it with any other (or default) ``penalty`` is silently ignored
   with a ``UserWarning`` and the fit falls back to ``penalty``'s own value
   -- so the two spellings are not interchangeable and must be chosen by
-  installed version, not simply swapped. ``liblinear_penalty_kwargs``
+  installed version, not simply swapped. ``logistic_penalty_kwargs``
   provides the correct one for the installed version.
 
 Supported sklearn range: >= 1.0  (tested through current stable).
@@ -63,6 +63,7 @@ __all__ = [
     "check_array",
     "sklearn_version",
     "SKLEARN_VERSION",
+    "logistic_penalty_kwargs",
     "liblinear_penalty_kwargs",
 ]
 
@@ -148,11 +149,8 @@ _SKLEARN_DEPRECATES_PENALTY_STRING: bool = SKLEARN_VERSION >= _V("1.8")
 _LIBLINEAR_PENALTY_TO_L1_RATIO = {"l1": 1.0, "l2": 0.0}
 
 
-def liblinear_penalty_kwargs(penalty: str) -> dict[str, Any]:
-    """Return the correct ``LogisticRegression(solver="liblinear", ...)``
-    keyword for the requested L1/L2 penalty on the installed sklearn
-    version -- see this module's docstring for why ``penalty=`` and
-    ``l1_ratio=`` are not interchangeable across versions.
+def logistic_penalty_kwargs(penalty: str) -> dict[str, Any]:
+    """Return version-appropriate LogisticRegression regularization keywords.
 
     ``penalty`` must be ``"l1"`` or ``"l2"``; any other value is passed
     through as ``{"penalty": penalty}`` unchanged and left to raise
@@ -164,3 +162,8 @@ def liblinear_penalty_kwargs(penalty: str) -> dict[str, Any]:
     if l1_ratio is None:
         return {"penalty": penalty}
     return {"l1_ratio": l1_ratio}
+
+
+def liblinear_penalty_kwargs(penalty: str) -> dict[str, Any]:
+    """Compatibility alias for callers using the liblinear solver."""
+    return logistic_penalty_kwargs(penalty)

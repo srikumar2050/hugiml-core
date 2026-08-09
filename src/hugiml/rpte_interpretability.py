@@ -407,7 +407,7 @@ def format_rpte_rule_tree(
 
     Shared condition prefixes are merged, one split is shown per indentation
     level, and each terminal leaf reports its fitted LR coefficient, odds
-    multiplier, support, centered contribution, and raw-feature provenance.
+    multiplier, support, centered contribution, and raw-feature mapping.
     Direct source terms are grouped by original, HUG-pattern, and augmented-pair
     families after the tree sections.
 

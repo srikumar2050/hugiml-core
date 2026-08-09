@@ -40,7 +40,7 @@ Internal modules
    selection; downstream matrix construction; and feature-name alignment.
 
 ``_classifier_interpretation.py``
-   pattern provenance, RPTE rule and alias views, complexity delegation,
+   pattern source metadata, RPTE rule and alias views, complexity delegation,
    standardization metadata, and augmented-pair effect explanations.
 
 ``_classifier_prediction.py``

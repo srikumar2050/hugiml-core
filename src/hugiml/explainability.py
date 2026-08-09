@@ -48,7 +48,7 @@ __all__ = [
 
 @dataclass
 class FeatureLineage:
-    """Provenance record linking an original feature to downstream features.
+    """Source-mapping record linking an original feature to downstream features.
 
     Attributes
     ----------
@@ -582,6 +582,9 @@ def shap_values_from_pattern_matrix(
     import shap
 
     X_hup = classifier.transform(X)
+    canonical_transform = getattr(classifier, "_apply_lr_downstream_canonical_transform", None)
+    if callable(canonical_transform):
+        X_hup = canonical_transform(X_hup)
 
     # Try LinearExplainer first (works when downstream is LogisticRegression)
     clf_step = classifier.model_.named_steps.get("clf")
@@ -634,7 +637,16 @@ def aggregate_shap_to_features(
         )
 
     feature_names = getattr(classifier, "feature_names_in_", None) or []
-    pattern_labels = classifier.get_hug_features()
+    retained_pattern_labels = [
+        str(name)[len("pattern:") :]
+        for name in downstream_names
+        if str(name).startswith("pattern:")
+    ]
+    pattern_labels = (
+        retained_pattern_labels
+        if len(retained_pattern_labels) == np.asarray(shap_values_pattern).shape[1]
+        else classifier.get_hug_features()
+    )
 
     aggregated: dict[str, float] = {f: 0.0 for f in feature_names}
     mean_abs = np.abs(shap_values_pattern).mean(axis=0)

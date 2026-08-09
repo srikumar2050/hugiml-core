@@ -6,6 +6,14 @@ The canonical release notes live in ``CHANGELOG.md`` at the repository root. Kee
 Recent releases
 ---------------
 
+1.1.20 - 2026-08-09
+~~~~~~~~~~~~~~~~~~~
+
+* Made Dash the primary HUGIML LLM Assistant interface, retained Streamlit as the lightweight interface, and aligned the Chat, Dataset, and Model evidence workspaces with Governance Studio. Dataset catalogs refresh on every catalog-selection change, governance requests remain available through Chat, and the interface accepts a stable dataset, model-session, workspace, and source launch-context contract. Both interfaces apply the same Ollama catalog, memory eligibility, recommended-model selection, session retention, and local setup guidance.
+* Strengthened benchmark analysis across the internal benchmark, OpenML-CC18, PMLBmini, TabZilla, and TabArena while retaining suite-specific official validation protocols and splits.
+* Improved downstream logistic-regression canonicalization with exact redundancy removal and selective VIF-based filtering of strongly represented generated terms.
+* Retained the fitted downstream transformation for prediction, interpretation, and serialization while preserving the public estimator contract.
+
 1.1.19 — 2026-07-23
 ~~~~~~~~~~~~~~~~~~~
 
@@ -21,7 +29,7 @@ Recent releases
 
 * Added the optional RPTE downstream model for higher-order relationships with adaptive sequential or bounded-lookahead tree growth.
 * Added interaction relaxation through the first child split, with held-out acceptance checks for jointly useful features.
-* Added interpretable RPTE tree, rule-table, direct-term provenance, complexity, instance inspection, and structured serialization views.
+* Added interpretable RPTE tree, rule-table, direct-term source metadata, complexity, instance inspection, and structured serialization views.
 * Added a Dash-based Governance Studio while retaining the lightweight Streamlit interface.
 * Expanded benchmark analysis to 100 diverse datasets: 50 real-world and 50 synthetic datasets.
 

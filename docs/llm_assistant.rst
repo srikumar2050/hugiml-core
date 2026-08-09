@@ -4,24 +4,33 @@ LLM assistant add-on
 The optional HUGIML LLM assistant adds a natural-language interface for common
 modeling and governance workflows. It can answer package-usage questions from
 the local documentation index, run supported HUGIML actions, summarize fitted
-model evidence, and produce lightweight HTML outputs for review.
+model evidence, and produce lightweight HTML outputs for review. Dash is the
+primary interface and the existing Streamlit application remains available as
+a lightweight option.
 
 Installation
 ------------
 
-Install the optional dependencies with one of the Streamlit-oriented extras:
+Install the optional dependencies with the LLM extra:
 
 .. code-block:: bash
 
    pip install "hugiml-core[llm]"
-   # or install the dashboard stack if you want both Streamlit UIs
-   pip install "hugiml-core[dashboard]"
 
 Launch the assistant from an installed environment:
 
 .. code-block:: bash
 
    hugiml-llm
+   hugiml-llm --ui light
+   hugiml-llm --host 127.0.0.1 --port 8051 --no-open
+
+The Dash interface provides Chat, Dataset, and Model evidence workspaces using
+the same visual system as Governance Studio. Governance reports and pruning
+requests are available through Chat. Its URL context
+contract accepts ``dataset``, ``session``, ``view``, and ``source`` so another
+local HUGIML interface can open the relevant review state, for example
+``http://localhost:8051/?dataset=credit_risk&session=model-17&view=chat&source=governance``.
 
 Useful CLI commands include:
 
@@ -47,6 +56,11 @@ The assistant supports two response styles:
 The deterministic path remains available without Ollama. When Ollama is used,
 the add-on checks lightweight local model options and keeps execution bounded by
 the supported HUGIML action schema.
+
+The Dash and lightweight interfaces share the same local-model catalog and
+available-memory policy. The Dash model selector recommends a suitable installed
+model, retains the selection for the browser session, and provides a refresh
+control with availability details and Ollama setup commands.
 
 Supported workflows
 -------------------

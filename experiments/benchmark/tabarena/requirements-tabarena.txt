@@ -1,0 +1,3 @@
+autogluon.common==1.5.0
+autogluon.features==1.5.0
+psutil==7.1.3

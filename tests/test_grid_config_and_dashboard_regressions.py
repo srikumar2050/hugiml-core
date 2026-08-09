@@ -842,13 +842,7 @@ def test_classifier_default_param_grid_accepts_named_grid() -> None:
             # way; compare shape/type instead of value equality.
             assert len(default_grid[key]) == len(performance_ho[key]) == 2
             for grid in (default_grid, performance_ho):
-                linear = grid[key][0]
-                assert linear.solver == "liblinear"
-                linear_params = linear.get_params()
-                assert (
-                    linear_params.get("penalty") == "l1"
-                    or linear_params.get("l1_ratio") == 1.0
-                )
+                assert grid[key][0] is None
                 assert grid[key][1] is not None
         else:
             assert default_grid[key] == performance_ho[key]

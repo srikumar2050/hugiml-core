@@ -70,7 +70,7 @@ class _InterpretationMixin:
         return {"feature": text, "operator": "present"}
 
     def get_pattern_provenance(self) -> dict[str, dict[str, Any]]:
-        """Return raw-feature provenance for downstream HUG pattern columns.
+        """Return raw-feature mappings for downstream HUG pattern columns.
 
         The method is available in both audit and production execution modes.
         It reads the retained pattern structures and transaction item labels;
@@ -170,7 +170,7 @@ class _InterpretationMixin:
         """Return augmented pair transforms used by the downstream estimator.
 
         Each catalog entry includes the raw pair formula, source-feature IG
-        provenance, candidate coverage, unavailable-pair policy, and the
+        source mappings, candidate coverage, unavailable-pair policy, and the
         standardization parameters used before the downstream estimator sees
         the feature.  Candidate IG is scored on rows where both source values
         are observed.  For selected features, rows where the pair value cannot

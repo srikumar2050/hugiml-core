@@ -94,12 +94,14 @@ def test_hybrid_modes_have_downstream_feature_count_at_least_patterns_only():
     aug_counts = {mode: len(clf.get_augmented_pair_transforms()) for mode, clf in fitted.items()}
     assert (
         fitted["patterns_only"].x_train_downstream_.shape[1]
-        == n_patterns + aug_counts["patterns_only"]
+        <= n_patterns + aug_counts["patterns_only"]
     )
+    assert fitted["patterns_only"].x_train_downstream_.shape[1] > 0
     assert (
         fitted["original_plus_patterns"].x_train_downstream_.shape[1]
-        == Xtr.shape[1] + n_patterns + aug_counts["original_plus_patterns"]
+        <= Xtr.shape[1] + n_patterns + aug_counts["original_plus_patterns"]
     )
+    assert fitted["original_plus_patterns"].x_train_downstream_.shape[1] >= Xtr.shape[1]
     assert (
         fitted["original_plus_interactions"].x_train_downstream_.shape[1]
         <= Xtr.shape[1] + n_patterns
@@ -161,8 +163,12 @@ def test_original_plus_interactions_uses_only_interaction_patterns_after_origina
     Xtr, Xte, ytr, yte = _frame_dataset("breast")
     clf = _clf_for_frame(Xtr, "original_plus_interactions").fit(Xtr, ytr)
     assert hasattr(clf, "_interaction_pattern_mask_")
-    assert clf.x_train_downstream_.shape[1] == (
+    candidate_count = (
         Xtr.shape[1]
         + int(clf._interaction_pattern_mask_.sum())
         + len(clf.get_augmented_pair_transforms())
     )
+    audit = clf.get_downstream_redundancy_audit()
+    assert clf.x_train_downstream_.shape[1] == audit["retained_columns"]
+    assert audit["input_columns"] == candidate_count
+    assert Xtr.shape[1] <= clf.x_train_downstream_.shape[1] <= candidate_count

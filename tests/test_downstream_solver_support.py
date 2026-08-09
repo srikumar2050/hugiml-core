@@ -122,7 +122,7 @@ def test_sgd_solver_uses_native_serialization(tmp_path, synthetic_split) -> None
         manifest = json.loads(zf.read("manifest.json"))
         estimator_config = json.loads(zf.read("estimator.json"))
 
-    assert manifest["schema_version"] == MODEL_SCHEMA_VERSION == 10
+    assert manifest["schema_version"] == MODEL_SCHEMA_VERSION == 11
     assert estimator_config["class"] == "sklearn.pipeline.Pipeline"
     step_configs = {step["name"]: step["estimator"] for step in estimator_config["steps"]}
     assert step_configs["clf"]["class"] == "sklearn.linear_model.SGDClassifier"
@@ -142,7 +142,7 @@ def test_auto_solver_keeps_native_multiclass_linear_path() -> None:
 
     assert isinstance(estimator, LogisticRegression)
     assert estimator.solver == "saga"
-    assert getattr(estimator, "penalty", None) == "l1"
+    assert getattr(estimator, "l1_ratio", None) == 1.0 or getattr(estimator, "penalty", None) == "l1"
 
 
 def test_explicit_liblinear_base_estimator_is_class_aware() -> None:
@@ -236,4 +236,3 @@ def test_fast_grid_tune_supports_explicit_l1_multiclass_base_estimator() -> None
     assert isinstance(estimator, OneVsRestClassifier)
     assert len(estimator.estimators_) == 3
     assert result["best_model"].predict_proba(X_valid).shape == (len(X_valid), 3)
-

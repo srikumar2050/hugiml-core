@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 import time
 import warnings
@@ -151,6 +152,8 @@ class _TrainingMixin:
             "_strict_topk_feature_scores_",
             "_strict_topk_selected_feature_names_",
             "_downstream_feature_names_full_",
+            "_downstream_lr_canonical_mask_",
+            "_downstream_lr_canonicalization_",
             "_training_pattern_matrix_shape_",
             "_training_pattern_matrix_nnz_",
             "_training_downstream_matrix_shape_",
@@ -888,6 +891,9 @@ class _TrainingMixin:
                 self.x_train_downstream_ = self._apply_strict_topk_budget_fit(
                     self.x_train_downstream_, y_train
                 )
+                self.x_train_downstream_ = self._canonicalize_lr_downstream_fit(
+                    self.x_train_downstream_
+                )
                 self._cache_downstream_feature_metadata()
                 self.model_ = Pipeline([("clf", self._make_estimator(n_cls))])
                 _downstream_names_for_wiring = self._get_downstream_feature_names()
@@ -1005,6 +1011,272 @@ class _TrainingMixin:
             logger.info("  fit complete: %s", self.fit_metadata_.summary())
 
         return self
+
+    def _get_downstream_feature_names(self) -> list[str]:
+        names = list(super()._get_downstream_feature_names())
+        mask = getattr(self, "_downstream_lr_canonical_mask_", None)
+        if mask is None:
+            return names
+        mask_arr = np.asarray(mask, dtype=bool)
+        if mask_arr.size != len(names):
+            raise RuntimeError(
+                "Stored downstream canonicalization mask does not match the feature schema."
+            )
+        return [name for name, keep in zip(names, mask_arr) if keep]
+
+    @staticmethod
+    def _downstream_column(X: Any, column_index: int) -> np.ndarray:
+        if hasattr(X, "tocsc"):
+            return np.asarray(X[:, column_index].toarray()).ravel()
+        return np.asarray(X)[:, column_index]
+
+    def _canonicalize_lr_downstream_fit(self, X: Any) -> Any:
+        """Reduce redundant downstream terms before automatic LR fitting.
+
+        Exact constants, duplicates, and binary complements are removed first.
+        A single variance-inflation analysis is then performed on the retained
+        training columns. Original terms that survive exact canonicalization
+        are always retained. A generated term with VIF greater than 5 is removed
+        only when an earlier, semantically preferred retained term explains at
+        least 80 percent of its variance. Patterns are considered before
+        augmented pairs, so an augmented term can never displace a pattern.
+        """
+        vif_started = time.perf_counter()
+        n_rows, n_columns = (int(X.shape[0]), int(X.shape[1]))
+        column_source = X.tocsc(copy=False) if hasattr(X, "tocsc") else X
+        keep = np.ones(n_columns, dtype=bool)
+        signatures: dict[tuple[str, bytes], list[int]] = {}
+        removed = {"constant": 0, "duplicate": 0, "complement": 0}
+
+        def signature(values: np.ndarray) -> tuple[str, bytes]:
+            contiguous = np.ascontiguousarray(values)
+            digest = hashlib.blake2b(contiguous.view(np.uint8), digest_size=20).digest()
+            return contiguous.dtype.str, digest
+
+        for column_index in range(n_columns):
+            column = self._downstream_column(column_source, column_index)
+            if n_rows == 0 or np.all(column == column[0]):
+                keep[column_index] = False
+                removed["constant"] += 1
+                continue
+
+            key = signature(column)
+            duplicate_of = next(
+                (
+                    retained
+                    for retained in signatures.get(key, [])
+                    if np.array_equal(
+                        column, self._downstream_column(column_source, retained)
+                    )
+                ),
+                None,
+            )
+            if duplicate_of is not None:
+                keep[column_index] = False
+                removed["duplicate"] += 1
+                continue
+
+            unique_values = np.unique(column)
+            if unique_values.size == 2 and np.array_equal(unique_values, np.asarray([0, 1])):
+                complement = 1 - column
+                complement_key = signature(complement)
+                complement_of = next(
+                    (
+                        retained
+                        for retained in signatures.get(complement_key, [])
+                        if np.array_equal(
+                            complement, self._downstream_column(column_source, retained)
+                        )
+                    ),
+                    None,
+                )
+                if complement_of is not None:
+                    keep[column_index] = False
+                    removed["complement"] += 1
+                    continue
+
+            signatures.setdefault(key, []).append(column_index)
+
+        if not np.any(keep) and n_columns:
+            keep[0] = True
+            removed["constant"] = max(0, removed["constant"] - 1)
+
+        exact_keep = keep.copy()
+        generated_vif = {
+            "vif_threshold": 5.0,
+            "representation_r2_threshold": 0.8,
+            "vif_columns_above_threshold": 0,
+            "removed_high_vif_pattern_columns": 0,
+            "removed_high_vif_augmented_pair_columns": 0,
+            "maximum_vif": None,
+            "median_vif": None,
+            "vif_analysis_seconds": 0.0,
+        }
+        exact_indices = np.flatnonzero(exact_keep)
+        if n_rows >= 2 and exact_indices.size >= 2:
+            exact_matrix = X[:, exact_keep]
+            if hasattr(exact_matrix, "tocsc"):
+                numeric = exact_matrix.tocsc(copy=False).astype(np.float64)
+                means = np.asarray(numeric.sum(axis=0)).ravel() / float(n_rows)
+                second = (
+                    np.asarray(numeric.power(2).sum(axis=0)).ravel()
+                    / float(n_rows)
+                )
+                covariance = (
+                    (numeric.T @ numeric).toarray() / float(n_rows)
+                    - np.outer(means, means)
+                )
+            else:
+                numeric = np.asarray(exact_matrix, dtype=np.float64)
+                means = np.mean(numeric, axis=0)
+                centered = numeric - means
+                covariance = (centered.T @ centered) / float(n_rows)
+                second = np.diag(covariance) + means * means
+            variances = np.maximum(second - means * means, 0.0)
+            scales = np.sqrt(variances)
+            denominator = np.outer(scales, scales)
+            correlation = np.divide(
+                covariance,
+                denominator,
+                out=np.zeros_like(covariance, dtype=np.float64),
+                where=denominator > 0.0,
+            )
+            correlation = (correlation + correlation.T) * 0.5
+            np.fill_diagonal(correlation, 1.0)
+
+            eigenvalues, eigenvectors = np.linalg.eigh(correlation)
+            eigen_floor = max(
+                1e-12,
+                float(np.max(eigenvalues))
+                * float(exact_indices.size)
+                * float(np.finfo(np.float64).eps),
+            )
+            inverse_eigenvalues = 1.0 / np.maximum(eigenvalues, eigen_floor)
+            inverse_correlation = (
+                eigenvectors * inverse_eigenvalues
+            ) @ eigenvectors.T
+            vif = np.maximum(np.diag(inverse_correlation), 1.0)
+            high_vif = vif > 5.0
+
+            try:
+                raw_names = list(super()._get_downstream_feature_names())
+            except Exception:
+                raw_names = []
+            if len(raw_names) != n_columns:
+                # Direct calls used by diagnostics may provide a matrix without
+                # a fitted feature schema. Treat those columns as protected so
+                # exact canonicalization remains independently usable.
+                raw_names = [f"orig:column_{index}" for index in range(n_columns)]
+            exact_names = [str(raw_names[index]) for index in exact_indices]
+            families = np.asarray(
+                [
+                    "original"
+                    if name.startswith("orig:")
+                    else "augmented_pair"
+                    if name.startswith("augmented_pair:")
+                    else "pattern"
+                    if name.startswith("pattern:")
+                    else "original"
+                    for name in exact_names
+                ],
+                dtype=object,
+            )
+            retained_exact = np.zeros(exact_indices.size, dtype=bool)
+            retained_exact[families == "original"] = True
+
+            for family in ("pattern", "augmented_pair"):
+                for local_index in np.flatnonzero(families == family):
+                    if not high_vif[local_index]:
+                        retained_exact[local_index] = True
+                        continue
+                    if family == "pattern":
+                        representative_pool = np.flatnonzero(
+                            retained_exact
+                            & np.isin(families, ["original", "pattern"])
+                        )
+                    else:
+                        representative_pool = np.flatnonzero(retained_exact)
+                    represented = bool(
+                        representative_pool.size
+                        and np.max(
+                            np.square(
+                                correlation[local_index, representative_pool]
+                            )
+                        )
+                        >= 0.8
+                    )
+                    if represented:
+                        keep[exact_indices[local_index]] = False
+                        key = (
+                            "removed_high_vif_pattern_columns"
+                            if family == "pattern"
+                            else "removed_high_vif_augmented_pair_columns"
+                        )
+                        generated_vif[key] += 1
+                    else:
+                        retained_exact[local_index] = True
+
+            generated_vif.update(
+                vif_columns_above_threshold=int(np.count_nonzero(high_vif)),
+                maximum_vif=float(np.max(vif)),
+                median_vif=float(np.median(vif)),
+                vif_analysis_seconds=float(time.perf_counter() - vif_started),
+            )
+
+        self._downstream_lr_canonical_mask_ = keep
+        self._downstream_lr_canonicalization_ = {
+            "input_columns": n_columns,
+            "retained_columns": int(np.count_nonzero(keep)),
+            "removed_constant_columns": int(removed["constant"]),
+            "removed_duplicate_columns": int(removed["duplicate"]),
+            "removed_complementary_columns": int(removed["complement"]),
+            **generated_vif,
+        }
+        return X[:, keep]
+
+    def _apply_lr_downstream_canonical_transform(self, X: Any) -> Any:
+        mask = getattr(self, "_downstream_lr_canonical_mask_", None)
+        if mask is None:
+            return X
+        mask_arr = np.asarray(mask, dtype=bool)
+        if int(X.shape[1]) != int(mask_arr.size):
+            raise RuntimeError(
+                "Downstream feature matrix does not match the fitted canonicalization mask."
+            )
+        return X[:, mask_arr]
+
+    def get_downstream_redundancy_audit(
+        self, *, include_feature_names: bool = True
+    ) -> dict[str, Any]:
+        """Return the fitted training-only downstream redundancy audit.
+
+        The returned mapping is a copy and may be safely modified by callers.
+        When requested, retained and removed feature names are derived from the
+        fitted full feature schema and its stored retained-column mask.
+        """
+        summary = getattr(self, "_downstream_lr_canonicalization_", None)
+        mask = getattr(self, "_downstream_lr_canonical_mask_", None)
+        if not isinstance(summary, dict) or mask is None:
+            raise RuntimeError(
+                "Downstream redundancy audit is unavailable before fitting."
+            )
+        audit = {"training_data_only": True, **dict(summary)}
+        if not include_feature_names:
+            return audit
+
+        names = list(super()._get_downstream_feature_names())
+        mask_arr = np.asarray(mask, dtype=bool)
+        if mask_arr.size != len(names):
+            raise RuntimeError(
+                "Stored downstream canonicalization mask does not match the feature schema."
+            )
+        audit["retained_feature_names"] = [
+            str(name) for name, keep in zip(names, mask_arr) if keep
+        ]
+        audit["removed_feature_names"] = [
+            str(name) for name, keep in zip(names, mask_arr) if not keep
+        ]
+        return audit
 
     def _effective_mining_timeout_seconds(self) -> float | None:
         """Return the configured mining-stage timeout in seconds.
@@ -1365,6 +1637,7 @@ class _TrainingMixin:
                 X_test_original_for_downstream, Z_test, fit=False
             )
             X_downstream = self._apply_strict_topk_budget_transform(X_downstream)
+            X_downstream = self._apply_lr_downstream_canonical_transform(X_downstream)
             proba = np.asarray(self.model_.predict_proba(X_downstream))
             _mon = getattr(self, "monitor", None)
             if _mon is not None:
@@ -1398,6 +1671,9 @@ class _TrainingMixin:
             Z_chunk = self._build_test_hup(chunk)
             X_downstream_chunk = self._make_downstream_features(orig_chunk, Z_chunk, fit=False)
             X_downstream_chunk = self._apply_strict_topk_budget_transform(X_downstream_chunk)
+            X_downstream_chunk = self._apply_lr_downstream_canonical_transform(
+                X_downstream_chunk
+            )
             result[start:end] = self.model_.predict_proba(X_downstream_chunk)
             completed = end
 
@@ -1436,4 +1712,5 @@ class _TrainingMixin:
             X_test_original_for_downstream, Z_test, fit=False
         )
         X_downstream = self._apply_strict_topk_budget_transform(X_downstream)
+        X_downstream = self._apply_lr_downstream_canonical_transform(X_downstream)
         return np.asarray(self.model_.predict(X_downstream))

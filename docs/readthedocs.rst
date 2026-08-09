@@ -35,7 +35,7 @@ Your current public page is ``https://hugiml-core.readthedocs.io/en/latest/``. I
 #. In Read the Docs, open **Admin → Advanced Settings** and confirm that the default branch matches your GitHub default branch.
 #. In **Admin → Automation Rules** or **Admin → Versions**, confirm that ``latest`` tracks the branch you are updating.
 #. In **Builds**, start a fresh build for ``latest``. If the previous build is cached, choose the option to wipe the build environment before rebuilding.
-#. Check the build log for the Git commit SHA. It should match the commit containing the current release docs.
+#. Check that the build log uses the branch containing the current release documentation.
 #. If GitHub pushes are not triggering builds, reconnect the GitHub integration or recreate the webhook from the RTD project admin page.
 
 Local build check
@@ -75,5 +75,5 @@ Troubleshooting
 
 * If API pages fail because optional packages are missing, add the module name to ``autodoc_mock_imports`` in ``docs/conf.py`` instead of installing heavy runtime extras on Read the Docs.
 * If image links fail, confirm that the image is committed under ``docs/images`` and referenced with a path relative to the ``docs`` directory, such as ``images/example.png``.
-* If ``latest`` still shows an older release, compare the RTD build log commit SHA with your GitHub commit. A mismatch usually means the RTD project is tracking a different branch or the webhook did not run.
+* If ``latest`` still shows an older release, confirm that the RTD project tracks the intended branch and that its webhook completed successfully.
 * If a page is missing from the sidebar, add it to the appropriate ``.. toctree::`` in ``docs/index.rst``.

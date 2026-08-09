@@ -142,6 +142,7 @@ def test_hugiml_linear_three_level_report_and_instance_counts():
             fit=False,
         )
     )
+    downstream = clf._apply_lr_downstream_canonical_transform(downstream)
     expected_instance = np.zeros(len(X), dtype=np.int64)
     for index, (name, keep) in enumerate(zip(names, active)):
         if not keep:

@@ -86,6 +86,12 @@ __all__ = [
 # custom-estimator payload for RPTE. v1-v9 loading remains supported, including
 # v9 RPTE archives written through the previous fallback path.
 #
+# Schema v11 preserves the fitted downstream LR canonicalization mask and its
+# audit summary. These fields are required to reproduce the fitted feature
+# layout when a structured model archive is loaded for prediction or
+# interpretation. It also preserves the benchmark LR regularization value
+# when present so fitted-model telemetry remains complete after loading.
+#
 # Schema v9 covers `base_estimator` values that are live sklearn estimator
 # instances rather than plain scalars/None -- reachable through RPTE (a
 # downstream branch: bare, or OneVsRestClassifier-wrapped for multiclass, as
@@ -101,7 +107,7 @@ __all__ = [
 # rely on. Loading remains backward-compatible with v1-v8: those files'
 # `base_estimator` value is always plain None (RPTE did not exist yet) and
 # round-trips through the same code unchanged.
-MODEL_SCHEMA_VERSION: int = 10
+MODEL_SCHEMA_VERSION: int = 11
 MIN_SCHEMA_VERSION: int = 1
 
 # ── Legacy (v1/v2) pickle-envelope constants ──────────────────────────────────
@@ -1158,6 +1164,10 @@ def save_model(clf: Any, path: str | os.PathLike) -> None:
         # plain JSON dict/list/scalar values so the versioned .hugiml format
         # preserves the same audit trail as pickle/joblib serialization.
         "mining_audit_log": list(getattr(clf, "mining_audit_log_", []) or []),
+        "downstream_lr_canonicalization": getattr(
+            clf, "_downstream_lr_canonicalization_", None
+        ),
+        "benchmark_lr_C": getattr(clf, "_benchmark_lr_C", None),
     }
     if hasattr(clf, "fit_metadata_") and clf.fit_metadata_ is not None:
         import dataclasses
@@ -1329,6 +1339,10 @@ def save_model(clf: Any, path: str | os.PathLike) -> None:
         )
     if hasattr(clf, "_downstream_variance_"):
         clf_arrays["downstream_variance_"] = np.asarray(clf._downstream_variance_, dtype=np.float64)
+    if hasattr(clf, "_downstream_lr_canonical_mask_"):
+        clf_arrays["downstream_lr_canonical_mask_"] = np.asarray(
+            clf._downstream_lr_canonical_mask_, dtype=np.bool_
+        )
     aug_block = getattr(clf, "_augmented_pair_block_", None)
     if aug_block is not None:
         if hasattr(aug_block, "scaler_mean_"):
@@ -1651,6 +1665,20 @@ def _load_v3(path: str | os.PathLike) -> Any:
     clf._downstream_pattern_support_ = clf_arrays.get("downstream_pattern_support_", None)
     clf._downstream_non_missing_rate_ = clf_arrays.get("downstream_non_missing_rate_", None)
     clf._downstream_variance_ = clf_arrays.get("downstream_variance_", None)
+    if "downstream_lr_canonical_mask_" in clf_arrays:
+        clf._downstream_lr_canonical_mask_ = clf_arrays[
+            "downstream_lr_canonical_mask_"
+        ].astype(bool)
+    downstream_lr_canonicalization = clf_fit.get(
+        "downstream_lr_canonicalization", None
+    )
+    if downstream_lr_canonicalization is not None:
+        clf._downstream_lr_canonicalization_ = dict(
+            downstream_lr_canonicalization
+        )
+    benchmark_lr_C = clf_fit.get("benchmark_lr_C", None)
+    if benchmark_lr_C is not None:
+        clf._benchmark_lr_C = float(benchmark_lr_C)
     clf._original_feature_names_downstream_ = clf_fit.get("original_feature_names_downstream", [])
     if "pattern_orders_" in clf_arrays:
         clf._pattern_orders_ = clf_arrays["pattern_orders_"].astype(int)

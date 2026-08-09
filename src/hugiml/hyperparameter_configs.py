@@ -41,11 +41,11 @@ Four named HUGIML grids are provided:
 
 ``"performance_ho"``
     **Default grid** (``DEFAULT_HUGIML_GRID_NAME``). Higher-order Hybrid
-    grid. It searches an explicit L1-regularized logistic-regression
-    ``base_estimator`` together with the adaptive RPTE downstream branch only
-    at ``leaf_config="3xD"``. Binary targets fit the logistic estimator
-    directly; targets with three or more classes use one-vs-rest
-    classification with the same estimator configuration.
+    grid. It searches the built-in automatic L2 lbfgs logistic-regression branch
+    together with the adaptive RPTE downstream branch only
+    at ``leaf_config="3xD"``. The automatic branch uses lbfgs directly for
+    binary targets and through one-vs-rest for multiclass targets. RPTE uses
+    L2 lbfgs for downstream leaf weighting.
     The mining dimensions search ``L`` in ``[1, 2]``,
     ``topK`` in ``[50, 100]``, and ``G`` in ``[0.01, 0.001]``. The RPTE
     estimators are wrapped in sklearn's ``OneVsRestClassifier``: binary
@@ -88,20 +88,20 @@ import copy
 from sklearn.linear_model import LogisticRegression
 from sklearn.multiclass import OneVsRestClassifier
 
-from ._compat import liblinear_penalty_kwargs
+from ._compat import logistic_penalty_kwargs
 from .rpte_bounded_lookahead_leafwise import (
     LeafWiseBoundedLookaheadRPTEFeatureLR,
 )
 
 
 def make_l1_logistic_base_estimator() -> LogisticRegression:
-    """Create the linear HUGIML base estimator used by named grids."""
+    """Create the L1 one-vs-rest logistic estimator used by named grids."""
     return LogisticRegression(
         solver="liblinear",
-        C=1.0,
+        C=0.5,
         random_state=0,
-        max_iter=500,
-        **liblinear_penalty_kwargs("l1"),
+        max_iter=300,
+        **logistic_penalty_kwargs("l1"),
     )
 
 # ── HUGIML hyperparameter grids ──────────────────────────────────────────────
@@ -168,34 +168,60 @@ HUGIML_GRIDS: dict[str, dict[str, list]] = {
             ),
         ],
     },
-    "performance_ho": {
-        "B": [-1],
-        "adaptive_binning": [True],
-        "L": [1, 2],
-        "topK": [50, 100],
-        "feature_mode": ["original_plus_patterns"],
-        "G": [0.01, 0.001],
-        "convert_binary_to_categorical": [False],
-        "augmented_pair_transforms": [True],
-        "topk_budget_strict": [False],
-        # Hybrid downstream search:
-        #   LogisticRegression -> L1-regularized linear base estimator.
-        #   RPTE-OvR -> one binary rigorous Newton/deviance adaptive-RPTE
-        #               estimator per class, using the single validated LW_3xD
-        #               leaf budget. On binary targets sklearn's OvR wrapper
-        #               fits one RPTE estimator and exposes two probabilities.
-        "base_estimator": [
-            make_l1_logistic_base_estimator(),
-            OneVsRestClassifier(
-                LeafWiseBoundedLookaheadRPTEFeatureLR(
-                    leaf_config="3xD",
-                    depth=4,
-                    enable_lookahead="adaptive",
-                ),
-                n_jobs=1,
+}
+
+HUGIML_GRIDS["performance_ho"] = {
+    "B": [-1],
+    "adaptive_binning": [True],
+    "L": [1, 2],
+    "topK": [50, 100],
+    "feature_mode": ["original_plus_patterns"],
+    "G": [0.01, 0.001],
+    "convert_binary_to_categorical": [False],
+    "augmented_pair_transforms": [True],
+    "topk_budget_strict": [False],
+    "lr_solver": ["adaptive_l1"],
+    "lr_C": [0.5],
+    "base_estimator": [
+        None,
+        OneVsRestClassifier(
+            LeafWiseBoundedLookaheadRPTEFeatureLR(
+                leaf_config="3xD",
+                depth=4,
+                enable_lookahead="adaptive",
+                lr_C=0.5,
+                lr_penalty="l1",
             ),
-        ],
-    },
+            n_jobs=1,
+        ),
+    ],
+}
+HUGIML_GRIDS["interpretability_ho"] = {
+    "B": [-1],
+    "adaptive_binning": [True],
+    "L": [1, 2],
+    "topK": [50, 100],
+    "feature_mode": ["patterns_only"],
+    "G": [0.01, 0.001],
+    "interaction_relaxed_mining": [True],
+    "augmented_pair_transforms": [False],
+    "convert_binary_to_categorical": [True],
+    "topk_budget_strict": [False],
+    "lr_solver": ["adaptive_l1"],
+    "lr_C": [0.5],
+    "base_estimator": [
+        None,
+        OneVsRestClassifier(
+            LeafWiseBoundedLookaheadRPTEFeatureLR(
+                leaf_config="3xD",
+                depth=4,
+                enable_lookahead=False,
+                lr_C=0.5,
+                lr_penalty="l1",
+            ),
+            n_jobs=1,
+        ),
+    ],
 }
 
 # As of the RPTE integration, "performance_ho" (the hybrid grid that also
@@ -274,6 +300,12 @@ BASELINE_MODEL_GRIDS: dict[str, dict[str, list]] = {
     },
     "LogisticReg": {
         "lr__C": [0.1, 1.0, 10.0],
+    },
+    # 4 x 2 x 2 = 16 candidates.
+    "LogisticRegression": {
+        "C": [0.01, 0.1, 1.0, 10.0],
+        "penalty": ["l1", "l2"],
+        "class_weight": [None, "balanced"],
     },
     # 2 x 2 x 2 x 1 = 8 candidates.
     "EBM": {

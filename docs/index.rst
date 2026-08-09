@@ -14,34 +14,29 @@ Why HUGIML?
 
 * **Intrinsic interpretability:** learned HUG patterns are the model representation, not an after-the-fact explanation.
 * **Regulated-domain fit:** model cards, audit artifacts, pruning trails, calibration, drift monitoring, and deployment helpers are included.
-* **Native performance:** computationally intensive mining, transaction construction, interaction-information scoring, pair-aware adaptive binning, matrix construction, and RPTE tree search are C++ accelerated with optional OpenMP support. Version 1.1.19 improves RPTE representation clarity, modularizes the classifier implementation, and adds rich on-demand data profiling to the Dash workbench while retaining the complete 1.1.x feature set.
+* **Native performance:** computationally intensive mining, transaction construction, interaction-information scoring, pair-aware adaptive binning, matrix construction, and RPTE tree search are C++ accelerated with optional OpenMP support. Version 1.1.20 extends validation, benchmark, and representation-audit capabilities while retaining the complete 1.1.x feature set.
 * **Python ergonomics:** the estimator follows the scikit-learn API and works with pandas DataFrames or NumPy arrays.
 
 
 Current release focus
 ---------------------
 
-The 1.1.19 release strengthens model representation, maintainability, and data
-review without changing the public estimator contract:
+The 1.1.20 release extends reproducible validation, representation audit, and
+benchmark coverage without changing the public estimator contract:
 
-* RPTE retains higher-order mined patterns as direct sparse terms and
-  consolidates an equivalent leaf-pattern representation into one canonical
-  model component. The omitted representation remains available as an audit
-  alias, so interpretation and complexity views do not count the same fitted
-  component twice.
-* The classifier implementation is organized into focused internal modules for
-  preparation, training, feature assembly, prediction, interpretation,
-  inspection, tuning, and estimator state. ``HUGIMLClassifier`` and
-  ``HUGIMLClassifierNative`` keep the same public behavior.
-* The Dash workbench includes a compact data-profile preview and an expandable,
-  on-demand profile with sample or full-data scope, raw-data and model-input
-  views, variable roles, quality findings, missingness, distributions,
-  correlations, and target associations.
-* A reproducible OpenML-CC18 workflow evaluates 36 classification datasets on
-  their official task-defined splits and assembles a static comparison dashboard
-  with performance, runtime, and inspection-efficiency summaries.
-* Dashboard model configuration uses consistent Default, Guided, and Advanced
-  run modes for HUGIML and comparison estimators.
+* Integrated workflows cover the internal 100-dataset evaluation and four
+  external classification suites: OpenML-CC18, PMLBmini, TabZilla, and
+  TabArena. Each workflow retains its suite-specific validation protocol.
+* Rotating-fold validation uses a dedicated validation fold, and RPTE can use
+  validation-guided tree growth with a bounded estimator budget.
+* Training-only downstream representation controls remove constant, redundant,
+  and highly represented terms before logistic fitting. Their audit metadata is
+  available through the interpretability APIs and benchmark outputs.
+* Benchmark checkpoints and dashboards consistently report performance,
+  tuning, fit and prediction time, RPTE behavior, and model, model-inspection,
+  and instance-inspection complexity.
+* TabArena evaluation uses fold-local model-agnostic preprocessing and supports
+  comparison with the official leaderboard and prediction-derived metrics.
 
 The complete 1.1.x documentation remains in this guide, including execution
 modes, adaptive binning, feature modes, augmented-pair features, RPTE,

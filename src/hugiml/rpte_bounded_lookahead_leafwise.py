@@ -69,8 +69,9 @@ from typing import Any, Callable
 
 import numpy as np
 from scipy import sparse
-from sklearn.base import BaseEstimator, ClassifierMixin
+from sklearn.base import BaseEstimator, ClassifierMixin, clone
 from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import log_loss, roc_auc_score
 from sklearn.model_selection import train_test_split
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.utils.validation import check_is_fitted
@@ -97,6 +98,15 @@ _PAIR_OP_CODES = {"absolute_difference": 0, "signed_difference": 1, "sum": 2, "p
 _PAIR_OP_NAMES = {code: name for name, code in _PAIR_OP_CODES.items()}
 
 LEAF_CONFIGS = {"2xD": 2, "3xD": 3, "4xD": 4}
+
+# RPTE is intended to remain compact enough for direct human inspection.  Keep
+# the stopping policy deliberately small and fixed; ``early_stopping`` is the
+# only public switch.  In particular, the legacy path below still uses the
+# estimator's existing ``n_estimators=10`` default unchanged.
+RPTE_EARLY_STOPPING_MAX_ESTIMATORS = 15
+RPTE_EARLY_STOPPING_PATIENCE = 3
+RPTE_EARLY_STOPPING_MIN_DELTA = 1e-4
+RPTE_EARLY_STOPPING_VALIDATION_FRACTION = 0.10
 
 _PATTERN_LABEL = re.compile(r"^pattern:(.+)$")
 _ORIG_DUMMY_LABEL = re.compile(r"^orig:(.+)_([^_]+)$")
@@ -564,7 +574,7 @@ def _render_threshold(
         # the fitted descriptor currently does not retain enough information
         # to invert the split to one raw-domain scalar threshold.  Report the
         # exact operator in RPTE-combined units and preserve operation/source
-        # provenance without inventing a raw equivalent.
+        # source mapping without inventing a raw equivalent.
         parts = name[len("synthetic_pair:") :].split("__")
         op = parts[0] if parts else "?"
         raw_sources = [
@@ -789,7 +799,13 @@ class _DefaultRPTEFeatureExtractor:
         )
         self.reserved_raw_features_: list[set[str]] = []
 
-    def fit_leaves(self, X, y) -> sparse.csr_matrix:
+    def fit_leaves(
+        self,
+        X,
+        y,
+        *,
+        stage_callback: Callable[[Any], bool] | None = None,
+    ) -> sparse.csr_matrix:
         """Fit the tree ensemble on (X, y) and return the training leaf-match matrix."""
         X = X.tocsr() if sparse.issparse(X) else sparse.csr_matrix(X)
         y01 = np.asarray(y, dtype=float)
@@ -842,6 +858,7 @@ class _DefaultRPTEFeatureExtractor:
                 self.tree_leaf_values_.append(
                     {leaf: eta * value for leaf, value in values.items()}
                 )
+                self.leaf_vocab_.append(np.unique(leaf_ids))
                 used_columns = {columns[i] for i in used_local}
                 if use_raw_ownership:
                     used_raw: set[str] = set()
@@ -854,17 +871,54 @@ class _DefaultRPTEFeatureExtractor:
 
             return _BoostingRound(leaf_ids=leaf_ids, on_accept=on_accept)
 
+        p_bar = float(np.clip(y01.mean(), 1e-6, 1.0 - 1e-6))
+        self.base_log_odds_ = float(np.log(p_bar / (1.0 - p_bar)))
         _F, self.deviance_history_, self.base_log_odds_ = _fit_newton_boosted_ensemble(
-            y01, self.n_estimators, self.learning_rate, 1e-8, grow_round
+            y01,
+            self.n_estimators,
+            self.learning_rate,
+            1e-8,
+            grow_round,
+            stop_after_accept=(
+                (lambda: bool(stage_callback(self)))
+                if stage_callback is not None
+                else None
+            ),
         )
         if not self.trees_:
             raise ValueError("No RPTE-FE tree could be constructed.")
-        return self._leaf_matrix(X, fit=True)
+        return self._leaf_matrix(X, fit=False)
+
+    def retain_tree_prefix(self, tree_count: int) -> None:
+        """Retain the first accepted trees and their aligned fitted state."""
+        count = max(0, min(int(tree_count), len(self.trees_)))
+        self.trees_ = self.trees_[:count]
+        self.tree_columns_ = self.tree_columns_[:count]
+        self.leaf_vocab_ = self.leaf_vocab_[:count]
+        self.tree_leaf_values_ = self.tree_leaf_values_[:count]
+        self.reserved_raw_features_ = self.reserved_raw_features_[:count]
+        if hasattr(self, "deviance_history_"):
+            self.deviance_history_ = self.deviance_history_[: count + 1]
 
     def transform_leaves(self, X) -> sparse.csr_matrix:
         """Encode new rows into the leaf-match column space fit_leaves already built."""
         X = X.tocsr() if sparse.issparse(X) else sparse.csr_matrix(X)
         return self._leaf_matrix(X, fit=False)
+
+    def boosted_decision_function(self, X) -> np.ndarray:
+        """Apply the retained additive RPTE tree sequence to new rows."""
+        X = X.tocsr() if sparse.issparse(X) else sparse.csr_matrix(X)
+        score = np.full(X.shape[0], float(self.base_log_odds_), dtype=np.float64)
+        for tree, columns, values in zip(
+            self.trees_, self.tree_columns_, self.tree_leaf_values_
+        ):
+            assignments = tree.apply(X[:, columns])
+            score += np.fromiter(
+                (float(values.get(int(leaf), 0.0)) for leaf in assignments),
+                dtype=np.float64,
+                count=X.shape[0],
+            )
+        return score
 
     def _leaf_matrix(self, X: sparse.csr_matrix, fit: bool) -> sparse.csr_matrix:
         blocks = []
@@ -921,25 +975,31 @@ class _DefaultRPTEFeatureExtractor:
         return rows
 
 
-# solver="liblinear" only ever supports penalty in {"l1", "l2"}, so this
-# covers every value `lr_penalty` can meaningfully take; anything else is
-# passed through unchanged and left to raise sklearn's own error, exactly
-# as it would have before this translation existed.
-def _liblinear_logistic_regression(
-    *, lr_penalty: str, lr_C: float, random_state: int, max_iter: int = 2000
+# New estimators default to L2 lbfgs. L1 liblinear remains available for
+# explicitly configured estimators and serialized configurations.
+def _downstream_logistic_regression(
+    *, lr_penalty: str, lr_C: float, random_state: int, max_iter: int = 300
 ) -> LogisticRegression:
-    """Build the leaf-weighting LogisticRegression for solver="liblinear".
+    """Build the leaf-weighting logistic model.
 
-    Uses ``hugiml._compat.liblinear_penalty_kwargs`` rather than passing
-    ``penalty=lr_penalty`` directly: sklearn >= 1.8 deprecates the
-    ``penalty`` string in favor of ``l1_ratio`` (removal targeted for
-    sklearn 1.10), but ``l1_ratio`` is honored only when
-    ``penalty="elasticnet"`` on sklearn < 1.8 -- silently falling back to a
-    different penalty otherwise. The two spellings are equivalent in
-    result, not interchangeable in source, so which one to use must be
-    chosen by installed sklearn version. See ``_compat``'s module
-    docstring for the version boundary and verification.
+    L2 uses lbfgs. The former L1/liblinear behavior remains available when
+    loading or explicitly configuring an estimator with ``lr_penalty="l1"``.
     """
+    from hugiml._compat import logistic_penalty_kwargs
+
+    return LogisticRegression(
+        solver="lbfgs" if lr_penalty == "l2" else "liblinear",
+        C=lr_C,
+        random_state=random_state,
+        max_iter=max_iter,
+        **logistic_penalty_kwargs(lr_penalty),
+    )
+
+
+def _liblinear_logistic_regression(
+    *, lr_penalty: str, lr_C: float, random_state: int, max_iter: int = 300
+) -> LogisticRegression:
+    """Build the explicitly configured liblinear leaf-weighting model."""
     from hugiml._compat import liblinear_penalty_kwargs
 
     return LogisticRegression(
@@ -969,7 +1029,7 @@ class _DefaultRPTEFeatureLR(ClassifierMixin, BaseEstimator):
         min_samples_leaf: int = 5,
         rpte_learning_rate: float = 0.3,
         lr_C: float = 1.0,
-        lr_penalty: str = "l1",
+        lr_penalty: str = "l2",
         random_state: int = 42,
     ):
         self.leaf_config = leaf_config
@@ -1002,7 +1062,7 @@ class _DefaultRPTEFeatureLR(ClassifierMixin, BaseEstimator):
             random_state=self.random_state,
         )
         leaves = self.fe_.fit_leaves(X, y)
-        self.logistic_ = _liblinear_logistic_regression(
+        self.logistic_ = _downstream_logistic_regression(
             lr_penalty=self.lr_penalty, lr_C=self.lr_C, random_state=self.random_state,
         )
         self.logistic_.fit(leaves, y)
@@ -1284,6 +1344,7 @@ class LeafWiseBoundedLookaheadRPTEFeatureExtractor:
         reason: str,
         owner_by_column: dict[int, frozenset[str]] | None = None,
         eligible_columns: list[int] | tuple[int, ...] | None = None,
+        stage_callback: Callable[[Any], bool] | None = None,
     ) -> sparse.csr_matrix:
         """Dispatch to _DefaultRPTEFeatureExtractor (sequential RPTE, no
         augmented-pair/microtree machinery) and record why -- shared by all
@@ -1354,14 +1415,26 @@ class LeafWiseBoundedLookaheadRPTEFeatureExtractor:
                 reserve_raw_features=self.reserve_raw_features,
                 eligible_columns=eligible_columns,
             )
-            leaves = self._default_fe.fit_leaves(Xd, y)
+            leaves = self._default_fe.fit_leaves(
+                Xd,
+                y,
+                stage_callback=(
+                    (lambda _default: bool(stage_callback(self)))
+                    if stage_callback is not None
+                    else None
+                ),
+            )
             self.is_degenerate_ = False
             self.trees_ = []
             self.default_backend_reason_ = reason
             self._raw_feature_fallback_ = False
             return leaves
         except ValueError:
-            pass
+            # A validation callback runs only after a tree has been accepted.
+            # Once growth has started, surface callback/data errors instead of
+            # converting them into the raw-feature fallback route.
+            if self._default_fe is not None and self._default_fe.trees_:
+                raise
         try:
             self._default_fe = None
             leaves = sparse.csr_matrix(Xd)
@@ -1379,7 +1452,13 @@ class LeafWiseBoundedLookaheadRPTEFeatureExtractor:
             return sparse.csr_matrix(np.ones((Xd.shape[0], 1), dtype=np.float32))
 
 
-    def fit_leaves(self, X, y) -> sparse.csr_matrix:
+    def fit_leaves(
+        self,
+        X,
+        y,
+        *,
+        stage_callback: Callable[[Any], bool] | None = None,
+    ) -> sparse.csr_matrix:
         if self.enable_lookahead not in (True, False, "adaptive"):
             raise ValueError(
                 f"enable_lookahead must be True, False, or 'adaptive', got {self.enable_lookahead!r}."
@@ -1402,6 +1481,7 @@ class LeafWiseBoundedLookaheadRPTEFeatureExtractor:
         ) = self._metadata(Xd.shape[1])
         self.default_backend_reason_: str | None = None
         self._raw_feature_fallback_ = False
+        self.initial_available_raw_features_ = set(available_names)
 
         if not roots:
             self.remaining_raw_features_ = set(available_names)
@@ -1411,6 +1491,7 @@ class LeafWiseBoundedLookaheadRPTEFeatureExtractor:
                 "no_augmented_pairs",
                 owner_by_column_names,
                 tree_eligible_columns,
+                stage_callback,
             )
 
         use_lookahead = self.enable_lookahead
@@ -1433,6 +1514,7 @@ class LeafWiseBoundedLookaheadRPTEFeatureExtractor:
                 "enable_lookahead_false_or_adaptive_strong_marginal_signal",
                 owner_by_column_names,
                 tree_eligible_columns,
+                stage_callback,
             )
 
         self._default_fe = None
@@ -1442,6 +1524,7 @@ class LeafWiseBoundedLookaheadRPTEFeatureExtractor:
         self.tree_residual_gains_: list[float] = []
         self.reserved_raw_features_: list[set[str]] = []
         self._tree_names_: list[list[str]] = []
+        self.is_degenerate_ = False
         available_raw = set(available_native)
 
         allowed_ops = None if self.lookahead_ops is None else set(self.lookahead_ops)
@@ -1529,13 +1612,18 @@ class LeafWiseBoundedLookaheadRPTEFeatureExtractor:
 
             return _BoostingRound(leaf_ids=leaf_ids, on_accept=on_accept)
 
+        p_bar = float(np.clip(y01.mean(), 1e-6, 1.0 - 1e-6))
+        self.base_log_odds_ = float(np.log(p_bar / (1.0 - p_bar)))
         _F, self.deviance_history_, self.base_log_odds_ = _fit_newton_boosted_ensemble(
             y01,
             self.n_estimators,
             self.learning_rate,
             self.min_tree_residual_gain,
             grow_round,
-            stop_after_accept=lambda: self.reserve_raw_features and not available_raw,
+            stop_after_accept=lambda: (
+                (self.reserve_raw_features and not available_raw)
+                or (stage_callback is not None and bool(stage_callback(self)))
+            ),
         )
 
         self.is_degenerate_ = not self.trees_
@@ -1552,12 +1640,46 @@ class LeafWiseBoundedLookaheadRPTEFeatureExtractor:
                 "lookahead_degenerate",
                 owner_by_column_names,
                 tree_eligible_columns,
+                stage_callback,
             )
         self.remaining_raw_features_ = {
             raw_name_by_index.get(tok, names[tok] if tok < len(names) else str(tok))
             for tok in available_raw
         }
         return self._leaf_matrix(Xd)
+
+    def retain_tree_prefix(self, tree_count: int) -> None:
+        """Retain a fitted tree prefix and keep all aligned state consistent."""
+        if self._default_fe is not None:
+            self._default_fe.retain_tree_prefix(tree_count)
+            count = len(self._default_fe.trees_)
+            reserved = self._default_fe.reserved_raw_features_
+        else:
+            count = max(0, min(int(tree_count), len(getattr(self, "trees_", []))))
+            for name in (
+                "trees_",
+                "tree_leaf_ids_",
+                "tree_leaf_values_",
+                "tree_residual_gains_",
+                "reserved_raw_features_",
+                "_tree_names_",
+            ):
+                if hasattr(self, name):
+                    setattr(self, name, list(getattr(self, name))[:count])
+            if hasattr(self, "deviance_history_"):
+                self.deviance_history_ = self.deviance_history_[: count + 1]
+            reserved = getattr(self, "reserved_raw_features_", [])
+        initial = set(getattr(self, "initial_available_raw_features_", set()))
+        consumed: set[str] = set()
+        raw_name_by_index = getattr(self, "raw_name_by_index_", {})
+        for values in reserved:
+            for value in values:
+                if isinstance(value, (int, np.integer)) and int(value) in raw_name_by_index:
+                    consumed.add(str(raw_name_by_index[int(value)]))
+                else:
+                    consumed.add(str(value))
+        if initial:
+            self.remaining_raw_features_ = initial - consumed
 
     def _leaf_matrix(self, Xd: np.ndarray) -> sparse.csr_matrix:
         blocks = []
@@ -1580,6 +1702,21 @@ class LeafWiseBoundedLookaheadRPTEFeatureExtractor:
                 return sparse.csr_matrix(Xd)
             return sparse.csr_matrix(np.ones((Xd.shape[0], 1), dtype=np.float32))
         return self._leaf_matrix(Xd)
+
+    def boosted_decision_function(self, X) -> np.ndarray:
+        """Apply the retained additive RPTE tree sequence to new rows."""
+        if self._default_fe is not None:
+            return self._default_fe.boosted_decision_function(X)
+        Xd = self._dense(X)
+        score = np.full(Xd.shape[0], float(self.base_log_odds_), dtype=np.float64)
+        for tree, values in zip(self.trees_, self.tree_leaf_values_):
+            assignments = _native.rpte_apply_tree(Xd, tree)
+            score += np.fromiter(
+                (float(values.get(int(leaf), 0.0)) for leaf in assignments),
+                dtype=np.float64,
+                count=Xd.shape[0],
+            )
+        return score
 
     def leaf_column_descriptors(self) -> list[dict[str, Any]]:
         """Describe extracted leaf columns in the exact matrix column order."""
@@ -1823,10 +1960,11 @@ class LeafWiseBoundedLookaheadRPTEFeatureLR(ClassifierMixin, BaseEstimator):
         leaf_config: str = "3xD",
         depth: int = 4,
         n_estimators: int = 10,
+        early_stopping: bool = False,
         min_samples_leaf: int = 5,
         rpte_learning_rate: float = 0.3,
         lr_C: float = 1.0,
-        lr_penalty: str = "l1",
+        lr_penalty: str = "l2",
         random_state: int = 42,
         lookahead_child_mode: str = "shared",
         lookahead_ops: tuple[str, ...] | None = ("absolute_difference",),
@@ -1856,6 +1994,7 @@ class LeafWiseBoundedLookaheadRPTEFeatureLR(ClassifierMixin, BaseEstimator):
         self.leaf_config = leaf_config
         self.depth = depth
         self.n_estimators = n_estimators
+        self.early_stopping = early_stopping
         self.min_samples_leaf = min_samples_leaf
         self.rpte_learning_rate = rpte_learning_rate
         self.lr_C = lr_C
@@ -2195,15 +2334,11 @@ class LeafWiseBoundedLookaheadRPTEFeatureLR(ClassifierMixin, BaseEstimator):
         n_leaf = int(getattr(self, "n_leaf_features_", self.logistic_.coef_.shape[1]))
         return np.asarray(self.logistic_.coef_[0, n_leaf:], dtype=float)
 
-    def fit(self, X, y):
-        y = np.asarray(y)
-        self.classes_ = np.unique(y)
-        if self.classes_.size != 2:
-            raise ValueError("LeafWiseBoundedLookaheadRPTEFeatureLR is binary only.")
-        self.fe_ = LeafWiseBoundedLookaheadRPTEFeatureExtractor(
+    def _make_feature_extractor(self, n_estimators: int):
+        extractor = LeafWiseBoundedLookaheadRPTEFeatureExtractor(
             leaf_config=self.leaf_config,
             depth=self.depth,
-            n_estimators=self.n_estimators,
+            n_estimators=int(n_estimators),
             min_samples_leaf=self.min_samples_leaf,
             learning_rate=self.rpte_learning_rate,
             random_state=self.random_state,
@@ -2228,21 +2363,307 @@ class LeafWiseBoundedLookaheadRPTEFeatureLR(ClassifierMixin, BaseEstimator):
             enable_lookahead=self.enable_lookahead,
             adaptive_marginal_gain_threshold=self.adaptive_marginal_gain_threshold,
         )
-        self.fe_.set_hugiml_feature_metadata(
+        extractor.set_hugiml_feature_metadata(
             self.hugiml_feature_names or [],
             self.hugiml_augmented_catalog or [],
             self.hugiml_pattern_provenance or {},
             self.hugiml_original_feature_standardization or {},
         )
+        return extractor
+
+    @staticmethod
+    def _feature_extractor_tree_count(fe) -> int:
+        default_fe = getattr(fe, "_default_fe", None)
+        return int(
+            len(default_fe.trees_)
+            if default_fe is not None
+            else len(getattr(fe, "trees_", []) or [])
+        )
+
+    def _validation_matrix_from_layout(self, X) -> sparse.csr_matrix:
+        X_csr = self._as_csr(X)
+        leaves = self.fe_.transform_leaves(X_csr)
+        direct_indices = np.asarray(self.direct_input_indices_, dtype=np.int64)
+        if direct_indices.size:
+            return sparse.hstack([leaves, X_csr[:, direct_indices]], format="csr")
+        return leaves.tocsr()
+
+    def _use_configured_tree_count(self, X, y, reason: str):
+        params = self.get_params(deep=False)
+        params["early_stopping"] = False
+        fitted = self.__class__(**params).fit(X, y)
+        self.__dict__.update(fitted.__dict__)
+        self.early_stopping = True
+        self.early_stopping_used_ = False
+        self.early_stopping_fallback_reason_ = reason
+        self.early_stopping_validation_source_ = None
+        self.early_stopping_validation_size_ = 0
+        self.early_stopping_metric_ = "log_loss"
+        self.early_stopping_best_loss_ = None
+        self.early_stopping_best_score_ = None
+        self.early_stopping_evaluated_estimators_ = []
+        self.rpte_staged_growth_used_ = False
+        self.n_estimators_ = self._feature_extractor_tree_count(self.fe_)
+        return self
+
+    def _fit_with_validation_early_stopping_legacy(self, X, y):
+        """Select a compact RPTE tree count on a private stratified holdout.
+
+        The public estimator surface intentionally exposes only the boolean
+        ``early_stopping`` switch.  The maximum tree count, patience,
+        improvement tolerance, and holdout fraction are fixed module constants
+        so benchmark runs cannot silently drift into large, hard-to-inspect
+        ensembles.
+
+        Each candidate is a normal RPTE fit with ``early_stopping=False``.
+        This keeps the established fixed-tree implementation as the single
+        source of truth and makes the compatibility path exactly the old path.
+        The best fitted candidate is retained directly; there is deliberately
+        no train+validation refit.
+        """
+        y_arr = np.asarray(y)
+        classes, counts = np.unique(y_arr, return_counts=True)
+        fallback_reason = None
+        if classes.size != 2:
+            raise ValueError("LeafWiseBoundedLookaheadRPTEFeatureLR is binary only.")
+        if int(counts.min()) < 2:
+            fallback_reason = "smallest_class_has_fewer_than_two_samples"
+        else:
+            n_rows = int(y_arr.shape[0])
+            n_validation = max(
+                int(classes.size),
+                int(np.ceil(RPTE_EARLY_STOPPING_VALIDATION_FRACTION * n_rows)),
+            )
+            n_validation = min(n_validation, n_rows - int(classes.size))
+            if n_validation < int(classes.size):
+                fallback_reason = "insufficient_rows_for_stratified_validation"
+
+        if fallback_reason is not None:
+            params = self.get_params(deep=False)
+            params["early_stopping"] = False
+            params["n_estimators"] = int(self.n_estimators)
+            fitted = self.__class__(**params).fit(X, y_arr)
+            self.__dict__.update(fitted.__dict__)
+            self.early_stopping = True
+            self.n_estimators = params["n_estimators"]
+            self.early_stopping_used_ = False
+            self.early_stopping_fallback_reason_ = fallback_reason
+            self.early_stopping_validation_size_ = 0
+            self.early_stopping_best_score_ = None
+            self.early_stopping_evaluated_estimators_ = []
+            self.n_estimators_ = int(len(getattr(self.fe_, "trees_", []) or []))
+            return self
+
+        indices = np.arange(y_arr.shape[0], dtype=np.int64)
+        fit_idx, validation_idx = train_test_split(
+            indices,
+            test_size=int(n_validation),
+            stratify=y_arr,
+            random_state=int(self.random_state),
+        )
+        X_fit = X[fit_idx] if sparse.issparse(X) else np.asarray(X)[fit_idx]
+        X_validation = X[validation_idx] if sparse.issparse(X) else np.asarray(X)[validation_idx]
+        y_fit = y_arr[fit_idx]
+        y_validation = y_arr[validation_idx]
+
+        template = clone(self)
+        template.set_params(early_stopping=False)
+        best_model = None
+        best_score = -np.inf
+        best_tree_count = 0
+        rounds_without_improvement = 0
+        history: list[dict[str, float | int]] = []
+        for tree_count in range(1, RPTE_EARLY_STOPPING_MAX_ESTIMATORS + 1):
+            candidate = clone(template).set_params(n_estimators=tree_count)
+            candidate.fit(X_fit, y_fit)
+            probabilities = np.asarray(candidate.predict_proba(X_validation), dtype=float)
+            score = float(roc_auc_score(y_validation, probabilities[:, 1]))
+            history.append({"n_estimators": int(tree_count), "validation_roc_auc": score})
+            if score > best_score + RPTE_EARLY_STOPPING_MIN_DELTA:
+                best_score = score
+                best_model = candidate
+                best_tree_count = int(tree_count)
+                rounds_without_improvement = 0
+            else:
+                rounds_without_improvement += 1
+                if rounds_without_improvement >= RPTE_EARLY_STOPPING_PATIENCE:
+                    break
+
+        if best_model is None:  # defensive: the loop always evaluates one candidate
+            raise RuntimeError("RPTE early stopping did not produce a fitted candidate.")
+        configured_n_estimators = int(self.n_estimators)
+        self.__dict__.update(best_model.__dict__)
+        self.early_stopping = True
+        self.n_estimators = configured_n_estimators
+        self.early_stopping_used_ = True
+        self.early_stopping_fallback_reason_ = None
+        self.early_stopping_validation_size_ = int(validation_idx.size)
+        self.early_stopping_best_score_ = float(best_score)
+        self.early_stopping_evaluated_estimators_ = history
+        self.n_estimators_ = int(best_tree_count)
+        return self
+
+    def _fit_with_validation_early_stopping(
+        self,
+        X,
+        y,
+        *,
+        validation_data: tuple[Any, Any] | None = None,
+        validation_source: str | None = None,
+    ):
+        """Select a compact tree prefix from staged validation log loss."""
+        y_arr = np.asarray(y)
+        self.classes_, counts = np.unique(y_arr, return_counts=True)
+        if self.classes_.size != 2:
+            raise ValueError("LeafWiseBoundedLookaheadRPTEFeatureLR is binary only.")
+
+        X_all = self._as_csr(X)
+        if validation_data is None:
+            if int(counts.min()) < 2:
+                return self._use_configured_tree_count(
+                    X_all, y_arr, "smallest_class_has_fewer_than_two_samples"
+                )
+            n_rows = int(y_arr.shape[0])
+            n_validation = max(
+                int(self.classes_.size),
+                int(np.ceil(RPTE_EARLY_STOPPING_VALIDATION_FRACTION * n_rows)),
+            )
+            n_validation = min(n_validation, n_rows - int(self.classes_.size))
+            if n_validation < int(self.classes_.size):
+                return self._use_configured_tree_count(
+                    X_all, y_arr, "insufficient_rows_for_stratified_validation"
+                )
+            indices = np.arange(n_rows, dtype=np.int64)
+            fit_idx, validation_idx = train_test_split(
+                indices,
+                test_size=int(n_validation),
+                stratify=y_arr,
+                random_state=int(self.random_state),
+            )
+            X_fit = X_all[fit_idx]
+            y_fit = y_arr[fit_idx]
+            X_validation = X_all[validation_idx]
+            y_validation = y_arr[validation_idx]
+            source = "private_stratified_holdout"
+        else:
+            X_validation_raw, y_validation_raw = validation_data
+            X_fit = X_all
+            y_fit = y_arr
+            X_validation = self._as_csr(X_validation_raw)
+            y_validation = np.asarray(y_validation_raw)
+            if X_validation.shape[0] != y_validation.shape[0]:
+                raise ValueError("RPTE validation features and labels have different row counts.")
+            if X_validation.shape[1] != X_fit.shape[1]:
+                raise ValueError("RPTE training and validation feature counts differ.")
+            if y_validation.size == 0:
+                raise ValueError("RPTE validation data is empty.")
+            if not np.isin(np.unique(y_validation), self.classes_).all():
+                raise ValueError("RPTE validation labels are absent from training labels.")
+            source = str(validation_source or "supplied_validation")
+
+        self.fe_ = self._make_feature_extractor(RPTE_EARLY_STOPPING_MAX_ESTIMATORS)
+        history: list[dict[str, float | int]] = []
+        best_loss = np.inf
+        best_tree_count = 0
+        rounds_without_improvement = 0
+
+        def monitor_stage(fe) -> bool:
+            nonlocal best_loss, best_tree_count, rounds_without_improvement
+            tree_count = self._feature_extractor_tree_count(fe)
+            positive = _sigmoid(fe.boosted_decision_function(X_validation))
+            probabilities = np.column_stack([1.0 - positive, positive])
+            loss = float(
+                log_loss(y_validation, probabilities, labels=list(self.classes_))
+            )
+            history.append(
+                {"n_estimators": int(tree_count), "validation_log_loss": loss}
+            )
+            if loss < best_loss - RPTE_EARLY_STOPPING_MIN_DELTA:
+                best_loss = loss
+                best_tree_count = int(tree_count)
+                rounds_without_improvement = 0
+            else:
+                rounds_without_improvement += 1
+            return rounds_without_improvement >= RPTE_EARLY_STOPPING_PATIENCE
+
+        self.fe_.fit_leaves(X_fit, y_fit, stage_callback=monitor_stage)
+        if not history:
+            return self._use_configured_tree_count(
+                X_fit, y_fit, "no_tree_stage_available_for_monitoring"
+            )
+        self.fe_.retain_tree_prefix(best_tree_count)
+        leaves = self.fe_.transform_leaves(X_fit)
+        final_X = self._fit_final_feature_layout(X_fit, leaves)
+        if bool(getattr(self, "_fast_tune_monitor_only", False)):
+            self._fast_tune_boosting_proxy_ = True
+            self._fast_tune_final_X_ = final_X
+            self._fast_tune_final_y_ = np.asarray(y_fit)
+        else:
+            self.logistic_ = _downstream_logistic_regression(
+                lr_penalty=self.lr_penalty,
+                lr_C=self.lr_C,
+                random_state=self.random_state,
+            )
+            self.logistic_.fit(final_X, y_fit)
+        self.early_stopping_used_ = True
+        self.early_stopping_fallback_reason_ = None
+        self.early_stopping_validation_source_ = source
+        self.early_stopping_validation_size_ = int(y_validation.size)
+        self.early_stopping_metric_ = "log_loss"
+        self.early_stopping_monitor_solver_ = "rpte_cumulative_log_loss"
+        self.early_stopping_monitor_reused_coefficient_count_ = 0
+        self.early_stopping_best_loss_ = float(best_loss)
+        self.early_stopping_best_score_ = float(-best_loss)
+        self.early_stopping_evaluated_estimators_ = history
+        self.rpte_staged_growth_used_ = True
+        self.n_estimators_ = int(best_tree_count)
+        return self
+
+    def _finalize_fast_tune_monitor(self):
+        """Fit the retained RPTE selection once with the final logistic solver."""
+        if not hasattr(self, "_fast_tune_final_X_"):
+            return self
+        final_lr = _downstream_logistic_regression(
+            lr_penalty=self.lr_penalty,
+            lr_C=self.lr_C,
+            random_state=self.random_state,
+        )
+        final_lr.fit(self._fast_tune_final_X_, self._fast_tune_final_y_)
+        self.logistic_ = final_lr
+        del self._fast_tune_final_X_
+        del self._fast_tune_final_y_
+        self.__dict__.pop("_fast_tune_boosting_proxy_", None)
+        self.__dict__.pop("_fast_tune_monitor_only", None)
+        return self
+
+    def _fit_with_supplied_validation(self, X, y, X_validation, y_validation):
+        if not bool(self.early_stopping):
+            return self.fit(X, y)
+        return self._fit_with_validation_early_stopping(
+            X,
+            y,
+            validation_data=(X_validation, y_validation),
+            validation_source="rotating_fold",
+        )
+
+    def fit(self, X, y):
+        if bool(self.early_stopping):
+            return self._fit_with_validation_early_stopping(X, y)
+        y = np.asarray(y)
+        self.classes_ = np.unique(y)
+        if self.classes_.size != 2:
+            raise ValueError("LeafWiseBoundedLookaheadRPTEFeatureLR is binary only.")
+        self.fe_ = self._make_feature_extractor(self.n_estimators)
         X_csr = self._as_csr(X)
         leaves = self.fe_.fit_leaves(X_csr, y)
         final_X = self._fit_final_feature_layout(X_csr, leaves)
-        self.logistic_ = _liblinear_logistic_regression(
+        self.logistic_ = _downstream_logistic_regression(
             lr_penalty=self.lr_penalty,
             lr_C=self.lr_C,
             random_state=self.random_state,
         )
         self.logistic_.fit(final_X, y)
+        self.rpte_staged_growth_used_ = False
         return self
 
     def representation_alias_table(self) -> list[dict[str, Any]]:
@@ -2251,6 +2672,9 @@ class LeafWiseBoundedLookaheadRPTEFeatureLR(ClassifierMixin, BaseEstimator):
         return [dict(item) for item in getattr(self, "suppressed_direct_aliases_", [])]
 
     def predict_proba(self, X) -> np.ndarray:
+        if bool(getattr(self, "_fast_tune_boosting_proxy_", False)):
+            positive = _sigmoid(self.fe_.boosted_decision_function(self._as_csr(X)))
+            return np.column_stack([1.0 - positive, positive])
         check_is_fitted(self, "logistic_")
         return self.logistic_.predict_proba(self._final_lr_matrix(X))
 
@@ -2578,7 +3002,7 @@ class LeafWiseBoundedLookaheadRPTEFeatureLR(ClassifierMixin, BaseEstimator):
 
         Shared root-to-leaf prefixes are merged into a decision-tree-style text
         layout.  Each terminal leaf includes its final LR coefficient, odds
-        multiplier, support, centered contribution, and raw-feature provenance.
+        multiplier, support, centered contribution, and raw-feature mapping.
         Direct source terms are grouped after the leaf trees by source family.
 
         ``condition_space`` accepts ``"raw"``, ``"downstream"``, or ``"both"``.
@@ -2605,7 +3029,7 @@ def aggregate_rule_table_by_raw_source(
     rows: list[dict[str, Any]],
     allocation: str = "interaction_only",
 ) -> dict[str, Any]:
-    """Aggregate a unified_rule_table() result by raw-feature provenance, producing two complementary views.
+    """Aggregate a unified_rule_table() result by raw-feature mapping, producing two complementary views.
 
     downstream_contributions: keyed by each condition's own
     family-qualified downstream name (e.g. "orig:age",

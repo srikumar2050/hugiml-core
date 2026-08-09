@@ -1067,6 +1067,12 @@ def _extract_grid_assignments(text: str) -> dict[str, dict[str, list[Any]]]:
             grid_name = assignment_name.replace("_grid", "")
             if isinstance(value, dict):
                 grids[grid_name] = _normalise_grid_dict(value)
+    pattern = re.compile(r'''HUGIML_GRIDS\s*\[\s*["']([^"']+)["']\s*\]\s*=\s*\{''')
+    for match in pattern.finditer(text):
+        literal = _balanced_brace_text(text, text.find("{", match.start()))
+        parsed = _safe_literal_eval_dict(literal) if literal else None
+        if isinstance(parsed, dict):
+            grids[match.group(1)] = _normalise_grid_dict(parsed)
     return grids
 
 

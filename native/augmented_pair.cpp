@@ -739,7 +739,20 @@ py::list select_interaction_information_features(
         std::vector<std::vector<int32_t>> codes(static_cast<size_t>(p));
         std::vector<int32_t> n_bins(static_cast<size_t>(p), 1);
         std::vector<double> marginal_ig(static_cast<size_t>(p), 0.0);
+        std::vector<uint8_t> complete_on_valid_labels(static_cast<size_t>(p), 1);
         std::vector<double> values(static_cast<size_t>(n), 0.0);
+
+        std::vector<int64_t> global_label_counts(static_cast<size_t>(n_classes), 0);
+        int64_t global_eligible = 0;
+        for (py::ssize_t i = 0; i < n; ++i) {
+            const int64_t cls = y_ptr[i];
+            if (cls < 0 || cls >= n_classes) continue;
+            global_label_counts[static_cast<size_t>(cls)]++;
+            ++global_eligible;
+        }
+        const double global_base = global_eligible > 0
+            ? entropy_from_counts(global_label_counts, global_eligible)
+            : 0.0;
 
         for (py::ssize_t j = 0; j < p; ++j) {
             for (py::ssize_t i = 0; i < n; ++i) {
@@ -752,6 +765,15 @@ py::list select_interaction_information_features(
                 if (c > max_code) max_code = c;
             }
             n_bins[static_cast<size_t>(j)] = std::max<int32_t>(1, max_code + 1);
+            for (py::ssize_t i = 0; i < n; ++i) {
+                const int64_t cls = y_ptr[i];
+                if (cls < 0 || cls >= n_classes) continue;
+                const int32_t c = codes[static_cast<size_t>(j)][static_cast<size_t>(i)];
+                if (c < 0 || c >= n_bins[static_cast<size_t>(j)]) {
+                    complete_on_valid_labels[static_cast<size_t>(j)] = 0;
+                    break;
+                }
+            }
             marginal_ig[static_cast<size_t>(j)] = marginal_ig_skip_missing(
                 codes[static_cast<size_t>(j)], y_ptr, n, n_classes, n_bins[static_cast<size_t>(j)]
             );
@@ -786,6 +808,46 @@ py::list select_interaction_information_features(
                 const int32_t nb_b = n_bins[static_cast<size_t>(b)];
                 if (nb_a <= 0 || nb_b <= 0) continue;
                 const int64_t n_joint = static_cast<int64_t>(nb_a) * static_cast<int64_t>(nb_b);
+
+                const bool complete_pair =
+                    complete_on_valid_labels[static_cast<size_t>(a)] != 0
+                    && complete_on_valid_labels[static_cast<size_t>(b)] != 0;
+
+                if (complete_pair) {
+                    joint_counts.assign(static_cast<size_t>(n_joint) * static_cast<size_t>(n_classes), 0);
+                    joint_totals.assign(static_cast<size_t>(n_joint), 0);
+
+                    for (py::ssize_t i = 0; i < n; ++i) {
+                        const int64_t cls = y_ptr[i];
+                        if (cls < 0 || cls >= n_classes) continue;
+                        const int32_t ca = codes[static_cast<size_t>(a)][static_cast<size_t>(i)];
+                        const int32_t cb = codes[static_cast<size_t>(b)][static_cast<size_t>(i)];
+                        const int64_t joint = static_cast<int64_t>(ca) * static_cast<int64_t>(nb_b)
+                            + static_cast<int64_t>(cb);
+                        joint_totals[static_cast<size_t>(joint)]++;
+                        joint_counts[static_cast<size_t>(joint) * static_cast<size_t>(n_classes)
+                            + static_cast<size_t>(cls)]++;
+                    }
+                    if (global_eligible < 3 || global_base <= 0.0) continue;
+
+                    const double cond_joint = conditional_entropy_from_table(
+                        joint_counts, joint_totals, n_classes, global_eligible
+                    );
+                    const double joint_ig = std::max(0.0, global_base - cond_joint);
+                    const double interaction = joint_ig
+                        - marginal_ig[static_cast<size_t>(a)]
+                        - marginal_ig[static_cast<size_t>(b)];
+
+                    if (interaction > best_interaction[static_cast<size_t>(a)]) {
+                        best_interaction[static_cast<size_t>(a)] = interaction;
+                        best_partner[static_cast<size_t>(a)] = b;
+                    }
+                    if (interaction > best_interaction[static_cast<size_t>(b)]) {
+                        best_interaction[static_cast<size_t>(b)] = interaction;
+                        best_partner[static_cast<size_t>(b)] = a;
+                    }
+                    continue;
+                }
 
                 label_counts.assign(static_cast<size_t>(n_classes), 0);
                 joint_counts.assign(static_cast<size_t>(n_joint) * static_cast<size_t>(n_classes), 0);
@@ -1596,4 +1658,3 @@ void bind_augmented_pair(py::module_& m)
         "Score final downstream CSC columns by IG and return scores plus a topK mask."
     );
 }
-

@@ -18,7 +18,6 @@ import sys
 import sysconfig
 import time
 import warnings
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -199,7 +198,7 @@ def _dense_numeric_array(X: Any) -> np.ndarray:
 class DenseArrayTransformer(BaseEstimator, TransformerMixin):
     """Convert preprocessed baseline features to an unlabeled numeric matrix."""
 
-    def fit(self, X: Any, y: Any = None) -> "DenseArrayTransformer":
+    def fit(self, X: Any, y: Any = None) -> DenseArrayTransformer:
         return self
 
     def transform(self, X: Any) -> np.ndarray:
@@ -297,7 +296,7 @@ except Exception:
     # benchmark reproducible by embedding the same default grids here.
     from sklearn.multiclass import OneVsRestClassifier
 
-    from hugiml._compat import liblinear_penalty_kwargs
+    from hugiml._compat import logistic_penalty_kwargs
     from hugiml.rpte_bounded_lookahead_leafwise import (
         LeafWiseBoundedLookaheadRPTEFeatureLR,
     )
@@ -307,10 +306,10 @@ except Exception:
     def make_l1_logistic_base_estimator() -> LogisticRegression:
         return LogisticRegression(
             solver="liblinear",
-            C=1.0,
+            C=0.5,
             random_state=0,
-            max_iter=500,
-            **liblinear_penalty_kwargs("l1"),
+            max_iter=300,
+            **logistic_penalty_kwargs("l1"),
         )
 
     def get_hugiml_grid(name: str = DEFAULT_HUGIML_GRID_NAME) -> dict[str, list[Any]]:
@@ -349,7 +348,7 @@ except Exception:
                 "convert_binary_to_categorical": [True],
                 "topk_budget_strict": [False],
                 "base_estimator": [
-                    make_l1_logistic_base_estimator(),
+                    None,
                     OneVsRestClassifier(
                         LeafWiseBoundedLookaheadRPTEFeatureLR(
                             leaf_config="3xD",
@@ -370,19 +369,41 @@ except Exception:
                 "convert_binary_to_categorical": [False],
                 "augmented_pair_transforms": [True],
                 "topk_budget_strict": [False],
+                "lr_solver": ["adaptive_l1"],
+                "lr_C": [0.5],
                 "base_estimator": [
-                    make_l1_logistic_base_estimator(),
+                    None,
                     OneVsRestClassifier(
                         LeafWiseBoundedLookaheadRPTEFeatureLR(
                             leaf_config="3xD",
                             depth=4,
                             enable_lookahead="adaptive",
+                            lr_C=0.5,
+                            lr_penalty="l1",
                         ),
                         n_jobs=1,
                     ),
                 ],
             },
         }
+        interaction_l1 = copy.deepcopy(grids["interpretability_ho"])
+        interaction_l1["lr_solver"] = ["adaptive_l1"]
+        interaction_l1["lr_C"] = [0.5]
+        interaction_l1["base_estimator"] = [
+            None,
+            OneVsRestClassifier(
+                LeafWiseBoundedLookaheadRPTEFeatureLR(
+                    leaf_config="3xD",
+                    depth=4,
+                    enable_lookahead=False,
+                    lr_C=0.5,
+                    lr_penalty="l1",
+                ),
+                n_jobs=1,
+            ),
+        ]
+        grids["interpretability_ho"] = interaction_l1
+
         resolved = name or DEFAULT_HUGIML_GRID_NAME
         if resolved not in grids:
             raise KeyError(resolved)
@@ -411,6 +432,7 @@ except Exception:
             "LogisticRegression": {
                 "C": [0.01, 0.1, 1.0, 10.0],
                 "penalty": ["l1", "l2"],
+            "class_weight": [None, "balanced"],
             },
             "EBM": {
                 "learning_rate": [0.01, 0.05],
@@ -460,6 +482,7 @@ def get_baseline_grid(model: str) -> dict[str, list[Any]]:
         return {
             "C": [0.01, 0.1, 1.0, 10.0],
             "penalty": ["l1", "l2"],
+            "class_weight": [None, "balanced"],
         }
     return copy.deepcopy(_BASELINE_GRID_PROVIDER(model))
 
@@ -526,7 +549,8 @@ HUGIML_SCENARIOS: dict[str, dict[str, Any]] = {
         "description": (
             "The performance_ho grid with original features, mined patterns, "
             "augmented pairs, numeric 0/1 columns retained as numeric sources, "
-            "and inner-CV selection between logistic regression (L1 penalty, liblinear solver, C=1.0) and adaptive RPTE"
+            "and inner-CV selection between the HUGIML logistic branch "
+            "and its corresponding adaptive RPTE branch"
         ),
         "grid_name": "performance_ho",
         "overrides": {},
@@ -536,7 +560,8 @@ HUGIML_SCENARIOS: dict[str, dict[str, Any]] = {
         "description": (
             "The interpretability_ho grid with pattern-only interaction-relaxed "
             "mining, numeric 0/1 indicators treated categorically, no augmented "
-            "pairs, and inner-CV selection between logistic regression (L1 penalty, liblinear solver, C=1.0) and sequential RPTE"
+            "pairs, and inner-CV selection between the HUGIML logistic branch "
+            "and its corresponding sequential RPTE branch"
         ),
         "grid_name": "interpretability_ho",
         "overrides": {},
@@ -1696,6 +1721,15 @@ def _finite_positive_ms(value: Any) -> float | None:
     return out
 
 
+def _finite_or_none(value: Any) -> float | None:
+    """Return a finite numeric value, or None when unavailable."""
+    try:
+        out = float(value)
+    except Exception:
+        return None
+    return out if math.isfinite(out) else None
+
+
 def _model_fit_ms_from_metadata(model: Any) -> float | None:
     """Read a fitted estimator's own final-fit timing metadata when present."""
     metadata = getattr(model, "fit_metadata_", None)
@@ -1908,7 +1942,7 @@ def _fit_default_model(
     X_tr: pd.DataFrame,
     y_tr: np.ndarray,
 ) -> tuple[Any, float, float]:
-    clf = builder({}) if model == "HUGIML" else baseline_pipeline(builder({}))
+    clf = builder({}) if is_hugiml_model(model) else baseline_pipeline(builder({}))
     t0 = time.perf_counter()
     clf.fit(X_tr, y_tr)
     fit_ms = (time.perf_counter() - t0) * 1000.0
@@ -1955,6 +1989,12 @@ def _evaluate_outer_fold(
             "predict_seconds": float(predict_ms) / 1000.0,
             "tune_seconds": float(tune_ms) / 1000.0,
             "tuned": bool(tuned),
+            "fit_time_included_in_tuning": bool(tuned and float(tune_ms) > 0.0),
+            "fit_time_accounting": (
+                "included_in_tuning"
+                if tuned and float(tune_ms) > 0.0
+                else "separate_from_tuning"
+            ),
         }
     )
     if extra:
@@ -1970,6 +2010,228 @@ def _mean_or_none(values: pd.Series) -> float | None:
 def _std_or_none(values: pd.Series) -> float | None:
     nums = pd.to_numeric(values, errors="coerce").dropna()
     return None if len(nums) < 2 else float(nums.std(ddof=1))
+
+
+RPTE_BACKEND_TO_PATH = {
+    "sequential_default": "rpte_sequential",
+    "bounded_lookahead": "rpte_lookahead",
+}
+RPTE_DISTRIBUTION_METRICS = (
+    "rpte_inputs_passed",
+    "rpte_tree_count",
+    "rpte_active_tree_count",
+    "rpte_leaf_count",
+    "rpte_active_leaf_count",
+    "rpte_direct_term_count",
+    "rpte_average_leaf_path_length",
+    "rpte_active_average_leaf_path_length",
+)
+
+
+def _fitted_rpte_estimators(estimator: Any) -> list[Any]:
+    """Find fitted binary RPTE estimators through HUGIML and sklearn wrappers."""
+    found: list[Any] = []
+    seen: set[int] = set()
+    stack = [estimator]
+    while stack:
+        current = stack.pop()
+        if current is None or id(current) in seen:
+            continue
+        seen.add(id(current))
+        if (
+            current.__class__.__name__ == "LeafWiseBoundedLookaheadRPTEFeatureLR"
+            and hasattr(current, "fe_")
+        ):
+            found.append(current)
+            continue
+        model = getattr(current, "model_", None)
+        if model is not None:
+            stack.append(model)
+        for attr in ("best_estimator_", "estimator_", "estimator"):
+            child = getattr(current, attr, None)
+            if child is not None and child is not current:
+                stack.append(child)
+        for child in getattr(current, "estimators_", []) or []:
+            stack.append(child)
+        for _, child in getattr(current, "steps", []) or []:
+            stack.append(child)
+        named_steps = getattr(current, "named_steps", None)
+        if named_steps:
+            stack.extend(named_steps.values())
+    return found
+
+
+def _rpte_rule_rows(estimator: Any, fitted_rpte: list[Any]) -> list[dict[str, Any]]:
+    for candidate in (estimator, getattr(estimator, "best_estimator_", None)):
+        method = getattr(candidate, "rpte_rule_table", None)
+        if callable(method):
+            return [dict(row) for row in (method() or [])]
+    rows: list[dict[str, Any]] = []
+    for class_index, candidate in enumerate(fitted_rpte):
+        method = getattr(candidate, "unified_rule_table", None)
+        if not callable(method):
+            continue
+        for raw in method() or []:
+            row = dict(raw)
+            row.setdefault("class", class_index)
+            rows.append(row)
+    return rows
+
+
+def hugiml_run_fields(estimator: Any) -> dict[str, Any]:
+    """Describe the selected HUGIML route and fitted RPTE structure for one fold."""
+    rpte_estimators = _fitted_rpte_estimators(estimator)
+    rows = _rpte_rule_rows(estimator, rpte_estimators)
+    tree_rows = [
+        row
+        for row in rows
+        if row.get("tree_index") is not None
+        and str(row.get("backend")) in RPTE_BACKEND_TO_PATH
+    ]
+    direct_rows = [
+        row
+        for row in rows
+        if row.get("tree_index") is None
+        and str(row.get("backend")) in {"direct_hugiml_feature", "raw_hugiml_features"}
+        and row.get("source_selection_status") in {None, "not_selected_in_tree_split"}
+    ]
+    active_tree_rows = [
+        row
+        for row in tree_rows
+        if abs(float(row.get("final_logistic_coefficient") or 0.0)) > 1e-12
+    ]
+    active_direct_rows = [
+        row
+        for row in direct_rows
+        if abs(float(row.get("final_logistic_coefficient") or 0.0)) > 1e-12
+    ]
+
+    backend_counts: dict[str, int] = {}
+    for rpte in rpte_estimators:
+        fe = getattr(rpte, "fe_", None)
+        if getattr(fe, "_default_fe", None) is not None:
+            backend = "sequential_default"
+        elif getattr(fe, "trees_", None):
+            backend = "bounded_lookahead"
+        else:
+            continue
+        path = RPTE_BACKEND_TO_PATH[backend]
+        backend_counts[path] = backend_counts.get(path, 0) + 1
+
+    if not rpte_estimators and not tree_rows and not direct_rows:
+        path = "lr"
+    elif len(backend_counts) == 1:
+        path = next(iter(backend_counts))
+    else:
+        path = None
+    paths = ["lr"] if path == "lr" else sorted(backend_counts)
+    input_counts = [
+        int(rpte.n_input_features_)
+        for rpte in rpte_estimators
+        if getattr(rpte, "n_input_features_", None) is not None
+    ]
+    tree_keys = {
+        (str(row.get("class")), int(row["tree_index"]), str(row.get("backend")))
+        for row in tree_rows
+    }
+    active_tree_keys = {
+        (str(row.get("class")), int(row["tree_index"]), str(row.get("backend")))
+        for row in active_tree_rows
+    }
+    path_lengths = [len(row.get("conditions") or []) for row in tree_rows]
+    active_path_lengths = [len(row.get("conditions") or []) for row in active_tree_rows]
+    selected_tree_counts = [
+        int(rpte.n_estimators_)
+        for rpte in rpte_estimators
+        if getattr(rpte, "n_estimators_", None) is not None
+    ]
+    canonical = dict(
+        getattr(estimator, "_downstream_lr_canonicalization_", None) or {}
+    )
+    return {
+        "hugiml_path": path,
+        "hugiml_benchmark_lr_C": _finite_or_none(
+            getattr(estimator, "_benchmark_lr_C", None)
+        ),
+        "hugiml_lr_solver": str(getattr(estimator, "lr_solver", "auto")),
+        "downstream_columns_before_reduction": canonical.get("input_columns"),
+        "downstream_columns_after_reduction": canonical.get("retained_columns"),
+        "downstream_vif_columns_above_threshold": canonical.get(
+            "vif_columns_above_threshold"
+        ),
+        "downstream_vif_removed_patterns": canonical.get(
+            "removed_high_vif_pattern_columns"
+        ),
+        "downstream_vif_removed_augmented_pairs": canonical.get(
+            "removed_high_vif_augmented_pair_columns"
+        ),
+        "downstream_vif_maximum": canonical.get("maximum_vif"),
+        "downstream_vif_median": canonical.get("median_vif"),
+        "downstream_vif_analysis_seconds": canonical.get(
+            "vif_analysis_seconds"
+        ),
+        "hugiml_paths_json": json.dumps(paths),
+        "hugiml_path_counts_json": json.dumps(
+            {"lr": 1} if path == "lr" else backend_counts, sort_keys=True
+        ),
+        "rpte_binary_estimator_count": len(rpte_estimators) or None,
+        "rpte_sequential_estimator_count": backend_counts.get("rpte_sequential", 0),
+        "rpte_lookahead_estimator_count": backend_counts.get("rpte_lookahead", 0),
+        "rpte_inputs_passed": (
+            int(input_counts[0])
+            if input_counts and len(set(input_counts)) == 1
+            else (int(max(input_counts)) if input_counts else None)
+        ),
+        "rpte_inputs_passed_per_estimator_json": json.dumps(input_counts),
+        "rpte_tree_count": len(tree_keys) if path != "lr" else None,
+        "rpte_active_tree_count": len(active_tree_keys) if path != "lr" else None,
+        "rpte_selected_tree_counts_json": json.dumps(selected_tree_counts),
+        "rpte_selected_tree_count": (
+            int(max(selected_tree_counts)) if selected_tree_counts else None
+        ),
+        "rpte_leaf_count": len(tree_rows) if path != "lr" else None,
+        "rpte_active_leaf_count": len(active_tree_rows) if path != "lr" else None,
+        "rpte_direct_term_count": len(active_direct_rows) if path != "lr" else None,
+        "rpte_candidate_direct_term_count": len(direct_rows) if path != "lr" else None,
+        "rpte_average_leaf_path_length": (
+            float(np.mean(path_lengths)) if path_lengths else (0.0 if path != "lr" else None)
+        ),
+        "rpte_active_average_leaf_path_length": (
+            float(np.mean(active_path_lengths))
+            if active_path_lengths
+            else (0.0 if path != "lr" else None)
+        ),
+        "rpte_max_leaf_path_length": (
+            int(max(path_lengths)) if path_lengths else (0 if path != "lr" else None)
+        ),
+    }
+
+
+def _distribution_summary(values: Any) -> dict[str, Any]:
+    clean: list[float] = []
+    for raw in values:
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(value):
+            clean.append(value)
+    if not clean:
+        return {
+            "n": 0, "mean": None, "std": None, "min": None, "q25": None,
+            "median": None, "q75": None, "max": None,
+        }
+    array = np.asarray(clean, dtype=float)
+    return {
+        "n": int(array.size),
+        "mean": float(np.mean(array)),
+        "std": float(np.std(array, ddof=0)),
+        "min": float(np.min(array)),
+        "q25": float(np.quantile(array, 0.25)),
+        "median": float(np.median(array)),
+        "q75": float(np.quantile(array, 0.75)),
+        "max": float(np.max(array)),
+    }
 
 
 def _summary_from_moments(
@@ -2031,7 +2293,31 @@ def _series_mean_ci(
     )
 
 
+def _timing_inclusion_marker(row: dict[str, Any]) -> bool | None:
+    explicit = row.get("fit_time_included_in_tuning")
+    if isinstance(explicit, bool):
+        return explicit
+    tune_seconds = _safe_number_or_none(row.get("tune_seconds"))
+    if tune_seconds is None:
+        return None
+    return bool(row.get("tuned", True) and tune_seconds > 0.0)
+
+
 def _aggregate_fold_rows(fold_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    normalized_fold_rows: list[dict[str, Any]] = []
+    for source in fold_rows:
+        item = dict(source)
+        marker = _timing_inclusion_marker(item)
+        item["fit_time_included_in_tuning"] = marker
+        item["fit_time_accounting"] = (
+            "included_in_tuning"
+            if marker is True
+            else "separate_from_tuning"
+            if marker is False
+            else "unavailable"
+        )
+        normalized_fold_rows.append(item)
+    fold_rows = normalized_fold_rows
     df = pd.DataFrame(fold_rows)
     row: dict[str, Any] = {}
     mean_cols = [
@@ -2054,6 +2340,14 @@ def _aggregate_fold_rows(fold_rows: list[dict[str, Any]]) -> dict[str, Any]:
         "fit_seconds",
         "predict_seconds",
         "tune_seconds",
+        "downstream_columns_before_reduction",
+        "downstream_columns_after_reduction",
+        "downstream_vif_columns_above_threshold",
+        "downstream_vif_removed_patterns",
+        "downstream_vif_removed_augmented_pairs",
+        "downstream_vif_maximum",
+        "downstream_vif_median",
+        "downstream_vif_analysis_seconds",
     ]
     for col in mean_cols:
         if col in df:
@@ -2119,6 +2413,46 @@ def _aggregate_fold_rows(fold_rows: list[dict[str, Any]]) -> dict[str, Any]:
     row["complexity_report_by_fold_json"] = json.dumps(
         [r.get("complexity_report_json", "{}") for r in fold_rows], default=str
     )
+    markers = [_timing_inclusion_marker(item) for item in fold_rows]
+    known = [marker for marker in markers if marker is not None]
+    included_count = sum(marker is True for marker in known)
+    separate_count = sum(marker is False for marker in known)
+    row["fit_time_included_in_tuning_fold_count"] = int(included_count)
+    row["fit_time_separate_from_tuning_fold_count"] = int(separate_count)
+    row["fit_time_accounting_unknown_fold_count"] = int(len(markers) - len(known))
+    if known and included_count == len(known) and len(known) == len(markers):
+        row["fit_time_included_in_tuning"] = True
+        row["fit_time_accounting"] = "included_in_tuning"
+    elif known and separate_count == len(known) and len(known) == len(markers):
+        row["fit_time_included_in_tuning"] = False
+        row["fit_time_accounting"] = "separate_from_tuning"
+    elif known:
+        row["fit_time_included_in_tuning"] = None
+        row["fit_time_accounting"] = "mixed"
+    else:
+        row["fit_time_included_in_tuning"] = None
+        row["fit_time_accounting"] = "unavailable"
+    path_counts: dict[str, int] = {}
+    for fold_row in fold_rows:
+        if fold_row.get("hugiml_path") == "lr":
+            path_counts["lr"] = path_counts.get("lr", 0) + 1
+        for path, field in (
+            ("rpte_sequential", "rpte_sequential_estimator_count"),
+            ("rpte_lookahead", "rpte_lookahead_estimator_count"),
+        ):
+            count = int(fold_row.get(field, 0) or 0)
+            if count:
+                path_counts[path] = path_counts.get(path, 0) + count
+    if path_counts:
+        row["hugiml_path_counts_json"] = json.dumps(path_counts, sort_keys=True)
+        row["hugiml_paths_json"] = json.dumps(sorted(path_counts))
+        row["hugiml_dominant_path"] = sorted(
+            path_counts, key=lambda value: (-path_counts[value], value)
+        )[0]
+        for metric in RPTE_DISTRIBUTION_METRICS:
+            summary = _distribution_summary(r.get(metric) for r in fold_rows)
+            for statistic, value in summary.items():
+                row[f"{metric}_{statistic}"] = value
     row["outer_folds_completed"] = int(len(fold_rows))
     row["error_count"] = int(sum(int(r.get("error_count", 0) or 0) for r in fold_rows))
     errors = [str(r.get("last_error")) for r in fold_rows if r.get("last_error")]
@@ -2264,6 +2598,41 @@ def fit_select_hugiml_fast(
                 "hugiml_fast_tune_transaction_cache_entries": result.get(
                     "transaction_cache_entries"
                 ),
+                "hugiml_fast_tune_template_prepare_seconds_json": json.dumps(
+                    result.get("template_prepare_seconds", {}),
+                    sort_keys=True,
+                    default=str,
+                ),
+                "hugiml_fast_tune_validation_prepare_seconds_json": json.dumps(
+                    result.get("validation_prepare_seconds", {}),
+                    sort_keys=True,
+                    default=str,
+                ),
+                "hugiml_fast_tune_fingerprint_seconds_json": json.dumps(
+                    result.get("fingerprint_seconds", {}),
+                    sort_keys=True,
+                    default=str,
+                ),
+                "hugiml_fast_tune_downstream_fit_seconds": float(
+                    result.get("downstream_fit_seconds", 0.0)
+                ),
+                "hugiml_fast_tune_downstream_score_seconds": float(
+                    result.get("downstream_score_seconds", 0.0)
+                ),
+                "hugiml_fast_tune_downstream_template_count": int(
+                    result.get("downstream_template_count", 0)
+                ),
+                "hugiml_fast_tune_validation_structure_reuses": int(
+                    result.get("validation_structure_reuses", 0)
+                ),
+                "hugiml_fast_tune_original_feature_cache_stats_json": json.dumps(
+                    result.get("original_feature_cache_stats"),
+                    sort_keys=True,
+                    default=str,
+                ),
+                "hugiml_fast_tune_equivalent_downstream_fit_reuses": int(
+                    result.get("equivalent_downstream_fit_reuses", 0)
+                ),
             }
         )
         return selected, errors, info
@@ -2296,6 +2665,41 @@ def _hugiml_grid_for_scenario(hugiml_scenario: str | None) -> tuple[str, list[di
     return str(spec["grid_name"]), list(ParameterGrid(grid_dict))
 
 
+HUGIML_MODEL_GRIDS = {
+    "HUGIML": "performance_ho",
+}
+
+HUGIML_INTERACTION_GRIDS = {
+    "HUGIML": "interpretability_ho",
+}
+
+
+def is_hugiml_model(model: str) -> bool:
+    return str(model) in HUGIML_MODEL_GRIDS
+
+
+def _hugiml_grid_for_model(
+    model: str, hugiml_scenario: str | None
+) -> tuple[str, list[dict[str, Any]]]:
+    scenario = hugiml_scenario or DEFAULT_DASHBOARD_HUGIML_SCENARIO
+    if scenario not in HUGIML_SCENARIOS:
+        raise ValueError(
+            f"Unknown HUGIML scenario {scenario!r}. Allowed: {list(HUGIML_SCENARIOS)}"
+        )
+    spec = HUGIML_SCENARIOS[scenario]
+    configured_grid = str(spec["grid_name"])
+    if configured_grid == "performance_ho":
+        grid_name = HUGIML_MODEL_GRIDS[model]
+    elif configured_grid == "interpretability_ho":
+        grid_name = HUGIML_INTERACTION_GRIDS[model]
+    else:
+        grid_name = configured_grid
+    grid_dict = get_hugiml_grid(grid_name)
+    for key, values in dict(spec.get("overrides", {})).items():
+        grid_dict[key] = list(values)
+    return grid_name, list(ParameterGrid(grid_dict))
+
+
 def _hugiml_scenario_label(scenario: str | None) -> str | None:
     if scenario is None:
         return None
@@ -2307,22 +2711,32 @@ def _model_inspection_complexity(model: Any) -> int | float | None:
     return get_complexity(model, "model inspection units")
 
 
+class AdaptiveSolverLogisticRegression(LogisticRegression):
+    """Use liblinear for binary targets and saga for multiclass targets."""
+
+    def fit(self, X: Any, y: Any, sample_weight: Any = None):
+        self.solver = "liblinear" if np.unique(np.asarray(y)).size <= 2 else "saga"
+        return super().fit(X, y, sample_weight=sample_weight)
+
 def get_model_spec(
     model: str,
     *,
     hugiml_scenario: str | None = None,
     hugiml_max_fit_seconds: float | None = None,
 ):
-    if model == "HUGIML":
-        _, grid = _hugiml_grid_for_scenario(hugiml_scenario)
+    if is_hugiml_model(model):
+        _, grid = _hugiml_grid_for_model(model, hugiml_scenario)
 
         def builder(params):
             pp = dict(params)
+            lr_C = float(pp.pop("lr_C", 1.0))
             pp.setdefault("execution_mode", "production")
             if hugiml_max_fit_seconds is not None:
                 pp.setdefault("max_fit_seconds", float(hugiml_max_fit_seconds))
             pp.setdefault("n_jobs", 1)
-            return HUGIMLClassifierNative(**pp)
+            estimator = HUGIMLClassifierNative(**pp)
+            estimator._benchmark_lr_C = lr_C
+            return estimator
 
         return grid, builder, _model_inspection_complexity, None
 
@@ -2352,7 +2766,7 @@ def get_model_spec(
     def lr_builder(params):
         pp = baseline_constant_parameters("LogisticRegression")
         pp.update(params)
-        return LogisticRegression(**pp)
+        return AdaptiveSolverLogisticRegression(**pp)
 
     def ebm_builder(params):
         if ExplainableBoostingClassifier is None:
@@ -2409,7 +2823,7 @@ def run_pair(
     raw_features = int(X.shape[1])
     native_categorical_features = _categorical_columns(X)
 
-    if dataset == "InterestInflationHighRate" and model == "HUGIML":
+    if dataset == "InterestInflationHighRate" and is_hugiml_model(model):
         if "year" not in X.columns or not _is_categorical_like(X["year"]):
             raise RuntimeError(
                 "InterestInflationHighRate expected HUGIML to receive native categorical year. "
@@ -2492,7 +2906,7 @@ def run_pair(
         last_error = None
 
         try:
-            if model == "HUGIML":
+            if is_hugiml_model(model):
                 X_train_model, X_test_model = X_train_native, X_test_native
                 if tune:
                     clf, params, best_inner_score, tune_ms, selection_info = _tune_hugiml_inner_cv(
@@ -2538,6 +2952,8 @@ def run_pair(
                     clf, fit_ms, tune_ms = _fit_default_model(model, builder, X_train_model, y_train)
 
             selection_info = dict(selection_info or {})
+            if is_hugiml_model(model):
+                selection_info.update(hugiml_run_fields(clf))
             complexity_report = get_complexity_report(clf, X=X_test_model)
             model_units = (complexity_report or {}).get("model_units", {}).get("value")
             model_inspection_units = (complexity_report or {}).get(
@@ -2621,6 +3037,25 @@ def run_pair(
                 "complexity_instance_inspection_units_min": None,
                 "complexity_instance_inspection_units_max": None,
                 "complexity_report_json": "{}",
+                "hugiml_path": None,
+                "hugiml_paths_json": "[]",
+                "hugiml_path_counts_json": "{}",
+                "rpte_binary_estimator_count": None,
+                "rpte_sequential_estimator_count": 0,
+                "rpte_lookahead_estimator_count": 0,
+                "rpte_inputs_passed": None,
+                "rpte_inputs_passed_per_estimator_json": "[]",
+                "rpte_tree_count": None,
+                "rpte_active_tree_count": None,
+                "rpte_selected_tree_counts_json": "[]",
+                "rpte_selected_tree_count": None,
+                "rpte_leaf_count": None,
+                "rpte_active_leaf_count": None,
+                "rpte_direct_term_count": None,
+                "rpte_candidate_direct_term_count": None,
+                "rpte_average_leaf_path_length": None,
+                "rpte_active_average_leaf_path_length": None,
+                "rpte_max_leaf_path_length": None,
                 "complexity_budget": None if budget is None else float(budget),
                 "fit_ms": None,
                 "predict_ms": None,
@@ -2637,7 +3072,7 @@ def run_pair(
             {
                 "dataset": dataset,
                 "model": model,
-                "hugiml_scenario": hugiml_scenario if model == "HUGIML" else None,
+                "hugiml_scenario": hugiml_scenario if is_hugiml_model(model) else None,
                 "outer_n_splits": int(n_splits),
                 "inner_n_splits": int(inner_splits) if tune else None,
                 "random_state": int(random_state),
@@ -2673,7 +3108,7 @@ def run_pair(
     model_features = int(round(float(np.nanmean(model_feature_counts)))) if model_feature_counts else raw_features
     preprocessing_policy = (
         "HUGIML native categorical"
-        if model == "HUGIML"
+        if is_hugiml_model(model)
         else "runner-compatible Pipeline preprocessing fitted inside CV"
     )
     protocol = "outer_cv_inner_cv_tuning" if tune else "outer_cv_no_inner_tuning"
@@ -2682,9 +3117,9 @@ def run_pair(
             "dataset": dataset,
             "dataset_group": group,
             "model": model,
-            "hugiml_scenario": hugiml_scenario if model == "HUGIML" else None,
-            "hugiml_scenario_label": _hugiml_scenario_label(hugiml_scenario) if model == "HUGIML" else None,
-            "hugiml_grid_name": HUGIML_SCENARIOS[hugiml_scenario or DEFAULT_DASHBOARD_HUGIML_SCENARIO]["grid_name"] if model == "HUGIML" else None,
+            "hugiml_scenario": hugiml_scenario if is_hugiml_model(model) else None,
+            "hugiml_scenario_label": _hugiml_scenario_label(hugiml_scenario) if is_hugiml_model(model) else None,
+            "hugiml_grid_name": _hugiml_grid_for_model(model, hugiml_scenario)[0] if is_hugiml_model(model) else None,
             "raw_features": raw_features,
             "model_features": model_features,
             "categorical_features": native_categorical_features,
@@ -2699,7 +3134,7 @@ def run_pair(
             "tuned": bool(tune),
         }
     )
-    if model == "HUGIML":
+    if is_hugiml_model(model):
         row.setdefault("hugiml_fast_path_requested", bool(tune))
         if tune and "hugiml_fast_path_used" not in row:
             used = [r.get("hugiml_fast_path_used") for r in fold_rows if r.get("hugiml_fast_path_used") is not None]
@@ -2749,8 +3184,13 @@ def grid_snapshot() -> dict[str, Any]:
             key: {
                 "label": spec["label"],
                 "description": spec["description"],
-                "grid_name": spec["grid_name"],
-                "grid": {**get_hugiml_grid(str(spec["grid_name"])), **dict(spec.get("overrides", {}))},
+                "model_grids": {
+                    model: {
+                        "grid_name": _hugiml_grid_for_model(model, key)[0],
+                        "grid": get_hugiml_grid(_hugiml_grid_for_model(model, key)[0]),
+                    }
+                    for model in ("HUGIML",)
+                },
             }
             for key, spec in HUGIML_SCENARIOS.items()
         },
@@ -2801,15 +3241,21 @@ def _methodology_display_value(value: Any) -> str:
 
 def _methodology_parameter_rows(grid: dict[str, list[Any]]) -> list[dict[str, Any]]:
     rows = []
+    automatic_lr_C = float((grid.get("lr_C") or [1.0])[0])
     for parameter, values in grid.items():
         display_values = [_methodology_display_value(value) for value in values]
         if parameter == "base_estimator":
             normalized = []
             for value in values:
                 text = str(value)
-                if isinstance(value, LogisticRegression) or text.startswith("LogisticRegression("):
+                if value is None:
                     normalized.append(
-                        "Logistic regression (L1 penalty, liblinear solver, C=1.0)"
+                        "Automatic L2 logistic regression "
+                        f"(binary: lbfgs; multiclass: lbfgs-OvR; C={automatic_lr_C:g})"
+                    )
+                elif isinstance(value, LogisticRegression) or text.startswith("LogisticRegression("):
+                    normalized.append(
+                        "Logistic regression (L1 penalty, liblinear solver, C=0.5)"
                     )
                 else:
                     normalized.append(_methodology_display_value(value))
@@ -2846,10 +3292,13 @@ def methodology_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
         if not grid:
             grid = get_hugiml_grid(str(spec["grid_name"]))
             grid.update(dict(spec.get("overrides", {})))
+        automatic_lr_C = float((grid.get("lr_C") or [1.0])[0])
         notes = [
             "execution_mode=production",
             "n_jobs=1",
-            "Linear base estimator: logistic regression with L1 penalty, liblinear solver, C=1.0, random_state=0, and max_iter=500.",
+            "Automatic linear base estimator: logistic regression with L2 penalty, "
+            f"binary lbfgs / multiclass lbfgs-OvR, C={automatic_lr_C:g}, "
+            "random_state=0, and max_iter=300 for every binary fit.",
         ]
         if scenario_id == "augmented_pair":
             notes.extend(
@@ -2884,6 +3333,64 @@ def methodology_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
                 ),
             }
         )
+
+    # Present each regularization variant separately for both HUGIML scenarios.
+    hugiml_models = []
+    for scenario_id, spec in HUGIML_SCENARIOS.items():
+        stored = dict(scenario_snapshot.get(scenario_id, {}) or {})
+        stored_model_grids = dict(stored.get("model_grids", {}) or {})
+        for model in ("HUGIML",):
+            grid_name, _ = _hugiml_grid_for_model(model, scenario_id)
+            stored_model = dict(stored_model_grids.get(model, {}) or {})
+            grid = dict(stored_model.get("grid", {}) or {})
+            if not grid:
+                grid = get_hugiml_grid(grid_name)
+                grid.update(dict(spec.get("overrides", {})))
+            lr_C = float((grid.get("lr_C") or [0.5 if model == "HUGIML" else 0.1])[0])
+            solver_note = (
+                "Direct logistic branch: L1 penalty with binary liblinear "
+                f"(max_iter=300) or multiclass SAGA (max_iter=500), C={lr_C:g}. "
+                "RPTE downstream fits use L1/liblinear with max_iter=300."
+            )
+            notes = [
+                "execution_mode=production",
+                "n_jobs=1",
+                solver_note,
+                "Downstream redundancy uses one training-only VIF analysis; generated terms with VIF greater than 5 are reduced when an earlier preferred term explains at least 80 percent of their variance, while originals are preserved and patterns precede augmented pairs.",
+            ]
+            if scenario_id == "augmented_pair":
+                notes.extend(
+                    [
+                        "Inner cross-validation selects between the stated logistic-regression base estimator and one-vs-rest RPTE.",
+                        "Numeric 0/1 columns remain numeric and eligible for augmented-pair transforms.",
+                        "RPTE uses leaf indicators together with downstream inputs not selected in accepted tree splits.",
+                        "RPTE lookahead is adaptive for this path.",
+                    ]
+                )
+            else:
+                notes.extend(
+                    [
+                        "Inner cross-validation selects between the stated logistic-regression base estimator and one-vs-rest RPTE.",
+                        "Numeric 0/1 indicators are treated categorically for the pattern-mining surface.",
+                        "Interaction relaxation is performed by the pattern miner; augmented pairs are disabled.",
+                        "RPTE uses the sequential backend with lookahead inactive for this path.",
+                    ]
+                )
+            hugiml_models.append(
+                {
+                    "model": f'{model} - {spec["label"]}',
+                    "grid_name": grid_name,
+                    "candidate_count": _methodology_candidate_count(grid),
+                    "parameters": _methodology_parameter_rows(grid),
+                    "constant_settings": notes,
+                    "complexity": (
+                        "Model inspection units represent the complete fitted HUGIML model that a reviewer "
+                        "must inspect. Linear branches count active source contributions; RPTE branches count "
+                        "conditions across active terminal paths plus direct terms. Intercepts are excluded, "
+                        "and fitted numeric components are active when their absolute value exceeds 1e-12."
+                    ),
+                }
+            )
 
     baseline_models = []
     # Methodology-card display order only: the two HUGIML variants are
@@ -2930,7 +3437,10 @@ def methodology_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
         notes = [
             f"{key}={_methodology_display_value(value)}"
             for key, value in constant_parameters[family].items()
+            if not (family == "LogisticRegression" and key == "solver")
         ]
+        if family == "LogisticRegression":
+            notes.append("Adaptive solver selection: liblinear for binary targets; saga for multiclass targets.")
         if budgeted:
             notes.append(
                 f"Complexity budget={float(metadata.get('budget', BUDGET)):g}; candidates within the budget are preferred during inner-CV selection."
@@ -2965,6 +3475,7 @@ def methodology_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
     ]
     preprocessing = [
         "HUGIML receives the native pandas table, including categorical columns, and performs its own binning and pattern construction inside each training fold.",
+        "HUGIML applies exact downstream canonicalization followed by one training-only VIF analysis. Original terms are preserved; patterns and augmented pairs with VIF greater than 5 are reduced in that order when an earlier preferred term explains at least 80 percent of their variance.",
         "Non-HUGIML models use a fold-local pipeline: numeric median imputation; categorical most-frequent imputation followed by dense one-hot encoding with unknown categories ignored.",
         "Source dataframe indexes are discarded before modelling; statsmodels-backed tasks use only columns declared in load_pandas().data.",
         "Preprocessing is fitted only on the relevant training partition. No test-fold information is used for preprocessing or parameter selection.",
@@ -3011,23 +3522,30 @@ def save_checkpoint(path: Path, payload: dict[str, Any]) -> None:
     tmp.replace(path)
 
 
+def _canonical_model_label(model: Any) -> str:
+    return str(model)
+
+
 def _hugiml_scenario_for_row(row: dict[str, Any]) -> str | None:
-    if row.get("model") != "HUGIML":
+    if not is_hugiml_model(str(row.get("model"))):
         return None
-    # Backward compatibility: older checkpoints had one HUGIML row and no
-    # scenario column. Treat those rows as the original/default augmented path.
     return str(row.get("hugiml_scenario") or DEFAULT_DASHBOARD_HUGIML_SCENARIO)
 
 
 def _pair_key(dataset: str, model: str, hugiml_scenario: str | None = None) -> tuple[str, str, str | None]:
-    return (dataset, model, hugiml_scenario if model == "HUGIML" else None)
+    canonical_model = _canonical_model_label(model)
+    return (
+        dataset,
+        canonical_model,
+        hugiml_scenario if is_hugiml_model(canonical_model) else None,
+    )
 
 
 def pair_plan(datasets: list[str], models: list[str]) -> list[tuple[str, str, str | None]]:
     pairs: list[tuple[str, str, str | None]] = []
     for d in datasets:
         for m in models:
-            if m == "HUGIML":
+            if is_hugiml_model(m):
                 for scenario in HUGIML_SCENARIOS:
                     pairs.append((d, m, scenario))
             else:
@@ -3309,7 +3827,7 @@ def _infer_complexity_budget(row: dict[str, Any]) -> float | None:
         params = json.loads(row.get("best_params_json") or "{}")
     except Exception:
         params = {}
-    if row.get("model") == "HUGIML":
+    if is_hugiml_model(str(row.get("model"))):
         return _safe_number_or_none(params.get("topK"))
     if "complexity-budgeted" in str(row.get("model", "")):
         return float(BUDGET)
@@ -3330,6 +3848,16 @@ def _normalize_detail_rows_for_assembly(details: list[dict[str, Any]]) -> list[d
     normalized: list[dict[str, Any]] = []
     for row in details:
         item = dict(row)
+        item["model"] = _canonical_model_label(item.get("model"))
+        marker = _timing_inclusion_marker(item)
+        item["fit_time_included_in_tuning"] = marker
+        item["fit_time_accounting"] = (
+            "included_in_tuning"
+            if marker is True
+            else "separate_from_tuning"
+            if marker is False
+            else "unavailable"
+        )
         if "complexity_budget" not in item or _safe_number_or_none(item.get("complexity_budget")) is None:
             item["complexity_budget"] = _infer_complexity_budget(item)
         for field in _DASHBOARD_UNUSED_FOLD_FIELDS:
@@ -3556,7 +4084,7 @@ def _make_data_single(details: list[dict[str, Any]]) -> dict[str, Any]:
         )
 
     hugrows = []
-    for _, r in df[df.model == "HUGIML"].iterrows():
+    for _, r in df[df.model.map(is_hugiml_model)].iterrows():
         try:
             params = json.loads(r["best_params_json"])
         except Exception:
@@ -3623,14 +4151,45 @@ def _make_data_single(details: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def _scenario_details_for_dashboard(df: pd.DataFrame, scenario: str) -> list[dict[str, Any]]:
-    baseline = df[df["model"] != "HUGIML"].copy()
-    hug = df[df["model"] == "HUGIML"].copy()
+    hug_mask = df["model"].map(is_hugiml_model)
+    baseline = df[~hug_mask].copy()
+    hug = df[hug_mask].copy()
     if "hugiml_scenario" not in hug.columns:
         hug["hugiml_scenario"] = DEFAULT_DASHBOARD_HUGIML_SCENARIO
     hug["hugiml_scenario"] = hug["hugiml_scenario"].fillna(DEFAULT_DASHBOARD_HUGIML_SCENARIO)
     hug = hug[hug["hugiml_scenario"].astype(str) == scenario].copy()
     details = pd.concat([hug, baseline], axis=0, ignore_index=True)
     return details.to_dict(orient="records")
+
+
+def _rpte_dashboard_rows(details: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for detail in details:
+        if not is_hugiml_model(str(detail.get("model"))):
+            continue
+        try:
+            path_counts = json.loads(detail.get("hugiml_path_counts_json") or "{}")
+        except (TypeError, json.JSONDecodeError):
+            path_counts = {}
+        output = {
+            "dataset": detail.get("dataset"),
+            "split_count": int(detail.get("outer_folds_completed", 0) or 0),
+            "lr_split_count": int(path_counts.get("lr", 0) or 0),
+            "rpte_sequential_estimator_count": int(
+                path_counts.get("rpte_sequential", 0) or 0
+            ),
+            "rpte_lookahead_estimator_count": int(
+                path_counts.get("rpte_lookahead", 0) or 0
+            ),
+        }
+        output["rpte_split_count"] = max(
+            0, output["split_count"] - output["lr_split_count"]
+        )
+        for metric in RPTE_DISTRIBUTION_METRICS:
+            for statistic in ("n", "mean", "std", "min", "q25", "median", "q75", "max"):
+                output[f"{metric}_{statistic}"] = detail.get(f"{metric}_{statistic}")
+        rows.append(output)
+    return rows
 
 
 def make_data(details: list[dict[str, Any]]) -> dict[str, Any]:
@@ -3648,9 +4207,10 @@ def make_data(details: list[dict[str, Any]]) -> dict[str, Any]:
     shared_catalog: list[dict[str, Any]] | None = None
     for scenario, spec in HUGIML_SCENARIOS.items():
         scenario_details = _scenario_details_for_dashboard(df, scenario)
-        if not any(r.get("model") == "HUGIML" for r in scenario_details):
+        if not any(is_hugiml_model(str(r.get("model"))) for r in scenario_details):
             continue
         scenario_data = _make_data_single(scenario_details)
+        scenario_data["hugiml_rpte_distributions"] = _rpte_dashboard_rows(scenario_details)
         scenario_data["active_hugiml_scenario"] = scenario
         scenario_data["active_hugiml_scenario_label"] = spec["label"]
         scenario_data["active_hugiml_grid_name"] = spec["grid_name"]
@@ -4261,7 +4821,6 @@ def build_reproducibility_sbom(
             "bom_format": "HUGIML benchmark reproducibility manifest",
             "bom_version": "1.0",
             "schema_hint": "SBOM-like JSON; intentionally lightweight rather than SPDX/CycloneDX-complete.",
-            "generated_utc": datetime.now(timezone.utc).isoformat(),
             "command": {
                 "argv": list(sys.argv),
                 "executable": sys.executable,
@@ -4606,6 +5165,7 @@ def _ensure_dashboard_scenario_ui(text: str, data: dict[str, Any]) -> str:
     if(typeof renderScopeSummary==='function') renderScopeSummary();
     if(typeof renderProfiles==='function') renderProfiles();
     if(typeof renderDatasetProfile==='function') renderDatasetProfile();
+    if(typeof renderInternalRpte==='function') renderInternalRpte();
     if(typeof adjustComplexityCharts==='function') setTimeout(adjustComplexityCharts,0);
   }
   function applyScenario(id){
@@ -4645,6 +5205,90 @@ def _ensure_dashboard_scenario_ui(text: str, data: dict[str, Any]) -> str:
     else:
         text = _inject_before_body_end(text, runtime)
     return text
+
+
+def _ensure_dashboard_rpte_ui(text: str, data: dict[str, Any]) -> str:
+    scenarios = data.get("dashboard_scenarios") or []
+    available = any(
+        (item.get("data", {}) or {}).get("hugiml_rpte_distributions")
+        for item in scenarios
+        if isinstance(item, dict)
+    ) or bool(data.get("hugiml_rpte_distributions"))
+    if not available:
+        return text
+    text = re.sub(
+        r'<!-- BEGIN INTERNAL_RPTE_DASHBOARD -->.*?<!-- END INTERNAL_RPTE_DASHBOARD -->',
+        '', text, flags=re.S,
+    )
+    section = r"""
+<!-- BEGIN INTERNAL_RPTE_DASHBOARD -->
+<style>
+.rpte-dashboard{margin-top:16px;color:var(--ink,#edf2ff)}
+.rpte-dashboard h2,.rpte-dashboard strong,.rpte-dashboard td{color:var(--ink,#edf2ff)}
+.rpte-dashboard .meta,.rpte-dashboard .rpte-note,.rpte-dashboard th{color:var(--muted,#aeb9d4)}
+.rpte-dashboard .rpte-summary-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px;margin:14px 0}
+.rpte-dashboard .rpte-summary-card{background:var(--panel2,#18223d);border:1px solid var(--border,#2a3658);border-radius:12px;padding:14px}
+.rpte-dashboard .rpte-summary-card .value{color:var(--accent2,#86efcf);font-size:1.45rem;font-weight:750;margin-top:4px}
+.rpte-dashboard .rpte-controls{display:flex;align-items:flex-end;gap:12px;flex-wrap:wrap;margin:12px 0}
+.rpte-dashboard .rpte-control{display:flex;flex-direction:column;gap:5px;min-width:240px}
+.rpte-dashboard .rpte-control label{color:var(--muted,#aeb9d4);font-size:.78rem;font-weight:650}
+.rpte-dashboard .rpte-control select{color:var(--ink,#edf2ff);background:var(--panel2,#18223d);border:1px solid var(--border,#2a3658);border-radius:8px;padding:8px 10px;font:inherit}
+.rpte-dashboard .rpte-control select option{color:var(--ink,#edf2ff);background:var(--panel2,#18223d)}
+.rpte-dashboard .rpte-table-scroll{max-height:min(54vh,560px);overflow:auto;border:1px solid var(--border,#2a3658);border-radius:12px;background:var(--panel,#121a31);scrollbar-gutter:stable}
+.rpte-dashboard table{width:100%;border-collapse:collapse;font-size:.82rem;background:transparent;color:var(--ink,#edf2ff)}
+.rpte-dashboard th,.rpte-dashboard td{padding:8px 10px;border-bottom:1px solid var(--border,#2a3658);text-align:right;white-space:nowrap;background:transparent}
+.rpte-dashboard thead th{position:sticky;top:0;z-index:2;background:var(--panel2,#18223d);box-shadow:0 1px 0 var(--border,#2a3658)}
+.rpte-dashboard th:first-child,.rpte-dashboard td:first-child{text-align:left}
+.rpte-dashboard code{color:var(--accent,#82aaff);background:var(--panel2,#18223d);padding:1px 4px;border-radius:4px}
+@media(max-width:760px){.rpte-dashboard .rpte-summary-grid{grid-template-columns:1fr}}
+</style>
+<section class="card rpte-dashboard" id="internalRpteDashboard">
+  <div class="section-title"><h2>RPTE path and structural distributions</h2><div class="meta" id="rpteScenarioLabel"></div></div>
+  <div class="rpte-controls"><div class="rpte-control"><label for="rpteScenarioSelect">HUGIML path shown in this section</label><select id="rpteScenarioSelect" aria-label="Select HUGIML path for RPTE statistics"></select></div></div>
+  <div class="rpte-summary-grid">
+    <article class="rpte-summary-card"><div class="meta">RPTE-selected folds</div><div class="value" id="rpteSelectedFolds">—</div></article>
+    <article class="rpte-summary-card"><div class="meta">Direct LR folds</div><div class="value" id="rpteLrFolds">—</div></article>
+    <article class="rpte-summary-card"><div class="meta">Datasets activating RPTE</div><div class="value" id="rpteDatasetCount">—</div></article>
+  </div>
+  <div class="rpte-table-scroll"><table id="internalRpteTable"></table></div>
+  <p class="rpte-note">Values are recorded during each fitted outer fold. Distributions show median [Q25, Q75] for inputs, generated trees, active trees, leaves, active leaves, active direct terms and leaf-path length.</p>
+</section>
+<script>
+(function(){
+  function num(v){const n=Number(v);return Number.isFinite(n)?n:null}
+  function fmt(v,d=1){const n=num(v);return n==null?'—':n.toFixed(d).replace(/\.0+$/,'')}
+  function range(row,p,d=1){return num(row[p+'_n'])?`${fmt(row[p+'_median'],d)} [${fmt(row[p+'_q25'],d)}, ${fmt(row[p+'_q75'],d)}]`:'—'}
+  window.renderInternalRpte=function(){
+    const rows=DATA.hugiml_rpte_distributions||[];
+    const scenarioSelect=document.getElementById('rpteScenarioSelect');
+    if(scenarioSelect && typeof DASHBOARD_SCENARIOS!=='undefined'){
+      if(!scenarioSelect.options.length){
+        DASHBOARD_SCENARIOS.forEach(item=>scenarioSelect.add(new Option(item.label||item.id,item.id)));
+        scenarioSelect.addEventListener('change',()=>{
+          const mainSelect=document.getElementById('hugimlScenarioSelect');
+          if(mainSelect){mainSelect.value=scenarioSelect.value;mainSelect.dispatchEvent(new Event('change',{bubbles:true}));}
+        });
+      }
+      scenarioSelect.value=DATA.active_hugiml_scenario||DATA.default_hugiml_scenario||'';
+    }
+    const total=rows.reduce((s,r)=>s+Number(r.split_count||0),0);
+    const lr=rows.reduce((s,r)=>s+Number(r.lr_split_count||0),0);
+    const rpte=rows.reduce((s,r)=>s+Number(r.rpte_split_count||0),0);
+    const active=rows.filter(r=>Number(r.rpte_split_count||0)>0).length;
+    const label=document.getElementById('rpteScenarioLabel');if(label)label.textContent=DATA.active_hugiml_scenario_label||'';
+    const a=document.getElementById('rpteSelectedFolds');if(a)a.textContent=`${rpte} / ${total}`;
+    const b=document.getElementById('rpteLrFolds');if(b)b.textContent=String(lr);
+    const c=document.getElementById('rpteDatasetCount');if(c)c.textContent=String(active);
+    const headers=['Dataset','Splits','LR','RPTE','Sequential estimators','Lookahead estimators','Inputs','Trees','Active trees','Leaves','Active leaves','Direct terms','Average active leaf path'];
+    const body=rows.map(r=>`<tr><td>${String(r.dataset??'')}</td><td>${r.split_count}</td><td>${r.lr_split_count}</td><td>${r.rpte_split_count}</td><td>${r.rpte_sequential_estimator_count}</td><td>${r.rpte_lookahead_estimator_count}</td><td>${range(r,'rpte_inputs_passed')}</td><td>${range(r,'rpte_tree_count')}</td><td>${range(r,'rpte_active_tree_count')}</td><td>${range(r,'rpte_leaf_count')}</td><td>${range(r,'rpte_active_leaf_count')}</td><td>${range(r,'rpte_direct_term_count')}</td><td>${range(r,'rpte_active_average_leaf_path_length',2)}</td></tr>`).join('');
+    const table=document.getElementById('internalRpteTable');if(table)table.innerHTML=`<thead><tr>${headers.map(h=>`<th>${h}</th>`).join('')}</tr></thead><tbody>${body}</tbody>`;
+  };
+  if(document.readyState==='loading')document.addEventListener('DOMContentLoaded',window.renderInternalRpte);else window.renderInternalRpte();
+})();
+</script>
+<!-- END INTERNAL_RPTE_DASHBOARD -->
+"""
+    return _inject_before_body_end(text, section)
 
 
 def _remove_embedded_reproducibility_section(text: str) -> str:
@@ -4955,6 +5599,7 @@ def render_html(
     text = _remove_dashboard_profile_ui(text)
     text = _ensure_dashboard_complexity_rendering(text)
     text = _ensure_dashboard_scenario_ui(text, data)
+    text = _ensure_dashboard_rpte_ui(text, data)
     methodology = data.get("methodology", {}) if isinstance(data, dict) else {}
     if methodology:
         text = _inject_before_body_end(text, _methodology_section_html(methodology))
@@ -5013,8 +5658,13 @@ def assemble_outputs(
     *,
     include_sbom: bool = False,
 ) -> dict[str, Path]:
+    global MODEL_ORDER
     payload = _remove_local_provenance(load_checkpoint(checkpoint))
     details = payload.get("results", [])
+    observed_models = {
+        _canonical_model_label(row.get("model")) for row in details
+    }
+    MODEL_ORDER = [model for model in MODEL_ORDER if model in observed_models]
     order = {d: i for i, d in enumerate(DATASET_NAMES)}
     mo = {m: i for i, m in enumerate(MODEL_ORDER)}
     so = {s: i for i, s in enumerate(HUGIML_SCENARIOS)}
@@ -5219,36 +5869,39 @@ def main(argv=None) -> int:
     if args.max_pairs is not None:
         plan = plan[: args.max_pairs]
 
-    grid = get_hugiml_grid("performance_ho")
-    assert grid.get("feature_mode") == ["original_plus_patterns"]
-    assert grid.get("topK") == [50, 100]
-    assert grid.get("L") == [1, 2]
-    assert grid.get("G") == [0.01, 0.001]
-    assert grid.get("augmented_pair_transforms") == [True]
-    assert grid.get("convert_binary_to_categorical") == [False]
-    assert grid.get("topk_budget_strict") == [False]
-    relaxed_grid = get_hugiml_grid("interpretability_ho")
-    assert relaxed_grid.get("interaction_relaxed_mining") == [True]
-    assert relaxed_grid.get("augmented_pair_transforms") == [False]
-    assert relaxed_grid.get("convert_binary_to_categorical") == [True]
-    assert len(list(ParameterGrid(relaxed_grid))) == 16
-    assert len(grid.get("base_estimator", [])) == 2
-    assert any(isinstance(estimator, LogisticRegression) for estimator in grid["base_estimator"])
-    _rpte_candidates = [
-        estimator
-        for estimator in grid["base_estimator"]
-        if not isinstance(estimator, LogisticRegression)
-    ]
-    assert len(_rpte_candidates) == 1
-    # sklearn's repr() omits params equal to the class's own __init__
-    # default, and RPTE's leaf_config default happens to also be "3xD", so
-    # repr()-based checks silently pass/fail regardless of what's actually
-    # configured; check get_params() instead.
-    _rpte_inner = getattr(_rpte_candidates[0], "estimator", _rpte_candidates[0])
-    assert _rpte_inner.get_params().get("leaf_config") == "3xD"
-    assert len(list(ParameterGrid(grid))) == 16
+    for model_name, scenario, expected_grid_name, expected_C, expected_solver in (
+        ("HUGIML", "augmented_pair", "performance_ho", 0.5, "adaptive_l1"),
+        ("HUGIML", "interaction_relaxed", "interpretability_ho", 0.5, "adaptive_l1"),
+    ):
+        grid_name, candidates = _hugiml_grid_for_model(model_name, scenario)
+        assert grid_name == expected_grid_name
+        grid = get_hugiml_grid(grid_name)
+        assert grid.get("topK") == [50, 100]
+        assert grid.get("L") == [1, 2]
+        assert grid.get("G") == [0.01, 0.001]
+        assert grid.get("topk_budget_strict") == [False]
+        assert grid.get("lr_C") == [expected_C]
+        assert grid.get("lr_solver", ["auto"]) == [expected_solver]
+        assert len(candidates) == 16
+        base_estimators = list(grid.get("base_estimator", []))
+        assert len(base_estimators) == 2
+        assert sum(estimator is None for estimator in base_estimators) == 1
+        rpte_candidates = [estimator for estimator in base_estimators if estimator is not None]
+        assert len(rpte_candidates) == 1
+        rpte_inner = getattr(rpte_candidates[0], "estimator", rpte_candidates[0])
+        assert rpte_inner.get_params().get("leaf_config") == "3xD"
+        if scenario == "augmented_pair":
+            assert grid.get("feature_mode") == ["original_plus_patterns"]
+            assert grid.get("augmented_pair_transforms") == [True]
+            assert grid.get("convert_binary_to_categorical") == [False]
+        else:
+            assert grid.get("feature_mode") == ["patterns_only"]
+            assert grid.get("interaction_relaxed_mining") == [True]
+            assert grid.get("augmented_pair_transforms") == [False]
+            assert grid.get("convert_binary_to_categorical") == [True]
     lr_grid = get_baseline_grid("LogisticRegression")
-    assert set(lr_grid) == {"C", "penalty"}
+    assert set(lr_grid) == {"C", "penalty", "class_weight"}
+    assert len(list(ParameterGrid(lr_grid))) == 16
     ebm_grid = get_baseline_grid("EBM")
     assert ebm_grid.get("learning_rate") == [0.01, 0.05]
     assert ebm_grid.get("max_bins") == [32, 64]
@@ -5302,7 +5955,7 @@ def main(argv=None) -> int:
 
     for dataset, model, hugiml_scenario in plan:
         key = _pair_key(dataset, model, hugiml_scenario)
-        scenario_suffix = f" :: {hugiml_scenario}" if model == "HUGIML" else ""
+        scenario_suffix = f" :: {hugiml_scenario}" if is_hugiml_model(model) else ""
         if key in done:
             print(f"skip {dataset} :: {model}{scenario_suffix}", flush=True)
             continue

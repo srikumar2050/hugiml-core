@@ -27,9 +27,10 @@ except Exception:  # pragma: no cover - fallback message shown in UI
     go = None  # type: ignore[assignment]
 
 from hugiml.llm import ActionRequest, DatasetRegistry, HUGIMLActionOrchestrator
-from hugiml.llm.evidence import rpte_rule_rows_to_importance_rows
-from hugiml.llm.guardrails import deterministic_refusal
-from hugiml.llm.planner import plan_request
+from hugiml.llm.evidence import (
+    downstream_redundancy_audit_rows,
+    rpte_rule_rows_to_importance_rows,
+)
 from hugiml.llm.runtime import (
     DEFAULT_OLLAMA_MODEL,
     FALLBACK_OLLAMA_MODEL,
@@ -42,6 +43,7 @@ from hugiml.llm.runtime import (
     model_availability,
     recommend_profile,
 )
+from hugiml.llm.ui_service import run_prompt
 
 
 def _guess_repo_root() -> Path | None:
@@ -126,7 +128,10 @@ _CLI_COMMANDS = [
     ("Check setup", "hugiml-llm status"),
     ("List datasets", "hugiml-llm list-datasets"),
     ("Terminal chat", "hugiml-llm chat --dataset churn_synthetic --no-llm"),
-    ("One-shot request", 'hugiml-llm ask "build a model and explain it" --dataset churn_synthetic --no-llm'),
+    (
+        "One-shot request",
+        'hugiml-llm ask "build a model and explain it" --dataset churn_synthetic --no-llm',
+    ),
     ("Demo HTML", "hugiml-llm demo-html"),
 ]
 
@@ -258,7 +263,9 @@ def _hero(
 ) -> None:
     profile_label = _PROFILE_LABELS.get(profile.name, profile.name)
     ollama_state = "ready" if status.get("ok") else "not connected"
-    catalog_note = "including benchmark catalog" if include_benchmarks else "built-in first-run catalog"
+    catalog_note = (
+        "including benchmark catalog" if include_benchmarks else "built-in first-run catalog"
+    )
     st.markdown(
         f"""
         <div class="hugiml-hero">
@@ -364,7 +371,9 @@ def _model_picker(mem: Any, profile: Any, status: dict[str, Any]) -> str:
         lightweight = is_lightweight_supported_model(model_name)
         min_free_gb = 5.0 if lightweight else 6.0
         too_small = is_below_minimum_llm_model(model_name)
-        selectable = bool(status.get("ok")) and not too_small and (free_gb is None or free_gb >= min_free_gb)
+        selectable = (
+            bool(status.get("ok")) and not too_small and (free_gb is None or free_gb >= min_free_gb)
+        )
         if selectable:
             selectable_values.append(model_name)
             labels[model_name] = f"Installed Ollama model · {model_name} · manual"
@@ -376,7 +385,11 @@ def _model_picker(mem: Any, profile: Any, status: dict[str, Any]) -> str:
                 "status": (
                     "unsupported sub-3B manual model; use deterministic routing"
                     if too_small
-                    else ("selectable" if selectable else f"manual model needs ≥{min_free_gb:.1f} GB free RAM")
+                    else (
+                        "selectable"
+                        if selectable
+                        else f"manual model needs ≥{min_free_gb:.1f} GB free RAM"
+                    )
                 ),
                 "installed": "yes",
             }
@@ -403,7 +416,9 @@ def _model_picker(mem: Any, profile: Any, status: dict[str, Any]) -> str:
             labels[selected] = f"Current session model · {selected} · keeping selection"
             for row in rows:
                 if row.get("model") == selected:
-                    row["status"] = "kept for this session; memory may be temporarily held by Ollama"
+                    row["status"] = (
+                        "kept for this session; memory may be temporarily held by Ollama"
+                    )
                     break
         else:
             selected = default_model
@@ -420,9 +435,13 @@ def _model_picker(mem: Any, profile: Any, status: dict[str, Any]) -> str:
     st.session_state["_hugiml_selected_model"] = str(choice)
 
     if choice == default_model:
-        st.info("Using deterministic routing. HUGIML actions still run normally; no Ollama call is made.")
+        st.info(
+            "Using deterministic routing. HUGIML actions still run normally; no Ollama call is made."
+        )
     else:
-        st.success(f"Using Ollama model `{choice}` for conversational routing. HUGIML still executes the modeling actions.")
+        st.success(
+            f"Using Ollama model `{choice}` for conversational routing. HUGIML still executes the modeling actions."
+        )
 
     with st.expander("Model catalog and setup", expanded=False):
         _show_dataframe(rows, height=260)
@@ -434,15 +453,24 @@ def _model_picker(mem: Any, profile: Any, status: dict[str, Any]) -> str:
             st.caption("Pull a recommended model, then refresh this page:")
             st.code("\n".join(f"ollama pull {name}" for name in not_installed[:5]), language="bash")
         if any(r.get("tier") == "manual" for r in rows):
-            st.caption("*Manual models are not in the HUGIML recommendation catalog. qwen3:1.7b, gemma3:1b, and llama3.2:1b are allowed as explicit HUGIML tiny-model choices; other sub-3B manual models are shown but not selectable.")
+            st.caption(
+                "*Manual models are not in the HUGIML recommendation catalog. qwen3:1.7b, gemma3:1b, and llama3.2:1b are allowed as explicit HUGIML tiny-model choices; other sub-3B manual models are shown but not selectable."
+            )
 
     return str(choice)
 
 
-def _preferred_initial_model(selectable_values: list[str], recommended_model: str, default_model: str) -> str:
+def _preferred_initial_model(
+    selectable_values: list[str], recommended_model: str, default_model: str
+) -> str:
     """Pick the first-run model according to HUGIML's local model policy."""
 
-    for candidate in (DEFAULT_OLLAMA_MODEL, recommended_model, LIGHT_MODE_MODEL, FALLBACK_OLLAMA_MODEL):
+    for candidate in (
+        DEFAULT_OLLAMA_MODEL,
+        recommended_model,
+        LIGHT_MODE_MODEL,
+        FALLBACK_OLLAMA_MODEL,
+    ):
         if candidate and candidate in selectable_values:
             return candidate
     return default_model
@@ -463,8 +491,12 @@ def _dataset_picker(dataset_rows: list[dict[str, Any]]) -> str | None:
         priority = {"llm_builtin": 0, "user": 1, "benchmark": 2}
         df["_source_order"] = df["source"].map(priority).fillna(9)
         df = df.sort_values(["_source_order", "name"]).drop(columns=["_source_order"])
-    columns = [c for c in ["name", "source", "rows", "features", "target", "task_type"] if c in df.columns]
-    st.caption("Built-in sample datasets are shown first. Enable the benchmark catalog only when needed.")
+    columns = [
+        c for c in ["name", "source", "rows", "features", "target", "task_type"] if c in df.columns
+    ]
+    st.caption(
+        "Built-in sample datasets are shown first. Enable the benchmark catalog only when needed."
+    )
     st.dataframe(
         _display_dataset_frame(df[columns]),
         hide_index=True,
@@ -474,7 +506,6 @@ def _dataset_picker(dataset_rows: list[dict[str, Any]]) -> str | None:
     options = df["name"].tolist()
     selected = st.selectbox("Active dataset", options, index=0)
     return str(selected) if selected else None
-
 
 
 def _cli_commands_panel() -> None:
@@ -491,7 +522,10 @@ def _cli_commands_panel() -> None:
 
 def _cli_examples_readout() -> None:
     st.markdown("### Command-line shortcuts")
-    st.markdown("<p class='example-note'>The same workflows are also available outside the browser.</p>", unsafe_allow_html=True)
+    st.markdown(
+        "<p class='example-note'>The same workflows are also available outside the browser.</p>",
+        unsafe_allow_html=True,
+    )
     command_text = "\n".join(command for _, command in _CLI_COMMANDS)
     st.code(command_text, language="bash")
 
@@ -639,11 +673,17 @@ def _overview_panel(
     _cli_examples_readout()
 
 
-def _data_panel(registry: DatasetRegistry, dataset_rows: list[dict[str, Any]], selected_dataset: str | None) -> None:
+def _data_panel(
+    registry: DatasetRegistry, dataset_rows: list[dict[str, Any]], selected_dataset: str | None
+) -> None:
     st.markdown("### Dataset catalog")
     if dataset_rows:
         df = pd.DataFrame(dataset_rows)
-        cols = [c for c in ["name", "source", "rows", "features", "target", "description"] if c in df.columns]
+        cols = [
+            c
+            for c in ["name", "source", "rows", "features", "target", "description"]
+            if c in df.columns
+        ]
         st.caption(
             "The default view is intentionally small. Use the sidebar checkbox to include the benchmark catalog when you want the full experiment library."
         )
@@ -664,12 +704,15 @@ def _data_panel(registry: DatasetRegistry, dataset_rows: list[dict[str, Any]], s
                 st.markdown("#### Class balance")
                 _render_class_balance_chart(class_counts)
             missing = desc.get("missing_top") or {}
-            missing_df = pd.DataFrame([{"feature": k, "missing_fraction": v} for k, v in missing.items() if v])
+            missing_df = pd.DataFrame(
+                [{"feature": k, "missing_fraction": v} for k, v in missing.items() if v]
+            )
             if not missing_df.empty:
                 st.markdown("#### Missingness")
                 _render_missingness_chart(missing_df)
         except Exception as exc:
             st.warning(f"Could not profile active dataset: {exc}")
+
 
 def _chat_panel(
     orch: HUGIMLActionOrchestrator,
@@ -780,7 +823,9 @@ def _inline_chat_composer(selected_dataset: str | None, model_choice: str) -> No
     """Render an inline follow-up composer directly below the Q&A thread."""
 
     active_dataset = html.escape(str(selected_dataset)) if selected_dataset else ""
-    active_note = f"Active dataset: {active_dataset}" if active_dataset else "No active dataset selected yet."
+    active_note = (
+        f"Active dataset: {active_dataset}" if active_dataset else "No active dataset selected yet."
+    )
     st.markdown(
         f"""
         <div class='chat-composer-card'>
@@ -804,12 +849,18 @@ def _inline_chat_composer(selected_dataset: str | None, model_choice: str) -> No
         help="Fast answers direct dataset/model questions from HUGIML artifacts. Thinking also asks the selected Ollama model to rewrite grounded results.",
     )
     if selected_mode == "Fast":
-        st.caption("Fast mode uses direct HUGIML artifacts and skips the Ollama writer for lower latency.")
+        st.caption(
+            "Fast mode uses direct HUGIML artifacts and skips the Ollama writer for lower latency."
+        )
     else:
         if model_choice == "deterministic router only":
-            st.caption("Thinking mode is selected, but no Ollama model is active; responses will use deterministic routing.")
+            st.caption(
+                "Thinking mode is selected, but no Ollama model is active; responses will use deterministic routing."
+            )
         else:
-            st.caption(f"Thinking mode uses `{model_choice}` after HUGIML produces grounded results.")
+            st.caption(
+                f"Thinking mode uses `{model_choice}` after HUGIML produces grounded results."
+            )
 
     with st.form("hugiml_inline_chat_form", clear_on_submit=False):
         st.text_area(
@@ -827,42 +878,6 @@ def _inline_chat_composer(selected_dataset: str | None, model_choice: str) -> No
         )
 
 
-# Actions whose deterministic draft is already a complete answer: a table
-# (or a short list of tables) plus a few lines of summary, with nothing left
-# to interpret or synthesize into prose. Sending these through the writer
-# model in Thinking mode adds a full local-LLM generation (commonly several
-# seconds, more on a cold/CPU-bound model) for a cosmetic rewrite of text
-# that was already clear -- e.g. "describe the dataset" only needs the
-# registry's profile, never an opinion.
-#
-# Verified by inspecting each draft-building function in orchestrator.py:
-# build_model/tune_hyperparameters (_build_result_summary), compare_model_configs
-# (_comparison_decision_summary), prune_patterns (_pruning_decision_summary), and
-# generate_governance_report (_governance_decision_summary) are all fixed
-# template structure + tables + a "Decision note"/"Review checklist" that is
-# identical boilerplate every time -- none of them branch on the data or the
-# user's question, so the writer model has nothing to add beyond word
-# choice. explain_model and explain_prediction are NOT in this set: their
-# draft includes data-driven judgment (a score band, confusion-matrix
-# trade-off framing) and the writer has room to tailor the answer to the
-# specific follow-up question. answer_api_question is also excluded: its
-# draft synthesizes raw retrieved doc snippets, where prose cleanup
-# genuinely helps.
-_SKIP_WRITER_POLISH_ACTIONS = frozenset(
-    {
-        "list_datasets",
-        "describe_dataset",
-        "generate_tabular_output",
-        "generate_predictions",
-        "build_model",
-        "tune_hyperparameters",
-        "compare_model_configs",
-        "prune_patterns",
-        "generate_governance_report",
-    }
-)
-
-
 def _handle_prompt(
     orch: HUGIMLActionOrchestrator,
     prompt: str,
@@ -872,78 +887,15 @@ def _handle_prompt(
     response_mode: str = "Fast",
     include_benchmarks: bool,
 ) -> dict[str, Any]:
-    refusal = deterministic_refusal(prompt)
-    if refusal is not None:
-        return refusal.to_dict()
-    thinking_mode = str(response_mode).lower().startswith("think")
-    prefer_llm = thinking_mode and model_choice != "deterministic router only"
-    model = None if not prefer_llm else model_choice
-    active_session = None
-    if orch.last_session_id:
-        try:
-            active_session = orch.sessions.get(orch.last_session_id)
-        except Exception:
-            active_session = None
-    context = {
-        "dataset": selected_dataset,
-        "active_session_id": orch.last_session_id,
-        "active_session_dataset": getattr(active_session, "dataset", None),
-        "has_active_model": active_session is not None,
-        "note": "If the user asks to summarize findings/results after a model build, use explain_model.",
-    }
-    planned = plan_request(
+    return run_prompt(
+        orch,
         prompt,
-        model=model,
-        prefer_llm=prefer_llm,
-        context=context,
+        selected_dataset,
+        model_choice,
+        response_mode=response_mode,
+        include_benchmarks=include_benchmarks,
         repo_root=REPO_ROOT,
-    )
-    if hasattr(planned, "to_dict") and getattr(planned, "ok", None) is False:
-        return planned.to_dict()  # ActionResult refusal
-    if not isinstance(planned, ActionRequest):
-        return {"ok": False, "message": "Unable to plan request.", "action": "refuse"}
-    if planned.action == "list_datasets":
-        visible_infos = orch.registry.list_datasets(
-            include_profiles=True,
-            include_benchmarks=include_benchmarks,
-        )
-        rows = [info.to_dict() for info in visible_infos]
-        scope = "built-in and user" if not include_benchmarks else "built-in, user, and benchmark"
-        return {
-            "ok": True,
-            "action": "list_datasets",
-            "message": f"Found {len(rows)} visible datasets from {scope} sources.",
-            "tables": {"datasets": rows},
-            "data": {"count": len(rows), "include_benchmarks": include_benchmarks},
-            "artifacts": {},
-            "refusal_reason": None,
-        }
-    if selected_dataset and planned.dataset is None and planned.action in {
-        "describe_dataset",
-        "build_model",
-        "tune_hyperparameters",
-        "generate_predictions",
-        "generate_tabular_output",
-        "compare_model_configs",
-        "explain_model",
-        "explain_prediction",
-    }:
-        planned.dataset = selected_dataset
-    if planned.action in {"build_model", "tune_hyperparameters", "compare_model_configs"}:
-        planned.params = dict(planned.params or {})
-        if not _asks_for_full_dataset(prompt):
-            planned.params.setdefault("_chat_max_rows", 8000 if planned.action == "build_model" else 6000)
-    if prefer_llm and model and planned.action not in _SKIP_WRITER_POLISH_ACTIONS:
-        planned.params = dict(planned.params or {})
-        planned.params["_writer_model"] = model
-    result = orch.execute(planned)
-    return result.to_dict()
-
-
-def _asks_for_full_dataset(prompt: str) -> bool:
-    low = (prompt or "").lower()
-    return any(term in low for term in ("full dataset", "entire dataset", "all rows", "no sampling", "without sampling", "complete dataset"))
-
+)
 
 
 def _session_panel(orch: HUGIMLActionOrchestrator) -> None:
@@ -972,6 +924,14 @@ def _model_panel(orch: HUGIMLActionOrchestrator) -> None:
         return
     session = orch.sessions[orch.last_session_id]
     _render_metrics(session.metrics)
+    redundancy_rows = downstream_redundancy_audit_rows(session.model)
+    if redundancy_rows:
+        st.markdown("#### Downstream redundancy audit")
+        st.caption(
+            "Computed from the fitted training partition; prediction uses the "
+            "stored retained-column mask."
+        )
+        _show_dataframe(redundancy_rows, height=300)
     try:
         imp = session.model.feature_importances().head(15)
         st.markdown("#### Top patterns and features")
@@ -986,7 +946,9 @@ def _model_panel(orch: HUGIMLActionOrchestrator) -> None:
         # else, right when a user most needs the RPTE-specific explanation.
         rpte_rows: list[dict[str, Any]] = []
         try:
-            rpte_rows = session.model.rpte_rule_table() if hasattr(session.model, "rpte_rule_table") else []
+            rpte_rows = (
+                session.model.rpte_rule_table() if hasattr(session.model, "rpte_rule_table") else []
+            )
         except Exception:
             rpte_rows = []
         if rpte_rows:
@@ -1002,7 +964,9 @@ def _model_panel(orch: HUGIMLActionOrchestrator) -> None:
         else:
             st.warning(f"Feature importance unavailable: {exc}")
     try:
-        pred = orch._prediction_rows(session, limit=12)  # dashboard-only readout from active session
+        pred = orch._prediction_rows(
+            session, limit=12
+        )  # dashboard-only readout from active session
         st.markdown("#### Held-out prediction snapshot")
         _render_prediction_chart(pred)
         _show_dataframe(pred, height=300)
@@ -1031,10 +995,16 @@ def _governance_panel(orch: HUGIMLActionOrchestrator) -> None:
     c3.metric("Current score", _fmt_float(session.metrics.get("primary_score")))
 
     st.markdown("#### Guided pruning")
-    min_support = st.slider("Remove patterns below support", min_value=0.0, max_value=0.20, value=0.03, step=0.01)
-    reason = st.text_input("Audit reason", value="Governance review: remove very low-support patterns before sign-off.")
+    min_support = st.slider(
+        "Remove patterns below support", min_value=0.0, max_value=0.20, value=0.03, step=0.01
+    )
+    reason = st.text_input(
+        "Audit reason", value="Governance review: remove very low-support patterns before sign-off."
+    )
     if st.button("Prune and refit", type="primary"):
-        result = orch.execute(ActionRequest(action="prune_patterns", min_support=min_support, reason=reason))
+        result = orch.execute(
+            ActionRequest(action="prune_patterns", min_support=min_support, reason=reason)
+        )
         st.markdown(result.message)
         _render_result(result.to_dict(), suppress_summary=True)
 
@@ -1064,12 +1034,16 @@ def _plotly_chart(fig: Any, base_key: str) -> None:
 def _display_dataset_frame(df: pd.DataFrame) -> pd.DataFrame:
     out = df.copy()
     if "source" in out.columns:
-        out["source"] = out["source"].replace({"llm_builtin": "built-in", "user": "user", "benchmark": "benchmark"})
+        out["source"] = out["source"].replace(
+            {"llm_builtin": "built-in", "user": "user", "benchmark": "benchmark"}
+        )
     for col in ["rows", "features"]:
         if col in out.columns:
             out[col] = out[col].map(lambda v: _fmt_int(v) if pd.notna(v) else "n/a")
     if "description" in out.columns:
-        out["description"] = out["description"].map(lambda v: _clip_text(str(v), 92) if pd.notna(v) else "")
+        out["description"] = out["description"].map(
+            lambda v: _clip_text(str(v), 92) if pd.notna(v) else ""
+        )
     return out
 
 
@@ -1204,7 +1178,9 @@ def _show_dataframe(value: Any, *, height: int | None = None) -> pd.DataFrame:
     display_df = df.copy()
     for col in display_df.columns:
         if display_df[col].dtype == object:
-            display_df[col] = display_df[col].map(lambda v: _clip_text(v, 140) if isinstance(v, str) else v)
+            display_df[col] = display_df[col].map(
+                lambda v: _clip_text(v, 140) if isinstance(v, str) else v
+            )
     try:
         st.dataframe(display_df, hide_index=True, width="stretch", height=height)
     except Exception:
@@ -1231,13 +1207,17 @@ def _render_result(result: dict[str, Any], *, suppress_summary: bool = False) ->
         _render_metrics(tables["metrics"][0])
         _render_confusion_matrix(tables["metrics"][0])
     if "datasets" in tables and tables["datasets"]:
-        df = _show_dataframe(_display_dataset_frame(_safe_dataframe(tables["datasets"])), height=260)
+        df = _show_dataframe(
+            _display_dataset_frame(_safe_dataframe(tables["datasets"])), height=260
+        )
         if "source" in df.columns:
             counts = df.groupby("source").size().reset_index(name="count")
             _render_source_chart(counts)
     if "class_balance" in tables and tables["class_balance"]:
         st.markdown("#### Class balance")
-        _render_class_balance_chart({row.get("class"): row.get("count") for row in tables["class_balance"]})
+        _render_class_balance_chart(
+            {row.get("class"): row.get("count") for row in tables["class_balance"]}
+        )
     if "feature_importance" in tables and tables["feature_importance"]:
         st.markdown("#### Pattern / feature influence")
         _render_importance_chart(tables["feature_importance"])
@@ -1248,7 +1228,14 @@ def _render_result(result: dict[str, Any], *, suppress_summary: bool = False) ->
         st.markdown("#### Pruning summary")
         _show_dataframe(tables["pruning_summary"], height=160)
     for name, rows in tables.items():
-        if name in {"metrics", "datasets", "class_balance", "feature_importance", "predictions", "pruning_summary"}:
+        if name in {
+            "metrics",
+            "datasets",
+            "class_balance",
+            "feature_importance",
+            "predictions",
+            "pruning_summary",
+        }:
             continue
         if rows:
             with st.expander(f"Table: {name}", expanded=False):
@@ -1353,8 +1340,16 @@ def _render_importance_chart(rows: list[dict[str, Any]]) -> None:
     df = _safe_dataframe(rows)
     if df.empty:
         return
-    label_col = next((c for c in ["display_name", "pattern", "feature"] if c in df.columns), df.columns[0])
-    value_col = "coefficient" if "coefficient" in df.columns else "abs_coefficient" if "abs_coefficient" in df.columns else None
+    label_col = next(
+        (c for c in ["display_name", "pattern", "feature"] if c in df.columns), df.columns[0]
+    )
+    value_col = (
+        "coefficient"
+        if "coefficient" in df.columns
+        else "abs_coefficient"
+        if "abs_coefficient" in df.columns
+        else None
+    )
     if value_col is None:
         _show_dataframe(_df_records(df), height=300)
         return
@@ -1373,7 +1368,9 @@ def _render_importance_chart(rows: list[dict[str, Any]]) -> None:
     else:
         height = max(360, 120 + 30 * len(plot))
         if signed:
-            plot["direction"] = plot[value_col].map(lambda v: "toward positive class" if v >= 0 else "toward negative class")
+            plot["direction"] = plot[value_col].map(
+                lambda v: "toward positive class" if v >= 0 else "toward negative class"
+            )
             fig = px.bar(
                 plot,
                 x=value_col,
@@ -1382,7 +1379,12 @@ def _render_importance_chart(rows: list[dict[str, Any]]) -> None:
                 color="direction",
                 text="value_label",
                 color_discrete_map=_COLOR_MAP,
-                hover_data={"full_label": True, "label": False, value_col: ":.4f", "value_label": False},
+                hover_data={
+                    "full_label": True,
+                    "label": False,
+                    value_col: ":.4f",
+                    "value_label": False,
+                },
                 title="Feature and pattern influence",
             )
             fig.add_vline(x=0, line_width=1, line_dash="dot", line_color="#5B6358")
@@ -1390,7 +1392,14 @@ def _render_importance_chart(rows: list[dict[str, Any]]) -> None:
             max_v = float(plot[value_col].max())
             pad = max(0.2, (max_v - min_v) * 0.18)
             fig.update_xaxes(range=[min_v - pad, max_v + pad])
-            _polish_fig(fig, x_title="Signed coefficient", y_title="", height=height, margin_l=210, margin_r=70)
+            _polish_fig(
+                fig,
+                x_title="Signed coefficient",
+                y_title="",
+                height=height,
+                margin_l=210,
+                margin_r=70,
+            )
         else:
             fig = px.bar(
                 plot,
@@ -1398,16 +1407,24 @@ def _render_importance_chart(rows: list[dict[str, Any]]) -> None:
                 y="label",
                 orientation="h",
                 text="value_label",
-                hover_data={"full_label": True, "label": False, value_col: ":.4f", "value_label": False},
+                hover_data={
+                    "full_label": True,
+                    "label": False,
+                    value_col: ":.4f",
+                    "value_label": False,
+                },
                 title="Feature and pattern importance",
             )
             fig.update_traces(marker_color=_PALETTE[0])
             max_v = float(plot[value_col].max())
             fig.update_xaxes(range=[0, max_v * 1.22 if max_v > 0 else 1])
-            _polish_fig(fig, x_title="Importance", y_title="", height=height, margin_l=210, margin_r=70)
+            _polish_fig(
+                fig, x_title="Importance", y_title="", height=height, margin_l=210, margin_r=70
+            )
         fig.update_traces(textposition="outside", cliponaxis=False)
         _plotly_chart(fig, "importance")
     _show_dataframe(_df_records(df), height=340)
+
 
 def _render_prediction_chart(rows: list[dict[str, Any]]) -> None:
     df = _safe_dataframe(rows)
@@ -1450,16 +1467,32 @@ def _render_source_chart(src_counts: pd.DataFrame) -> None:
         st.bar_chart(src_counts.set_index("source"), width="stretch")
         return
     plot = src_counts.sort_values("count").copy()
-    plot["source"] = plot["source"].replace({"llm_builtin": "built-in", "user": "user", "benchmark": "benchmark"})
-    fig = px.bar(plot, x="count", y="source", orientation="h", text="count", title="Dataset catalog by source")
-    fig.update_traces(marker_color=_PALETTE[0], textposition="outside", cliponaxis=False, hovertemplate="%{y}: %{x}<extra></extra>")
+    plot["source"] = plot["source"].replace(
+        {"llm_builtin": "built-in", "user": "user", "benchmark": "benchmark"}
+    )
+    fig = px.bar(
+        plot,
+        x="count",
+        y="source",
+        orientation="h",
+        text="count",
+        title="Dataset catalog by source",
+    )
+    fig.update_traces(
+        marker_color=_PALETTE[0],
+        textposition="outside",
+        cliponaxis=False,
+        hovertemplate="%{y}: %{x}<extra></extra>",
+    )
     max_count = max(1, int(plot["count"].max()))
     fig.update_xaxes(range=[0, max_count * 1.35])
     _polish_fig(fig, x_title="Datasets", y_title="", height=280, margin_l=110, margin_r=45)
     _plotly_chart(fig, "source_catalog")
 
 
-def _render_catalog_size_bars(dataset_rows: list[dict[str, Any]], title: str = "Dataset sizes") -> None:
+def _render_catalog_size_bars(
+    dataset_rows: list[dict[str, Any]], title: str = "Dataset sizes"
+) -> None:
     if not dataset_rows or px is None:
         return
     df = pd.DataFrame(dataset_rows)
@@ -1486,11 +1519,20 @@ def _render_catalog_size_bars(dataset_rows: list[dict[str, Any]], title: str = "
     fig.update_traces(textposition="outside", cliponaxis=False)
     max_rows = float(df["rows"].max())
     fig.update_xaxes(range=[0, max_rows * 1.30 if max_rows > 0 else 1])
-    _polish_fig(fig, x_title="Rows", y_title="", height=max(300, 110 + 30 * len(df)), margin_l=175, margin_r=65)
+    _polish_fig(
+        fig,
+        x_title="Rows",
+        y_title="",
+        height=max(300, 110 + 30 * len(df)),
+        margin_l=175,
+        margin_r=65,
+    )
     _plotly_chart(fig, "catalog_size")
 
 
-def _render_catalog_scatter(dataset_rows: list[dict[str, Any]], title: str = "Dataset shape map") -> None:
+def _render_catalog_scatter(
+    dataset_rows: list[dict[str, Any]], title: str = "Dataset shape map"
+) -> None:
     if not dataset_rows or px is None:
         return
     df = pd.DataFrame(dataset_rows)
@@ -1504,7 +1546,9 @@ def _render_catalog_scatter(dataset_rows: list[dict[str, Any]], title: str = "Da
         return
     df["rows_label"] = df["rows"].map(_fmt_int)
     df["features_label"] = df["features"].map(_fmt_int)
-    df["source"] = df["source"].replace({"llm_builtin": "built-in", "user": "user", "benchmark": "benchmark"})
+    df["source"] = df["source"].replace(
+        {"llm_builtin": "built-in", "user": "user", "benchmark": "benchmark"}
+    )
     st.markdown(f"### {title}")
     fig = px.scatter(
         df,
@@ -1520,8 +1564,11 @@ def _render_catalog_scatter(dataset_rows: list[dict[str, Any]], title: str = "Da
         marker=dict(size=13, line=dict(width=1, color="#1C2420")),
         hovertemplate="%{hovertext}<br>Rows: %{customdata[0]}<br>Features: %{customdata[1]}<br>Source: %{customdata[2]}<extra></extra>",
     )
-    _polish_fig(fig, x_title="Features", y_title="Rows (log scale)", height=330, margin_l=55, margin_r=20)
+    _polish_fig(
+        fig, x_title="Features", y_title="Rows (log scale)", height=330, margin_l=55, margin_r=20
+    )
     _plotly_chart(fig, "catalog_scatter")
+
 
 def _render_class_balance_chart(class_counts: dict[Any, Any]) -> None:
     rows = []
@@ -1542,13 +1589,22 @@ def _render_class_balance_chart(class_counts: dict[Any, Any]) -> None:
     col1, col2 = st.columns([0.48, 0.52])
     with col1:
         fig = px.pie(df, names="class", values="count", hole=0.52, title="Class mix")
-        fig.update_traces(textposition="inside", textinfo="percent", hovertemplate="%{label}: %{value:,}<extra></extra>")
+        fig.update_traces(
+            textposition="inside",
+            textinfo="percent",
+            hovertemplate="%{label}: %{value:,}<extra></extra>",
+        )
         _polish_fig(fig, height=300)
         _plotly_chart(fig, "class_mix")
     with col2:
         df["count_label"] = df["count"].map(_fmt_compact)
         fig = px.bar(df, x="class", y="count", text="count_label", title="Class counts")
-        fig.update_traces(marker_color=_PALETTE[0], textposition="outside", cliponaxis=False, hovertemplate="%{x}: %{y:,}<extra></extra>")
+        fig.update_traces(
+            marker_color=_PALETTE[0],
+            textposition="outside",
+            cliponaxis=False,
+            hovertemplate="%{x}: %{y:,}<extra></extra>",
+        )
         max_count = max(1, int(df["count"].max()))
         fig.update_yaxes(range=[0, max_count * 1.22])
         _polish_fig(fig, y_title="Rows", height=300)
@@ -1560,9 +1616,21 @@ def _render_missingness_chart(missing_df: pd.DataFrame) -> None:
         st.bar_chart(missing_df.set_index("feature"))
         return
     view = missing_df.sort_values("missing_fraction", ascending=True)
-    fig = px.bar(view, x="missing_fraction", y="feature", orientation="h", title="Top missing-value fractions")
+    fig = px.bar(
+        view,
+        x="missing_fraction",
+        y="feature",
+        orientation="h",
+        title="Top missing-value fractions",
+    )
     fig.update_traces(marker_color=_PALETTE[3], hovertemplate="%{y}: %{x:.2%}<extra></extra>")
-    _polish_fig(fig, x_title="Missing fraction", y_title="", height=max(280, 100 + 28 * len(view)), margin_l=190)
+    _polish_fig(
+        fig,
+        x_title="Missing fraction",
+        y_title="",
+        height=max(280, 100 + 28 * len(view)),
+        margin_l=190,
+    )
     _plotly_chart(fig, "missingness")
 
 
@@ -1632,7 +1700,11 @@ def _coerce_matrix(value: Any) -> list[list[Any]] | None:
             value = ast.literal_eval(value)
         except Exception:
             return None
-    if isinstance(value, (list, tuple)) and value and all(isinstance(row, (list, tuple)) for row in value):
+    if (
+        isinstance(value, (list, tuple))
+        and value
+        and all(isinstance(row, (list, tuple)) for row in value)
+    ):
         return [list(row) for row in value]
     return None
 

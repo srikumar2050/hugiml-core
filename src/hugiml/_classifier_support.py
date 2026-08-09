@@ -946,7 +946,7 @@ def _wire_hugiml_feature_metadata(
     """Best-effort: if `estimator` (or, for a meta-estimator wrapper
     exposing `.estimator` -- e.g. sklearn's OneVsRestClassifier -- the
     estimator it wraps) knows how to consume HUGIML's own downstream
-    feature names / augmented-pair catalog / pattern provenance, wire it up
+    feature names / augmented-pair catalog / pattern source mapping, wire it up
     before fitting.
 
     `base_estimator=` is a plain sklearn fit(X, y)/predict_proba(X)

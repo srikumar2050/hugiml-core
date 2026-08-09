@@ -19,14 +19,19 @@ from __future__ import annotations
 
 import copy
 import dataclasses
+import hashlib
 import os
 import time
+from types import MethodType
 from typing import Any
 
 import numpy as np
 import pandas as pd
-from scipy.sparse import csr_matrix
+from scipy.sparse import csr_matrix, issparse
+from sklearn.base import clone
+from sklearn.multiclass import OneVsRestClassifier
 from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import LabelBinarizer
 
 from hugiml._classifier_runtime import _CORE_AVAILABLE, _core
 from hugiml._classifier_support import _wire_hugiml_feature_metadata
@@ -177,6 +182,7 @@ def _hugiml_shallow_candidate_from_base(base: HUGIMLClassifier) -> HUGIMLClassif
         "classes_",
         "n_features_in_",
         "_native_available_",
+        "_benchmark_lr_C",
     ]
     for attr in share_attrs:
         if hasattr(base, attr):
@@ -194,6 +200,8 @@ def _hugiml_prepare_downstream_template_from_cached_base(
     execution_mode: str = "audit",
     native_augmented_pair_cache: Any | None = None,
     native_augmented_pair_score_topK: int | None = None,
+    maximal_augmented_pair_block: Any | None = None,
+    original_feature_cache: dict[str, Any] | None = None,
 ) -> HUGIMLClassifier:
     """Build one (G, L, topK, feature_mode) candidate's downstream feature
     matrix from a max-topK cached mining base -- everything a candidate
@@ -221,21 +229,26 @@ def _hugiml_prepare_downstream_template_from_cached_base(
     cand.feature_mode = str(feature_mode)
     cand.execution_mode = str(execution_mode)
 
-    raw_patterns = list(getattr(base, "raw_patterns_", []))[: int(topK_value)]
-    n_train = len(y_train)
-    base_hup = getattr(base, "x_train_hup_", None)
-    if base_hup is None:
-        raise RuntimeError(
-            "fast_grid_tune requires cached training pattern matrices. "
-            "The cache model was created in production mode or otherwise does not retain "
-            "x_train_hup_; run tuning with execution_mode='audit'."
+    native_pattern_order = getattr(base, "_fast_tune_native_pattern_order_", None)
+    if native_pattern_order is not None:
+        raw_patterns = sorted(
+            list(native_pattern_order)[: int(topK_value)],
+            key=lambda pe: (-pe.utility, tuple(pe.items)),
         )
+    else:
+        raw_patterns = list(getattr(base, "raw_patterns_", []))[: int(topK_value)]
+    cand.raw_patterns_ = raw_patterns
+    n_train = len(y_train)
+    native_td = getattr(getattr(base, "td_", None), "_td", getattr(base, "td_", None))
     if int(L_value) == 1:
         cand.patterns_ = raw_patterns
-        # Fused L=1 path returns columns in raw_patterns_ order; slicing is exact.
+        base_hup = getattr(base, "x_train_hup_", None)
+        if base_hup is None or base_hup.shape[0] != n_train:
+            raise RuntimeError("Cached L1 pattern matrix is unavailable or has incompatible rows.")
+        if base_hup.shape[1] < len(cand.patterns_):
+            raise RuntimeError("Cached L1 pattern matrix has fewer columns than its raw prefix.")
         cand.x_train_hup_ = base_hup[:, : len(cand.patterns_)]
     else:
-        native_td = getattr(getattr(base, "td_", None), "_td", getattr(base, "td_", None))
         old_td = getattr(cand, "td_", None)
         cand.td_ = native_td
         cand.patterns_, cached_coo = cand._deduplicate_patterns_by_coverage(raw_patterns, n_train)
@@ -263,22 +276,117 @@ def _hugiml_prepare_downstream_template_from_cached_base(
         return cand
 
     cand._setup_feature_mode_metadata()
-    cand._native_augmented_pair_cache_ = native_augmented_pair_cache
-    cand._native_augmented_pair_score_topK_ = native_augmented_pair_score_topK
-    try:
-        cand._setup_augmented_pair_transforms(X_train_original, y_train, fit=True)
-    finally:
-        if hasattr(cand, "_native_augmented_pair_cache_"):
-            delattr(cand, "_native_augmented_pair_cache_")
-        if hasattr(cand, "_native_augmented_pair_score_topK_"):
-            delattr(cand, "_native_augmented_pair_score_topK_")
+    if maximal_augmented_pair_block is not None and int(cand.L) > 1:
+        master = maximal_augmented_pair_block
+        selected_indices = list(range(len(getattr(master, "kept_specs_", []))))
+        if str(getattr(master, "augmented_pair_mode", "")) == "marginal_ig":
+            threshold = max(1e-12, float(cand.G or 0.0))
+            source_scores = dict(getattr(master, "selected_aug_scores_", {}) or {})
+            selected_indices = [
+                idx
+                for idx in selected_indices
+                if all(
+                    float(source_scores.get(str(name), 0.0)) >= threshold
+                    for name in master.kept_specs_[idx].get("inputs", [])
+                )
+            ]
+        candidate_count_for_threshold = len(selected_indices)
+        if not bool(getattr(cand, "topk_budget_strict", False)):
+            selected_indices = selected_indices[: max(0, int(cand.topK))]
+        block = copy.copy(master)
+        block.budget_topK = None if bool(getattr(cand, "topk_budget_strict", False)) else int(cand.topK)
+        block.min_source_ig = float(cand.G)
+        block.min_source_ig_ = max(1e-12, float(cand.G or 0.0))
+        block.candidate_count_ = int(candidate_count_for_threshold)
+        block.kept_specs_ = [master.kept_specs_[idx] for idx in selected_indices]
+        master_sources = list(getattr(master, "selected_aug_features_", []))
+        if str(getattr(master, "augmented_pair_mode", "")) == "marginal_ig":
+            threshold = max(1e-12, float(cand.G or 0.0))
+            source_scores = dict(getattr(master, "selected_aug_scores_", {}) or {})
+            selected_sources = [
+                name for name in master_sources if float(source_scores.get(name, 0.0)) >= threshold
+            ]
+        else:
+            selected_sources = master_sources
+        source_positions = {name: idx for idx, name in enumerate(selected_sources)}
+        block.selected_aug_features_ = selected_sources
+        block.selected_aug_scores_ = {
+            name: float(getattr(master, "selected_aug_scores_", {}).get(name, 0.0))
+            for name in selected_sources
+        }
+        block.left_indices_ = np.asarray(
+            [source_positions[spec["inputs"][0]] for spec in block.kept_specs_], dtype=np.int64
+        )
+        block.right_indices_ = np.asarray(
+            [source_positions[spec["inputs"][1]] for spec in block.kept_specs_], dtype=np.int64
+        )
+        block.op_codes_ = np.asarray(master.op_codes_, dtype=np.int8)[selected_indices]
+        block.pair_reference_values_ = np.asarray(
+            master.pair_reference_values_, dtype=np.float64
+        )[selected_indices]
+        block.scaler_mean_ = np.asarray(master.scaler_mean_, dtype=np.float64)[selected_indices]
+        block.scaler_scale_ = np.asarray(master.scaler_scale_, dtype=np.float64)[selected_indices]
+        master_source_positions = {name: idx for idx, name in enumerate(master_sources)}
+        source_indices = [master_source_positions[name] for name in selected_sources]
+        block.source_observed_medians_array_ = np.asarray(
+            master.source_observed_medians_array_, dtype=np.float64
+        )[source_indices]
+        block.numeric_medians_array_ = block.source_observed_medians_array_.copy()
+        block.source_observed_medians_ = {
+            name: float(block.source_observed_medians_array_[idx])
+            for idx, name in enumerate(selected_sources)
+        }
+        block.numeric_medians_ = dict(block.source_observed_medians_)
+        block.input_bin_edges_ = {
+            name: getattr(master, "input_bin_edges_", {}).get(name) for name in selected_sources
+        }
+        block._fit_Z_cache_ = master._fit_Z_cache_[:, selected_indices]
+        block.feature_names_ = [str(spec["name"]) for spec in block.kept_specs_]
+        block.augmented_pair_transforms_ = block._build_catalog()
+        block.native_cache = None
+        cand._augmented_pair_block_ = block
+        cand.augmented_pair_transforms_ = list(block.augmented_pair_transforms_)
+        cand.augmented_pair_selected_features_ = list(block.selected_aug_features_)
+        cand.augmented_pair_transforms_enabled_ = bool(cand.augmented_pair_transforms_)
+        cand.augmented_pair_config_ = {
+            "enabled": cand.augmented_pair_transforms_enabled_,
+            "augmented_pair_mode": str(cand.augmented_pair_mode),
+            "aug_feature_size": int(cand.aug_feature_size),
+            "ii_partner_size": cand.ii_partner_size,
+            "max_pair_features": int(cand.max_pair_features),
+            "budget": int(cand.topK) if cand.topK is not None and cand.topK >= 0 else None,
+            "budget_source": "global_strict_topK"
+            if bool(getattr(cand, "topk_budget_strict", False))
+            else "topK",
+            "ops": ["product", "absolute_difference", "sum", "signed_difference"],
+            "score": str(cand.augmented_pair_mode),
+            "min_source_ig": float(max(1e-12, float(cand.G or 0.0))),
+            "num_candidates": int(getattr(block, "candidate_count_", 0)),
+            "num_retained": len(cand.augmented_pair_transforms_),
+        }
+    else:
+        cand._native_augmented_pair_cache_ = native_augmented_pair_cache
+        cand._native_augmented_pair_score_topK_ = native_augmented_pair_score_topK
+        try:
+            cand._setup_augmented_pair_transforms(X_train_original, y_train, fit=True)
+        finally:
+            if hasattr(cand, "_native_augmented_pair_cache_"):
+                delattr(cand, "_native_augmented_pair_cache_")
+            if hasattr(cand, "_native_augmented_pair_score_topK_"):
+                delattr(cand, "_native_augmented_pair_score_topK_")
+    original_fit_block = _hugiml_original_fit_block(
+        cand, X_train_original, original_feature_cache
+    )
+    bound_original_methods = _hugiml_bind_original_block(cand, original_fit_block)
     cand._current_y_for_downstream_topk_ = y_train
     try:
         X_down = cand._make_downstream_features(X_train_original, cand.x_train_hup_, fit=True)
     finally:
+        _hugiml_unbind_original_block(cand, bound_original_methods)
         if hasattr(cand, "_current_y_for_downstream_topk_"):
             delattr(cand, "_current_y_for_downstream_topk_")
     X_down = cand._apply_strict_topk_budget_fit(X_down, y_train)
+    X_down = cand._canonicalize_lr_downstream_fit(X_down)
     cand.x_train_downstream_ = X_down
     cand._cache_downstream_feature_metadata()
     # Intentionally does not build/fit model_ here -- see
@@ -290,6 +398,9 @@ def _hugiml_fit_downstream_estimator_from_template(
     template: HUGIMLClassifier,
     base_estimator_value: Any,
     y_train: Any,
+    X_validation_downstream: Any | None = None,
+    y_validation: Any | None = None,
+    defer_final_downstream: bool = False,
 ) -> HUGIMLClassifier:
     """Fit one base_estimator candidate's downstream estimator against an
     already-prepared template's cached downstream feature matrix, without
@@ -307,9 +418,13 @@ def _hugiml_fit_downstream_estimator_from_template(
         # sharing this template is identical regardless of base_estimator.
         return template
 
-    cand = copy.copy(template)
+    cand = _hugiml_shared_state_candidate(template)
     cand.base_estimator = base_estimator_value
     X_down = cand.x_train_downstream_
+    if X_validation_downstream is not None:
+        X_validation_downstream = cand._apply_lr_downstream_canonical_transform(
+            X_validation_downstream
+        )
     cand.model_ = Pipeline([("clf", cand._make_estimator(len(cand.classes_)))])
     _downstream_names_for_wiring = cand._get_downstream_feature_names()
     if len(_downstream_names_for_wiring) != X_down.shape[1]:
@@ -327,12 +442,310 @@ def _hugiml_fit_downstream_estimator_from_template(
         cand.get_pattern_provenance(),
         cand.get_original_feature_standardization(),
     )
-    cand.model_.fit(X_down, y_train)
+    downstream_estimator = cand.model_.named_steps["clf"]
+    if (
+        X_validation_downstream is not None
+        and y_validation is not None
+        and isinstance(downstream_estimator, OneVsRestClassifier)
+        and hasattr(downstream_estimator.estimator, "_fit_with_supplied_validation")
+    ):
+        y_train_arr = np.asarray(y_train)
+        y_validation_arr = np.asarray(y_validation)
+        label_binarizer = LabelBinarizer(sparse_output=True)
+        encoded = label_binarizer.fit_transform(y_train_arr)
+        encoded = csr_matrix(encoded).tocsc()
+        estimators = []
+        class_targets = (
+            [label_binarizer.classes_[1]]
+            if len(label_binarizer.classes_) == 2
+            else list(label_binarizer.classes_)
+        )
+        for column_index, class_value in enumerate(class_targets):
+            binary_train = np.asarray(encoded[:, column_index].toarray()).ravel().astype(int)
+            binary_validation = (y_validation_arr == class_value).astype(int)
+            estimator = clone(downstream_estimator.estimator)
+            if defer_final_downstream:
+                estimator._fast_tune_monitor_only = True
+            estimator._fit_with_supplied_validation(
+                X_down,
+                binary_train,
+                X_validation_downstream,
+                binary_validation,
+            )
+            estimators.append(estimator)
+        downstream_estimator.estimators_ = estimators
+        downstream_estimator.label_binarizer_ = label_binarizer
+        downstream_estimator.classes_ = label_binarizer.classes_
+        downstream_estimator.n_features_in_ = int(X_down.shape[1])
+    elif (
+        X_validation_downstream is not None
+        and y_validation is not None
+        and hasattr(downstream_estimator, "_fit_with_supplied_validation")
+    ):
+        if defer_final_downstream:
+            downstream_estimator._fast_tune_monitor_only = True
+        downstream_estimator._fit_with_supplied_validation(
+            X_down,
+            y_train,
+            X_validation_downstream,
+            y_validation,
+        )
+    else:
+        cand.model_.fit(X_down, y_train)
     cand._apply_execution_mode_retention()
     # Intentionally avoid drift baseline and rich metadata during tuning. The
     # returned best_model is immediately usable for prediction; call fit() on the
     # selected params if full production metadata/drift baseline is required.
     return cand
+
+
+def _hugiml_validation_downstream_matrix(
+    template: HUGIMLClassifier,
+    X_validation: Any,
+    original_feature_cache: dict[str, Any] | None = None,
+):
+    """Transform validation rows into a prepared candidate's downstream space."""
+    raw_X = X_validation
+    pattern_X = X_validation
+    if getattr(template, "adaptive_binning", False) and getattr(
+        template, "_bin_edges_", None
+    ):
+        pattern_X = template._prebin_for_predict(pattern_X)
+    pattern_matrix = template._build_test_hup(pattern_X)
+    original_validation_block = None
+    if original_feature_cache is not None and str(template.feature_mode) != "patterns_only":
+        original_validation_block = original_feature_cache.get("validation")
+        if original_validation_block is None:
+            original_validation_block = template._prepare_original_features_for_downstream(
+                raw_X, fit=False
+            )
+            original_feature_cache["validation"] = original_validation_block
+            original_feature_cache["validation_misses"] = int(
+                original_feature_cache.get("validation_misses", 0)
+            ) + 1
+        else:
+            original_feature_cache["validation_hits"] = int(
+                original_feature_cache.get("validation_hits", 0)
+            ) + 1
+    bound_original_methods = _hugiml_bind_original_block(
+        template, original_validation_block, selected_transform=True
+    )
+    try:
+        downstream = template._make_downstream_features(raw_X, pattern_matrix, fit=False)
+    finally:
+        _hugiml_unbind_original_block(template, bound_original_methods)
+    return template._apply_strict_topk_budget_transform(downstream)
+
+
+def _hugiml_shared_state_candidate(
+    template: HUGIMLClassifier,
+) -> HUGIMLClassifier:
+    """Create an estimator shell that shares the template's cached artifacts."""
+    candidate = template.__class__.__new__(template.__class__)
+    candidate.__dict__ = template.__dict__.copy()
+    return candidate
+
+
+def _hugiml_matrix_fingerprint(matrix: Any) -> str:
+    """Return a content fingerprint for an exact downstream-matrix lookup."""
+    digest = hashlib.sha256()
+    digest.update(repr(tuple(matrix.shape)).encode("ascii"))
+    if issparse(matrix):
+        value = matrix.tocsr(copy=False)
+        if not value.has_canonical_format or not value.has_sorted_indices:
+            value = value.copy()
+            value.sum_duplicates()
+            value.sort_indices()
+        digest.update(value.dtype.str.encode("ascii"))
+        digest.update(value.indptr.tobytes())
+        digest.update(value.indices.tobytes())
+        digest.update(value.data.tobytes())
+    else:
+        value = np.ascontiguousarray(np.asarray(matrix))
+        digest.update(value.dtype.str.encode("ascii"))
+        digest.update(value.tobytes())
+    return digest.hexdigest()
+
+
+_FAST_TUNE_ORIGINAL_ATTRS = (
+    "_original_numeric_cols_",
+    "_original_cat_cols_",
+    "_original_numeric_medians_",
+    "_original_numeric_medians_array_",
+    "_original_scaler_",
+    "_original_dummy_columns_",
+    "_original_feature_names_downstream_",
+)
+
+
+def _hugiml_original_fit_block(
+    candidate: HUGIMLClassifier,
+    X_train: Any,
+    cache: dict[str, Any] | None,
+) -> Any | None:
+    """Prepare or attach the fold-invariant original training block."""
+    if cache is None or str(candidate.feature_mode) == "patterns_only":
+        return None
+    entry = cache.get("fit")
+    if entry is None:
+        matrix = candidate._prepare_original_features_for_downstream(X_train, fit=True)
+        entry = {
+            "matrix": matrix,
+            "attrs": {
+                name: getattr(candidate, name)
+                for name in _FAST_TUNE_ORIGINAL_ATTRS
+                if hasattr(candidate, name)
+            },
+        }
+        cache["fit"] = entry
+        cache["fit_misses"] = int(cache.get("fit_misses", 0)) + 1
+    else:
+        cache["fit_hits"] = int(cache.get("fit_hits", 0)) + 1
+        for name, value in entry["attrs"].items():
+            setattr(candidate, name, value)
+    return entry["matrix"]
+
+
+def _hugiml_bind_original_block(
+    candidate: HUGIMLClassifier,
+    matrix: Any | None,
+    *,
+    selected_transform: bool = False,
+) -> list[str]:
+    """Temporarily route original-feature preparation to a cached matrix."""
+    installed: list[str] = []
+    if matrix is None:
+        return installed
+
+    def cached_full(_self, _X, fit=False):
+        return matrix
+
+    candidate._prepare_original_features_for_downstream = MethodType(
+        cached_full, candidate
+    )
+    installed.append("_prepare_original_features_for_downstream")
+    if selected_transform:
+        full_names = [
+            f"orig:{name}"
+            for name in getattr(candidate, "_original_feature_names_downstream_", [])
+        ]
+        positions = {name: idx for idx, name in enumerate(full_names)}
+
+        def cached_selected(_self, _X, selected_names):
+            indices = [positions[name] for name in selected_names]
+            return matrix[:, indices], list(selected_names)
+
+        candidate._prepare_selected_original_features_for_downstream_transform = MethodType(
+            cached_selected, candidate
+        )
+        installed.append("_prepare_selected_original_features_for_downstream_transform")
+    return installed
+
+
+def _hugiml_unbind_original_block(candidate: HUGIMLClassifier, names: list[str]) -> None:
+    for name in names:
+        candidate.__dict__.pop(name, None)
+
+
+def _hugiml_validation_structure_signature(template: HUGIMLClassifier) -> str:
+    """Identify an exact ordered downstream representation within one fold."""
+    digest = hashlib.sha256()
+    digest.update(str(template.feature_mode).encode("utf-8"))
+    digest.update(str(bool(getattr(template, "topk_budget_strict", False))).encode("ascii"))
+    transaction = getattr(template, "td_", None)
+    digest.update(str(id(getattr(transaction, "_td", transaction))).encode("ascii"))
+    for pattern in getattr(template, "patterns_", []):
+        digest.update(repr(tuple(int(item) for item in pattern.items)).encode("ascii"))
+    digest.update(
+        repr(getattr(template, "augmented_pair_transforms_", [])).encode("utf-8")
+    )
+    block = getattr(template, "_augmented_pair_block_", None)
+    for name in ("scaler_mean_", "scaler_scale_", "pair_reference_values_"):
+        value = getattr(block, name, None)
+        if value is not None:
+            digest.update(np.ascontiguousarray(np.asarray(value)).tobytes())
+    for name in (
+        "_original_selected_feature_names_downstream_",
+        "_original_feature_mask_downstream_",
+        "_strict_topk_feature_mask_",
+    ):
+        digest.update(repr(getattr(template, name, None)).encode("utf-8"))
+    return digest.hexdigest()
+
+
+def _hugiml_score_prepared_downstream(
+    model: HUGIMLClassifier,
+    X_downstream: Any,
+    y_val: Any,
+    scoring: str,
+) -> float:
+    """Score a candidate from its already prepared validation matrix."""
+    from sklearn.metrics import accuracy_score, balanced_accuracy_score, f1_score, log_loss
+
+    scoring_norm = str(scoring).lower()
+    X_downstream = model._apply_lr_downstream_canonical_transform(X_downstream)
+    downstream_model = model.model_
+    if scoring_norm in {"roc_auc", "auc"}:
+        proba = np.asarray(downstream_model.predict_proba(X_downstream))
+        return _hugiml_auc_score_for_fast_grid(y_val, proba, model.classes_)
+    if scoring_norm in {"log_loss", "neg_log_loss", "negative_log_loss"}:
+        proba = np.asarray(downstream_model.predict_proba(X_downstream))
+        return -float(log_loss(y_val, proba, labels=np.asarray(model.classes_)))
+
+    pred = np.asarray(downstream_model.predict(X_downstream))
+    if scoring_norm == "accuracy":
+        return float(accuracy_score(y_val, pred))
+    if scoring_norm == "balanced_accuracy":
+        return float(balanced_accuracy_score(y_val, pred))
+    if scoring_norm in {"f1", "f1_binary"}:
+        return float(f1_score(y_val, pred))
+    if scoring_norm == "f1_macro":
+        return float(f1_score(y_val, pred, average="macro"))
+    if scoring_norm == "f1_weighted":
+        return float(f1_score(y_val, pred, average="weighted"))
+    raise HUGIMLParamError(
+        "Unsupported scoring value. Supported: 'roc_auc', 'neg_log_loss', 'accuracy', "
+        "'balanced_accuracy', 'f1', 'f1_macro', 'f1_weighted'."
+    )
+
+
+def _hugiml_matrices_equal(left: Any, right: Any) -> bool:
+    """Confirm matrix equality after a fingerprint match."""
+    if tuple(left.shape) != tuple(right.shape):
+        return False
+    if issparse(left) or issparse(right):
+        left_csr = csr_matrix(left)
+        right_csr = csr_matrix(right)
+        difference = left_csr != right_csr
+        return int(difference.nnz) == 0
+    return bool(np.array_equal(np.asarray(left), np.asarray(right)))
+
+
+def _hugiml_reused_downstream_candidate(
+    template: HUGIMLClassifier,
+    base_estimator_value: Any,
+    fitted: HUGIMLClassifier,
+) -> HUGIMLClassifier:
+    """Attach an exactly equivalent fitted downstream model to a new template."""
+    candidate = _hugiml_shared_state_candidate(template)
+    candidate.base_estimator = base_estimator_value
+    candidate.model_ = fitted.model_
+    for attr in (
+        "_downstream_lr_canonical_mask_",
+        "_downstream_lr_canonicalization_",
+    ):
+        if hasattr(fitted, attr):
+            setattr(candidate, attr, getattr(fitted, attr))
+    if hasattr(candidate, "x_train_downstream_"):
+        mask = getattr(candidate, "_downstream_lr_canonical_mask_", None)
+        if mask is not None and int(candidate.x_train_downstream_.shape[1]) == len(mask):
+            candidate.x_train_downstream_ = (
+                candidate._apply_lr_downstream_canonical_transform(
+                    candidate.x_train_downstream_
+                )
+            )
+    candidate._apply_execution_mode_retention()
+    return candidate
 
 
 def _hugiml_prepare_candidate_from_cached_base(
@@ -526,6 +939,7 @@ def _hugiml_fast_grid_tune(
     for _key in sorted(_grid_keys - _explicit_keys):
         if _key not in params0:
             params0[_key] = candidates[0][_key]
+    benchmark_lr_C = float(params0.pop("lr_C", 1.0))
     if (
         params0.get("max_fit_seconds", None) is not None
         or params0.get("max_mining_seconds", None) is not None
@@ -549,6 +963,9 @@ def _hugiml_fast_grid_tune(
     disable_validation_cache = (
         os.environ.get("HUGIML_FAST_TUNE_DISABLE_VALIDATION_CACHE", "0") == "1"
     )
+    disable_original_feature_cache = (
+        os.environ.get("HUGIML_FAST_TUNE_DISABLE_ORIGINAL_FEATURE_CACHE", "0") == "1"
+    )
     t_adapt_ctx = time.perf_counter()
     adaptive_context = None
     if not disable_prep_cache and not bool(params0.get("interaction_relaxed_mining", False)):
@@ -560,33 +977,28 @@ def _hugiml_fast_grid_tune(
     adaptive_context_seconds = time.perf_counter() - t_adapt_ctx
     transaction_cache: dict[Any, Any] = {}
 
-    # Correctness note: topK is NOT derived by mining max(topK) once and slicing.
-    # Empirically, the native miner can return additional valid patterns when a
-    # larger topK is requested, so a smaller standalone topK run is not always
-    # equivalent to a prefix of the larger run.  To guarantee identical validation
-    # scores to the ordinary grid loop, cache one mining fit per (G, L, topK)
-    # group and reuse that cache only across feature_mode candidates.  Within
-    # each cache fit, fit() already sorts raw_patterns_ by descending utility with
-    # tuple(items) tie-breaking before downstream construction.
+    topk_values_by_G_L: dict[tuple[float, int], list[int]] = {}
+    for candidate in candidates:
+        key = (
+            float(candidate.get("G", params0.get("G", 1e-2))),
+            int(candidate.get("L", 1)),
+        )
+        topk_values_by_G_L.setdefault(key, []).append(int(candidate.get("topK", 30)))
+    topk_values_by_G_L = {
+        key: sorted(set(values)) for key, values in topk_values_by_G_L.items()
+    }
     base_by_G_L_topK: dict[tuple[float, int, int], HUGIMLClassifier] = {}
     cache_fit_seconds: dict[str, float] = {}
-    needed_cache_keys = sorted(
-        {
-            (
-                float(c.get("G", params0.get("G", 1e-2))),
-                int(c.get("L", 1)),
-                int(c.get("topK", 30)),
-            )
-            for c in candidates
-        }
-    )
-    for G_value, L_value, topK_value in needed_cache_keys:
+    mining_specs: list[tuple[float, int, int]] = []
+    for (G_value, L_value), values in sorted(topk_values_by_G_L.items()):
+        mining_specs.extend((G_value, L_value, value) for value in values)
+    for G_value, L_value, mining_topK in mining_specs:
         base_fit_params = dict(params0)
         base_fit_params.update(
             {
                 "adaptive_binning": True,
                 "L": int(L_value),
-                "topK": int(topK_value),
+                "topK": int(mining_topK),
                 # Use the richest ordinary mode so raw input is preserved and
                 # empty-pattern fallbacks do not fail while building the cache.
                 "feature_mode": "original_plus_patterns",
@@ -601,6 +1013,7 @@ def _hugiml_fast_grid_tune(
         # under adaptive_binning=True.
         t_fit = time.perf_counter()
         base = cls(**base_fit_params)
+        base._benchmark_lr_C = benchmark_lr_C
         base._fast_tune_cache_only = True
         # Reuse pre-binning and transaction preparation for the non-fused L>1
         # cache fits.  L=1 keeps the native fused adaptive path unchanged so
@@ -614,10 +1027,13 @@ def _hugiml_fast_grid_tune(
             base.__dict__.pop("_fast_tune_cache_only", None)
             base.__dict__.pop("_fast_tune_adaptive_context", None)
             base.__dict__.pop("_fast_tune_transaction_cache", None)
-        cache_fit_seconds[f"G={float(G_value):.12g},L={int(L_value)},topK={int(topK_value)}"] = (
+        cache_key = (
+            f"G={float(G_value):.12g},L={int(L_value)},topK={int(mining_topK)}"
+        )
+        cache_fit_seconds[cache_key] = (
             time.perf_counter() - t_fit
         )
-        base_by_G_L_topK[(float(G_value), int(L_value), int(topK_value))] = base
+        base_by_G_L_topK[(float(G_value), int(L_value), int(mining_topK))] = base
 
     native_augmented_pair_cache = (
         _core.AugmentedPairCache()
@@ -628,6 +1044,10 @@ def _hugiml_fast_grid_tune(
         [int(c.get("topK", params0.get("topK", 30))) for c in candidates if int(c.get("L", 1)) > 1]
         or [0]
     )
+    # Native augmented-pair work is cached by its complete input signature.
+    # A block is not shared across different G/topK representations because
+    # those representations need not contain the same ranked pattern set.
+    maximal_augmented_pair_block = None
 
     validation_cache: dict[Any, Any] | None = None if disable_validation_cache else {}
     # Second-level cache: one prepared downstream feature matrix per (G, L,
@@ -637,6 +1057,20 @@ def _hugiml_fast_grid_tune(
     # doesn't vary base_estimator this costs nothing extra: each key is
     # still built exactly once, same as before the split existed.
     downstream_template_cache: dict[tuple[float, int, int, str], HUGIMLClassifier] = {}
+    validation_downstream_cache: dict[tuple[float, int, int, str], Any] = {}
+    validation_structure_cache: dict[str, Any] = {}
+    downstream_artifact_cache: dict[tuple[float, int, int, str], dict[str, Any]] = {}
+    equivalent_downstream_fit_cache: dict[tuple[Any, ...], list[Any]] = {}
+    equivalent_downstream_fit_reuses = 0
+    template_prepare_seconds: dict[str, float] = {}
+    validation_prepare_seconds: dict[str, float] = {}
+    fingerprint_seconds: dict[str, float] = {}
+    downstream_fit_seconds = 0.0
+    downstream_score_seconds = 0.0
+    validation_structure_reuses = 0
+    original_feature_cache: dict[str, Any] | None = (
+        None if disable_original_feature_cache else {}
+    )
 
     rows: list[dict[str, Any]] = []
     best_score = -np.inf
@@ -654,10 +1088,16 @@ def _hugiml_fast_grid_tune(
         err = None
         score = np.nan
         model = None
+        downstream_fit_reused = False
         try:
             template_key = (G_value, L_value, topK_value, feature_mode)
+            template_label = (
+                f"G={G_value:.12g},L={L_value},topK={topK_value},"
+                f"feature_mode={feature_mode}"
+            )
             template = downstream_template_cache.get(template_key)
             if template is None:
+                t_template = time.perf_counter()
                 template = _hugiml_prepare_downstream_template_from_cached_base(
                     base_by_G_L_topK[(G_value, L_value, topK_value)],
                     X_train_original,
@@ -668,12 +1108,117 @@ def _hugiml_fast_grid_tune(
                     requested_execution_mode,
                     native_augmented_pair_cache,
                     native_augmented_pair_score_topK,
+                    maximal_augmented_pair_block,
+                    original_feature_cache,
                 )
                 downstream_template_cache[template_key] = template
-            model = _hugiml_fit_downstream_estimator_from_template(
-                template, base_estimator_value, y_train_arr
+                template_prepare_seconds[template_label] = time.perf_counter() - t_template
+            validation_downstream = validation_downstream_cache.get(template_key)
+            if validation_downstream is None and not hasattr(template, "model_"):
+                structure_signature = _hugiml_validation_structure_signature(template)
+                validation_downstream = validation_structure_cache.get(structure_signature)
+                if validation_downstream is not None:
+                    validation_structure_reuses += 1
+                    validation_prepare_seconds[template_label] = 0.0
+                else:
+                    t_validation = time.perf_counter()
+                    validation_template = _hugiml_shared_state_candidate(template)
+                    validation_template.model_ = object()
+                    validation_downstream = _hugiml_validation_downstream_matrix(
+                        validation_template, X_val, original_feature_cache
+                    )
+                    validation_structure_cache[structure_signature] = validation_downstream
+                    validation_prepare_seconds[template_label] = (
+                        time.perf_counter() - t_validation
+                    )
+                validation_downstream_cache[template_key] = validation_downstream
+            if hasattr(template, "model_"):
+                t_downstream_fit = time.perf_counter()
+                model = _hugiml_fit_downstream_estimator_from_template(
+                    template,
+                    base_estimator_value,
+                    y_train_arr,
+                    validation_downstream,
+                    y_val_arr,
+                    defer_final_downstream=True,
+                )
+                downstream_fit_seconds += time.perf_counter() - t_downstream_fit
+            else:
+                artifact = downstream_artifact_cache.get(template_key)
+                if artifact is None:
+                    t_fingerprint = time.perf_counter()
+                    artifact = {
+                        "feature_names": tuple(template._get_downstream_feature_names()),
+                        "feature_metadata": repr(
+                            (
+                                template.get_augmented_pair_transforms(),
+                                template.get_pattern_provenance(),
+                                template.get_original_feature_standardization(),
+                            )
+                        ),
+                        "training_fingerprint": _hugiml_matrix_fingerprint(
+                            template.x_train_downstream_
+                        ),
+                        "validation_fingerprint": _hugiml_matrix_fingerprint(
+                            validation_downstream
+                        ),
+                    }
+                    downstream_artifact_cache[template_key] = artifact
+                    fingerprint_seconds[template_label] = (
+                        time.perf_counter() - t_fingerprint
+                    )
+                fit_key = (
+                    repr(base_estimator_value),
+                    float(getattr(template, "_benchmark_lr_C", benchmark_lr_C)),
+                    str(getattr(template, "lr_solver", params0.get("lr_solver", "auto"))),
+                    artifact["training_fingerprint"],
+                    artifact["validation_fingerprint"],
+                    artifact["feature_names"],
+                    artifact["feature_metadata"],
+                )
+                entries = equivalent_downstream_fit_cache.setdefault(fit_key, [])
+                equivalent = next(
+                    (
+                        entry
+                        for entry in entries
+                        if _hugiml_matrices_equal(
+                            template.x_train_downstream_, entry["training_matrix"]
+                        )
+                        and _hugiml_matrices_equal(
+                            validation_downstream, entry["validation_matrix"]
+                        )
+                    ),
+                    None,
+                )
+                if equivalent is None:
+                    t_downstream_fit = time.perf_counter()
+                    model = _hugiml_fit_downstream_estimator_from_template(
+                        template,
+                        base_estimator_value,
+                        y_train_arr,
+                        validation_downstream,
+                        y_val_arr,
+                        defer_final_downstream=True,
+                    )
+                    downstream_fit_seconds += time.perf_counter() - t_downstream_fit
+                    entries.append(
+                        {
+                            "training_matrix": template.x_train_downstream_,
+                            "validation_matrix": validation_downstream,
+                            "model": model,
+                        }
+                    )
+                else:
+                    model = _hugiml_reused_downstream_candidate(
+                        template, base_estimator_value, equivalent["model"]
+                    )
+                    downstream_fit_reused = True
+                    equivalent_downstream_fit_reuses += 1
+            t_score = time.perf_counter()
+            score = _hugiml_score_prepared_downstream(
+                model, validation_downstream, y_val_arr, scoring
             )
-            score = _hugiml_score_model_for_tune(model, X_val, y_val_arr, scoring, validation_cache)
+            downstream_score_seconds += time.perf_counter() - t_score
             if np.isfinite(score) and score > best_score:
                 best_score = float(score)
                 best_model = model
@@ -696,16 +1241,33 @@ def _hugiml_fast_grid_tune(
                 "mean_test_score": score,
                 "status": status,
                 "error": err,
+                "downstream_fit_reused": downstream_fit_reused,
                 "elapsed_seconds": time.perf_counter() - t_cand,
             }
         )
 
     if best_model is None or best_params is None:
-        raise HUGIMLValidationError("All fast_grid_tune candidates failed.")
+        failures = [str(row.get("error")) for row in rows if row.get("error")]
+        detail = failures[-1] if failures else "no candidate detail was recorded"
+        raise HUGIMLValidationError(
+            f"All fast_grid_tune candidates failed. Last candidate: {detail}"
+        )
+
+    selected_downstream = best_model.model_.named_steps["clf"]
+    selected_estimators = (
+        list(selected_downstream.estimators_)
+        if isinstance(selected_downstream, OneVsRestClassifier)
+        else [selected_downstream]
+    )
+    for selected_estimator in selected_estimators:
+        finalize = getattr(selected_estimator, "_finalize_fast_tune_monitor", None)
+        if finalize is not None:
+            finalize()
 
     if refit_full:
         refit_params = dict(params0)
         refit_params.update(best_params)
+        refit_lr_C = float(refit_params.pop("lr_C", benchmark_lr_C))
         # The search above runs every candidate under 'production' by default
         # for speed; refit_full's purpose is producing one normal, fully
         # inspectable model from the winning configuration, so unless the
@@ -716,7 +1278,9 @@ def _hugiml_fast_grid_tune(
         if not _caller_set_execution_mode:
             refit_params["execution_mode"] = "audit"
         # Keep user-supplied B if present; adaptive_binning ignores it for transaction B.
-        best_model = cls(**refit_params).fit(X_train, y_train_arr)
+        best_model = cls(**refit_params)
+        best_model._benchmark_lr_C = refit_lr_C
+        best_model.fit(X_train, y_train_arr)
 
     result = {
         "best_model": best_model,
@@ -724,9 +1288,31 @@ def _hugiml_fast_grid_tune(
         "best_score": float(best_score),
         "cv_results": rows if return_results else None,
         "cache_fit_seconds_by_G_L_topK": cache_fit_seconds,
-        "cache_topK_strategy": "exact_per_G_L_topK_utility_ordered",
+        "cache_topK_strategy": "exact_per_G_L_topK",
+        "mining_calls": int(len(mining_specs)),
         "native_augmented_pair_cache_stats": (
             native_augmented_pair_cache.stats() if native_augmented_pair_cache is not None else None
+        ),
+        "template_prepare_seconds": template_prepare_seconds,
+        "validation_prepare_seconds": validation_prepare_seconds,
+        "fingerprint_seconds": fingerprint_seconds,
+        "downstream_fit_seconds": float(downstream_fit_seconds),
+        "downstream_score_seconds": float(downstream_score_seconds),
+        "downstream_template_count": int(len(downstream_template_cache)),
+        "validation_structure_reuses": int(validation_structure_reuses),
+        "validation_structure_count": int(len(validation_structure_cache)),
+        "original_feature_cache_stats": (
+            {
+                key: int(original_feature_cache.get(key, 0))
+                for key in (
+                    "fit_hits",
+                    "fit_misses",
+                    "validation_hits",
+                    "validation_misses",
+                )
+            }
+            if original_feature_cache is not None
+            else None
         ),
         "adaptive_context_seconds": float(adaptive_context_seconds),
         "adaptive_context_used": bool(adaptive_context is not None and "X_pre" in adaptive_context),
@@ -736,16 +1322,18 @@ def _hugiml_fast_grid_tune(
         "adaptive_context_hits": (
             max(
                 0,
-                sum(1 for _g, _l, _k in needed_cache_keys if int(_l) > 1)
+                sum(1 for _g, _l, _k in mining_specs if int(_l) > 1)
                 - int(adaptive_context.get("misses", 0)),
             )
             if isinstance(adaptive_context, dict) and "X_pre" in adaptive_context
             else 0
         ),
         "transaction_cache_entries": len(transaction_cache),
+        "equivalent_downstream_fit_reuses": int(equivalent_downstream_fit_reuses),
         "validation_cache_entries": len(validation_cache) if validation_cache is not None else 0,
         "prep_cache_disabled": bool(disable_prep_cache),
         "validation_cache_disabled": bool(disable_validation_cache),
+        "original_feature_cache_disabled": bool(disable_original_feature_cache),
         "elapsed_seconds": time.perf_counter() - t_start,
         "method": "exact_cached_adaptive_grid",
         "scoring": str(scoring),
@@ -808,7 +1396,7 @@ def _hugiml_score_model_for_tune(
     validation_cache: dict[Any, Any] | None = None,
 ) -> float:
     """Score one fitted model for HUGIMLClassifier.tune()."""
-    from sklearn.metrics import accuracy_score, balanced_accuracy_score, f1_score
+    from sklearn.metrics import accuracy_score, balanced_accuracy_score, f1_score, log_loss
 
     scoring_norm = str(scoring).lower()
     pred = None
@@ -838,7 +1426,8 @@ def _hugiml_score_model_for_tune(
                 validation_cache[z_key] = Z_val
             X_downstream = model._make_downstream_features(X_original, Z_val, fit=False)
             X_downstream = model._apply_strict_topk_budget_transform(X_downstream)
-            if scoring_norm in {"roc_auc", "auc"}:
+            X_downstream = model._apply_lr_downstream_canonical_transform(X_downstream)
+            if scoring_norm in {"roc_auc", "auc", "log_loss", "neg_log_loss", "negative_log_loss"}:
                 proba = np.asarray(model.model_.predict_proba(X_downstream))
             else:
                 pred = np.asarray(model.model_.predict(X_downstream))
@@ -851,6 +1440,10 @@ def _hugiml_score_model_for_tune(
         if proba is None:
             proba = model.predict_proba(X_val)
         return _hugiml_auc_score_for_fast_grid(y_val, proba, model.classes_)
+    if scoring_norm in {"log_loss", "neg_log_loss", "negative_log_loss"}:
+        if proba is None:
+            proba = np.asarray(model.predict_proba(X_val))
+        return -float(log_loss(y_val, proba, labels=np.asarray(model.classes_)))
     if pred is None:
         pred = model.predict(X_val)
     if scoring_norm == "accuracy":
@@ -864,7 +1457,7 @@ def _hugiml_score_model_for_tune(
     if scoring_norm == "f1_weighted":
         return float(f1_score(y_val, pred, average="weighted"))
     raise HUGIMLParamError(
-        "Unsupported scoring value. Supported: 'roc_auc', 'accuracy', "
+        "Unsupported scoring value. Supported: 'roc_auc', 'neg_log_loss', 'accuracy', "
         "'balanced_accuracy', 'f1', 'f1_macro', 'f1_weighted'."
     )
 
@@ -894,7 +1487,10 @@ def _hugiml_standard_grid_tune_one_split(
         score = np.nan
         model = None
         try:
-            model = cls(**params).fit(X_train, y_train_arr)
+            benchmark_lr_C = float(params.pop("lr_C", 1.0))
+            model = cls(**params)
+            model._benchmark_lr_C = benchmark_lr_C
+            model.fit(X_train, y_train_arr)
             score = _hugiml_score_model_for_tune(model, X_val, y_val, scoring)
             if np.isfinite(score) and score > best_score:
                 best_score = float(score)
@@ -956,7 +1552,7 @@ def _hugiml_tune(
     cv : int or splitter, default=5
         Number of stratified folds, or any sklearn-compatible splitter with
         split(X, y). Integer cv uses StratifiedKFold.
-    scoring : {'roc_auc', 'accuracy', 'balanced_accuracy', 'f1', 'f1_macro', 'f1_weighted'}
+    scoring : {'roc_auc', 'neg_log_loss', 'accuracy', 'balanced_accuracy', 'f1', 'f1_macro', 'f1_weighted'}
         Validation metric. 'roc_auc' supports binary and multiclass OVR macro AUC.
     param_grid : dict or None
         A dict (sklearn-style grid), the name of a grid registered in
@@ -1194,14 +1790,20 @@ def _hugiml_tune(
     # default.
     if not _caller_set_execution_mode:
         best_params["execution_mode"] = "audit"
+    refit_params = dict(best_params)
+    refit_lr_C = float(refit_params.pop("lr_C", 1.0))
     if refit:
-        best_estimator = cls(**best_params).fit(X, y_arr)
+        best_estimator = cls(**refit_params)
+        best_estimator._benchmark_lr_C = refit_lr_C
+        best_estimator.fit(X, y_arr)
     else:
         # Return a fitted estimator from the first fold for convenience.  It is
         # valid for immediate inspection/prediction on that fold's fitted state,
         # but refit=True is recommended for production use.
         train_idx, val_idx = splits[0]
-        best_estimator = cls(**best_params).fit(_take_rows(X, train_idx), y_arr[train_idx])
+        best_estimator = cls(**refit_params)
+        best_estimator._benchmark_lr_C = refit_lr_C
+        best_estimator.fit(_take_rows(X, train_idx), y_arr[train_idx])
 
     if return_dataframe:
         try:

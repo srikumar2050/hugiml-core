@@ -216,6 +216,34 @@ def get_complexity_report(
     if report is None:
         return None
 
+    if _is_hugiml(candidate):
+        audit_method = getattr(candidate, "get_downstream_redundancy_audit", None)
+        canonical = (
+            audit_method(include_feature_names=False)
+            if callable(audit_method)
+            else getattr(candidate, "_downstream_lr_canonicalization_", None)
+        )
+        if isinstance(canonical, dict):
+            report["downstream_redundancy_audit"] = {
+                "training_data_only": canonical.get("training_data_only", True),
+                "input_columns": canonical.get("input_columns"),
+                "retained_columns": canonical.get("retained_columns"),
+                "removed_constant_columns": canonical.get("removed_constant_columns"),
+                "removed_duplicate_columns": canonical.get("removed_duplicate_columns"),
+                "removed_complementary_columns": canonical.get("removed_complementary_columns"),
+                "vif_threshold": canonical.get("vif_threshold"),
+                "representation_r2_threshold": canonical.get("representation_r2_threshold"),
+                "vif_columns_above_threshold": canonical.get("vif_columns_above_threshold"),
+                "removed_high_vif_pattern_columns": canonical.get(
+                    "removed_high_vif_pattern_columns"
+                ),
+                "removed_high_vif_augmented_pair_columns": canonical.get(
+                    "removed_high_vif_augmented_pair_columns"
+                ),
+                "maximum_vif": canonical.get("maximum_vif"),
+                "median_vif": canonical.get("median_vif"),
+            }
+
     if X is not None:
         values = get_instance_inspection_units(
             model,
@@ -473,9 +501,7 @@ def _hugiml_feature_inspection_size(
         if display_name in augmented_pair_sizes:
             return int(augmented_pair_sizes[display_name])
     if condition:
-        raw_sources = [
-            str(value) for value in (condition.get("raw_sources") or []) if str(value)
-        ]
+        raw_sources = [str(value) for value in (condition.get("raw_sources") or []) if str(value)]
         if raw_sources:
             return max(1, len(dict.fromkeys(raw_sources)))
     return 1
@@ -618,10 +644,7 @@ def _hugiml_complexity_report(model: Any, tolerance: float) -> dict[str, Any]:
             "term_counts": family_term_counts,
             "units_by_family": family_inspection_units,
             "selected_pattern_model_inspection_units": int(
-                sum(
-                    pattern_sizes.get(f"pattern:{label}", 1)
-                    for label in model.get_hug_features()
-                )
+                sum(pattern_sizes.get(f"pattern:{label}", 1) for label in model.get_hug_features())
             ),
         },
     )
@@ -638,7 +661,8 @@ def _hugiml_downstream_matrix(model: Any, X: Any) -> Any:
         pattern_X = model._prebin_for_predict(pattern_X)
     Z = model._build_test_hup(pattern_X)
     downstream = model._make_downstream_features(raw_X, Z, fit=False)
-    return model._apply_strict_topk_budget_transform(downstream)
+    downstream = model._apply_strict_topk_budget_transform(downstream)
+    return model._apply_lr_downstream_canonical_transform(downstream)
 
 
 def _rpte_leaf_column_keys(estimator: Any) -> list[tuple[int, int]]:
@@ -868,10 +892,45 @@ def _xgboost_dump(model: Any) -> list[Any] | None:
     return list(dump_method(dump_format="json"))
 
 
+def _xgboost_effective_dump(
+    model: Any,
+    dumps: list[Any],
+) -> tuple[list[Any], int | None]:
+    """Return the trees used by XGBoost inference and its round limit."""
+    get_booster = getattr(model, "get_booster", None)
+    booster = model if callable(getattr(model, "get_dump", None)) else get_booster()
+    best_iteration = getattr(model, "best_iteration", None)
+    if best_iteration is None:
+        try:
+            best_iteration = getattr(booster, "best_iteration", None)
+        except (AttributeError, ValueError):
+            best_iteration = None
+    if best_iteration is None:
+        return dumps, None
+
+    rounds_method = getattr(booster, "num_boosted_rounds", None)
+    if not callable(rounds_method):
+        return dumps, None
+    try:
+        total_rounds = int(rounds_method())
+        effective_rounds = min(int(best_iteration) + 1, total_rounds)
+    except (TypeError, ValueError):
+        return dumps, None
+    if total_rounds <= 0 or effective_rounds <= 0 or len(dumps) % total_rounds:
+        return dumps, None
+
+    trees_per_round = len(dumps) // total_rounds
+    if trees_per_round <= 0:
+        return dumps, None
+    return dumps[: effective_rounds * trees_per_round], effective_rounds
+
+
 def _xgboost_complexity_report(model: Any, tolerance: float) -> dict[str, Any] | None:
     dumps = _xgboost_dump(model)
     if dumps is None:
         return None
+    all_tree_count = len(dumps)
+    dumps, effective_rounds = _xgboost_effective_dump(model, dumps)
     leaf_count = 0
     path_units = 0
     for tree_text in dumps:
@@ -885,8 +944,17 @@ def _xgboost_complexity_report(model: Any, tolerance: float) -> dict[str, Any] |
         model_unit="active_terminal_leaves",
         model_inspection_value=path_units,
         model_inspection_unit="all_active_root_to_leaf_conditions",
-        model_details={"tree_count": int(len(dumps)), "coefficient_tolerance": tolerance},
-        model_inspection_details={"tree_count": int(len(dumps))},
+        model_details={
+            "tree_count": int(len(dumps)),
+            "trained_tree_count": int(all_tree_count),
+            "effective_boosting_rounds": effective_rounds,
+            "coefficient_tolerance": tolerance,
+        },
+        model_inspection_details={
+            "tree_count": int(len(dumps)),
+            "trained_tree_count": int(all_tree_count),
+            "effective_boosting_rounds": effective_rounds,
+        },
     )
 
 
@@ -899,7 +967,14 @@ def _xgboost_instance_inspection_units(
     apply = getattr(model, "apply", None)
     if dumps is None or not callable(apply):
         return None
-    leaf_ids = np.asarray(apply(X))
+    dumps, effective_rounds = _xgboost_effective_dump(model, dumps)
+    if effective_rounds is None:
+        leaf_ids = np.asarray(apply(X))
+    else:
+        try:
+            leaf_ids = np.asarray(apply(X, iteration_range=(0, effective_rounds)))
+        except TypeError:
+            leaf_ids = np.asarray(apply(X))
     if leaf_ids.ndim == 1:
         leaf_ids = leaf_ids.reshape(-1, 1)
     else:
@@ -949,11 +1024,7 @@ def _lightgbm_leaf_depths(
 ) -> dict[int, int]:
     if "leaf_index" in node:
         leaf_id = int(node["leaf_index"])
-        return {
-            leaf_id: depth
-            if _is_active_number(node.get("leaf_value"), tolerance)
-            else 0
-        }
+        return {leaf_id: depth if _is_active_number(node.get("leaf_value"), tolerance) else 0}
     depths: dict[int, int] = {}
     for child_name in ("left_child", "right_child"):
         child = node.get(child_name)
@@ -1331,11 +1402,7 @@ def _count_rule_literals(rule_text: str) -> int:
     text = str(rule_text or "").strip()
     if not text:
         return 1
-    parts = [
-        part.strip()
-        for part in re.split(r"\s+(?:and|AND)\s+|\s*&\s*", text)
-        if part.strip()
-    ]
+    parts = [part.strip() for part in re.split(r"\s+(?:and|AND)\s+|\s*&\s*", text) if part.strip()]
     return max(1, len(parts))
 
 
@@ -1504,9 +1571,11 @@ def _rulefit_instance_inspection_units(
     transformed = _rulefit_transform_matrix(model, X, len(all_rule_rows))
     if transformed is not None:
         present = np.abs(transformed[:, active_rule_positions]) > tolerance
-        result += np.asarray(
-            present @ np.asarray(active_rule_weights, dtype=np.int64)
-        ).reshape(-1).astype(np.int64)
+        result += (
+            np.asarray(present @ np.asarray(active_rule_weights, dtype=np.int64))
+            .reshape(-1)
+            .astype(np.int64)
+        )
         return result
 
     for position, weight in zip(active_rule_positions, active_rule_weights):

@@ -52,7 +52,7 @@ def test_container_scan_is_retained_but_does_not_gate_python_publication() -> No
 
     assert "run_container_scan:" in workflow
     assert "continue-on-error: true" in scan_block
-    assert "actions/download-artifact@v4" in scan_block
+    assert "actions/download-artifact@v8" in scan_block
     assert "wheels-ubuntu-latest-x86_64" in scan_block
     assert "docker/Dockerfile.scan" in scan_block
     assert 'exit-code: "0"' in scan_block

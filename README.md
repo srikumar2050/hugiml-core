@@ -32,47 +32,49 @@ checking_status=no_checking          coef= +1.12     support=0.39
 ## Table of Contents
 
 1. [What Is HUG-IML?](#what-is-hug-iml)
-2. [Why HUG-IML?](#why-hug-iml)
-3. [Installation](#installation)
-4. [Quick Start](#quick-start)
-5. [Feature Modes](#feature-modes)
-6. [Execution Modes](#execution-modes)
-7. [Hyperparameter Search](#hyperparameter-search)
-8. [RPTE: Higher-Order Interactions](#rpte--higher-order-interactions)
-9. [Governance Studio Dashboard](#governance-studio-dashboard)
-10. [LLM Assistant](#llm-assistant)
-11. [Augmented Pair Features](#augmented-pair-features)
-12. [Adaptive Binning](#adaptive-binning)
-13. [Missing Value Handling](#missing-value-handling)
-14. [Model Explanation and Visualisations](#model-explanation-and-visualisations)
-15. [Native Mining Pruning Controls](#native-mining-pruning-controls)
-16. [Pattern Pruning](#pattern-pruning)
-17. [Interpretability Metrics](#interpretability-metrics)
-18. [Multiclass, Imbalanced Data, High-Cardinality](#multiclass-imbalanced-data-high-cardinality)
-19. [Drift Detection & Monitoring](#drift-detection--monitoring)
-20. [Calibration](#calibration)
-21. [Serialisation](#serialisation)
-22. [Governance & Model Cards](#governance--model-cards)
-23. [Benchmark Suite](#benchmark-suite)
-24. [Validation Highlights](#validation-highlights)
-25. [Inference Server](#inference-server)
-26. [CI / CD](#ci--cd)
-27. [Repository Structure](#repository-structure)
-28. [License](#license)
-29. [Citation](#citation)
+2. [Core Philosophy](#core-philosophy)
+3. [Why HUG-IML?](#why-hug-iml)
+4. [Installation](#installation)
+5. [Quick Start](#quick-start)
+6. [Feature Modes](#feature-modes)
+7. [Execution Modes](#execution-modes)
+8. [Hyperparameter Search](#hyperparameter-search)
+9. [RPTE: Higher-Order Interactions](#rpte--higher-order-interactions)
+10. [Governance Studio Dashboard](#governance-studio-dashboard)
+11. [LLM Assistant](#llm-assistant)
+12. [Augmented Pair Features](#augmented-pair-features)
+13. [Adaptive Binning](#adaptive-binning)
+14. [Missing Value Handling](#missing-value-handling)
+15. [Model Explanation and Visualisations](#model-explanation-and-visualisations)
+16. [Native Mining Pruning Controls](#native-mining-pruning-controls)
+17. [Pattern Pruning](#pattern-pruning)
+18. [Interpretability Metrics](#interpretability-metrics)
+19. [Multiclass, Imbalanced Data, High-Cardinality](#multiclass-imbalanced-data-high-cardinality)
+20. [Drift Detection & Monitoring](#drift-detection--monitoring)
+21. [Calibration](#calibration)
+22. [Serialisation](#serialisation)
+23. [Governance & Model Cards](#governance--model-cards)
+24. [Benchmark Suite](#benchmark-suite)
+25. [Example Notebooks: General and Domain-Specific](#example-notebooks-general-and-domain-specific)
+26. [Validation Highlights](#validation-highlights)
+27. [Inference Server](#inference-server)
+28. [CI / CD](#ci--cd)
+29. [Repository Structure](#repository-structure)
+30. [License](#license)
+31. [Citation](#citation)
 
 ---
 
 ## What Is HUG-IML?
 
-The **High Utility Gain Interpretable Machine Learning (HUG-IML)** framework extracts *High Utility Gain patterns* from labelled tabular data, transforms the input into a binary pattern-presence matrix, and fits an interpretable downstream classifier on that matrix — logistic regression by default for a single fit, or, when tuning with the default `performance_ho` grid, either logistic regression or RPTE (Residual Pattern Tree Ensemble, an optional constrained higher-order rule ensemble — see [RPTE — Higher-Order Interactions](#rpte--higher-order-interactions)), whichever scores better.
+The **High Utility Gain Interpretable Machine Learning (HUG-IML)** framework extracts *High Utility Gain patterns* from labelled tabular data, transforms the input into a binary pattern-presence matrix, and fits an interpretable downstream classifier on that matrix  -  logistic regression by default for a single fit, or, when tuning with the default `performance_ho` grid, either logistic regression or RPTE (Residual Pattern Tree Ensemble, an optional constrained higher-order rule ensemble  -  see [RPTE  -  Higher-Order Interactions](#rpte--higher-order-interactions)), whichever scores better.
 
 The resulting patterns are human-readable and serve as the primary source of model explanations, making the system suitable for regulated domains such as credit scoring, healthcare, and risk management.
 
 **Key references:**
 
 > Krishnamoorthy, S. (2024). Interpretable Classifier Models for Decision
-> Support Using High Utility Gain Patterns. *IEEE Access*, 12, 126088–126107.
+> Support Using High Utility Gain Patterns. *IEEE Access*, 12, 126088-126107.
 > DOI: [10.1109/ACCESS.2024.3455563](https://doi.org/10.1109/ACCESS.2024.3455563)
 
 The interaction-aware extensions such as adaptive discretisation, interaction-supported
@@ -82,9 +84,17 @@ Tabular Data](https://arxiv.org/abs/2607.07060).
 
 ---
 
+## Core Philosophy
+
+A hugimal is a soft toy designed for clinical use, placed in a person's hands before surgery, during a scan, or through the disorientation of a hospital ward. It is not a distraction. It is a therapeutic object with a documented role, earning its place not by being pleasant but by doing something measurable: giving a person in their care something they can hold and recognise while a system too large and complex to understand does its work on them. That same obligation, of placing something graspable in the hands of someone a powerful system acts upon, is what gives HUG-IML its name and its purpose. HUG stands for High Utility Gain, and IML for Interpretable Machine Learning, and together they describe a system built on a single conviction: that in the regulated domains this library targets, the person most affected by a model's output often cannot inspect it, appeal to it, or refuse it on informed grounds. What they can be given, through the expert who must own the decision, is something legible: patterns drawn from the vocabulary of their own domain, each with a demonstrated utility, each readable, challengeable, and if necessary removable on the record.
+
+Rather than explaining a black box after training, HUG-IML builds a model from interpretability up. The learned representation is anchored in High Utility Gain patterns: human-readable intervals and categories, each carrying its own support, utility, and coefficient. There is no hidden layer behind the explanation. The explanation is the model.
+
+---
+
 ## Why HUG-IML?
 
-Interpretable ML methods tend to navigate a tradeoff between readability and capacity: additive models such as EBMs grow in complexity with the number of features and interaction terms, while post-hoc methods such as SHAP explain a trained model after the fact rather than producing an inherently inspectable one. HUGIML takes a different approach. The complexity budget is capped at **topK patterns** and this cap holds regardless of the number of features or bin counts in the data. Each pattern is a human-readable conjunction of intervals and categories, and the patterns themselves form the learned representation — the downstream logistic regression operates directly on a binary pattern-presence matrix, with no separate explanation layer added after training. On the benchmark datasets evaluated so far, HUGIML achieves AUC broadly comparable to EBM and XGBoost while keeping the representation more compact (see [Benchmark Suite](#benchmark-suite) and [Validation Highlights](#validation-highlights)).
+Interpretable ML methods tend to navigate a tradeoff between readability and capacity: additive models such as EBMs grow in complexity with the number of features and interaction terms, while post-hoc methods such as SHAP explain a trained model after the fact rather than producing an inherently inspectable one. HUGIML takes a different approach. The complexity budget is capped at **topK patterns** and this cap holds regardless of the number of features or bin counts in the data. Each pattern is a human-readable conjunction of intervals and categories, and the patterns themselves form the learned representation  -  the downstream logistic regression operates directly on a binary pattern-presence matrix, with no separate explanation layer added after training. On the benchmark datasets evaluated so far, HUGIML achieves AUC broadly comparable to EBM and XGBoost while keeping the representation more compact (see [Benchmark Suite](#benchmark-suite) and [Validation Highlights](#validation-highlights)).
 
 This design makes HUG-IML a natural fit for regulated domains like credit scoring, healthcare risk, insurance underwriting, and AML, where reviewers need to inspect, edit, and sign off on individual model components. The [pattern pruning](#pattern-pruning) workflow lets analysts remove patterns that reference protected attributes or show drift, refit, recalibrate, and produce a full JSON audit trail, all within a single API.
 
@@ -145,11 +155,11 @@ ruff check .
 `HUGIMLClassifier` is the primary public class name. `HUGIMLClassifierNative` remains available as a backward-compatible alias for existing code.
 
 > **Note on `prepareXy`:** `prepareXy` performs schema and type preparation
-> only — it detects integer, float, and categorical columns and encodes the
+> only  -  it detects integer, float, and categorical columns and encodes the
 > target. Discretisation, HUG pattern mining, and downstream classifier fitting
 > occur inside `fit()` on the training data supplied to that call.
 
-### Path A — `prepareXy`
+### Path A  -  `prepareXy`
 
 ```python
 import pandas as pd
@@ -158,7 +168,7 @@ from hugiml import HUGIMLClassifier
 
 clf = HUGIMLClassifier(adaptive_binning=True, L=1, G=5e-3, topK=100)
 
-X_enc, y_enc = clf.prepareXy(X_df, y)   # schema/type prep — no model fitting
+X_enc, y_enc = clf.prepareXy(X_df, y)   # schema/type prep  -  no model fitting
 
 X_tr, X_te, y_tr, y_te = train_test_split(
     X_enc, y_enc, stratify=y_enc, random_state=42
@@ -172,7 +182,7 @@ print(clf.feature_importances())
 print(clf.model_summary())
 ```
 
-### Path B — explicit `allCols` for CV and production pipelines
+### Path B  -  explicit `allCols` for CV and production pipelines
 
 ```python
 from hugiml import HUGIMLClassifier
@@ -233,17 +243,17 @@ For hybrid modes, HUGIML standardizes numeric original features internally befor
 
 ## Downstream Solver Support
 
-When `base_estimator` is not supplied, HUGIML now exposes the built-in downstream linear classifier choice through `lr_solver`. The default remains `"auto"`, which preserves the historical behavior: binary problems use `LogisticRegression(solver="liblinear")`, and multiclass problems use `LogisticRegression(solver="lbfgs")`.
+When `base_estimator` is not supplied, HUGIML exposes the built-in downstream linear classifier choice through `lr_solver`. The default remains `"auto"`: binary problems use `LogisticRegression(solver="liblinear")`, and multiclass problems use `LogisticRegression(solver="saga")`.
 
 | `lr_solver` | Downstream estimator | When to use |
 |---|---|---|
-| `"auto"` | `LogisticRegression` with the historical binary/multiclass solver choice | Recommended default for most datasets and for backward-compatible results. |
+| `"auto"` | `LogisticRegression`: liblinear for binary tasks and saga for multiclass tasks | Recommended default for most datasets and for established v1.1.19 behavior. |
 | `"saga"` | `LogisticRegression(solver="saga")` | Useful for larger or sparse downstream matrices when you still want logistic-regression coefficients and probability estimates. |
 | `"sgd"` | `SGDClassifier(loss="log_loss")` | Useful for very large downstream matrices where stochastic optimization can reduce memory pressure or wall-clock time. Validate accuracy because SGD can be more sensitive to scaling and convergence settings. |
 
 All built-in solver choices keep deterministic defaults aligned with the existing classifier path: `random_state=0` and `max_iter=500`. If you need complete control over solver-specific hyperparameters, pass a fully configured `base_estimator`; that continues to override `lr_solver`.
 
-A `base_estimator` is not limited to `LogisticRegression`/`SGDClassifier` — see [RPTE — Higher-Order Interactions](#rpte--higher-order-interactions) for the constrained residual-rule branch reachable the same way (and, by default, automatically considered through the `performance_ho` grid).
+A `base_estimator` is not limited to `LogisticRegression`/`SGDClassifier`  -  see [RPTE  -  Higher-Order Interactions](#rpte--higher-order-interactions) for the constrained residual-rule branch reachable the same way (and, by default, automatically considered through the `performance_ho` grid).
 
 ```python
 from hugiml import HUGIMLClassifier
@@ -258,7 +268,7 @@ clf_saga = HUGIMLClassifier(lr_solver="saga", feature_mode="original_plus_patter
 clf_sgd = HUGIMLClassifier(lr_solver="sgd", feature_mode="original_plus_patterns")
 ```
 
-The versioned `.hugiml` serializer records `lr_solver` in the classifier initialization state and natively round-trips both `LogisticRegression` and the built-in `SGDClassifier` downstream estimator; an RPTE (or otherwise custom) `base_estimator` round-trips too, including the unfitted `base_estimator` hyperparameter itself — see [Serialization](#serialization) under the RPTE section above.
+The versioned `.hugiml` serializer records `lr_solver` in the classifier initialization state and natively round-trips both `LogisticRegression` and the built-in `SGDClassifier` downstream estimator; an RPTE (or otherwise custom) `base_estimator` round-trips too, including the unfitted `base_estimator` hyperparameter itself  -  see [Serialization](#serialization) under the RPTE section above.
 
 ## Execution Modes
 
@@ -291,7 +301,7 @@ In production mode, audit-oriented methods return a clear guidance result or rai
 
 HUGIML provides a fast cached tuning path for adaptive-binning grids. When `adaptive_binning=True`, the binning and transaction construction work is reused across eligible candidates, so compact grids can be evaluated without rebuilding the same mining inputs repeatedly. This caching follows from how HUGIML's pipeline is factored: adaptive binning and transaction preparation depend only on the data, so their outputs are shared across all candidates; pattern mining depends on `(G, L, topK)`, so its outputs are shared within each mining group; and only the lightweight downstream estimator fit varies per candidate. As a result, the most expensive stages run once regardless of grid size, and the downstream fit results are numerically identical to those from independent per-candidate runs.
 
-The reason this multi-level reuse is achievable in HUGIML is that its pipeline has a genuine separation between upstream data preparation and downstream fitting. Discretization and pattern mining are upstream stages whose outputs do not depend on the downstream estimator choice or its regularization parameters, so they can be computed once and shared. Tree-ensemble methods such as XGBoost and LightGBM support their own forms of caching and incremental training — most notably the ability to extend a fitted model by adding more boosting rounds without restarting from scratch. However, other hyperparameters such as tree depth, learning rate, subsampling ratios, and regularization terms affect the splitting criterion at every node throughout training, so changing them generally requires a full retrain rather than only updating a downstream stage. This reflects the nature of boosting as a joint optimization over the ensemble, not a limitation of ensemble methods as predictors. XGBoost and LightGBM remain competitive baselines on raw predictive performance across the evaluated datasets.
+The reason this multi-level reuse is achievable in HUGIML is that its pipeline has a genuine separation between upstream data preparation and downstream fitting. Discretization and pattern mining are upstream stages whose outputs do not depend on the downstream estimator choice or its regularization parameters, so they can be computed once and shared. Tree-ensemble methods such as XGBoost and LightGBM support their own forms of caching and incremental training  -  most notably the ability to extend a fitted model by adding more boosting rounds without restarting from scratch. However, other hyperparameters such as tree depth, learning rate, subsampling ratios, and regularization terms affect the splitting criterion at every node throughout training, so changing them generally requires a full retrain rather than only updating a downstream stage. This reflects the nature of boosting as a joint optimization over the ensemble, not a limitation of ensemble methods as predictors. XGBoost and LightGBM remain competitive baselines on raw predictive performance across the evaluated datasets.
 
 ### Recommended named parameter grids
 
@@ -381,7 +391,7 @@ All four grids keep `B=[-1]` and `adaptive_binning=[True]`, so each numerical fe
 
 Use focused follow-up grids when you want to explore interaction-relaxed mining or augmented-pair transforms.
 
-### `tune()` — cross-validated search with automatic fast path
+### `tune()`  -  cross-validated search with automatic fast path
 
 ```python
 result = HUGIMLClassifier.tune(
@@ -504,7 +514,7 @@ originals_augmented_grid = {
 }
 ```
 
-### `fast_grid_tune()` — single-split cached path for custom CV loops
+### `fast_grid_tune()`  -  single-split cached path for custom CV loops
 
 ```python
 tune_result = HUGIMLClassifier.fast_grid_tune(
@@ -737,7 +747,7 @@ this explicitly according to their mining design.
 
 ## LLM Assistant
 
-The **HUGIML LLM Assistant** is a chat-first Streamlit interface for working with HUGIML models and documentation from one place. It is designed for model-review workflows where a user asks natural-language questions, sees a structured answer, and then continues with follow-up questions in the same review session.
+The **HUGIML LLM Assistant** is a chat-first Dash interface for working with HUGIML models and documentation from one place. It shares the visual language of Governance Studio and keeps the existing Streamlit interface as a lightweight option. It is designed for model-review workflows where a user asks natural-language questions, sees a structured answer, and then continues with follow-up questions in the same review session.
 
 Unlike a general chatbot, the assistant grounds its responses in two HUGIML-specific sources:
 
@@ -753,11 +763,17 @@ Unlike a general chatbot, the assistant grounds its responses in two HUGIML-spec
 # Installed console script
 hugiml-llm
 
+# Lightweight Streamlit interface
+hugiml-llm --ui light
+
+# Dash host, port, and browser controls
+hugiml-llm --host 127.0.0.1 --port 8051 --no-open
+
 # Source-tree development
-python -m streamlit run src/hugiml/llm/ui_app.py
+python -m hugiml.llm.dash_app
 ```
 
-The UI uses a single Q&A-style view. The session appears as a chronological transcript, the follow-up input stays inline below the latest answer, and quick model/run details are available in expandable panes below the chat.
+The Dash UI provides Chat, Dataset, and Model evidence workspaces. The session appears as a chronological transcript, the follow-up input stays inline below the latest answer, and the evidence workspaces remain available throughout the review. Governance reports and pruning requests can be made directly in Chat. Governance Studio can pass dataset, model-session, workspace, and source context through a stable URL contract such as `?dataset=credit_risk&session=model-17&view=chat&source=governance`.
 
 ### Local model policy
 
@@ -780,7 +796,7 @@ Additional configured Ollama models remain visible in the selector when availabl
 | `qwen3:8b` | Stronger local LLM |
 | `gemma3:12b` | Large-context local LLM |
 
-The selector uses available system memory as a safety check. These thresholds are available-RAM requirements, not model file sizes:
+The Dash and lightweight interfaces use the same model catalog and available-memory policy. The Dash selector recommends an installed model for the current memory profile, retains the selected model for the browser session, and provides a refresh control, availability details, and Ollama setup commands. These thresholds are available-RAM requirements, not model file sizes:
 
 | Model | Role / profile | Minimum available RAM |
 |---|---|---:|
@@ -904,7 +920,7 @@ clf = HUGIMLClassifier(
 
 ## Missing Value Handling
 
-HUGIML treats NaN and Inf values as **not observed** — no imputation and no special parameter are required.
+HUGIML treats NaN and Inf values as **not observed**  -  no imputation and no special parameter are required.
 
 **How it works:** numerical columns are pre-binned at fit time. Non-finite cells become `np.nan` in the label array, and the C++ transaction builder skips them. The corresponding item is absent from the transaction. Patterns requiring that feature do not fire for that row.
 
@@ -969,13 +985,13 @@ Each profile panel shows the learned bin/pattern behavior for a feature: utility
 Existing example dashboards:
 
 **Public tabular benchmark classification**
-![Feature shape profiles — public tabular benchmark](docs/images/explanation_dashboard_bc.png)
+![Feature shape profiles  -  public tabular benchmark](docs/images/explanation_dashboard_bc.png)
 
 **Credit risk scoring**
-![Feature shape profiles — credit risk](docs/images/explanation_dashboard_credit.png)
+![Feature shape profiles  -  credit risk](docs/images/explanation_dashboard_credit.png)
 
-- [Open the HUGIML Benchmark Analysis Dashboard](https://srikumar2050.github.io/hugiml-core/hugiml_benchmark_analysis_dashboard.html) — internal 100-dataset suite (50 real-world + 50 synthetic)
-- [Open the OpenML-CC18 Benchmark Dashboard](https://srikumar2050.github.io/hugiml-core/openml_cc18_benchmark_dashboard.html) — 36-task evaluation on official OpenML-CC18 splits
+- [Open the HUGIML Benchmark Analysis Dashboard](https://srikumar2050.github.io/hugiml-core/hugiml_benchmark_analysis_dashboard.html)  -  internal 100-dataset suite (50 real-world + 50 synthetic)
+- [Open the OpenML-CC18 Benchmark Dashboard](https://srikumar2050.github.io/hugiml-core/openml_cc18_benchmark_dashboard.html)  -  evaluation on official OpenML-CC18 splits
 
 The static benchmark dashboards are reproducible from the repository source; see
 [Benchmark Suite](#benchmark-suite) for the exact rerun and assemble commands.
@@ -1026,7 +1042,7 @@ editor = PatternEditor(clf, operator_name="risk-team")
 print(editor.list_patterns().head(10))
 
 editor.remove([3, 7], reason="references protected attribute 'gender'")
-editor.remove_by_keyword("postcode", reason="high PSI — unstable feature")
+editor.remove_by_keyword("postcode", reason="high PSI  -  unstable feature")
 editor.remove_low_support(min_support=0.01, reason="noise patterns")
 
 editor.refit(X_tr, y_tr)
@@ -1042,6 +1058,13 @@ The **Representation Pruning** view in the Governance Studio provides an interac
 
 ## Interpretability Metrics
 
+HUGIML exposes two complementary views of interpretability. Pattern metrics
+describe the mined HUG representation on supplied data, while complexity
+metrics quantify how much fitted evidence must be reviewed at model and
+prediction level.
+
+### Pattern metrics
+
 ```python
 from hugiml.metrics import compute_all_metrics
 
@@ -1054,18 +1077,59 @@ Example output:
 ```text
 InterpretabilityMetrics
 ==========================================
-n_patterns              : 87
-avg_pattern_length       : 1.34
-coverage                 : 0.9812
-mean_active_patterns     : 6.21
-overlap_rate             : 0.0714
-explanation_sparsity     : 0.0230
-
-top-k cumulative |coef|:
-top- 1 : 8.4%
-top- 5 : 31.2%
-top-10 : 54.7%
+  n_patterns              : 87
+  avg_pattern_length      : 1.34
+  max_pattern_length      : 2
+  coverage                : 0.9812  (98.1% of 500 samples)
+  mean_active_patterns    : 6.21
+  std_active_patterns     : 2.08
+  overlap_rate (norm.)    : 0.0714
+  explanation_sparsity    : 0.0230
+  top-k cumulative |coef|:
+    top-  1 :    8.4%
+    top-  5 :   31.2%
+    top- 10 :   54.7%
 ```
+
+`coverage` is the fraction of supplied rows activating at least one mined
+pattern. `overlap_rate` is the mean number of active patterns per row divided
+by the number of mined patterns. `explanation_sparsity` is the fraction of
+mined patterns that do not activate on the supplied rows. Cumulative
+contribution is based on absolute downstream coefficients.
+
+### Structural and inspection complexity
+
+```python
+from hugiml.compute_complexity import (
+    get_complexity,
+    get_complexity_report,
+    get_instance_inspection_units,
+)
+
+model_units = get_complexity(clf, "model units")
+model_inspection_units = get_complexity(clf, "model inspection units")
+per_row_units = get_instance_inspection_units(clf, X_test)
+report = get_complexity_report(clf, X=X_test)
+
+# Equivalent estimator methods are also available.
+same_report = clf.get_complexity_report(X=X_test)
+redundancy_audit = clf.get_downstream_redundancy_audit()
+```
+
+| Measure | Interpretation |
+|---|---|
+| **Model units** | Coarse active components in the complete fitted model, such as terms, rules, or terminal leaves. |
+| **Model inspection units** | Expanded evidence required to inspect the complete fitted model, including source elements and active root-to-leaf conditions. |
+| **Instance inspection units** | Expanded evidence used for one prediction. The API returns one count per row; the report adds the mean, sample standard deviation, standard error, and confidence interval. |
+
+For an RPTE model, counts use the final active representation: active leaf
+rules and active direct terms, rather than every generated tree or leaf. The
+complexity report also includes `downstream_redundancy_audit`, which records
+the training-only removal of constant, duplicate, complementary, and
+high-dependence generated columns. Its summary includes the VIF threshold,
+the representation R² threshold, retained-column counts, and VIF statistics.
+These fitted audit details are retained by model serialization and are
+available to the Dash and Streamlit inspection interfaces.
 
 ---
 
@@ -1192,115 +1256,127 @@ The **Governance Studio dashboard** provides interactive governance evidence vie
 
 ## Benchmark Suite
 
-HUGIML validation spans two benchmark tracks and a package-level runner for ad hoc comparisons. Both tracks evaluate HUGIML against XGBoost, LightGBM, EBM, RuleFit, Random Forest, and Logistic Regression, using the same model definitions, preprocessing policy, and parameter grids. Static HTML dashboards for both tracks are published on GitHub Pages:
+HUGIML is evaluated on one internal panel and four external classification suites. The internal panel contains 50 real-world and 50 synthetic datasets. OpenML-CC18, PMLBmini, and TabZilla retain their suite-specific validation structures and matched ensemble baselines. TabArena uses repeated outer folds, retained inner-fold ensembles, and the official reference leaderboard.
 
-- [HUGIML Benchmark Analysis Dashboard](https://srikumar2050.github.io/hugiml-core/hugiml_benchmark_analysis_dashboard.html) — internal 100-dataset suite (50 real-world + 50 synthetic)
-- [OpenML-CC18 Benchmark Dashboard](https://srikumar2050.github.io/hugiml-core/openml_cc18_benchmark_dashboard.html) — 36-task evaluation on official OpenML-CC18 train/test splits
+**Evaluation environment.** All reported runs were performed on a 64-bit Windows 11 25H2 system with a 13th-generation Intel Core i9-13900H processor (14 cores and 20 logical processors), 16 GB of RAM, Python 3.12.7, and HUGIML 1.1.20. GPU acceleration was not used. Parallel execution followed each benchmark runner's configured worker settings, with the same computational environment applied to HUGIML and its matched baselines within each suite. Reported runtimes therefore support within-suite comparisons; cross-suite timing comparisons should also account for differences in validation protocols, fold counts, and retained ensembles.
 
-The package-level runner is useful for quick CV-style comparisons from the installed package:
+| Benchmark | Completed / catalog | Validation protocol | HUGIML / reference configurations |
+|---|---:|---|---:|
+| Internal panel | 100 / 100 | Controlled outer evaluation with inner model selection | 16 / 16 |
+| OpenML-CC18 | 50 / 72 | Official outer splits plus nested 3-fold selection | 16 / 16 |
+| PMLBmini | 44 / 44 | Three repeated rotating 3-fold partitions | 16 / 16 |
+| TabZilla | 31 / 36 | Official rotating train, validation, and test folds | 16 / 16 |
+| TabArena classification | 32 / 38 | Repeated outer 3-fold plus retained inner 8-fold ensemble | 16 / 200 |
+
+### Internal benchmark
+
+The internal benchmark evaluates 100 datasets using controlled outer evaluation with inner model selection. It separates 50 real-world datasets from 50 synthetic datasets designed to exercise interactions, missingness, and varied feature structures.
+
+#### HUGIML predictive results
+
+| Scope | Datasets | Mean ROC AUC | Mean balanced accuracy | Mean F1 | Mean Brier score |
+|---|---:|---:|---:|---:|---:|
+| Overall | 100 | 0.8809 | 0.8265 | 0.8110 | 0.1077 |
+| Real-world | 50 | 0.9020 | 0.8431 | 0.8359 | 0.0989 |
+| Synthetic | 50 | 0.8598 | 0.8099 | 0.7861 | 0.1165 |
+
+#### Inspection complexity
+
+Model-inspection units estimate the work required to audit the complete fitted model.
+
+<table>
+  <thead><tr><th rowspan="2">Scope</th><th rowspan="2">N</th><th colspan="4">Mean model-inspection units</th><th colspan="2">RPTE-active HUGIML fits</th></tr><tr><th>HUGIML</th><th>XGB</th><th>LGBM</th><th>RF</th><th>Mean active trees</th><th>Mean active leaf path length</th></tr></thead>
+  <tbody>
+    <tr><td>Overall</td><td>100</td><td><strong>67.4</strong></td><td>3,971.1</td><td>12,477.7</td><td>157,420.5</td><td>2.78</td><td>3.34</td></tr>
+    <tr><td>Real-world</td><td>50</td><td><strong>24.6</strong></td><td>1,839.3</td><td>6,919.7</td><td>37,007.3</td><td>1.91</td><td>2.46</td></tr>
+    <tr><td>Synthetic</td><td>50</td><td><strong>110.2</strong></td><td>6,102.9</td><td>18,035.7</td><td>277,833.8</td><td>3.19</td><td>3.75</td></tr>
+  </tbody>
+</table>
+
+[Open the internal benchmark dashboard](https://srikumar2050.github.io/hugiml-core/hugiml_benchmark_analysis_dashboard.html) for dataset-level results, statistical comparisons, timing, RPTE behavior, and methodology.
+
+### External benchmarks: OpenML-CC18, TabZilla, and PMLBmini
+
+OpenML-CC18 reports 50 of 72 catalog tasks using official outer splits and nested 3-fold model selection. TabZilla reports 31 of 36 tasks using stored rotating train, validation, and test folds. PMLBmini reports all 44 datasets using three repeated rotating 3-fold partitions. The tables use datasets with matched HUGIML, XGBoost, LightGBM, and Random Forest results.
+
+#### HUGIML predictive and inspection results
+
+| Benchmark | N | Mean ROC AUC | Mean balanced accuracy | Mean F1 | Mean Brier score | Mean model-inspection units |
+|---|---:|---:|---:|---:|---:|---:|
+| OpenML-CC18 | 50 | 0.9105 | 0.7910 | 0.7330 | 0.1372 | 119.4 |
+| TabZilla | 31 | 0.8934 | 0.7627 | 0.7345 | 0.1858 | 175.8 |
+| PMLBmini | 44 | 0.8248 | 0.7438 | 0.6973 | 0.1399 | 15.0 |
+
+#### Complexity and RPTE behavior
+
+<table>
+  <thead><tr><th rowspan="2">Benchmark</th><th rowspan="2">N</th><th colspan="4">Mean model-inspection units</th><th colspan="4">Mean instance-inspection units</th><th colspan="3">HUGIML active RPTE trees</th><th rowspan="2">HUGIML mean active leaf path length</th></tr><tr><th>HUGIML</th><th>XGB</th><th>LGBM</th><th>RF</th><th>HUGIML</th><th>XGB</th><th>LGBM</th><th>RF</th><th>Mean</th><th>Median</th><th>Maximum</th></tr></thead>
+  <tbody>
+    <tr><td>OpenML-CC18</td><td>50</td><td><strong>119.4 (1x)</strong></td><td>12,338.8 (103.3x)</td><td>50,476.2 (422.7x)</td><td>154,884.9 (1,297.0x)</td><td><strong>54.3 (1x)</strong></td><td>1,458.1 (26.8x)</td><td>2,024.1 (37.3x)</td><td>2,078.6 (38.3x)</td><td>4.66</td><td>4.00</td><td>10</td><td>3.97</td></tr>
+    <tr><td>TabZilla</td><td>31</td><td><strong>175.8 (1x)</strong></td><td>15,326.9 (87.2x)</td><td>60,824.4 (346.0x)</td><td>103,388.0 (588.1x)</td><td><strong>80.1 (1x)</strong></td><td>1,829.3 (22.8x)</td><td>3,184.0 (39.7x)</td><td>1,057.4 (13.2x)</td><td>5.69</td><td>4.00</td><td>15</td><td>4.19</td></tr>
+    <tr><td>PMLBmini</td><td>44</td><td><strong>15.0 (1x)</strong></td><td>481.8 (32.0x)</td><td>630.9 (41.9x)</td><td>3,644.6 (242.2x)</td><td><strong>9.7 (1x)</strong></td><td>110.6 (11.4x)</td><td>126.4 (13.0x)</td><td>380.8 (39.1x)</td><td>1.93</td><td>2.00</td><td>7</td><td>2.26</td></tr>
+  </tbody>
+</table>
+
+Detailed analysis: [OpenML-CC18](https://srikumar2050.github.io/hugiml-core/openml_cc18_benchmark_dashboard.html), [TabZilla](https://srikumar2050.github.io/hugiml-core/tabzilla_benchmark_dashboard.html), and [PMLBmini](https://srikumar2050.github.io/hugiml-core/pmlbmini_benchmark_dashboard.html).
+
+### External benchmark: TabArena
+
+TabArena classification uses repeated outer 3-fold evaluation with a retained inner 8-fold ensemble. The current comparison covers 32 of the 38 classification datasets and aligns HUGIML outer-fold results with the official reference pool. The leaderboard dashboard begins with a balanced 2 x 2 dataset-scale analysis using the median row and predictor counts of the completed datasets. TabArena's 2,500-row boundary continues to determine whether the evaluation uses ten or three repeated outer partitions.
+
+HUGIML evaluates only 16 configurations, while each other tuned method evaluates 200 configurations. The comparison therefore aligns datasets, outer test folds, and evaluation metrics, but not search budget. It shows HUGIML performance under substantially more limited tuning rather than an equal-compute comparison.
+
+#### Official Elo comparison
+
+<table>
+  <thead><tr><th rowspan="2">Scope</th><th rowspan="2">N</th><th colspan="2">Default pool</th><th colspan="2">Tuned pool</th><th colspan="2">All official variants</th></tr><tr><th>Elo</th><th>Rank</th><th>Elo</th><th>Rank</th><th>Elo</th><th>Rank</th></tr></thead>
+  <tbody>
+    <tr><td>Overall</td><td>32</td><td>1158.6</td><td>11 / 17</td><td>1080.2</td><td>12 / 15</td><td>1056.6</td><td>35 / 46</td></tr>
+    <tr><td>Binary</td><td>26</td><td>1152.7</td><td>11 / 17</td><td>1101.9</td><td>11 / 15</td><td>1074.9</td><td>32 / 46</td></tr>
+    <tr><td>Multiclass</td><td>6</td><td>1205.6</td><td>10 / 17</td><td>972.5</td><td>13 / 15</td><td>968.4</td><td>35 / 46</td></tr>
+  </tbody>
+</table>
+
+#### Tuned-pool metric comparison
+
+The delta is HUGIML's dataset-balanced mean minus the strongest official mean. For Brier score, the sign is reversed so a positive value always favors HUGIML.
+
+<table>
+  <thead><tr><th rowspan="2">Scope</th><th colspan="3">ROC AUC, mean (median)</th><th colspan="3">Balanced accuracy, mean (median)</th><th colspan="3">F1, mean (median)</th><th colspan="3">Brier score, mean (median)</th></tr><tr><th>HUGIML</th><th>Best official</th><th>Delta</th><th>HUGIML</th><th>Best official</th><th>Delta</th><th>HUGIML</th><th>Best official</th><th>Delta</th><th>HUGIML</th><th>Best official</th><th>Delta</th></tr></thead>
+  <tbody>
+    <tr><td>Overall</td><td>0.8425 (0.8365)</td><td>0.8747 (0.8913)</td><td>-0.0321 (-0.0547)</td><td>0.6821 (0.6981)</td><td>0.7244 (0.7268)</td><td>-0.0422 (-0.0287)</td><td>0.5509 (0.6004)</td><td>0.6145 (0.6869)</td><td>-0.0635 (-0.0866)</td><td>0.1169 (0.0976)</td><td>0.1087 (0.0929)</td><td>-0.0082 (-0.0047)</td></tr>
+    <tr><td>Binary</td><td>0.8220 (0.7947)</td><td>0.8520 (0.8309)</td><td>-0.0300 (-0.0362)</td><td>0.6696 (0.6807)</td><td>0.7119 (0.7255)</td><td>-0.0423 (-0.0448)</td><td>0.5067 (0.5607)</td><td>0.5691 (0.6505)</td><td>-0.0623 (-0.0897)</td><td>0.1019 (0.0904)</td><td>0.0971 (0.0896)</td><td>-0.0048 (-0.0008)</td></tr>
+    <tr><td>Multiclass</td><td>0.9315 (0.9348)</td><td>0.9501 (0.9622)</td><td>-0.0187 (-0.0274)</td><td>0.7364 (0.7965)</td><td>0.7668 (0.8670)</td><td>-0.0304 (-0.0704)</td><td>0.7425 (0.7979)</td><td>0.7686 (0.8592)</td><td>-0.0261 (-0.0613)</td><td>0.1820 (0.1668)</td><td>0.1529 (0.1523)</td><td>-0.0290 (-0.0145)</td></tr>
+  </tbody>
+</table>
+
+Each table entry reports mean (median), and positive delta favors HUGIML; the Brier delta follows its lower-is-better direction. For ROC AUC, HUGIML trails the strongest displayed tuned official mean by 0.0300 across binary datasets and by 0.0187 across multiclass datasets. These differences are achieved with 16 HUGIML configurations versus 200 for each tuned official method. HUGIML combines this predictive performance with source-disjoint, interpretable micro-ensembles and commonly uses one to two orders of magnitude fewer model-inspection units. The median active RPTE size is 3 trees in the internal benchmark, 2 trees on PMLBmini, and 4 trees on both OpenML-CC18 and TabZilla.
+
+[Open the TabArena official leaderboard dashboard](https://srikumar2050.github.io/hugiml-core/tabarena_official_leaderboard_dashboard.html) for model filters, rankings, metric distributions, and methodology.
+
+### Running benchmark evaluations
+
+The installed package provides a compact cross-validation runner:
 
 ```bash
-# Run full CV comparison
-python -m hugiml.benchmarks.runner
-
-# Specific datasets
-python -m hugiml.benchmarks.runner --datasets german_credit pima adult
-
-# Save results
-python -m hugiml.benchmarks.runner --output benchmarks/results/
+python -m hugiml.benchmarks.runner --datasets german_credit pima adult --output benchmarks/results/
 ```
 
-Or use the installed console script:
-
-```bash
-hugiml-bench --datasets german_credit --output results/
-```
-
-### Internal benchmark (100 datasets — 50 real-world + 50 synthetic)
-
-The internal benchmark evaluates HUGIML on a curated 100-dataset panel spanning diverse real-world classification domains and synthetic tasks designed to probe specific model behaviours such as non-monotone interactions, missingness patterns, and high-cardinality categoricals. Results include AUC, runtime, missing-value robustness, and complexity budget comparisons.
-
-The dashboard is generated from
-[`experiments/benchmark/benchmark_dashboard.py`](experiments/benchmark/benchmark_dashboard.py),
-which defines the full dataset panel, model grids, preprocessing policy, checkpointing, result aggregation,
-and static HTML assembly.
-
-The root-level `experiments/` runners are included in the source distribution but are not installed as importable wheel modules; the installed wheel provides the `hugiml-bench` package runner described above.
-
-From the repository root:
-
-```bash
-# Full fresh run; writes checkpoint, CSV summaries, and revised HTML
-python experiments/benchmark/benchmark_dashboard.py --fresh
-
-# Resume a partially completed run from checkpoint
-python experiments/benchmark/benchmark_dashboard.py --resume
-
-# Rebuild only the HTML/CSV summaries from an existing checkpoint
-python experiments/benchmark/benchmark_dashboard.py --assemble
-```
-
-Default outputs are written under:
-
-```text
-experiments/benchmark/results/
-```
-
-The runner is deterministic for a fixed code version and dependency environment: dataset generation,
-train/validation/test splits, row subsampling, and model seeds are all controlled by the script. Generated
-artifacts include `details.csv`, `summary_by_scope.csv`, `scope_tests.csv`, `overall.csv`, and
-`hugiml_benchmark_analysis_dashboard_revised.html`.
-
-### OpenML-CC18 benchmark (36 datasets)
-
-The OpenML-CC18 track evaluates HUGIML on 36 tasks from the official OpenML-CC18 classification suite, using every official `(repeat, fold, sample)` train/test split stored by OpenML — no outer folds are generated locally. Inner model selection uses stratified three-fold cross-validation inside each official training partition. Primary score is binary ROC AUC or multiclass one-vs-rest macro ROC AUC.
-
-Results include per-split records, statistical pairwise comparisons, inspection-unit analysis (pattern count, coverage, sparsity), task-level AUC ratios, and execution times — all assembled into a self-contained static HTML dashboard.
-
-**Download datasets and run:**
-
-```bash
-# Download the default 36-task cache
-python experiments/benchmark/download_openml_cc18_datasets.py
-
-# Run the full benchmark (all cached tasks, all models)
-python experiments/benchmark/run_openml_cc18_offline_benchmark.py
-
-# Assemble or refresh only the HTML dashboard from an existing checkpoint
-python experiments/benchmark/run_openml_cc18_offline_benchmark.py --assemble
-```
-
-See [`experiments/benchmark/openml_cc18_benchmarkREADME.md`](experiments/benchmark/openml_cc18_benchmarkREADME.md) for the full task-selection flags (`--smallest`, `--task-ids`, `--task-ids-file`), model selectors (`all`, `ensemble`, `interpretable`, `hugiml`, and individual aliases), and environment dependencies.
+Repository runners support dataset download, checkpoint resume, and dashboard assembly. The central [reproduction guide](experiments/benchmark/REPRODUCING.md) describes creation of a constrained environment, internal and external dataset preparation, cache verification, complete and staged execution, checkpoint continuation, result assembly, and dataset-integrity checks. Suite-specific README files define the corresponding panels, validation protocols, grids, metrics, and output schemas.
 
 ### Scalability dashboard
 
-For runtime and memory scaling evidence, see the static scalability dashboard:
+The scalability evaluation measures fit time, prediction latency, memory, pattern counts, and test AUC across row-count, feature-count, and mining-budget sweeps. It compares HUGIML with XGBoost and LightGBM while retaining the evidence needed for model review.
 
-- [Open the HUGIML Scalability Dashboard](https://srikumar2050.github.io/hugiml-core/hugiml_scalability_dashboard.html)
+[Open the HUGIML scalability dashboard](https://srikumar2050.github.io/hugiml-core/hugiml_scalability_dashboard.html) for the complete scaling analysis and methodology.
 
-The dashboard summarizes measured fit time, prediction latency, memory delta, pattern counts, and test AUC against XGBoost and LightGBM. It covers sample-size scaling, feature-count scaling, and parameter sweeps over `B`, `G`, `topK`, `L`, and adaptive binning. HUGIML retains many training and test artifacts to support governance and audit requirements.
+## Example Notebooks: General and Domain-Specific
 
-The scalability dashboard is reproducible from
-[`experiments/scalability/scalability_dashboard.py`](experiments/scalability/scalability_dashboard.py):
+The notebooks provide self-contained examples that move from model fitting to interpretation, governance review, and domain-specific analysis. They are organized in [`notebooks/`](notebooks/) as 12 focused folders.
 
-```bash
-# Full scalability run with checkpointing
-python experiments/scalability/scalability_dashboard.py --fresh
+### General Modeling and Evaluation
 
-# Resume a partially completed scalability run
-python experiments/scalability/scalability_dashboard.py --resume
-
-# Rebuild only the static dashboard from an existing checkpoint
-python experiments/scalability/scalability_dashboard.py --assemble
-
-# Assemble with a privacy-sanitized reproducibility/SBOM manifest embedded in Methodology
-python experiments/scalability/scalability_dashboard.py --assemble --include-sbom
-```
-
-Default outputs are written under the scalability results directory configured by the script and include the
-JSON checkpoint, flat CSV export, and `hugiml_scalability_dashboard.html`. With `--include-sbom`, assembly also writes `scalability_reproducibility_sbom.json` and embeds the same privacy-sanitized manifest as a collapsed block under the Methodology tab.
-
-Worked notebooks in [`notebooks/`](notebooks/) are organized as 12 self-contained folders:
+These notebooks introduce the core workflow, baseline evaluation, model comparison, and special modeling cases.
 
 | Folder | Notebook | Brief description |
 |---|---|---|
@@ -1308,6 +1384,13 @@ Worked notebooks in [`notebooks/`](notebooks/) are organized as 12 self-containe
 | [`01_benchmark_baselines`](notebooks/01_benchmark_baselines/) | [`nb01_benchmark_baselines.ipynb`](notebooks/01_benchmark_baselines/nb01_benchmark_baselines.ipynb) | Benchmark comparison across HUGIML and common tabular baselines such as XGBoost, LightGBM, Random Forest, and logistic regression. |
 | [`02_hug_vs_ebm`](notebooks/02_hug_vs_ebm/) | [`nb02_hug_vs_ebm.ipynb`](notebooks/02_hug_vs_ebm/nb02_hug_vs_ebm.ipynb) | Side-by-side comparison of HUGIML pattern profiles and EBM-style additive shape functions. |
 | [`03_modeling_special_cases`](notebooks/03_modeling_special_cases/) | [`nb03_modeling_special_cases.ipynb`](notebooks/03_modeling_special_cases/nb03_modeling_special_cases.ipynb) | Practical modeling cases including multiclass targets, imbalance, high-cardinality categoricals, adaptive binning, and pruning workflows. |
+
+### Domain-Specific Examples
+
+These notebooks apply the modeling and governance workflow to finance, fraud, healthcare, insurance, public-program integrity, and workforce analytics.
+
+| Folder | Notebook | Brief description |
+|---|---|---|
 | [`04_credit_risk`](notebooks/04_credit_risk/) | [`nb04_credit_risk.ipynb`](notebooks/04_credit_risk/nb04_credit_risk.ipynb) | Credit-risk governance example using German Credit-style data, scorecard-style features, and auditable risk patterns. |
 | [`05_aml`](notebooks/05_aml/) | [`nb05_aml.ipynb`](notebooks/05_aml/nb05_aml.ipynb) | Anti-money-laundering example focused on suspicious transaction pattern discovery and model review artifacts. |
 | [`06_mobile_money`](notebooks/06_mobile_money/) | [`nb06_mobile_money_fraud.ipynb`](notebooks/06_mobile_money/nb06_mobile_money_fraud.ipynb) | Mobile-money fraud example showing compact transaction-risk patterns and operational fraud-review signals. |
@@ -1434,16 +1517,16 @@ With strict budgeting enabled, HUGIML applies the TopK budget during feature con
 |---|---|
 | **HUG pattern mining** | C++ accelerated via pybind11; optional OpenMP parallelism |
 | **scikit-learn API** | Full `BaseEstimator` / `ClassifierMixin` compliance |
-| **Mixed feature types** | Integer, float, categorical — auto-detected or explicitly supplied |
+| **Mixed feature types** | Integer, float, categorical  -  auto-detected or explicitly supplied |
 | **Feature modes** | Pattern-only, original-plus-patterns, original-plus-interactions, augmented-pair downstream features |
 | **Fast hyperparameter search** | Multi-level compositional caching: binning and transactions shared across all candidates, mining shared per `(G, L, topK)` group; downstream fit results numerically identical to independent per-candidate runs, achievable because data preparation and pattern mining are upstream stages independent of the downstream estimator |
 | **Governance Studio** | Dash Workbench/Governance dashboard with model comparison, representation inspection, pruning, monitoring, and upload support |
 | **Profile visualisations** | EBM-style 1-D/2-D HUG profiles, active-pattern explanations, coefficient-support views (Plotly) |
 | **Interpretability metrics** | Pattern count, coverage, overlap, sparsity, top-k cumulative contribution |
-| **Adaptive binning** | Per-feature supervised `B` selection with optional stratified sampling — addresses the B-sensitivity trap |
+| **Adaptive binning** | Per-feature supervised `B` selection with optional stratified sampling  -  addresses the B-sensitivity trap |
 | **Pattern pruning** | Regulated remove/refit/calibrate workflow with full JSON audit trail |
 | **Multiclass & imbalance** | Multiclass report, SMOTE/class-weight pipeline, high-cardinality encoding |
-| **Benchmark suite** | Two reproducible tracks: internal 100-dataset suite (50 real-world + 50 synthetic) via `experiments/benchmark/benchmark_dashboard.py`, and 36-task OpenML-CC18 evaluation via `experiments/benchmark/run_openml_cc18_offline_benchmark.py` |
+| **Benchmark suite** | Reproducible internal and external evaluations covering the 100-dataset internal panel, PMLBmini, TabZilla, OpenML-CC18, and a reserved TabArena track; runners share a common benchmark engine while retaining suite-specific validation rules. |
 | **Scalability dashboard** | Static runtime, latency, memory, n-scaling, p-scaling, and parameter-sweep evidence reproducible via `experiments/scalability/scalability_dashboard.py` |
 | **Calibration** | ECE, MCE, Brier score, reliability diagram data |
 | **Drift detection** | PSI + symmetric KL divergence + label drift |
@@ -1545,7 +1628,7 @@ hugiml-core/
 
 ## License
 
-Apache License 2.0 — see [LICENSE](LICENSE).
+Apache License 2.0  -  see [LICENSE](LICENSE).
 
 ---
 

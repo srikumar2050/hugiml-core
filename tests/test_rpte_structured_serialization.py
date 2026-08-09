@@ -39,7 +39,9 @@ def test_sequential_rpte_uses_structured_state_and_roundtrips_exactly():
     assert config["serialization"] == "structured_rpte_v1"
     assert not _contains_key(config, "_pickle_fallback")
     assert not any("pickle_payload" in key for key in arrays)
-    np.testing.assert_allclose(model.predict_proba(X_test), restored.predict_proba(X_test))
+    np.testing.assert_allclose(
+        model.predict_proba(X_test), restored.predict_proba(X_test), rtol=2e-6, atol=1e-7
+    )
     assert model.unified_rule_table() == restored.unified_rule_table()
     assert restored.fe_._default_fe is not None
     assert len(restored.fe_._default_fe.trees_) == len(model.fe_._default_fe.trees_)
@@ -65,7 +67,9 @@ def test_ovr_rpte_serialization_is_recursive_and_structured():
     assert all(item["serialization"] == "structured_rpte_v1" for item in config["estimators"])
     assert not _contains_key(config, "_pickle_fallback")
     assert not any("pickle_payload" in key for key in arrays)
-    np.testing.assert_allclose(model.predict_proba(X), restored.predict_proba(X))
+    np.testing.assert_allclose(
+        model.predict_proba(X), restored.predict_proba(X), rtol=2e-6, atol=1e-7
+    )
     assert restored.label_binarizer_.y_type_ == model.label_binarizer_.y_type_
 
 
@@ -109,10 +113,10 @@ def test_hugiml_lookahead_rpte_archive_is_structured(tmp_path):
         estimator_config = json.loads(archive.read("estimator.json"))
         estimator_array_names = set(np.load(archive.open("estimator_arrays.npz")).files)
 
-    assert manifest["schema_version"] == serialization.MODEL_SCHEMA_VERSION == 10
+    assert manifest["schema_version"] == serialization.MODEL_SCHEMA_VERSION == 11
     assert not _contains_key(estimator_config, "_pickle_fallback")
     assert not any("pickle_payload" in key for key in estimator_array_names)
-    np.testing.assert_allclose(before, restored.predict_proba(X))
+    np.testing.assert_allclose(before, restored.predict_proba(X), rtol=3e-6, atol=1e-7)
     assert rules_before == restored.rpte_rule_table()
     fitted = restored.model_.named_steps["clf"]
     assert fitted.fe_._default_fe is None

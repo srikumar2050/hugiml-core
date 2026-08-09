@@ -73,7 +73,7 @@ Example
 Interpretation
 --------------
 
-Augmented-pair features use product, absolute-difference, sum, and signed-difference transforms. Public metadata reports the raw formula, standardized formula, information-gain provenance, observed-row coverage, missing-pair policy, source-selection mode, and raw-scale coefficient interpretation.
+Augmented-pair features use product, absolute-difference, sum, and signed-difference transforms. Public metadata reports the raw formula, standardized formula, information-gain source details, observed-row coverage, missing-pair policy, source-selection mode, and raw-scale coefficient interpretation.
 
 For a product feature such as ``glucose * bmi``, the raw-unit effect is on the product scale and depends on the current value of the other source variable. For an absolute-difference feature such as ``abs(age - duration)``, the raw-unit effect is on the distance scale. Sum and signed-difference features expose additive pair effects while preserving the same raw-to-standardized metadata structure.
 

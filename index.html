@@ -209,64 +209,21 @@
       </div>
     </section>
 
-    <!-- ROW 1 — three equal cards -->
-    <div class="section-label">Benchmark &amp; scalability</div>
+    <!-- ROW 1: internal and external benchmarks -->
+    <div class="section-label">Benchmark dashboards</div>
     <section class="grid-3">
-
-      <a class="card c1" href="https://srikumar2050.github.io/hugiml-core/hugiml_benchmark_analysis_dashboard.html">
-        <div class="card-icon">📊</div>
-        <span class="chip">Internal benchmark</span>
-        <h2>Benchmark Analysis Dashboard</h2>
-        <p>
-          100-dataset evaluation (50 real-world + 50 synthetic) against XGBoost, LightGBM,
-          EBM, RuleFit, Random Forest, and Logistic Regression. Compares AUC, runtime,
-          missing-value robustness, and model complexity across all configurations.
-        </p>
-        <div class="card-meta">
-          <span class="meta-tag">AUC comparison</span>
-          <span class="meta-tag">Runtime</span>
-          <span class="meta-tag">Missing values</span>
-          <span class="meta-tag">Complexity</span>
-        </div>
-      </a>
-
-      <a class="card c7" href="https://srikumar2050.github.io/hugiml-core/openml_cc18_benchmark_dashboard.html">
-        <div class="card-icon">🏆</div>
-        <span class="chip">OpenML-CC18</span>
-        <h2>OpenML-CC18 Benchmark Dashboard</h2>
-        <p>
-          36-task evaluation on official OpenML-CC18 train/test splits against XGBoost,
-          LightGBM, and Random Forest. Reports per-split AUC, accuracy, and runtime
-          with statistical pairwise comparisons across all tasks.
-        </p>
-        <div class="card-meta">
-          <span class="meta-tag">36 datasets</span>
-          <span class="meta-tag">Official splits</span>
-          <span class="meta-tag">vs ensemble baselines</span>
-          <span class="meta-tag">Statistical tests</span>
-        </div>
-      </a>
-
-      <a class="card c3" href="https://srikumar2050.github.io/hugiml-core/hugiml_scalability_dashboard.html">
-        <div class="card-icon">⚡</div>
-        <span class="chip">Scalability</span>
-        <h2>Scalability Dashboard</h2>
-        <p>
-          Measured fit-time and inference-latency scaling against XGBoost and LightGBM.
-          Covers sample sizes from 1k to 10Mn, feature counts to 10&thinsp;000, and
-          parameter sweeps over B, G, topK, L, and adaptive binning.
-        </p>
-        <div class="card-meta">
-          <span class="meta-tag">n-scaling to 10Mn</span>
-          <span class="meta-tag">p up to 10 000</span>
-          <span class="meta-tag">Param sweep</span>
-          <span class="meta-tag">Latency</span>
-        </div>
-      </a>
-
+      <a class="card c1" href="https://srikumar2050.github.io/hugiml-core/hugiml_benchmark_analysis_dashboard.html"><div class="card-icon">&#128202;</div><span class="chip">Internal benchmark</span><h2>Benchmark Analysis Dashboard</h2><p>100-dataset evaluation, with 50 real-world and 50 synthetic datasets, covering predictive quality, timing, robustness, RPTE behavior, and inspection complexity.</p><div class="card-meta"><span class="meta-tag">100 datasets</span><span class="meta-tag">Real and synthetic</span><span class="meta-tag">Complexity</span></div></a>
+      <a class="card c7" href="https://srikumar2050.github.io/hugiml-core/openml_cc18_benchmark_dashboard.html"><div class="card-icon">&#127942;</div><span class="chip">OpenML-CC18</span><h2>OpenML-CC18 Benchmark Dashboard</h2><p>50 completed tasks from the 72-task catalog, evaluated on official outer splits with nested model selection and matched ensemble comparisons.</p><div class="card-meta"><span class="meta-tag">50 / 72 tasks</span><span class="meta-tag">Official splits</span><span class="meta-tag">Nested selection</span></div></a>
+      <a class="card c4" href="https://srikumar2050.github.io/hugiml-core/tabzilla_benchmark_dashboard.html"><div class="card-icon">&#128200;</div><span class="chip">TabZilla</span><h2>TabZilla Benchmark Dashboard</h2><p>Rotating train, validation, and test evaluation on 31 matched datasets with predictive, timing, RPTE, and complexity analysis.</p><div class="card-meta"><span class="meta-tag">31 datasets</span><span class="meta-tag">Rotating validation</span><span class="meta-tag">Matched models</span></div></a>
     </section>
 
-    <!-- ROW 2 — full-width governance card -->
+    <!-- ROW 2: external benchmark, official leaderboard, and scalability -->
+    <section class="grid-3" style="margin-top:18px">
+      <a class="card c5" href="https://srikumar2050.github.io/hugiml-core/pmlbmini_benchmark_dashboard.html"><div class="card-icon">&#129514;</div><span class="chip">PMLBmini</span><h2>PMLBmini Benchmark Dashboard</h2><p>All 44 binary-classification datasets evaluated with repeated rotating folds and matched model comparisons.</p><div class="card-meta"><span class="meta-tag">44 datasets</span><span class="meta-tag">Repeated folds</span><span class="meta-tag">Binary classification</span></div></a>
+      <a class="card c6" href="https://srikumar2050.github.io/hugiml-core/tabarena_official_leaderboard_dashboard.html"><div class="card-icon">&#127942;</div><span class="chip">TabArena</span><h2>TabArena Official Leaderboard</h2><p>Official-reference Elo and detailed metric analysis with overall, binary, multiclass, default, tuned, and combined views.</p><div class="card-meta"><span class="meta-tag">Official reference</span><span class="meta-tag">Elo</span><span class="meta-tag">Metric deltas</span></div></a>
+      <a class="card c3" href="https://srikumar2050.github.io/hugiml-core/hugiml_scalability_dashboard.html"><div class="card-icon">&#9889;</div><span class="chip">Scalability</span><h2>Scalability Dashboard</h2><p>Measured fit-time and inference-latency scaling against XGBoost and LightGBM across row, feature, and mining-budget sweeps.</p><div class="card-meta"><span class="meta-tag">Rows to 10Mn</span><span class="meta-tag">Features to 10,000</span><span class="meta-tag">Latency</span></div></a>
+    </section>
+<!-- ROW 2 — full-width governance card -->
     <div class="section-label">Governance Studio</div>
     <a class="card card-h c2" href="https://srikumar2050.github.io/hugiml-core/hugiml_governance_studio_demo.html">
       <div class="card-h-body">

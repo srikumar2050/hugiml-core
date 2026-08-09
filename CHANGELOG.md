@@ -4,6 +4,16 @@ All notable changes to hugiml-core are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
+## [1.1.20] - 2026-08-09
+
+### Changed
+
+- Made Dash the primary HUGIML LLM Assistant interface, retained Streamlit as the lightweight interface, and aligned the Chat, Dataset, and Model evidence workspaces with Governance Studio. Dataset catalogs refresh on every catalog-selection change, governance requests remain available through Chat, and the interface accepts a stable dataset, model-session, workspace, and source launch-context contract. Both interfaces apply the same Ollama catalog, memory eligibility, recommended-model selection, session retention, and local setup guidance.
+- Strengthened benchmark analysis across the internal benchmark and four external suites: OpenML-CC18, PMLBmini, TabZilla, and TabArena. The benchmark workflows retain suite-specific official validation protocols and splits while reporting performance, runtime, RPTE behavior, and model complexity consistently.
+- Improved downstream logistic-regression canonicalization by removing constant, duplicate, and complementary columns, then filtering highly collinear generated terms only when they are strongly represented by semantically preferred retained terms. Original features remain protected, pattern terms take precedence over augmented-pair terms, and the fitted transformation is retained for prediction, interpretation, and serialization.
+- Accelerated complete-data interaction-information selection by reusing per-feature marginal information gain and global target entropy while retaining joint-observation scoring for feature pairs containing missing values.
+
+---
 ## [1.1.19] - 2026-07-23
 
 ### Added
@@ -25,7 +35,7 @@ Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - Added the optional RPTE downstream model for learning higher-order relationships with adaptive sequential or bounded-lookahead tree growth.
 - Added interaction relaxation through the first child split, with held-out acceptance checks for jointly useful features that may have weak individual signal.
-- Added RPTE rule-tree and rule-table views, direct-term provenance, model and instance inspection units, and structured save/load support.
+- Added RPTE rule-tree and rule-table views, direct-term source metadata, model and instance inspection units, and structured save/load support.
 - Added a Dash-based Governance Studio interface while retaining the lightweight Streamlit interface.
 - Expanded benchmark analysis to 100 diverse datasets: 50 real-world and 50 synthetic datasets, with instance-level inspection and confidence summaries.
 

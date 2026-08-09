@@ -40,7 +40,7 @@ from hugiml._classifier_support import (
     _joint_information_gain_from_binned_columns,
     logger,
 )
-from hugiml._compat import liblinear_penalty_kwargs
+from hugiml._compat import liblinear_penalty_kwargs, logistic_penalty_kwargs
 from hugiml.exceptions import (
     HUGIMLConvergenceWarning,
     HUGIMLMemoryError,
@@ -370,30 +370,51 @@ class _BinningMixin:
             return estimator
 
         lr_solver = str(getattr(self, "lr_solver", "auto")).lower()
+        lr_C = float(getattr(self, "_benchmark_lr_C", 1.0))
+        if lr_solver == "adaptive_l1":
+            if n_cls == 2:
+                return LogisticRegression(
+                    solver="liblinear",
+                    C=lr_C,
+                    random_state=0,
+                    max_iter=300,
+                    **liblinear_penalty_kwargs("l1"),
+                )
+            return LogisticRegression(
+                solver="saga",
+                C=lr_C,
+                random_state=0,
+                max_iter=500,
+                **logistic_penalty_kwargs("l1"),
+            )
         if lr_solver == "auto":
             if n_cls == 2:
                 return LogisticRegression(
                     solver="liblinear",
-                    C=1.0,
+                    C=lr_C,
                     random_state=0,
                     max_iter=500,
                     **liblinear_penalty_kwargs("l1"),
                 )
             return LogisticRegression(
                 solver="saga",
-                penalty="l1",
-                C=1.0,
+                C=lr_C,
                 random_state=0,
                 max_iter=500,
+                **logistic_penalty_kwargs("l1"),
             )
         if lr_solver == "saga":
             return LogisticRegression(
-                solver="saga", penalty="l1", C=1.0, random_state=0, max_iter=500
+                solver="saga",
+                C=lr_C,
+                random_state=0,
+                max_iter=500,
+                **logistic_penalty_kwargs("l1"),
             )
         if lr_solver == "sgd":
             return SGDClassifier(loss="log_loss", penalty="l1", random_state=0, max_iter=500)
         raise HUGIMLParamError(
-            "lr_solver must be one of {'auto', 'saga', 'sgd'}, "
+            "lr_solver must be one of {'auto', 'adaptive_l1', 'saga', 'sgd'}, "
             f"got {getattr(self, 'lr_solver', None)!r}."
         )
 
@@ -409,9 +430,9 @@ class _BinningMixin:
         if self.G < 0:
             raise HUGIMLParamError(f"G must be >= 0, got {self.G}")
         lr_solver = str(getattr(self, "lr_solver", "auto")).lower()
-        if lr_solver not in {"auto", "saga", "sgd"}:
+        if lr_solver not in {"auto", "adaptive_l1", "saga", "sgd"}:
             raise HUGIMLParamError(
-                "lr_solver must be one of {'auto', 'saga', 'sgd'}, "
+                "lr_solver must be one of {'auto', 'adaptive_l1', 'saga', 'sgd'}, "
                 f"got {getattr(self, 'lr_solver', None)!r}."
             )
         dense_width = getattr(self, "dense_downstream_max_width", 200)

@@ -19,4 +19,9 @@ def test_display_path_is_relative_inside_repository() -> None:
 
 def test_display_path_accepts_external_log_directory(tmp_path: Path) -> None:
     path = tmp_path / "pytest-logs" / "batch_001.log"
-    assert MODULE._display_path(path) == path.resolve().as_posix()
+    expected = (
+        path.resolve().relative_to(MODULE.ROOT).as_posix()
+        if path.resolve().is_relative_to(MODULE.ROOT)
+        else path.resolve().as_posix()
+    )
+    assert MODULE._display_path(path) == expected

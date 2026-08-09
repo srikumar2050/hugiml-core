@@ -12,9 +12,7 @@ imports are lazy so importing the base package remains lightweight.
 from __future__ import annotations
 
 import argparse
-import importlib.util
 import json
-import subprocess
 import sys
 from pathlib import Path
 
@@ -46,10 +44,19 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="Source checkout root. Usually unnecessary for installed packages.",
     )
+    parser.add_argument("--ui", choices=["dash", "light"], default="dash")
+    parser.add_argument("--host", default="127.0.0.1")
+    parser.add_argument("--port", type=int, default=None)
+    parser.add_argument("--debug", action="store_true")
+    parser.add_argument("--no-open", action="store_true")
     sub = parser.add_subparsers(dest="cmd")
 
-    p_ui = sub.add_parser("ui", help="Launch the Streamlit natural-language workbench.")
+    p_ui = sub.add_parser("ui", help="Launch the natural-language workbench.")
+    p_ui.add_argument("--ui", choices=["dash", "light"], default="dash")
+    p_ui.add_argument("--host", default="127.0.0.1")
     p_ui.add_argument("--port", type=int, default=None)
+    p_ui.add_argument("--debug", action="store_true")
+    p_ui.add_argument("--no-open", action="store_true")
     p_ui.add_argument("--headless", action="store_true", help="Start Streamlit in headless mode.")
 
     sub.add_parser("status", help="Show memory/profile/Ollama status.")
@@ -81,7 +88,14 @@ def main(argv: list[str] | None = None) -> int:
     cmd = args.cmd or "ui"
 
     if cmd == "ui":
-        return _cmd_ui(port=getattr(args, "port", None), headless=getattr(args, "headless", False))
+        return _cmd_ui(
+            ui=getattr(args, "ui", "dash"),
+            host=getattr(args, "host", "127.0.0.1"),
+            port=getattr(args, "port", None),
+            debug=getattr(args, "debug", False),
+            no_open=getattr(args, "no_open", False),
+            headless=getattr(args, "headless", False),
+        )
     if cmd == "status":
         return _cmd_status(repo_root=args.repo_root)
     if cmd == "list-datasets":
@@ -109,17 +123,28 @@ def main(argv: list[str] | None = None) -> int:
     return 2
 
 
-def _cmd_ui(*, port: int | None = None, headless: bool = False) -> int:
-    if importlib.util.find_spec("streamlit") is None:
+def _cmd_ui(
+    *,
+    ui: str = "dash",
+    host: str = "127.0.0.1",
+    port: int | None = None,
+    debug: bool = False,
+    no_open: bool = False,
+    headless: bool = False,
+) -> int:
+    try:
+        from .launcher import launch
+    except ImportError:
         print(_OPTIONAL_INSTALL_HINT, file=sys.stderr)
         return 1
-    app_path = Path(__file__).with_name("ui_app.py")
-    cmd = [sys.executable, "-m", "streamlit", "run", str(app_path)]
-    if port is not None:
-        cmd.extend(["--server.port", str(port)])
-    if headless:
-        cmd.extend(["--server.headless", "true"])
-    return subprocess.call(cmd)
+    return launch(
+        ui=ui,
+        host=host,
+        port=port,
+        debug=debug,
+        no_open=no_open,
+        headless=headless,
+    )
 
 
 def _cmd_status(*, repo_root: str | None = None) -> int:

@@ -77,6 +77,86 @@ def _complexity(model):
         ]
     )
     c = [met]
+    redundancy = cr.get("downstream_redundancy_audit", {}) if isinstance(cr, dict) else {}
+    if redundancy:
+        c += [
+            html.H6("Downstream Redundancy Audit", className="fw-semibold mb-2"),
+            dbc.Row(
+                [
+                    dbc.Col(
+                        mc("VIF Threshold", redundancy.get("vif_threshold")),
+                        md=4,
+                        className="mb-3",
+                    ),
+                    dbc.Col(
+                        mc(
+                            "Representation R² Threshold",
+                            redundancy.get("representation_r2_threshold"),
+                        ),
+                        md=4,
+                        className="mb-3",
+                    ),
+                    dbc.Col(
+                        mc(
+                            "VIF-Flagged Columns",
+                            redundancy.get("vif_columns_above_threshold"),
+                        ),
+                        md=4,
+                        className="mb-3",
+                    ),
+                ]
+            ),
+            dbc.Row(
+                [
+                    dbc.Col(
+                        mc("Input Columns", redundancy.get("input_columns")), md=4, className="mb-3"
+                    ),
+                    dbc.Col(
+                        mc("Retained Columns", redundancy.get("retained_columns")),
+                        md=4,
+                        className="mb-3",
+                    ),
+                    dbc.Col(
+                        mc(
+                            "Removed Exact Redundancy",
+                            sum(
+                                int(redundancy.get(key) or 0)
+                                for key in (
+                                    "removed_constant_columns",
+                                    "removed_duplicate_columns",
+                                    "removed_complementary_columns",
+                                )
+                            ),
+                        ),
+                        md=4,
+                        className="mb-3",
+                    ),
+                ]
+            ),
+            make_table(
+                pd.DataFrame(
+                    [
+                        {"Reason": label, "Removed columns": redundancy.get(key, 0)}
+                        for label, key in (
+                            ("Constant columns", "removed_constant_columns"),
+                            ("Duplicate columns", "removed_duplicate_columns"),
+                            ("Complementary columns", "removed_complementary_columns"),
+                            ("High-VIF patterns", "removed_high_vif_pattern_columns"),
+                            (
+                                "High-VIF augmented pairs",
+                                "removed_high_vif_augmented_pair_columns",
+                            ),
+                        )
+                    ]
+                ),
+                page_size=5,
+            ),
+            html.P(
+                "Computed from the fitted training partition only. Validation and "
+                "test rows apply the stored retained-column mask.",
+                className="small text-secondary mb-3",
+            ),
+        ]
     if cr:
         c += [
             html.H6("Complexity Report", className="fw-semibold mb-2"),
@@ -465,7 +545,7 @@ def render(ctx):
         ]
     else:
         title = "Representation Audit"
-        note = "Complexity, feature-family provenance, and generated-feature governance evidence."
+        note = "Complexity, feature-family mapping, and generated-feature governance evidence."
         tabs = [
             dbc.Tab(
                 _family_audit(model, X, sens, excl, idc), label="Feature Families", tab_id="r-fam"

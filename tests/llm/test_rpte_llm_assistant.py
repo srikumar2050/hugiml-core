@@ -22,6 +22,29 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+
+def test_redundancy_audit_rows_exclude_timing_and_feature_names():
+    from hugiml.llm.evidence import downstream_redundancy_audit_rows
+
+    class Model:
+        def get_downstream_redundancy_audit(self, *, include_feature_names=True):
+            assert include_feature_names is False
+            return {
+                "input_columns": 12,
+                "retained_columns": 8,
+                "removed_constant_columns": 1,
+                "vif_analysis_seconds": 0.25,
+                "retained_feature_names": ["x"],
+            }
+
+    rows = downstream_redundancy_audit_rows(Model())
+    assert {row["measure"]: row["value"] for row in rows} == {
+        "Input columns": 12,
+        "Retained columns": 8,
+        "Removed constants": 1,
+    }
+
+
 # ---------------------------------------------------------------------------
 # docs_index grid extraction
 # ---------------------------------------------------------------------------
@@ -149,10 +172,12 @@ def test_tune_model_uses_default_grid_name_for_unrecognized_strategy(tmp_path):
 
         rng = np.random.RandomState(0)
         n = 120
-        df = pd.DataFrame({
-            "x1": rng.uniform(0, 1, n),
-            "x2": rng.randint(0, 2, n),
-        })
+        df = pd.DataFrame(
+            {
+                "x1": rng.uniform(0, 1, n),
+                "x2": rng.randint(0, 2, n),
+            }
+        )
         y = (df["x1"] > 0.5).astype(int).values
         X_train, X_test, y_train, y_test = df.iloc[:90], df.iloc[90:], y[:90], y[90:]
         orch_module.HUGIMLActionOrchestrator._tune_model(

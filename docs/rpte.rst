@@ -40,7 +40,7 @@ This structure makes the prediction path reviewable at both global and
 instance levels. Reviewers can inspect which direct terms remain, which leaf
 rules were accepted, how each rule was formed, its support, its coefficient,
 and which rules activate for a particular row. The alias table preserves
-representation provenance without inflating model or inspection-unit counts.
+representation source metadata without inflating model or inspection-unit counts.
 
 How tree growth works
 ---------------------
@@ -98,7 +98,7 @@ Interpretability
 RPTE exposes the complete fitted decision structure at three complementary
 levels:
 
-* ``unified_rule_tree()`` returns the nested tree structure, split provenance,
+* ``unified_rule_tree()`` returns the nested tree structure, split source metadata,
   thresholds, leaf values, support, and downstream coefficients.
 * ``unified_rule_table()`` returns a flat review table with one row per active
   leaf rule or direct source term.

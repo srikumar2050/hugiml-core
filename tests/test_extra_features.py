@@ -775,7 +775,7 @@ def test_hugiml_named_grids_have_expected_values_and_are_copy_safe() -> None:
     linear = linear_estimators[0]
     assert isinstance(linear, LogisticRegression)
     assert linear.solver == "liblinear"
-    assert linear.max_iter == 500
+    assert linear.max_iter == 300
     assert linear.random_state == 0
 
     performance["topK"].append(200)
@@ -803,9 +803,8 @@ def test_classifier_default_param_grid_accepts_named_grid() -> None:
             # Each accessor deliberately deep-copies live estimator objects,
             # so identity/value equality is not meaningful here.
             assert len(default_grid[key]) == len(performance_ho[key]) == 2
-            assert isinstance(default_grid[key][0], LogisticRegression)
-            assert isinstance(performance_ho[key][0], LogisticRegression)
-            assert default_grid[key][0].solver == performance_ho[key][0].solver == "liblinear"
+            assert default_grid[key][0] is None
+            assert performance_ho[key][0] is None
             assert type(default_grid[key][1]) is type(performance_ho[key][1])
         else:
             assert default_grid[key] == performance_ho[key]

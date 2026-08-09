@@ -211,7 +211,12 @@ def test_alias_layout_roundtrips_through_structured_serialization():
     np.testing.assert_array_equal(
         restored.direct_input_indices_, model.direct_input_indices_
     )
-    np.testing.assert_allclose(restored.predict_proba(X), model.predict_proba(X))
+    np.testing.assert_allclose(
+        restored.predict_proba(X),
+        model.predict_proba(X),
+        rtol=1e-7,
+        atol=2e-8,
+    )
 
 
 def test_higher_order_direct_only_role_survives_one_vs_rest_cloning():

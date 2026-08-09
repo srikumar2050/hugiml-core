@@ -40,7 +40,7 @@ When the fitted downstream estimator is RPTE-based (see :doc:`tuning`), use the 
    # On the fitted RPTE estimator directly:
    print(rpte.unified_rule_tree())
 
-The flat-tree view merges shared path prefixes and shows each terminal leaf's final LR coefficient, odds multiplier, support, centered contribution, and raw-source provenance. Direct source terms are grouped by original features, HUG patterns, and augmented pairs. ``condition_space="downstream"`` displays standardized downstream thresholds, while ``condition_space="both"`` displays both forms.
+The flat-tree view merges shared path prefixes and shows each terminal leaf's final LR coefficient, odds multiplier, support, centered contribution, and raw-source metadata. Direct source terms are grouped by original features, HUG patterns, and augmented pairs. ``condition_space="downstream"`` displays standardized downstream thresholds, while ``condition_space="both"`` displays both forms.
 
 ``rpte_rule_table()`` remains the structured source of record. RPTE's final L1 logistic model uses accepted tree-leaf indicators plus direct source terms. Rows with ``backend="direct_hugiml_feature"`` identify direct terms; tree rows retain ``backend="sequential_default"`` or ``backend="bounded_lookahead"``. The Governance Studio uses the same flat-tree formatter. ``shap_values_from_pattern_matrix()`` remains available for RPTE-based models and uses a model-agnostic explainer when required.
 
@@ -119,4 +119,3 @@ The optional explainability module can compute SHAP values over the HUG pattern 
    explainer = HUGPatternExplainer(clf)
    report = explainer.generate_report(model_id="credit-scorer-v1")
    report.save("explainability_report.json")
-

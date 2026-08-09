@@ -251,7 +251,7 @@ def feature_family_summary(model: Any, X: pd.DataFrame | None = None) -> pd.Data
             "count": int(counts.get("augmented_pair", n_aug)),
             "used_as_direct_final_lr_family": direct,
             "rpte_role": role,
-            "evidence": "Generated transforms with source-feature provenance",
+            "evidence": "Generated transforms with source-feature mapping",
         },
     ]
     total = sum(int(r["count"]) for r in rows)
