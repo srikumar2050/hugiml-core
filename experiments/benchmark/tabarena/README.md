@@ -7,7 +7,7 @@ classification catalog.
 The downloader writes to `../../../datasetsTabarena` by default, stores features and encoded/original targets as Parquet, and stores every prescribed split separately. For the supported classification catalog, it uses 10 repeated three-fold partitions below 2,500 rows and 3 repeated three-fold partitions otherwise.
 
 ```powershell
-.\.venv-hugiml-1.1.19\Scripts\python.exe experiments\benchmark\tabarena\download_tabarena_datasets.py
+.\.venv-hugiml\Scripts\python.exe experiments\benchmark\tabarena\download_tabarena_datasets.py
 ```
 
 The benchmark runner is offline-only and exits with download guidance when
@@ -15,7 +15,7 @@ The benchmark runner is offline-only and exits with download guidance when
 in the parent folder; this folder intentionally duplicates neither module.
 
 ```powershell
-.\.venv-hugiml-1.1.19\Scripts\python.exe experiments\benchmark\tabarena\run_tabarena_offline_benchmark.py
+.\.venv-hugiml\Scripts\python.exe experiments\benchmark\tabarena\run_tabarena_offline_benchmark.py
 ```
 
 Use `--smallest N` for the `N` smallest datasets by row count, `--first N` for
@@ -34,7 +34,7 @@ The TabArena protocol additionally requires AutoGluon's model-agnostic feature
 generator:
 
 ```powershell
-.\.venv-hugiml-1.1.19\Scripts\python.exe -m pip install --no-deps --target experiments\benchmark\tabarena\_dependencies -r experiments\benchmark\tabarena\requirements-tabarena.txt
+.\.venv-hugiml\Scripts\python.exe -m pip install --no-deps --target experiments\benchmark\tabarena\_dependencies -r experiments\benchmark\tabarena\requirements-tabarena.txt
 ```
 
 The dedicated target directory and `--no-deps` preserve the benchmark
