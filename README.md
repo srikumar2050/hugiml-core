@@ -247,7 +247,7 @@ When `base_estimator` is not supplied, HUGIML exposes the built-in downstream li
 
 | `lr_solver` | Downstream estimator | When to use |
 |---|---|---|
-| `"auto"` | `LogisticRegression`: liblinear for binary tasks and saga for multiclass tasks | Recommended default for most datasets and for established v1.1.19 behavior. |
+| `"auto"` | `LogisticRegression`: liblinear for binary tasks and saga for multiclass tasks | Recommended default for most datasets and for the established solver-selection behavior. |
 | `"saga"` | `LogisticRegression(solver="saga")` | Useful for larger or sparse downstream matrices when you still want logistic-regression coefficients and probability estimates. |
 | `"sgd"` | `SGDClassifier(loss="log_loss")` | Useful for very large downstream matrices where stochastic optimization can reduce memory pressure or wall-clock time. Validate accuracy because SGD can be more sensitive to scaling and convergence settings. |
 

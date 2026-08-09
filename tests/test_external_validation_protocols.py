@@ -209,7 +209,7 @@ def test_baseline_stopping_metadata_does_not_invalidate_hugiml_reuse() -> None:
         "validation_protocol": "rotating",
         "early_stopping": True,
         "grid_snapshot": {"HUGIML": {"candidate_count": 16}},
-        "source": {"package_version": "1.1.19"},
+        "source": {"package_version": "test-version"},
     }
     earlier = {"metadata": dict(common)}
     current = {
