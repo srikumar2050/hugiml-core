@@ -234,6 +234,10 @@ class TestZeroPatternNonPatternsOnlyMode:
         assert not clf._is_constant_prior_fallback_active()
         proba = clf.predict_proba(X_p)
         assert proba.shape[0] == len(X_p)
+        transformed = clf.transform(X_p)
+        assert transformed.shape == (len(X_p), len(clf.get_downstream_features()))
+        np.testing.assert_allclose(clf.model_.predict_proba(transformed), proba)
+        assert clf.transform_patterns(X_p).shape == (len(X_p), 0)
 
 
 # ===================================================================

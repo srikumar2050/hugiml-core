@@ -280,7 +280,7 @@ class PatternEditor:
         if cached_hup is not None and cached_hup.shape[0] == len(y_arr):
             clf.x_train_hup_ = csr_matrix(cached_hup, dtype=np.float32)
         else:
-            hup_tr = clf.transform(X_tr)
+            hup_tr = clf.transform_patterns(X_tr)
             clf.x_train_hup_ = csr_matrix(hup_tr, dtype=np.float32)
 
         # Recompute downstream construction metadata after pruning.  Hybrid
@@ -360,7 +360,7 @@ class PatternEditor:
         from sklearn.pipeline import Pipeline
 
         clf = self._working_clf
-        hup_cal = csr_matrix(clf.transform(X_cal), dtype=np.float32)
+        hup_cal = csr_matrix(clf.transform_patterns(X_cal), dtype=np.float32)
         X_downstream_cal = clf._make_downstream_features(X_cal, hup_cal, fit=False)
         X_downstream_cal = clf._apply_strict_topk_budget_transform(X_downstream_cal)
         X_downstream_cal = clf._apply_lr_downstream_canonical_transform(X_downstream_cal)

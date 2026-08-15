@@ -241,19 +241,16 @@ def _rpte_final_representation(model: Any) -> str | None:
 def _transform_downstream(model: Any, X: pd.DataFrame) -> pd.DataFrame:
     """Return the fitted HUGIML source matrix with aligned column names.
 
-    HUGIML's public ``transform()`` returns the pattern matrix only, not the
-    complete original/pattern/augmented matrix supplied to the downstream
-    estimator. Prefer the fitted internal construction path when available so
+    HUGIML's public ``transform()`` returns the fitted downstream source
+    representation. Prefer it together with the fitted downstream names so
     representation-column pruning cannot silently target synthetic ``repr_*``
     names or the wrong matrix.
     """
-    make_downstream = getattr(model, "_make_downstream_features", None)
-    pattern_transform = getattr(model, "transform", None)
+    transform = getattr(model, "transform", None)
     get_names = getattr(model, "get_downstream_features", None)
-    if callable(make_downstream) and callable(pattern_transform) and callable(get_names):
+    if callable(transform) and callable(get_names):
         try:
-            Z_patterns = pattern_transform(X)
-            Z = make_downstream(X, Z_patterns, fit=False)
+            Z = transform(X)
             names = [str(v) for v in list(get_names() or [])]
             if hasattr(Z, "toarray"):
                 arr = Z.toarray()

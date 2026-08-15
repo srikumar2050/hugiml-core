@@ -43,7 +43,14 @@ def test_ndarray_and_dataframe_colj_parity(feature_mode, adaptive_binning):
 
     np.testing.assert_allclose(arr_model.predict_proba(X), df_model.predict_proba(X_df), atol=0, rtol=0)
     np.testing.assert_array_equal(arr_model.predict(X), df_model.predict(X_df))
-    assert (arr_model.transform(X) != df_model.transform(X_df)).nnz == 0
+    arr_transform = arr_model.transform(X)
+    df_transform = df_model.transform(X_df)
+    np.testing.assert_allclose(
+        arr_transform.toarray() if hasattr(arr_transform, "toarray") else np.asarray(arr_transform),
+        df_transform.toarray() if hasattr(df_transform, "toarray") else np.asarray(df_transform),
+        atol=0,
+        rtol=0,
+    )
     assert arr_model.fit_metadata_.n_augmented_pairs == df_model.fit_metadata_.n_augmented_pairs
 
 
@@ -51,8 +58,8 @@ def test_augmented_pairs_keep_ndarray_schema_order_when_selected_features_reorde
     X, y, X_df = _data(n=220, p=8)
     model = _clf("original_plus_patterns", True).fit(X, y)
     # Cross input must be exactly aligned even when selected IG features are not
-    # in raw column order. This catches assigning ndarray columns using selected
-    # feature order instead of the fitted full feature schema.
+    # in raw column order. This checks ndarray-column assignment against the
+    # fitted full feature schema rather than selected-feature order.
     np.testing.assert_allclose(model.predict_proba(X), model.predict_proba(X_df), atol=0, rtol=0)
     assert model.fit_metadata_.n_augmented_pairs > 0
 
@@ -62,7 +69,14 @@ def test_nonadaptive_ndarray_uses_synthetic_names_for_prebin_edges():
     arr_model = _clf("patterns_only", False).fit(X, y)
     df_model = _clf("patterns_only", False).fit(X_df, y)
     np.testing.assert_allclose(arr_model.predict_proba(X), df_model.predict_proba(X_df), atol=0, rtol=0)
-    assert (arr_model.transform(X) != df_model.transform(X_df)).nnz == 0
+    arr_transform = arr_model.transform(X)
+    df_transform = df_model.transform(X_df)
+    np.testing.assert_allclose(
+        arr_transform.toarray() if hasattr(arr_transform, "toarray") else np.asarray(arr_transform),
+        df_transform.toarray() if hasattr(df_transform, "toarray") else np.asarray(df_transform),
+        atol=0,
+        rtol=0,
+    )
 
 
 def test_nonfinite_ndarray_original_features_do_not_break_downstream_scaler():
@@ -81,3 +95,5 @@ def test_wrong_width_ndarray_raises_schema_error_not_index_error():
     model = _clf("original_plus_patterns", True).fit(X, y)
     with pytest.raises(HUGIMLSchemaError):
         model.predict_proba(X[:5, :-1])
+    with pytest.raises(HUGIMLSchemaError):
+        model.transform(X[:5, :-1])

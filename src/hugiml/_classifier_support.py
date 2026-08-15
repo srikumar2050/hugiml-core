@@ -731,7 +731,7 @@ class FitMetadata:
     openmp_threads : int
         Number of OpenMP threads used.
     degraded : bool
-        True when fit fell back to reduced parameters.
+        True when fit completed in a degraded or fallback state.
     """
 
     n_samples: int

@@ -1,7 +1,7 @@
 Feature modes
 =============
 
-HUGIML supports three downstream feature representations. The mined pattern matrix is always available through ``transform(X)``. The ``feature_mode`` parameter controls only the matrix passed to ``fit``, ``predict``, ``predict_proba``, and ``score``.
+HUGIML supports three downstream feature representations. ``transform(X)`` returns the fitted downstream representation selected by ``feature_mode``; the mined binary pattern matrix remains available through ``transform_patterns(X)``.
 
 .. list-table::
    :header-rows: 1
@@ -156,9 +156,9 @@ Interpretation notes
 Compatibility with transform
 ----------------------------
 
-``transform(X)`` and ``fit_transform(X, y)`` intentionally remain pattern-space APIs in every feature mode. This means existing explanation workflows that expect the binary HUG pattern matrix continue to work after enabling a hybrid downstream representation.
+``transform(X)`` and ``fit_transform(X, y)`` return the fitted downstream representation for the configured feature mode. The same representation is consumed by ``predict()`` and ``predict_proba()`` after the fitted strict-TopK and redundancy masks are applied.
 
-In hybrid modes, the fitted downstream estimator receives a private design matrix built from standardized original features, selected pattern columns, and any active augmented-pair columns. ``feature_importances()``, ``model_summary()``, and ``get_model_composition()`` report that downstream feature space so that diagnostics match what the estimator actually used.
+Use ``transform_patterns(X)`` for the binary HUG pattern matrix used by pattern-level explanation and pruning workflows. ``feature_importances()``, ``model_summary()``, and ``get_model_composition()`` report the downstream feature space so diagnostics match what the estimator actually used.
 
 Operational guidance
 --------------------

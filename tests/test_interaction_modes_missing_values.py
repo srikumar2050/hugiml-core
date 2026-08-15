@@ -103,7 +103,7 @@ def test_missing_value_matrix_for_interaction_paths(
     assert proba.shape == (len(X_test), 2)
     assert np.isfinite(proba).all()
 
-    pattern_block = clf.transform(X_test)
+    pattern_block = clf.transform_patterns(X_test)
     downstream = clf._make_downstream_features(X_test, pattern_block, fit=False)
     downstream_dense = downstream.toarray() if hasattr(downstream, "toarray") else np.asarray(downstream)
     assert np.isfinite(downstream_dense).all()
@@ -203,7 +203,7 @@ def test_relaxed_survivor_sources_missing_at_inference_remain_original_bin_patte
     X_test = X.iloc[160:178].copy().reset_index(drop=True)
     X_test.loc[:, survivor_names] = np.nan
 
-    pattern_block = clf.transform(X_test)
+    pattern_block = clf.transform_patterns(X_test)
     downstream = clf._make_downstream_features(X_test, pattern_block, fit=False)
     downstream_dense = downstream.toarray() if hasattr(downstream, "toarray") else np.asarray(downstream)
     assert np.isfinite(downstream_dense).all()

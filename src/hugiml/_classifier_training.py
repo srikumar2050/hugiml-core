@@ -40,6 +40,7 @@ from hugiml._classifier_support import (
 )
 from hugiml._compat import check_X_y
 from hugiml.exceptions import (
+    HUGIMLDegradedWarning,
     HUGIMLMemoryError,
     HUGIMLTimeoutError,
     HUGIMLValidationError,
@@ -104,6 +105,8 @@ class _TrainingMixin:
         with self._fit_lock:
             try:
                 return self._fit_impl(X, y)
+            except HUGIMLMemoryError:
+                raise
             except MemoryError as exc:
                 raise HUGIMLMemoryError(
                     "HUGIML fit failed cleanly because required memory could not be allocated. "
@@ -165,10 +168,16 @@ class _TrainingMixin:
             "fallback_class_prior_",
             "fallback_majority_class_",
             "fallback_n_samples_",
+            "_degraded_reason",
+            "mining_audit_log_",
+            "mining_audit_config_",
+            "_effective_mining_config_",
         ):
             self.__dict__.pop(_attr, None)
 
         self.fallback_active_ = False
+        self.mining_audit_log_ = []
+        self.mining_audit_config_ = {}
 
         t_total = self._timer()
         stage_times: dict[str, float] = {}
@@ -571,6 +580,13 @@ class _TrainingMixin:
 
                 t = self._timer()
                 raw_patterns_list = list(_l1_result.patterns)
+                self._effective_mining_config_ = {
+                    "K": int(K_eff),
+                    "L": 1,
+                    "G": float(self.G),
+                    "label": "fused_full",
+                    "status": "ok",
+                }
                 self.raw_patterns_ = sorted(
                     raw_patterns_list, key=lambda pe: (-pe.utility, tuple(pe.items))
                 )
@@ -971,6 +987,9 @@ class _TrainingMixin:
         }
         downstream_feature_counts["total"] = len(downstream_names_for_metadata)
 
+        effective_mining_config = dict(getattr(self, "_effective_mining_config_", {}) or {})
+        effective_topk_used = int(effective_mining_config.get("K", 0))
+
         self.fit_metadata_ = FitMetadata(
             n_samples=n_train_final,
             n_features=X_num.shape[1],
@@ -978,7 +997,7 @@ class _TrainingMixin:
             n_items=len(getattr(self.td_, "item_twu", [])),
             n_patterns=n_pats_final,
             n_compound=n_compound,
-            topK_used=self._effective_topK(len(getattr(self.td_, "item_twu", [])) or None),
+            topK_used=effective_topk_used,
             n_augmented_pairs=downstream_feature_counts.get("augmented_pair", 0),
             n_downstream_features=downstream_feature_counts.get("total", 0),
             downstream_feature_counts=downstream_feature_counts,
@@ -995,7 +1014,9 @@ class _TrainingMixin:
                 execution_mode=self.execution_mode,
                 max_fit_seconds=self.max_fit_seconds,
                 max_mining_seconds=getattr(self, "max_mining_seconds", None),
+                mining_degradation_policy=getattr(self, "mining_degradation_policy", "allow"),
                 effective_mining_timeout_seconds=self._effective_mining_timeout_seconds(),
+                effective_mining_config=effective_mining_config,
                 mining_audit_log_entries=len(getattr(self, "mining_audit_log_", []) or []),
             ),
             memory_peak_mb=round(mem.traced_peak_mb, 1),
@@ -1314,30 +1335,22 @@ class _TrainingMixin:
         deadline: float | None,
         relaxed_cols: list[int] | None = None,
     ) -> list:
-        """Mine patterns with graceful degradation on OOM or timeout.
+        """Mine patterns with an explicit resource-degradation policy.
 
-        The ``deadline`` is forwarded into the C++ mining engine as a
-        wall-clock ``timeout_s`` budget so the native layer can abort
-        mid-run rather than only being checked between attempts.
-
-        ``relaxed_cols``, when not None/empty, routes every attempt through
-        ``mine_patterns_relaxed`` instead of ``mine_patterns`` (interaction_
-        relaxed_mining). The minimal final fallback attempt drops G to 0.0
-        for ordinary mining already; relaxation does not change that
-        behavior, and the result remains bounded by the requested K.
-
-        Every attempt appends a JSON/pickle-safe row to ``mining_audit_log_``.
-        Native timeout returns are graceful: the C++ layer returns whatever
-        patterns were mined before the deadline, and the audit row marks that
-        the deadline was reached.
+        ``deadline`` is forwarded into the native mining engine as a wall-clock
+        ``timeout_s`` budget. ``mining_degradation_policy='allow'`` permits
+        staged memory recovery and partial timeout results while recording each
+        attempt. ``'raise'`` rejects those resource-driven deviations.
         """
         use_relaxed = bool(relaxed_cols)
         mine_fn = _core.mine_patterns_relaxed if use_relaxed else _core.mine_patterns
         timeout_budget_s = self._effective_mining_timeout_seconds()
+        policy = getattr(self, "mining_degradation_policy", "allow")
+        requested_K = max(1, int(K))
         self.mining_audit_log_ = []
         self.mining_audit_config_ = {
             "requested_L": int(self.L) if isinstance(self.L, int) else self.L,
-            "requested_K": int(K),
+            "requested_K": requested_K,
             "requested_G": float(self.G),
             "timeout_budget_s": timeout_budget_s,
             "uses_max_mining_seconds": getattr(self, "max_mining_seconds", None) is not None,
@@ -1345,9 +1358,10 @@ class _TrainingMixin:
             "interaction_relaxed_mining": bool(use_relaxed),
             "relaxed_cols_count": len(relaxed_cols or []),
             "execution_mode": getattr(self, "execution_mode", "audit"),
+            "mining_degradation_policy": policy,
         }
 
-        def _call(K_arg, L_arg, G_arg, timeout_arg):
+        def _call(K_arg: int, L_arg: int, G_arg: float, timeout_arg: float):
             if use_relaxed:
                 return mine_fn(
                     self.td_, y_train, n_cls, K_arg, L_arg, G_arg, relaxed_cols, timeout_arg
@@ -1364,7 +1378,7 @@ class _TrainingMixin:
                 "L": int(L_arg) if isinstance(L_arg, int) else L_arg,
                 "G": float(G_arg),
                 "timeout_s": float(timeout_arg or 0.0),
-                "deadline_enabled": bool(deadline),
+                "deadline_enabled": deadline is not None,
                 "interaction_relaxed_mining": bool(use_relaxed),
                 "relaxed_cols_count": len(relaxed_cols or []),
                 "status": "started",
@@ -1375,39 +1389,80 @@ class _TrainingMixin:
                 "exception_message": "",
             }
 
+        def _record_effective(
+            K_arg: int, L_arg: int, G_arg: float, label: str, status: str
+        ) -> None:
+            self._effective_mining_config_ = {
+                "K": int(K_arg),
+                "L": int(L_arg) if isinstance(L_arg, int) else L_arg,
+                "G": float(G_arg),
+                "label": str(label),
+                "status": str(status),
+            }
+
+        def _accept_degradation(reason: str) -> None:
+            self._degraded_reason = str(reason)
+            warnings.warn(
+                str(reason),
+                HUGIMLDegradedWarning,
+                stacklevel=4,
+            )
+
+        def _memory_policy_error(label: str) -> HUGIMLMemoryError:
+            return HUGIMLMemoryError(
+                "Mining encountered memory pressure during "
+                f"'{label}' and mining_degradation_policy='raise' does not permit "
+                "a reduced mining configuration."
+            )
+
+        half_K = max(1, requested_K // 2)
+        quarter_K = max(1, requested_K // 4)
+        minimal_K = min(50, quarter_K)
         attempts = [
-            (K, self.L, self.G, "full"),
-            (max(K // 2, 10), self.L, self.G, "K//2"),
-            (max(K // 4, 10), 1, self.G, "K//4,L=1"),
-            (50, 1, 0.0, "minimal"),
+            (requested_K, self.L, self.G, "full"),
+            (half_K, self.L, self.G, "K//2"),
+            (quarter_K, 1, self.G, "K//4,L=1"),
+            (minimal_K, 1, 0.0, "minimal"),
         ]
+
         for attempt_K, attempt_L, attempt_G, label in attempts:
-            if deadline and time.perf_counter() > deadline:
-                # Time budget exhausted — skip to minimal attempt immediately.
-                minimal_K, minimal_L, minimal_G = 50, 1, 0.0
+            if deadline is not None:
+                remaining_s = deadline - time.perf_counter()
+            else:
+                remaining_s = 0.0
+
+            if deadline is not None and remaining_s <= 0.0:
                 preempt = _audit_entry(label, attempt_K, attempt_L, attempt_G, 0.0)
                 preempt.update(
                     status="deadline_exhausted_before_attempt",
                     deadline_reached_after_attempt=True,
                 )
                 self.mining_audit_log_.append(preempt)
-                self._degraded_reason = (
-                    f"Time budget exceeded at '{label}'; "
-                    f"falling back to minimal (K={minimal_K}, L={minimal_L})."
+                reason = (
+                    f"Mining deadline was exhausted before '{label}'. "
+                    f"The allowed recovery configuration is K={minimal_K}, L=1, G=0.0."
                 )
-                logger.warning("  fit timeout: %s", self._degraded_reason)
-                # Give the minimal attempt a constant 5-second window; it is
-                # cheap and must not run indefinitely on degenerate data.
-                entry = _audit_entry("minimal_after_timeout", minimal_K, minimal_L, minimal_G, 5.0)
+                if policy == "raise":
+                    raise HUGIMLTimeoutError(
+                        reason + " mining_degradation_policy='raise' rejects that recovery."
+                    )
+
+                entry = _audit_entry("minimal_after_timeout", minimal_K, 1, 0.0, 5.0)
                 t0 = time.perf_counter()
                 try:
-                    patterns = list(_call(minimal_K, minimal_L, minimal_G, 5.0))
+                    patterns = list(_call(minimal_K, 1, 0.0, 5.0))
                     entry.update(
                         status="ok",
                         elapsed_ms=(time.perf_counter() - t0) * 1000.0,
                         n_patterns_returned=len(patterns),
                     )
                     self.mining_audit_log_.append(entry)
+                    _record_effective(minimal_K, 1, 0.0, "minimal_after_timeout", "ok")
+                    _accept_degradation(
+                        reason
+                        + f" Continued with the minimal configuration and returned {len(patterns)} "
+                        "pattern(s)."
+                    )
                     return patterns
                 except Exception as exc:
                     entry.update(
@@ -1418,35 +1473,48 @@ class _TrainingMixin:
                     )
                     self.mining_audit_log_.append(entry)
                     raise HUGIMLTimeoutError(
-                        f"fit() exceeded max_mining_seconds/max_fit_seconds and the minimal "
-                        f"fallback also failed: {exc}"
+                        "Mining exceeded the configured deadline and the minimal recovery "
+                        f"configuration also failed: {exc}"
                     ) from exc
-            # Compute remaining budget and pass it to the C++ engine so it
-            # can abort mid-run rather than running past the wall-clock limit.
-            remaining_s = max(deadline - time.perf_counter(), 0.0) if deadline else 0.0
+
             entry = _audit_entry(label, attempt_K, attempt_L, attempt_G, remaining_s)
             t0 = time.perf_counter()
             try:
-                patterns: list = list(_call(attempt_K, attempt_L, attempt_G, remaining_s))
-                elapsed_ms = (time.perf_counter() - t0) * 1000.0
-                deadline_reached = bool(deadline and time.perf_counter() >= deadline)
+                patterns = list(_call(attempt_K, attempt_L, attempt_G, remaining_s))
+                finished_at = time.perf_counter()
+                elapsed_ms = (finished_at - t0) * 1000.0
+                deadline_reached = bool(deadline is not None and finished_at >= deadline)
+                status = "ok_timeout_partial" if deadline_reached else "ok"
                 entry.update(
-                    status="ok_timeout_partial" if deadline_reached and remaining_s > 0.0 else "ok",
+                    status=status,
                     elapsed_ms=elapsed_ms,
                     n_patterns_returned=len(patterns),
                     deadline_reached_after_attempt=deadline_reached,
                 )
                 self.mining_audit_log_.append(entry)
-                if deadline_reached and remaining_s > 0.0:
-                    self._degraded_reason = (
-                        f"Mining deadline reached during {label}; using "
-                        f"{len(patterns)} partial pattern(s) returned by native miner."
+                _record_effective(attempt_K, attempt_L, attempt_G, label, status)
+
+                if deadline_reached:
+                    reason = (
+                        f"Mining deadline was reached during '{label}'; the native miner returned "
+                        f"{len(patterns)} partial pattern(s)."
                     )
-                if label != "full" and len(patterns) > 0:
-                    self._degraded_reason = (
-                        f"Recovered with {label}: K={attempt_K}, L={attempt_L}, G={attempt_G}"
+                    if policy == "raise":
+                        raise HUGIMLTimeoutError(
+                            reason
+                            + " mining_degradation_policy='raise' rejects partial timeout results."
+                        )
+                    _accept_degradation(reason)
+                    return patterns
+
+                if label != "full":
+                    _accept_degradation(
+                        f"Mining continued with '{label}' after memory pressure: "
+                        f"K={attempt_K}, L={attempt_L}, G={attempt_G}."
                     )
                 return patterns
+            except HUGIMLTimeoutError:
+                raise
             except MemoryError as exc:
                 entry.update(
                     status="memory_error",
@@ -1455,48 +1523,61 @@ class _TrainingMixin:
                     exception_message=str(exc)[:500],
                 )
                 self.mining_audit_log_.append(entry)
-                logger.warning("MemoryError during mining (%s), retrying…", label)
+                if policy == "raise":
+                    raise _memory_policy_error(label) from exc
+                logger.warning("MemoryError during mining (%s), retrying with a lower budget.", label)
                 continue
-            except Exception as e:
-                msg = str(e)
-                if "bad_alloc" in msg.lower() or "memory" in msg.lower():
+            except Exception as exc:
+                message = str(exc)
+                if "bad_alloc" in message.lower() or "memory" in message.lower():
                     entry.update(
                         status="cpp_memory_error",
                         elapsed_ms=(time.perf_counter() - t0) * 1000.0,
-                        exception_type=type(e).__name__,
-                        exception_message=msg[:500],
+                        exception_type=type(exc).__name__,
+                        exception_message=message[:500],
                     )
                     self.mining_audit_log_.append(entry)
-                    logger.warning("C++ memory error during mining (%s), retrying…", label)
+                    if policy == "raise":
+                        raise _memory_policy_error(label) from exc
+                    logger.warning(
+                        "Native memory pressure during mining (%s), retrying with a lower budget.",
+                        label,
+                    )
                     continue
                 entry.update(
                     status="exception",
                     elapsed_ms=(time.perf_counter() - t0) * 1000.0,
-                    exception_type=type(e).__name__,
-                    exception_message=msg[:500],
+                    exception_type=type(exc).__name__,
+                    exception_message=message[:500],
                 )
                 self.mining_audit_log_.append(entry)
                 raise
+
         self.mining_audit_log_.append(
             {
                 "attempt_index": len(getattr(self, "mining_audit_log_", []) or []) + 1,
                 "label": "all_attempts_exhausted",
-                "K": int(K),
+                "K": requested_K,
                 "L": int(self.L) if isinstance(self.L, int) else self.L,
                 "G": float(self.G),
                 "timeout_s": 0.0,
-                "deadline_enabled": bool(deadline),
+                "deadline_enabled": deadline is not None,
                 "interaction_relaxed_mining": bool(use_relaxed),
                 "relaxed_cols_count": len(relaxed_cols or []),
                 "status": "no_patterns",
                 "elapsed_ms": 0.0,
                 "n_patterns_returned": 0,
                 "deadline_reached_after_attempt": bool(
-                    deadline and time.perf_counter() >= deadline
+                    deadline is not None and time.perf_counter() >= deadline
                 ),
                 "exception_type": "",
                 "exception_message": "",
             }
+        )
+        _record_effective(0, self.L, self.G, "all_attempts_exhausted", "no_patterns")
+        _accept_degradation(
+            "All staged mining attempts were exhausted by memory pressure; continuing with no "
+            "mined patterns under mining_degradation_policy='allow'."
         )
         return []
 

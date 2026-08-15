@@ -216,7 +216,7 @@ class HUGIMLClassifier(
     """HUG-IML interpretable classifier — C++ accelerated, scikit-learn compatible.
 
     Extracts High Utility Gain (HUG) patterns from labelled tabular data,
-    transforms the input into a binary pattern-presence matrix, and fits an
+    assembles the configured downstream representation, and fits an
     interpretable downstream classifier.  The mined patterns are human-readable
     and serve as the primary source of model explanations.
 
@@ -264,8 +264,14 @@ class HUGIMLClassifier(
         especially useful for explicit high-order bounded mining such as
         ``L=4``/``L=5``/larger values. Use ``1800`` for a 30-minute mining
         cap. When unset, ``max_fit_seconds`` is used for backward
-        compatibility. Partial patterns mined before timeout are retained, and
-        attempt-level details are recorded in ``mining_audit_log_``.
+        compatibility. Partial patterns mined before timeout can be retained
+        when ``mining_degradation_policy="allow"``.
+    mining_degradation_policy : {"allow", "raise"}, default "allow"
+        Policy for resource-driven mining degradation. ``"allow"`` preserves
+        staged memory recovery and partial timeout results while recording the
+        outcome in ``mining_audit_log_`` and ``fit_metadata_``. ``"raise"``
+        rejects those degraded outcomes with ``HUGIMLMemoryError`` or
+        ``HUGIMLTimeoutError``.
     adaptive_binning : bool, default True
         Select per-feature numeric bin counts using supervised information gain.
     b_candidates : list of int or None
@@ -289,8 +295,8 @@ class HUGIMLClassifier(
         metadata takes precedence over this inference option.
     feature_mode : {"patterns_only", "original_plus_patterns",
         "original_plus_interactions"}, default "patterns_only"
-        Downstream representation used by fit/predict APIs. ``transform(X)``
-        always returns the HUG pattern matrix.
+        Downstream representation used by fit/predict/transform APIs.
+        ``transform_patterns(X)`` returns the binary HUG pattern matrix.
     use_hotpath : bool, default True
         Use the fused native ``L=1`` preparation/mining/matrix path when
         eligible. Disable only for diagnostic equivalence checks against the
@@ -370,6 +376,7 @@ class HUGIMLClassifier(
         max_predict_ms: float | None = None,
         max_fit_seconds: float | None = None,
         max_mining_seconds: float | None = None,
+        mining_degradation_policy: str = "allow",
         verbose: bool = False,
         # ── Adaptive binning ──────────────────────────────────────────────
         # When adaptive_binning=True each numerical feature is pre-discretised
@@ -461,6 +468,7 @@ class HUGIMLClassifier(
         self.max_predict_ms = max_predict_ms
         self.max_fit_seconds = max_fit_seconds
         self.max_mining_seconds = max_mining_seconds
+        self.mining_degradation_policy = mining_degradation_policy
         self.verbose = verbose
         self.adaptive_binning = adaptive_binning
         self.b_candidates = b_candidates

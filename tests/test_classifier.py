@@ -21,11 +21,10 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import pytest
+from hugiml import HUGIMLClassifierNative
 from scipy.sparse import issparse
 from sklearn.exceptions import NotFittedError as HUGIMLNotFittedError
 from sklearn.utils.estimator_checks import parametrize_with_checks
-
-from hugiml import HUGIMLClassifierNative
 
 # ---------------------------------------------------------------------------
 # Smoke: fit → predict_proba → predict
@@ -168,20 +167,39 @@ class TestTransform:
 
     def test_transform_correct_columns(self, fitted_clf_synthetic):
         clf, X_te, y_te = fitted_clf_synthetic
-        mat = clf.transform(X_te)
+        mat = clf.transform_patterns(X_te)
         # Number of columns should equal number of patterns
         n_patterns = len(clf.get_hug_features())
         assert mat.shape[1] == n_patterns
 
     def test_transform_binary_values(self, fitted_clf_synthetic):
         clf, X_te, y_te = fitted_clf_synthetic
-        mat = clf.transform(X_te)
+        mat = clf.transform_patterns(X_te)
         if issparse(mat):
             vals = mat.data
         else:
             vals = mat.ravel()
         unique = set(np.unique(vals))
         assert unique.issubset({0, 1, 0.0, 1.0})
+
+    def test_transform_column_count_matches_downstream_features(self, fitted_clf_synthetic):
+        clf, X_te, _ = fitted_clf_synthetic
+        mat = clf.transform(X_te)
+        assert mat.shape[1] == len(clf.get_downstream_features())
+
+    def test_transform_column_count_matches_trained_downstream_matrix(self, fitted_clf_synthetic):
+        clf, X_te, _ = fitted_clf_synthetic
+        mat = clf.transform(X_te)
+        assert mat.shape[1] == clf.x_train_downstream_.shape[1]
+
+    def test_transform_feeds_model_correctly(self, fitted_clf_synthetic):
+        # The output of transform() must be accepted by the fitted downstream
+        # estimator and produce probabilities identical to predict_proba().
+        clf, X_te, _ = fitted_clf_synthetic
+        Z = clf.transform(X_te)
+        proba_via_transform = clf.model_.predict_proba(Z)
+        proba_direct = clf.predict_proba(X_te)
+        np.testing.assert_allclose(proba_via_transform, proba_direct, rtol=1e-10, atol=1e-10)
 
 
 # ---------------------------------------------------------------------------

@@ -448,6 +448,10 @@ class _BinningMixin:
                 "Use 'audit' for complete traceability/governance artifacts, "
                 "or 'production' to retain only prediction-critical state."
             )
+        if getattr(self, "mining_degradation_policy", "allow") not in {"allow", "raise"}:
+            raise HUGIMLParamError(
+                "mining_degradation_policy must be either 'allow' or 'raise'."
+            )
         if self.allCols is not None or self.origColumns is not None:
             if self.allCols is None or self.origColumns is None:
                 raise HUGIMLParamError("allCols and origColumns must both be supplied together.")

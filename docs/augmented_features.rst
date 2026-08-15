@@ -44,7 +44,7 @@ A fitted downstream estimator can contain three feature families:
 * ``original`` — standardized original features, when ``feature_mode`` includes them;
 * ``augmented_pair`` — native continuous pair transforms such as products, absolute differences, sums, and signed differences.
 
-``transform(X)`` intentionally remains a pattern-space API and returns only the binary HUG pattern matrix. Use ``get_downstream_features()``, ``feature_importances()``, and ``get_model_composition()`` to inspect the fitted downstream feature space.
+``transform(X)`` returns the fitted downstream representation and therefore includes retained augmented-pair columns when they are active. Use ``transform_patterns(X)`` for the binary HUG pattern matrix, and ``get_downstream_features()``, ``feature_importances()``, and ``get_model_composition()`` to inspect the fitted downstream feature space.
 
 Example
 -------

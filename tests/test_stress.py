@@ -503,7 +503,7 @@ class TestBitmapAtScale:
     def test_pattern_matrix_values_binary(self, fitted_clf_synthetic):
         """All entries of the pattern feature matrix must be 0 or 1."""
         clf, X_te, _ = fitted_clf_synthetic
-        mat = clf.transform(X_te)
+        mat = clf.transform_patterns(X_te)
         vals = mat.data
         assert set(vals.round(6)).issubset({0.0, 1.0}), "Non-binary values in pattern matrix"
 

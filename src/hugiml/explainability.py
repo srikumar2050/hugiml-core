@@ -34,9 +34,11 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "ExplainabilityReport",
-    "FeatureLineage",
     "ExplanationStabilityMetrics",
+    "FeatureLineage",
     "HUGPatternExplainer",
+    "aggregate_shap_to_features",
+    "compute_shap_values",
     "shap_values_from_pattern_matrix",
 ]
 
@@ -518,6 +520,124 @@ class HUGPatternExplainer:
 # =============================================================================
 
 
+def compute_shap_values(
+    classifier: Any,
+    X: Any,
+    *,
+    feature_scope: str = "all",
+    background_samples: int = 100,
+    check_additivity: bool = False,
+    allow_incomplete: bool = False,
+) -> np.ndarray | None:
+    """Compute SHAP values for the fitted downstream representation.
+
+    The explainer always evaluates the complete matrix returned by
+    ``classifier.transform(X)`` so the SHAP input is aligned with the fitted
+    downstream estimator in every feature mode. ``feature_scope="patterns"``
+    optionally returns only pattern columns from that full-model explanation.
+
+    Parameters
+    ----------
+    classifier : HUGIMLClassifierNative
+        A fitted classifier.
+    X : array-like
+        Input data to explain.
+    feature_scope : {"all", "patterns"}, default "all"
+        Return all downstream SHAP columns or only HUG pattern columns.
+    background_samples : int
+        Number of background samples for KernelExplainer.
+    check_additivity : bool
+        Passed to KernelExplainer's SHAP call.
+    allow_incomplete : bool, default False
+        Required when ``feature_scope="patterns"`` would omit original or
+        augmented-pair columns used by the fitted downstream estimator. SHAP is
+        still computed on the complete fitted representation; this flag only
+        permits returning a partial reporting view.
+
+    Returns
+    -------
+    np.ndarray or None
+        Binary models return ``(n_samples, n_features)`` values using the
+        positive-class convention retained by the historical bridge. Multiclass
+        models retain a class axis as ``(n_samples, n_features, n_classes)``.
+        ``None`` is returned when SHAP is unavailable or the requested partial
+        view is not explicitly permitted.
+    """
+    if feature_scope not in {"all", "patterns"}:
+        raise ValueError("feature_scope must be either 'all' or 'patterns'.")
+
+    downstream_names = [str(name) for name in classifier.get_downstream_features()]
+    X_downstream = classifier.transform(X)
+    expected_shape = getattr(X_downstream, "shape", None)
+    if expected_shape is None or len(expected_shape) != 2:
+        raise RuntimeError("transform(X) must return a two-dimensional downstream matrix.")
+    if int(expected_shape[1]) != len(downstream_names):
+        raise RuntimeError(
+            "The downstream transform width does not match get_downstream_features()."
+        )
+
+    pattern_indices = [
+        idx for idx, name in enumerate(downstream_names) if name.startswith("pattern:")
+    ]
+    partial_pattern_view = len(pattern_indices) != len(downstream_names)
+    if feature_scope == "patterns" and partial_pattern_view and not allow_incomplete:
+        warnings.warn(
+            "Pattern-only SHAP reporting would omit downstream features used by the fitted "
+            "model. Pass allow_incomplete=True to request that partial reporting view; "
+            "the SHAP calculation itself will still use the complete transform(X) matrix.",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return None
+
+    n_samples = int(expected_shape[0])
+    n_features = int(expected_shape[1])
+    if n_features == 0:
+        return np.zeros((n_samples, 0), dtype=np.float64)
+
+    if not _shap_is_available():
+        warnings.warn(
+            "SHAP is not installed. Install it with: pip install shap",
+            ImportWarning,
+            stacklevel=2,
+        )
+        return None
+
+    import shap
+
+    clf_step = classifier.model_.named_steps.get("clf")
+    shap_values: Any | None = None
+    try:
+        explainer = shap.LinearExplainer(clf_step, X_downstream)
+        shap_values = explainer.shap_values(X_downstream)
+    except Exception:
+        logger.debug("SHAP LinearExplainer was not applicable; trying KernelExplainer.", exc_info=True)
+
+    if shap_values is None:
+        try:
+            bg_size = min(max(int(background_samples), 1), n_samples)
+            bg_indices = np.random.choice(n_samples, bg_size, replace=False)
+            bg = X_downstream[bg_indices]
+            explainer = shap.KernelExplainer(classifier.model_.predict_proba, bg)
+            shap_values = explainer.shap_values(
+                X_downstream, check_additivity=check_additivity
+            )
+        except Exception as exc:
+            warnings.warn(f"SHAP computation failed: {exc}", RuntimeWarning, stacklevel=2)
+            return None
+
+    classes = getattr(classifier, "classes_", None)
+    values = _normalize_shap_values(
+        shap_values,
+        n_samples=n_samples,
+        n_features=n_features,
+        n_classes=len(classes) if classes is not None else 0,
+    )
+    if feature_scope == "patterns":
+        return _select_shap_feature_columns(values, pattern_indices)
+    return values
+
+
 def shap_values_from_pattern_matrix(
     classifier: Any,
     X: Any,
@@ -526,143 +646,145 @@ def shap_values_from_pattern_matrix(
     check_additivity: bool = False,
     allow_incomplete: bool = False,
 ) -> np.ndarray | None:
-    """Compute SHAP values over the HUG pattern feature space.
+    """Return the pattern-column view of full-model SHAP values.
 
-    Applies SHAP's LinearExplainer (or KernelExplainer as fallback) on the
-    binary pattern-presence matrix produced by the classifier's transform()
-    method.  The resulting SHAP values are in pattern-space; use
-    :func:`aggregate_shap_to_features` to roll them back to original features.
-
-    When the fitted downstream estimator also uses original or augmented-pair
-    features, pattern-space SHAP is incomplete relative to the fitted model.
-    In that case this function warns and returns ``None`` unless
-    ``allow_incomplete=True`` is passed explicitly.
-
-    Requires the optional ``shap`` package (``pip install shap``).
-
-    Parameters
-    ----------
-    classifier : HUGIMLClassifierNative
-        A fitted classifier.
-    X : array-like
-        Input data to explain.
-    background_samples : int
-        Number of background samples for KernelExplainer.
-    check_additivity : bool
-        Pass to SHAP's explain call.
-    allow_incomplete : bool
-        If False, return None when the fitted downstream estimator uses
-        original or augmented-pair features in addition to HUG patterns.
-
-    Returns
-    -------
-    np.ndarray of shape (n_samples, n_patterns) or None
-        SHAP values in pattern space.  Returns None when shap is not installed.
+    This historical function name is retained for compatibility. The fitted
+    estimator is always evaluated on ``classifier.transform(X)``. When the
+    model also uses non-pattern downstream columns, callers must explicitly set
+    ``allow_incomplete=True`` to return only the pattern columns from the
+    complete-model SHAP result.
     """
-    downstream_names = list(getattr(classifier, "get_downstream_features", lambda: [])())
-    non_pattern = [name for name in downstream_names if not str(name).startswith("pattern:")]
-    if non_pattern and not allow_incomplete:
-        warnings.warn(
-            "Pattern-space SHAP is incomplete because the fitted downstream estimator "
-            "also uses original or augmented-pair features. Pass allow_incomplete=True "
-            "only if a pattern-only diagnostic is intended.",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-        return None
-
-    if not _shap_is_available():
-        warnings.warn(
-            "SHAP is not installed.  Install it with: pip install shap",
-            ImportWarning,
-            stacklevel=2,
-        )
-        return None
-
-    import shap
-
-    X_hup = classifier.transform(X)
-    canonical_transform = getattr(classifier, "_apply_lr_downstream_canonical_transform", None)
-    if callable(canonical_transform):
-        X_hup = canonical_transform(X_hup)
-
-    # Try LinearExplainer first (works when downstream is LogisticRegression)
-    clf_step = classifier.model_.named_steps.get("clf")
-    try:
-        explainer = shap.LinearExplainer(clf_step, X_hup)
-        sv = explainer.shap_values(X_hup)
-        if isinstance(sv, list):
-            sv = sv[1] if len(sv) == 2 else np.array(sv).mean(axis=0)
-        return np.array(sv)
-    except Exception:
-        logger.debug("SHAP LinearExplainer failed; trying KernelExplainer.", exc_info=True)
-    try:
-        bg_size = min(background_samples, X_hup.shape[0])
-        bg_indices = np.random.choice(X_hup.shape[0], bg_size, replace=False)
-        bg = X_hup[bg_indices]
-        explainer = shap.KernelExplainer(classifier.model_.predict_proba, bg)
-        sv = explainer.shap_values(X_hup, check_additivity=check_additivity)
-        if isinstance(sv, list):
-            sv = sv[1] if len(sv) == 2 else np.array(sv).mean(axis=0)
-        return np.array(sv)
-    except Exception as e:
-        warnings.warn(f"SHAP computation failed: {e}", RuntimeWarning, stacklevel=2)
-        return None
+    return compute_shap_values(
+        classifier,
+        X,
+        feature_scope="patterns",
+        background_samples=background_samples,
+        check_additivity=check_additivity,
+        allow_incomplete=allow_incomplete,
+    )
 
 
 def aggregate_shap_to_features(
     shap_values_pattern: np.ndarray,
     classifier: Any,
+    *,
+    allow_incomplete: bool = False,
 ) -> dict[str, float]:
-    """Aggregate pattern-space SHAP values back to original features.
+    """Aggregate downstream SHAP values back to original source features.
 
-    Parameters
-    ----------
-    shap_values_pattern : np.ndarray, shape (n_samples, n_patterns)
-    classifier : fitted HUGIMLClassifierNative
-
-    Returns
-    -------
-    dict mapping feature name to mean absolute SHAP value.
+    ``shap_values_pattern`` retains its historical parameter name for API
+    compatibility. The input may contain the complete downstream SHAP matrix,
+    or a pattern-only subset when ``allow_incomplete=True``. Multiclass values
+    may include a final class axis.
     """
-    downstream_names = list(getattr(classifier, "get_downstream_features", lambda: [])())
-    non_pattern = [name for name in downstream_names if not str(name).startswith("pattern:")]
-    if non_pattern:
-        warnings.warn(
-            "Aggregating pattern-space SHAP to original features omits original "
-            "downstream columns and augmented-pair transforms. Use this only as a "
-            "pattern-subspace diagnostic for this fitted model.",
-            RuntimeWarning,
-            stacklevel=2,
+    values = np.asarray(shap_values_pattern)
+    if values.ndim not in {2, 3}:
+        raise ValueError("SHAP values must have shape (samples, features[, classes]).")
+
+    downstream_names = [str(name) for name in classifier.get_downstream_features()]
+    pattern_names = [name for name in downstream_names if name.startswith("pattern:")]
+    width = int(values.shape[1])
+    if width == len(downstream_names):
+        names = downstream_names
+    elif width == len(pattern_names):
+        if len(pattern_names) != len(downstream_names) and not allow_incomplete:
+            raise ValueError(
+                "Pattern-only SHAP values omit downstream features used by the fitted model. "
+                "Pass allow_incomplete=True only when that partial aggregation is intended."
+            )
+        names = pattern_names
+    else:
+        raise ValueError(
+            "SHAP feature width does not match either the complete downstream schema "
+            "or its retained pattern subset."
         )
 
-    feature_names = getattr(classifier, "feature_names_in_", None) or []
-    retained_pattern_labels = [
-        str(name)[len("pattern:") :]
-        for name in downstream_names
-        if str(name).startswith("pattern:")
-    ]
-    pattern_labels = (
-        retained_pattern_labels
-        if len(retained_pattern_labels) == np.asarray(shap_values_pattern).shape[1]
-        else classifier.get_hug_features()
+    reduce_axes = (0,) if values.ndim == 2 else (0, 2)
+    mean_abs = np.abs(values).mean(axis=reduce_axes)
+    feature_names = [str(name) for name in (getattr(classifier, "feature_names_in_", None) or [])]
+    aggregated: dict[str, float] = {name: 0.0 for name in feature_names}
+
+    provenance = dict(getattr(classifier, "get_pattern_provenance", lambda: {})() or {})
+    pair_catalog = list(getattr(classifier, "get_augmented_pair_transforms", lambda: [])() or [])
+    pair_sources = {
+        f"augmented_pair:{row.get('name')}": [str(v) for v in (row.get("inputs") or [])]
+        for row in pair_catalog
+        if row.get("name") is not None
+    }
+    categorical_sources = sorted(
+        [str(name) for name in (getattr(classifier, "_original_cat_cols_", []) or [])],
+        key=len,
+        reverse=True,
     )
 
-    aggregated: dict[str, float] = {f: 0.0 for f in feature_names}
-    mean_abs = np.abs(shap_values_pattern).mean(axis=0)
-
-    for pat_idx, label in enumerate(pattern_labels):
-        if pat_idx >= len(mean_abs):
-            break
-        parts = label.split(", ")
-        for part in parts:
-            if "=" in part:
-                fname = part.split("=")[0]
-                if fname in aggregated:
-                    aggregated[fname] += float(mean_abs[pat_idx])
+    for idx, name in enumerate(names):
+        sources: list[str] = []
+        if name.startswith("pattern:"):
+            sources = [str(v) for v in provenance.get(name, {}).get("raw_features", [])]
+        elif name.startswith("augmented_pair:"):
+            sources = list(pair_sources.get(name, []))
+        elif name.startswith("orig:"):
+            display = name[len("orig:") :]
+            if display in aggregated:
+                sources = [display]
+            else:
+                for source in categorical_sources:
+                    if display.startswith(f"{source}_"):
+                        sources = [source]
+                        break
+        for source in sources:
+            if source in aggregated:
+                aggregated[source] += float(mean_abs[idx])
 
     return aggregated
 
+
+def _select_shap_feature_columns(values: np.ndarray, indices: list[int]) -> np.ndarray:
+    if values.ndim == 2:
+        return values[:, indices]
+    return values[:, indices, :]
+
+
+def _normalize_shap_values(
+    values: Any,
+    *,
+    n_samples: int,
+    n_features: int,
+    n_classes: int,
+) -> np.ndarray:
+    if isinstance(values, (list, tuple)):
+        arrays = [np.asarray(value) for value in values]
+        if len(arrays) == 2:
+            arr = arrays[1]
+        else:
+            arr = np.stack(arrays, axis=-1)
+    else:
+        arr = np.asarray(values)
+
+    if arr.ndim == 1 and n_features == 1 and arr.shape[0] == n_samples:
+        arr = arr.reshape(n_samples, 1)
+    if arr.ndim == 2:
+        if arr.shape != (n_samples, n_features):
+            raise RuntimeError(
+                f"SHAP returned shape {arr.shape}, expected {(n_samples, n_features)}."
+            )
+        return arr
+    if arr.ndim == 3:
+        if arr.shape[:2] == (n_samples, n_features):
+            normalized = arr
+        elif n_classes and arr.shape == (n_classes, n_samples, n_features):
+            normalized = np.moveaxis(arr, 0, -1)
+        else:
+            raise RuntimeError(
+                "SHAP returned a three-dimensional array whose feature axis does not "
+                "match the fitted downstream schema."
+            )
+        if normalized.shape[2] == 1:
+            return normalized[:, :, 0]
+        if n_classes == 2 and normalized.shape[2] == 2:
+            return normalized[:, :, 1]
+        return normalized
+    raise RuntimeError("SHAP returned an unsupported output shape.")
 
 def _shap_is_available() -> bool:
     try:

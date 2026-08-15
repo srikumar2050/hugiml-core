@@ -67,12 +67,9 @@ stage. ``max_fit_seconds`` is still accepted as a backward-compatible alias,
 but new code should prefer ``max_mining_seconds`` because the budget applies to
 mining rather than the entire estimator ``fit()`` call.
 
-When a budget is active, native miners check the deadline during search and
-return partial results where possible. The estimator records each mining
-attempt in ``mining_audit_log_`` and exposes it as a DataFrame through
-``get_mining_audit_log()``. The log includes the requested ``K``/``L``/``G``,
-timeout budget, elapsed time, status, relaxed-mining flag, and number of
-patterns returned.
+When a budget is active, native miners check the deadline during search and can return partial results. ``mining_degradation_policy`` controls whether resource-driven deviations are accepted. The default ``"allow"`` retains backward-compatible staged memory recovery and partial timeout results, emits ``HUGIMLDegradedWarning``, and records the outcome. ``"raise"`` rejects reduced-memory recovery with ``HUGIMLMemoryError`` and rejects partial or post-deadline results with ``HUGIMLTimeoutError``.
+
+The estimator records each mining attempt in ``mining_audit_log_`` and exposes it as a DataFrame through ``get_mining_audit_log()``. The log includes ``K``/``L``/``G`` for each attempt, timeout budget, elapsed time, status, relaxed-mining flag, and number of patterns returned. ``fit_metadata_.topK_used`` reports the successful mining budget; ``fit_metadata_.config`` retains the requested configuration and the effective mining configuration. For controlled production training, use ``mining_degradation_policy="raise"`` when any resource-driven change to the mining plan must stop the fit.
 
 EUCS parameters
 ---------------

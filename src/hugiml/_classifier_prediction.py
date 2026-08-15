@@ -40,19 +40,13 @@ from hugiml.exceptions import (
 class _PredictionMixin:
     """Implement transform-time validation and monitoring operations."""
 
-    def transform(self, X: Any) -> csr_matrix:
+    def transform_patterns(self, X: Any) -> csr_matrix:
         """Return the binary HUG pattern matrix for X.
 
-        Each column corresponds to one mined pattern.  Entry (i, j) is 1 when
-        all items of pattern j appear in row i.
-
-        Parameters
-        ----------
-        X : array-like or DataFrame
-
-        Returns
-        -------
-        csr_matrix, shape (n_samples, n_patterns)
+        Each column corresponds to one mined pattern. Entry ``(i, j)`` is 1
+        when all items of pattern ``j`` appear in row ``i``. This is the
+        pattern-space transform used by pattern inspection, pruning, and
+        pattern-level explanation utilities.
         """
         check_is_fitted(self)
         if self._is_constant_prior_fallback_active():
@@ -63,6 +57,30 @@ class _PredictionMixin:
             X = self._prebin_for_predict(X)
         # ─────────────────────────────────────────────────────────────────
         return self._build_test_hup(X)
+
+    def transform(self, X: Any) -> Any:
+        """Return the fitted downstream feature representation for X.
+
+        The returned columns are exactly the representation consumed by the
+        fitted downstream estimator after feature-mode assembly, strict TopK
+        selection, and logistic-regression canonicalization. Use
+        :meth:`transform_patterns` when the binary HUG pattern matrix itself is
+        required.
+
+        When a patterns-only fit uses the zero-pattern constant-prior fallback,
+        an empty sparse matrix of shape ``(n_samples, 0)`` is returned, matching
+        :meth:`transform_patterns` and the fitted ``x_train_downstream_`` in that
+        degenerate case.
+        """
+        check_is_fitted(self)
+        if self._is_constant_prior_fallback_active():
+            # Delegate to transform_patterns so that input validation and
+            # row-count resolution run exactly once through the shared path.
+            return self.transform_patterns(X)
+        Z_patterns = self.transform_patterns(X)
+        X_downstream = self._make_downstream_features(X, Z_patterns, fit=False)
+        X_downstream = self._apply_strict_topk_budget_transform(X_downstream)
+        return self._apply_lr_downstream_canonical_transform(X_downstream)
 
     def _build_test_hup(self, X_test: Any) -> csr_matrix:
         """Build the sparse binary pattern matrix for test data.

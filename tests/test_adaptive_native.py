@@ -173,8 +173,10 @@ class TestInference:
 
     def test_transform_shape(self, fitted_adaptive, bc_split):
         clf, Xtr, Xte, ytr, yte = fitted_adaptive
-        hup = clf.transform(Xte)
-        assert hup.shape == (len(yte), len(clf.patterns_))
+        transformed = clf.transform(Xte)
+        assert transformed.shape == (len(yte), len(clf.get_downstream_features()))
+        patterns = clf.transform_patterns(Xte)
+        assert patterns.shape == (len(yte), len(clf.patterns_))
 
     def test_auc_competitive(self, fitted_adaptive, bc_split):
         clf, Xtr, Xte, ytr, yte = fitted_adaptive

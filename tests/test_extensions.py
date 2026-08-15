@@ -381,7 +381,7 @@ class TestAdaptiveStandalone:
         Xtr, Xte, ytr, yte = train_test_split(X, y, test_size=0.25, stratify=y, random_state=42)
         clf = HUGIMLAdaptive(b_candidates=[3, 5], L=1, G=1e-2)
         clf.fit(Xtr, ytr)
-        hup = clf.transform(Xte)
+        hup = clf.transform_patterns(Xte)
         assert hup.shape[0] == len(yte)
         assert hup.shape[1] == len(clf.patterns_)
 

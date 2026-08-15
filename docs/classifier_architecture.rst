@@ -62,6 +62,51 @@ Internal modules
    runtime access to mutable native-extension and monitoring symbols exposed by
    ``hugiml.classifier``.
 
+Lifecycle and fitted-state ownership
+------------------------------------
+
+The mixins compose one estimator instance and therefore share ``self.__dict__``. They are implementation modules rather than independent objects with isolated state. Extensions should use the public ``HUGIMLClassifier`` API instead of subclassing an internal mixin directly; private mixin methods and fitted attributes can change together as the estimator lifecycle evolves.
+
+The canonical lifecycle is:
+
+#. **Constructed** — constructor parameters and ``_fit_lock`` exist; fitted attributes are absent.
+#. **Input preparation** — binning and schema metadata such as ``feature_names_in_``, ``cat_cols_mask_``, ``is_int_mask_``, and ``_bin_edges_`` are established.
+#. **Mining** — transaction state, ``raw_patterns_``/``patterns_``, ``x_train_hup_``, mining audit state, and any resource-degradation record are created.
+#. **Downstream assembly** — original-feature preprocessing, augmented-pair state, strict-budget masks, downstream feature names, and ``x_train_downstream_`` are created before ``model_`` is fitted.
+#. **Fitted** — ``fit_metadata_`` summarizes the completed fit. Production execution mode may then discard audit-only training matrices while retaining prediction-critical state.
+#. **Transform/predict** — prediction paths read fitted schema, binning, pattern, feature-assembly, and estimator state. Monitoring may update monitoring counters, but fitted model structure is not rebuilt.
+#. **Refit** — fitted lifecycle state is cleared before a new fit establishes a fresh schema, mining audit trail, downstream representation, and estimator.
+
+The main ownership boundaries are:
+
+.. list-table::
+   :header-rows: 1
+   :widths: 28 36 36
+
+   * - Module / mixin
+     - Primarily creates or updates
+     - Primarily reads from other stages
+   * - ``_EstimatorMixin``
+     - estimator protocol state, serialization compatibility, execution-mode retention
+     - fitted artifacts retained or removed after training
+   * - ``_BinningMixin``
+     - ``feature_names_in_``, ``cat_cols_mask_``, ``is_int_mask_``, ``_bin_edges_``, adaptive-binning metadata
+     - constructor parameters and training input schema
+   * - ``_TrainingMixin``
+     - ``classes_``, ``td_``, ``raw_patterns_``, ``patterns_``, ``x_train_hup_``, ``model_``, ``fit_metadata_``, ``mining_audit_log_``
+     - binning metadata and downstream feature-assembly methods
+   * - ``_FeatureAssemblyMixin``
+     - ``_original_scaler_``, original-feature metadata, augmented-pair transforms, strict-budget/canonicalization masks, ``x_train_downstream_`` and downstream names
+     - schema/binning state and mined pattern matrix
+   * - ``_PredictionMixin``
+     - transform-time validation/monitoring state
+     - fitted schema, binning, patterns, feature-assembly metadata, and downstream estimator
+   * - ``_InterpretationMixin`` / ``_InspectionMixin``
+     - derived explanation and inspection views
+     - retained fitted state from all earlier stages
+
+When maintainers add a fitted attribute, document the stage that creates it, the modules that consume it, whether it is prediction-critical or audit-only, how refit clears it, and whether serialization must preserve it. This keeps the implicit shared-state surface reviewable even though the implementation is distributed across mixins.
+
 Dependency rules
 ----------------
 

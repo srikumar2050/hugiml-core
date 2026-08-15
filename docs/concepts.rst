@@ -130,7 +130,7 @@ Operational stability controls
 
 Use ``n_jobs=-1`` to allow the native backend to use all available OpenMP threads. The adaptive bin-selection and bin-code application stages can use this parallelism before the main mining step, so it benefits adaptive workflows as well as the fused ``L=1`` path.
 
-``max_mining_seconds`` is a wall-clock budget for the native mining stage; ``max_fit_seconds`` remains a backward-compatible alias. If the budget or memory pressure prevents the full configuration from completing, HUGIML attempts safer fallback configurations, records the degraded outcome in ``fit_metadata_.degraded``, and keeps a compact attempt log in ``mining_audit_log_``. Inspect ``fit_metadata_`` and ``get_mining_audit_log()`` after fitting to review pattern counts, stage timings, memory estimates, OpenMP thread count, timeout status, and whether a fallback was used.
+``max_mining_seconds`` is a wall-clock budget for the native mining stage; ``max_fit_seconds`` remains a backward-compatible alias. ``mining_degradation_policy="allow"`` permits staged memory recovery or partial timeout results and records the degraded outcome in ``fit_metadata_.degraded`` and ``mining_audit_log_``. ``mining_degradation_policy="raise"`` makes those resource-driven deviations terminate training instead. Inspect ``fit_metadata_`` and ``get_mining_audit_log()`` after fitting to review requested and effective mining settings, pattern counts, stage timings, memory estimates, OpenMP thread count, and timeout status.
 
 Constant and zero-utility columns
 ---------------------------------

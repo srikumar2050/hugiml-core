@@ -42,7 +42,7 @@ When the fitted downstream estimator is RPTE-based (see :doc:`tuning`), use the 
 
 The flat-tree view merges shared path prefixes and shows each terminal leaf's final LR coefficient, odds multiplier, support, centered contribution, and raw-source metadata. Direct source terms are grouped by original features, HUG patterns, and augmented pairs. ``condition_space="downstream"`` displays standardized downstream thresholds, while ``condition_space="both"`` displays both forms.
 
-``rpte_rule_table()`` remains the structured source of record. RPTE's final L1 logistic model uses accepted tree-leaf indicators plus direct source terms. Rows with ``backend="direct_hugiml_feature"`` identify direct terms; tree rows retain ``backend="sequential_default"`` or ``backend="bounded_lookahead"``. The Governance Studio uses the same flat-tree formatter. ``shap_values_from_pattern_matrix()`` remains available for RPTE-based models and uses a model-agnostic explainer when required.
+``rpte_rule_table()`` remains the structured source of record. RPTE's final L1 logistic model uses accepted tree-leaf indicators plus direct source terms. Rows with ``backend="direct_hugiml_feature"`` identify direct terms; tree rows retain ``backend="sequential_default"`` or ``backend="bounded_lookahead"``. The Governance Studio uses the same flat-tree formatter. ``compute_shap_values()`` also supports RPTE-based downstream models by using a model-agnostic explainer when the linear explainer is not applicable.
 
 Interpretability metrics
 ------------------------
@@ -106,15 +106,27 @@ EBM-style models learn smooth additive shape functions. HUGIML learns bin/catego
 SHAP bridge
 -----------
 
-The optional explainability module can compute SHAP values over the HUG pattern matrix and aggregate them back to original features. This is a pattern-space diagnostic. When the fitted downstream estimator also uses original or augmented-pair features, the SHAP helper reports that the pattern-space result is incomplete unless incomplete reporting is explicitly allowed.
+The optional explainability module computes SHAP values against the complete fitted downstream representation returned by ``transform(X)``. This keeps the explainer input aligned with the estimator for ``patterns_only``, ``original_plus_patterns``, and ``original_plus_interactions``, including retained augmented-pair columns, strict ``topK`` selection, and downstream canonicalization.
+
+``compute_shap_values()`` is the primary API. By default it returns SHAP values for every fitted downstream feature. ``feature_scope="patterns"`` requests only the pattern columns from that full-model explanation. If the fitted model also uses non-pattern columns, that partial reporting view requires ``allow_incomplete=True``; the estimator is still evaluated on the complete downstream matrix. The historical ``shap_values_from_pattern_matrix()`` name remains available as a compatibility wrapper for the pattern-scope view.
 
 .. code-block:: python
 
    from hugiml.explainability import (
        HUGPatternExplainer,
-       shap_values_from_pattern_matrix,
        aggregate_shap_to_features,
+       compute_shap_values,
+       shap_values_from_pattern_matrix,
    )
+
+   shap_all = compute_shap_values(clf, X_test)
+   shap_patterns = compute_shap_values(
+       clf,
+       X_test,
+       feature_scope="patterns",
+       allow_incomplete=True,
+   )
+   source_importance = aggregate_shap_to_features(shap_all, clf)
 
    explainer = HUGPatternExplainer(clf)
    report = explainer.generate_report(model_id="credit-scorer-v1")

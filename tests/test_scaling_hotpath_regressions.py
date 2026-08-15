@@ -25,7 +25,7 @@ def test_fixed_numeric_l1_hotpath_transform_is_not_all_zero(monkeypatch):
         n_jobs=1,
     ).fit(X, y)
 
-    Z = clf.transform(X[:25])
+    Z = clf.transform_patterns(X[:25])
     assert isinstance(Z, csr_matrix)
     assert Z.shape[0] == 25
     assert Z.shape[1] == len(clf.patterns_)
@@ -49,7 +49,7 @@ def test_fixed_numeric_l1_hotpath_skips_nonfinite_cells(monkeypatch):
         use_hotpath=True,
         n_jobs=1,
     ).fit(X, y)
-    Z = clf.transform(X[:20])
+    Z = clf.transform_patterns(X[:20])
     assert Z.nnz > 0
     proba = clf.predict_proba(X[:20])
     assert np.all(np.isfinite(proba))
@@ -69,5 +69,5 @@ def test_adaptive_ndarray_prebin_keeps_numpy_fast_path():
     X_pre = clf._prebin_for_predict(X[:10])
     assert isinstance(X_pre, np.ndarray)
     assert X_pre.shape == X[:10].shape
-    Z = clf.transform(X[:10])
+    Z = clf.transform_patterns(X[:10])
     assert Z.nnz > 0

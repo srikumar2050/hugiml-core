@@ -74,17 +74,41 @@ def test_three_feature_modes_fit_predict_proba_and_transform(mode):
     assert proba.shape == (len(yte), 2)
     assert np.allclose(proba.sum(axis=1), 1.0)
     assert Z.shape[0] == len(yte)
-    assert Z.shape[1] == len(clf.patterns_)
+    assert Z.shape[1] == clf.x_train_downstream_.shape[1]
+    assert Z.shape[1] == len(clf.get_downstream_features())
+    np.testing.assert_allclose(clf.model_.predict_proba(Z), proba, rtol=1e-10, atol=1e-10)
 
 
 @pytest.mark.parametrize("mode", MODES)
-def test_fit_transform_remains_pattern_matrix_only(mode):
+def test_fit_transform_matches_fitted_downstream_representation(mode):
     Xtr, Xte, ytr, yte = _frame_dataset("moons")
     clf = _clf(mode)
     Z_fit = clf.fit_transform(Xtr, ytr)
     Z_transform = clf.transform(Xtr)
-    assert Z_fit.shape == Z_transform.shape
-    assert Z_fit.shape[1] == len(clf.patterns_)
+    assert Z_fit.shape == Z_transform.shape == clf.x_train_downstream_.shape
+    fit_dense = Z_fit.toarray() if hasattr(Z_fit, "toarray") else np.asarray(Z_fit)
+    transform_dense = (
+        Z_transform.toarray() if hasattr(Z_transform, "toarray") else np.asarray(Z_transform)
+    )
+    train_dense = (
+        clf.x_train_downstream_.toarray()
+        if hasattr(clf.x_train_downstream_, "toarray")
+        else np.asarray(clf.x_train_downstream_)
+    )
+    np.testing.assert_allclose(fit_dense, transform_dense, rtol=0, atol=1e-6)
+    np.testing.assert_allclose(fit_dense, train_dense, rtol=0, atol=1e-6)
+
+
+@pytest.mark.parametrize("mode", MODES)
+def test_transform_respects_fitted_strict_topk_and_canonicalization(mode):
+    Xtr, Xte, ytr, yte = _frame_dataset("moons")
+    clf = _clf(mode).set_params(topk_budget_strict=True, topK=5).fit(Xtr, ytr)
+    Z = clf.transform(Xte)
+    assert Z.shape[1] == clf.model_.named_steps["clf"].n_features_in_
+    assert Z.shape[1] == len(clf.get_downstream_features())
+    np.testing.assert_allclose(
+        clf.model_.predict_proba(Z), clf.predict_proba(Xte), rtol=1e-10, atol=1e-10
+    )
 
 
 def test_hybrid_modes_have_downstream_feature_count_at_least_patterns_only():
@@ -144,6 +168,14 @@ def test_save_load_preserves_feature_mode_and_predictions(mode, tmp_path):
     p2 = loaded.predict_proba(Xte)
     assert loaded.feature_mode == mode
     np.testing.assert_allclose(p1, p2, rtol=1e-10, atol=1e-10)
+    z1 = clf.transform(Xte)
+    z2 = loaded.transform(Xte)
+    np.testing.assert_allclose(
+        z1.toarray() if hasattr(z1, "toarray") else np.asarray(z1),
+        z2.toarray() if hasattr(z2, "toarray") else np.asarray(z2),
+        rtol=0,
+        atol=1e-10,
+    )
 
 
 def test_all_modes_share_same_pattern_transform_when_mining_params_match():
@@ -152,7 +184,7 @@ def test_all_modes_share_same_pattern_transform_when_mining_params_match():
     pattern_counts = []
     for mode in MODES:
         clf = _clf(mode).fit(Xtr, ytr)
-        matrices.append(clf.transform(Xte).toarray())
+        matrices.append(clf.transform_patterns(Xte).toarray())
         pattern_counts.append(len(clf.patterns_))
     assert len(set(pattern_counts)) == 1
     np.testing.assert_array_equal(matrices[0], matrices[1])

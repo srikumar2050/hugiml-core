@@ -29,6 +29,7 @@ from hugiml.explainability import (
     FeatureLineage,
     HUGPatternExplainer,
     aggregate_shap_to_features,
+    compute_shap_values,
     shap_values_from_pattern_matrix,
 )
 
@@ -205,19 +206,19 @@ class TestGenerateReport:
 class TestSHAPBridge:
     def test_shap_values_returns_array_or_none(self, fitted_clf_synthetic):
         clf, X_te, _ = fitted_clf_synthetic
-        sv = shap_values_from_pattern_matrix(clf, X_te)
+        sv = compute_shap_values(clf, X_te)
         # Returns None when shap is not installed, or ndarray when it is
         assert sv is None or isinstance(sv, np.ndarray)
 
     def test_shap_values_finite_when_returned(self, fitted_clf_synthetic):
         clf, X_te, _ = fitted_clf_synthetic
-        sv = shap_values_from_pattern_matrix(clf, X_te)
+        sv = compute_shap_values(clf, X_te)
         if sv is not None:
             assert np.all(np.isfinite(sv)), "SHAP values contain non-finite entries"
 
     def test_aggregate_shap_returns_dict_or_none(self, fitted_clf_synthetic):
         clf, X_te, _ = fitted_clf_synthetic
-        sv = shap_values_from_pattern_matrix(clf, X_te)
+        sv = compute_shap_values(clf, X_te)
         if sv is None:
             pytest.skip("shap not installed")
         result = aggregate_shap_to_features(sv, clf)
@@ -225,7 +226,7 @@ class TestSHAPBridge:
 
     def test_aggregate_shap_feature_names_present(self, fitted_clf_synthetic):
         clf, X_te, _ = fitted_clf_synthetic
-        sv = shap_values_from_pattern_matrix(clf, X_te)
+        sv = compute_shap_values(clf, X_te)
         if sv is None:
             pytest.skip("shap not installed")
         result = aggregate_shap_to_features(sv, clf)
@@ -259,7 +260,7 @@ class TestSHAPBridge:
         )
         clf.fit(X, y)
 
-        sv = shap_values_from_pattern_matrix(X=X.iloc[:40], classifier=clf, background_samples=20)
+        sv = compute_shap_values(X=X.iloc[:40], classifier=clf, background_samples=20)
         assert sv is not None
         assert np.all(np.isfinite(sv))
 
@@ -286,7 +287,8 @@ def test_explanation_stability_reports_feature_type_specific_metrics():
     assert metrics.jaccard_similarity == metrics.by_feature_type["pattern"]["jaccard_similarity"]
 
 
-def test_pattern_space_shap_warns_for_mixed_downstream_features():
+def test_full_model_shap_supports_mixed_downstream_features():
+    pytest.importorskip("shap")
     X, y = make_classification(n_samples=120, n_features=5, n_informative=3, random_state=7)
     clf = HUGIMLClassifierNative(
         B=-1,
@@ -300,7 +302,172 @@ def test_pattern_space_shap_warns_for_mixed_downstream_features():
         max_fit_seconds=5,
         interaction_relaxed_mining=False,
     ).fit(X, y)
-    with pytest.warns(RuntimeWarning, match="Pattern-space SHAP is incomplete"):
+
+    sv = compute_shap_values(clf, X[:5], background_samples=5)
+    assert sv is not None
+    assert sv.shape[0] == 5
+    assert sv.shape[1] == len(clf.get_downstream_features())
+    assert clf.transform(X[:5]).shape[1] == sv.shape[1]
+
+    pattern_count = sum(
+        str(name).startswith("pattern:") for name in clf.get_downstream_features()
+    )
+    with pytest.warns(RuntimeWarning, match="Pattern-only SHAP reporting would omit"):
         assert shap_values_from_pattern_matrix(clf, X[:5]) is None
-    with pytest.warns(RuntimeWarning, match="omits original downstream columns"):
-        aggregate_shap_to_features(np.zeros((5, len(clf.get_hug_features()))), clf)
+    sv_patterns = shap_values_from_pattern_matrix(
+        clf, X[:5], background_samples=5, allow_incomplete=True
+    )
+    assert sv_patterns is not None
+    assert sv_patterns.shape[1] == pattern_count
+
+    with pytest.raises(ValueError, match="Pattern-only SHAP values omit"):
+        aggregate_shap_to_features(sv_patterns, clf)
+    aggregated = aggregate_shap_to_features(sv_patterns, clf, allow_incomplete=True)
+    assert isinstance(aggregated, dict)
+
+
+class _SHAPContractClassifier:
+    def __init__(self, X_downstream, names, *, classes=(0, 1)):
+        from types import SimpleNamespace
+
+        self._X_downstream = np.asarray(X_downstream, dtype=float)
+        self._names = list(names)
+        self.classes_ = np.asarray(classes)
+        self.feature_names_in_ = ["age", "income"]
+        self._original_cat_cols_ = []
+        self.model_ = SimpleNamespace(
+            named_steps={"clf": SimpleNamespace(n_features_in_=self._X_downstream.shape[1])},
+            predict_proba=lambda Z: np.column_stack(
+                [np.full(len(Z), 0.4), np.full(len(Z), 0.6)]
+            ),
+        )
+
+    def transform(self, X):
+        return self._X_downstream[: len(X)]
+
+    def get_downstream_features(self):
+        return list(self._names)
+
+    def get_pattern_provenance(self):
+        return {
+            "pattern:age=high, income=high": {
+                "raw_features": ["age", "income"],
+            }
+        }
+
+    def get_augmented_pair_transforms(self):
+        return [{"name": "age_times_income", "inputs": ["age", "income"]}]
+
+
+def _install_fake_linear_shap(monkeypatch, calls, *, multiclass=False):
+    import sys
+    from types import SimpleNamespace
+
+    class LinearExplainer:
+        def __init__(self, model, background):
+            calls["background_shape"] = tuple(background.shape)
+
+        def shap_values(self, X):
+            calls["explained_shape"] = tuple(X.shape)
+            base = np.arange(X.shape[0] * X.shape[1], dtype=float).reshape(X.shape)
+            if multiclass:
+                return np.stack([base, base + 1.0, base + 2.0], axis=-1)
+            return base
+
+    fake_shap = SimpleNamespace(LinearExplainer=LinearExplainer)
+    monkeypatch.setitem(sys.modules, "shap", fake_shap)
+
+
+@pytest.mark.parametrize(
+    "names",
+    [
+        ["pattern:age=high", "pattern:income=high"],
+        ["pattern:age=high", "augmented_pair:age_times_income"],
+        ["orig:age", "pattern:income=high"],
+        ["orig:age", "pattern:age=high, income=high", "augmented_pair:age_times_income"],
+    ],
+)
+def test_compute_shap_values_uses_complete_downstream_width(monkeypatch, names):
+    X_downstream = np.arange(18, dtype=float).reshape(6, 3)[:, : len(names)]
+    clf = _SHAPContractClassifier(X_downstream, names)
+    calls = {}
+    _install_fake_linear_shap(monkeypatch, calls)
+
+    sv = compute_shap_values(clf, np.zeros((4, 2)))
+
+    assert sv is not None
+    assert sv.shape == (4, len(names))
+    assert calls["background_shape"][1] == len(names)
+    assert calls["explained_shape"][1] == len(names)
+
+
+def test_pattern_scope_filters_after_full_model_explanation(monkeypatch):
+    names = ["orig:age", "pattern:income=high", "augmented_pair:age_times_income"]
+    clf = _SHAPContractClassifier(np.arange(18, dtype=float).reshape(6, 3), names)
+    calls = {}
+    _install_fake_linear_shap(monkeypatch, calls)
+
+    with pytest.warns(RuntimeWarning, match="Pattern-only SHAP reporting would omit"):
+        assert compute_shap_values(clf, np.zeros((4, 2)), feature_scope="patterns") is None
+
+    sv = compute_shap_values(
+        clf,
+        np.zeros((4, 2)),
+        feature_scope="patterns",
+        allow_incomplete=True,
+    )
+    assert sv is not None
+    assert sv.shape == (4, 1)
+    assert calls["explained_shape"] == (4, 3)
+
+    legacy = shap_values_from_pattern_matrix(
+        clf,
+        np.zeros((4, 2)),
+        allow_incomplete=True,
+    )
+    assert legacy is not None
+    np.testing.assert_allclose(legacy, sv)
+
+
+def test_compute_shap_values_preserves_multiclass_axis(monkeypatch):
+    names = ["orig:age", "pattern:income=high"]
+    clf = _SHAPContractClassifier(
+        np.arange(12, dtype=float).reshape(6, 2), names, classes=(0, 1, 2)
+    )
+    calls = {}
+    _install_fake_linear_shap(monkeypatch, calls, multiclass=True)
+
+    sv = compute_shap_values(clf, np.zeros((4, 2)))
+
+    assert sv is not None
+    assert sv.shape == (4, 2, 3)
+
+
+def test_aggregate_full_downstream_shap_uses_source_lineage():
+    names = [
+        "orig:age",
+        "pattern:age=high, income=high",
+        "augmented_pair:age_times_income",
+    ]
+    clf = _SHAPContractClassifier(np.ones((4, 3)), names)
+    sv = np.ones((4, 3), dtype=float)
+
+    aggregated = aggregate_shap_to_features(sv, clf)
+
+    assert aggregated["age"] == pytest.approx(3.0)
+    assert aggregated["income"] == pytest.approx(2.0)
+
+
+def test_aggregate_pattern_subset_requires_explicit_incomplete_permission():
+    names = ["orig:age", "pattern:age=high, income=high"]
+    clf = _SHAPContractClassifier(np.ones((4, 2)), names)
+    sv_patterns = np.ones((4, 1), dtype=float)
+
+    with pytest.raises(ValueError, match="Pattern-only SHAP values omit"):
+        aggregate_shap_to_features(sv_patterns, clf)
+
+    aggregated = aggregate_shap_to_features(
+        sv_patterns, clf, allow_incomplete=True
+    )
+    assert aggregated["age"] == pytest.approx(1.0)
+    assert aggregated["income"] == pytest.approx(1.0)

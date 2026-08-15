@@ -338,4 +338,4 @@ def _require_fitted(clf: Any) -> None:
 def _transform(clf: Any, X: Any):
     """Return the sparse binary HUG pattern matrix for X."""
     _require_fitted(clf)
-    return clf.transform(X)
+    return clf.transform_patterns(X)

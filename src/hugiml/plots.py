@@ -934,7 +934,7 @@ class HUGPlotter:
         clf = self._clf
         is_df = isinstance(X, pd.DataFrame)
         row = X.iloc[[sample_idx]] if is_df else X[sample_idx : sample_idx + 1]
-        hup = clf.transform(row)
+        hup = clf.transform_patterns(row)
         active_cols = hup[0].nonzero()[1].tolist()
 
         all_labels = clf.get_hug_features()

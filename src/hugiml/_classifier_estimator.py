@@ -179,6 +179,7 @@ class _EstimatorMixin:
             max_predict_ms=self.max_predict_ms,
             max_fit_seconds=self.max_fit_seconds,
             max_mining_seconds=self.max_mining_seconds,
+            mining_degradation_policy=self.mining_degradation_policy,
             verbose=self.verbose,
             adaptive_binning=self.adaptive_binning,
             b_candidates=self.b_candidates,
@@ -353,6 +354,8 @@ class _EstimatorMixin:
         if not hasattr(self, "max_mining_seconds"):
             # v1.1.x compatibility: older pickles only know max_fit_seconds.
             self.max_mining_seconds = None
+        if not hasattr(self, "mining_degradation_policy"):
+            self.mining_degradation_policy = "allow"
         if not hasattr(self, "mining_audit_log_"):
             self.mining_audit_log_ = []
         if not hasattr(self, "augmented_pair_mode"):
