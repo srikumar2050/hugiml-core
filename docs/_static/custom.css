@@ -1,5 +1,0 @@
-/* Small readability tweaks for hugiml-core documentation. */
-.wy-side-nav-search .logo { max-width: 95%; }
-.rst-content code.literal { white-space: nowrap; }
-.rst-content .section img { border-radius: 6px; }
-.rst-content table.docutils td, .rst-content table.docutils th { vertical-align: top; }
