@@ -21,10 +21,11 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import pytest
-from hugiml import HUGIMLClassifierNative
 from scipy.sparse import issparse
 from sklearn.exceptions import NotFittedError as HUGIMLNotFittedError
 from sklearn.utils.estimator_checks import parametrize_with_checks
+
+from hugiml import HUGIMLClassifierNative
 
 # ---------------------------------------------------------------------------
 # Smoke: fit → predict_proba → predict
