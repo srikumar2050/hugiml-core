@@ -1,0 +1,288 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>HUGIML Guided Video Demos</title>
+  <style>
+    :root {
+      --bg: #f5f7fb;
+      --panel: #ffffff;
+      --ink: #172033;
+      --muted: #667085;
+      --line: #e4e7ec;
+      --brand: #2563eb;
+      --accent: #ea580c;
+      --shadow: 0 14px 36px rgba(16,24,40,.08);
+    }
+
+    * { box-sizing: border-box; }
+    html, body { max-width: 100%; overflow-x: hidden; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background:
+        radial-gradient(circle at 8% 8%, rgba(37,99,235,.18), transparent 32%),
+        radial-gradient(circle at 92% 12%, rgba(234,88,12,.12), transparent 30%),
+        var(--bg);
+      color: var(--ink);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    main { max-width: 1100px; margin: 0 auto; padding: 48px 22px 56px; }
+
+    .back {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      margin-bottom: 18px;
+      color: var(--brand);
+      font-size: .88rem;
+      font-weight: 800;
+      text-decoration: none;
+    }
+    .back:hover { text-decoration: underline; }
+
+    .hero {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 24px;
+      padding: 32px;
+      box-shadow: var(--shadow);
+      margin-bottom: 24px;
+    }
+
+    h1 {
+      margin: 0 0 10px;
+      font-size: clamp(2rem,4vw,3.2rem);
+      letter-spacing: -0.05em;
+      line-height: 1.05;
+    }
+
+    .hero p {
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.6;
+      max-width: 900px;
+    }
+
+    .chips {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      margin-top: 16px;
+    }
+
+    .chip {
+      display: inline-block;
+      padding: 5px 11px;
+      border-radius: 999px;
+      background: rgba(234,88,12,.09);
+      border: 1px solid rgba(234,88,12,.22);
+      color: var(--accent);
+      font-weight: 800;
+      font-size: .78rem;
+    }
+
+    .section-label {
+      margin: 30px 0 12px;
+      color: var(--muted);
+      font-size: .78rem;
+      font-weight: 800;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+
+    .video-list {
+      display: grid;
+      gap: 20px;
+    }
+
+    .video-card {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 22px;
+      box-shadow: var(--shadow);
+      overflow: hidden;
+    }
+
+    .video-head {
+      padding: 22px 24px 16px;
+    }
+
+    .eyebrow {
+      display: inline-block;
+      margin-bottom: 10px;
+      padding: 4px 9px;
+      border-radius: 999px;
+      background: rgba(37,99,235,.08);
+      border: 1px solid rgba(37,99,235,.18);
+      color: var(--brand);
+      font-size: .73rem;
+      font-weight: 800;
+    }
+
+    .video-card h2 {
+      margin: 0 0 7px;
+      font-size: 1.25rem;
+      letter-spacing: -.025em;
+    }
+
+    .video-card p {
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.58;
+      font-size: .92rem;
+    }
+
+    .player-wrap {
+      padding: 0 24px 22px;
+    }
+
+    video {
+      display: block;
+      width: 100%;
+      aspect-ratio: 16 / 9;
+      background: #0b1020;
+      border-radius: 14px;
+      border: 1px solid #20293a;
+    }
+
+    footer {
+      margin-top: 28px;
+      color: var(--muted);
+      font-size: .85rem;
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    footer a { color: var(--brand); text-decoration: none; }
+    footer a:hover { text-decoration: underline; }
+
+    @media (max-width: 700px) {
+      main { padding: 28px 14px 42px; }
+      .hero { padding: 24px 18px; }
+      .video-head { padding: 19px 18px 14px; }
+      .player-wrap { padding: 0 18px 18px; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <a class="back" href="../index.html">← Back to HUGIML demos</a>
+
+    <section class="hero">
+      <h1>HUGIML guided video demos</h1>
+      <p>
+        Browser-playable walkthroughs of HUGIML concepts and workflows, from a concise product overview
+        through model development, decision support, interpretability, stakeholder communication, and governance.
+      </p>
+      <div class="chips">
+        <span class="chip">No installation required</span>
+        <span class="chip">Play in browser</span>
+        <span class="chip">Guided walkthroughs</span>
+      </div>
+    </section>
+
+    <div class="section-label">Video library</div>
+
+    <section class="video-list">
+      <article class="video-card" id="overview">
+        <div class="video-head">
+          <span class="eyebrow">Overview</span>
+          <h2>HUGIML Overview</h2>
+          <p>A concise introduction to HUGIML, its interpretable modeling approach, and the main workflow.</p>
+        </div>
+        <div class="player-wrap">
+          <video controls preload="metadata" playsinline>
+            <source src="overview.mp4" type="video/mp4" />
+            Your browser does not support HTML5 video.
+          </video>
+        </div>
+      </article>
+
+      <article class="video-card" id="data-scientist">
+        <div class="video-head">
+          <span class="eyebrow">Workflow</span>
+          <h2>Data Scientist Demo</h2>
+          <p>A practical modeling walkthrough from dataset exploration through training, inspection, and model understanding.</p>
+        </div>
+        <div class="player-wrap">
+          <video controls preload="metadata" playsinline>
+            <source src="data-scientist-demo.mp4" type="video/mp4" />
+            Your browser does not support HTML5 video.
+          </video>
+        </div>
+      </article>
+
+      <article class="video-card" id="data-to-decision">
+        <div class="video-head">
+          <span class="eyebrow">Decision workflow</span>
+          <h2>Data to Decision: Churn</h2>
+          <p>An end-to-end churn example showing how data, model structure, and interpretable evidence support a decision workflow.</p>
+        </div>
+        <div class="player-wrap">
+          <video controls preload="metadata" playsinline>
+            <source src="data-to-decision-churn.mp4" type="video/mp4" />
+            Your browser does not support HTML5 video.
+          </video>
+        </div>
+      </article>
+
+      <article class="video-card" id="interpretability">
+        <div class="video-head">
+          <span class="eyebrow">Interpretability</span>
+          <h2>Interpretability Demo</h2>
+          <p>A focused walkthrough of model interpretation, feature-level evidence, and case-level explanations.</p>
+        </div>
+        <div class="player-wrap">
+          <video controls preload="metadata" playsinline>
+            <source src="interpretability-demo.mp4" type="video/mp4" />
+            Your browser does not support HTML5 video.
+          </video>
+        </div>
+      </article>
+
+
+      <article class="video-card" id="stakeholder">
+        <div class="video-head">
+          <span class="eyebrow">Stakeholder communication</span>
+          <h2>Stakeholder Demo</h2>
+          <p>A concise walkthrough of how HUGIML results can be communicated to business and review stakeholders using clear model evidence and decision-oriented explanations.</p>
+        </div>
+        <div class="player-wrap">
+          <video controls preload="metadata" playsinline>
+            <source src="stakeholder-demo.mp4" type="video/mp4" />
+            Your browser does not support HTML5 video.
+          </video>
+        </div>
+      </article>
+
+      <article class="video-card" id="governance">
+        <div class="video-head">
+          <span class="eyebrow">Governance</span>
+          <h2>Governance Demo</h2>
+          <p>A guided tour of validation evidence, representation review, data quality, monitoring, and case-level model review.</p>
+        </div>
+        <div class="player-wrap">
+          <video controls preload="metadata" playsinline>
+            <source src="governance-demo.mp4" type="video/mp4" />
+            Your browser does not support HTML5 video.
+          </video>
+        </div>
+      </article>
+    </section>
+
+    <footer>
+      <span>HUGIML guided demonstrations</span>
+      <span>
+        <a href="../index.html">Interactive demos</a>
+        &nbsp;·&nbsp;
+        <a href="https://hugiml-core.readthedocs.io" target="_blank" rel="noopener">Documentation</a>
+      </span>
+    </footer>
+  </main>
+</body>
+</html>
