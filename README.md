@@ -27,6 +27,14 @@ checking_status=no_checking          coef= +1.12     support=0.39
   <img src="docs/images/positioning-mosaic.png" alt="Where HUGIML fits" width="800" height="500">
 </p>
 
+
+## Explore HUGIML
+
+See HUGIML in action through interactive benchmark dashboards, Governance Studio, guided video demos, and LLM examples.
+
+**[Interactive Demos](https://srikumar2050.github.io/hugiml-core/)** · **[Open in Colab](https://colab.research.google.com/github/srikumar2050/hugiml-core/blob/gh-pages/quickstart.ipynb)** · **[Documentation](https://hugiml-core.readthedocs.io/)** · **[PyPI](https://pypi.org/project/hugiml-core/)**
+
+
 ---
 
 ## Table of Contents
