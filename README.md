@@ -48,28 +48,29 @@ See HUGIML in action through interactive benchmark dashboards, Governance Studio
 7. [Execution Modes](#execution-modes)
 8. [Hyperparameter Search](#hyperparameter-search)
 9. [RPTE: Higher-Order Interactions](#rpte--higher-order-interactions)
-10. [Governance Studio Dashboard](#governance-studio-dashboard)
-11. [LLM Assistant](#llm-assistant)
-12. [Augmented Pair Features](#augmented-pair-features)
-13. [Adaptive Binning](#adaptive-binning)
-14. [Missing Value Handling](#missing-value-handling)
-15. [Model Explanation and Visualisations](#model-explanation-and-visualisations)
-16. [Native Mining Pruning Controls](#native-mining-pruning-controls)
-17. [Pattern Pruning](#pattern-pruning)
-18. [Interpretability Metrics](#interpretability-metrics)
-19. [Multiclass, Imbalanced Data, High-Cardinality](#multiclass-imbalanced-data-high-cardinality)
-20. [Drift Detection & Monitoring](#drift-detection--monitoring)
-21. [Calibration](#calibration)
-22. [Serialisation](#serialisation)
-23. [Governance & Model Cards](#governance--model-cards)
-24. [Benchmark Suite](#benchmark-suite)
-25. [Example Notebooks: General and Domain-Specific](#example-notebooks-general-and-domain-specific)
-26. [Validation Highlights](#validation-highlights)
-27. [Inference Server](#inference-server)
-28. [CI / CD](#ci--cd)
-29. [Repository Structure](#repository-structure)
-30. [License](#license)
-31. [Citation](#citation)
+10. [Causal Analysis with T-HUG](#causal-analysis-with-t-hug)
+11. [Governance Studio Dashboard](#governance-studio-dashboard)
+12. [LLM Assistant](#llm-assistant)
+13. [Augmented Pair Features](#augmented-pair-features)
+14. [Adaptive Binning](#adaptive-binning)
+15. [Missing Value Handling](#missing-value-handling)
+16. [Model Explanation and Visualisations](#model-explanation-and-visualisations)
+17. [Native Mining Pruning Controls](#native-mining-pruning-controls)
+18. [Pattern Pruning](#pattern-pruning)
+19. [Interpretability Metrics](#interpretability-metrics)
+20. [Multiclass, Imbalanced Data, High-Cardinality](#multiclass-imbalanced-data-high-cardinality)
+21. [Drift Detection & Monitoring](#drift-detection--monitoring)
+22. [Calibration](#calibration)
+23. [Serialisation](#serialisation)
+24. [Governance & Model Cards](#governance--model-cards)
+25. [Benchmark Suite](#benchmark-suite)
+26. [Example Notebooks: General and Domain-Specific](#example-notebooks-general-and-domain-specific)
+27. [Validation Highlights](#validation-highlights)
+28. [Inference Server](#inference-server)
+29. [CI / CD](#ci--cd)
+30. [Repository Structure](#repository-structure)
+31. [License](#license)
+32. [Citation](#citation)
 
 ---
 
@@ -119,6 +120,9 @@ pip install "hugiml-core[plots]"
 
 # With the Dash Governance Studio and dashboard dependencies
 pip install "hugiml-core[dashboard]"
+
+# With the focused causal-effect investigation dashboard
+pip install "hugiml-core[causal-dashboard]"
 
 # With benchmark comparison suite
 pip install "hugiml-core[benchmarks]"
@@ -689,6 +693,35 @@ For multiclass targets, wrap RPTE in `sklearn.multiclass.OneVsRestClassifier`; t
 ### Serialization
 
 RPTE-based models are persisted through `hugiml.serialization.save_model()` and `load_model()` using the versioned `.hugiml` archive format. The archive retains the fitted trees, final logistic layer, and reconstructable `base_estimator` configuration. See [Serialisation](#serialisation) for details.
+
+---
+
+## Causal Analysis with T-HUG
+
+The optional **HUGIML Causal Investigation Studio** explores binary-treatment
+effects with shared-vocabulary T-HUG outcome models. It provides potential-outcome
+and CATE summaries, repeated cross-fitted estimates, DR/AIPW comparisons, overlap
+sensitivity, balance diagnostics, interpretable treatment-effect regions, and
+control and treatment outcome-model details. The default Quick grid evaluates one configuration
+per model for a responsive first run; the four larger HUGIML grids remain available.
+
+### Install and launch
+
+```bash
+pip install "hugiml-core[causal-dashboard]"
+hugiml-causal-dashboard
+```
+
+The launcher opens `http://localhost:8052/` and binds locally to `127.0.0.1:8052`.
+Choose a demo or upload a supported dataset with causal metadata, confirm the
+treatment, outcome, and baseline covariates, select comparison methods and a
+grid, then run the analysis. T-HUG selection can use ROC AUC or negative log loss.
+Synthetic demos may include oracle CATE values; uploaded real datasets never
+receive fabricated counterfactual truth.
+
+### Interactive preview
+
+- [Open the HUGIML Causal Investigation Studio Demo](https://srikumar2050.github.io/hugiml-core/hugiml_causal_dashboard_demo.html)
 
 ---
 

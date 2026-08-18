@@ -256,7 +256,10 @@ class TestSHAPBridge:
 
         rpte_estimator = get_hugiml_grid("performance_ho")["base_estimator"][1]
         clf = HUGIMLClassifierNative(
-            L=1, topK=20, feature_mode="patterns_only", base_estimator=rpte_estimator,
+            L=1,
+            topK=20,
+            feature_mode="patterns_only",
+            base_estimator=rpte_estimator,
         )
         clf.fit(X, y)
 
@@ -309,9 +312,7 @@ def test_full_model_shap_supports_mixed_downstream_features():
     assert sv.shape[1] == len(clf.get_downstream_features())
     assert clf.transform(X[:5]).shape[1] == sv.shape[1]
 
-    pattern_count = sum(
-        str(name).startswith("pattern:") for name in clf.get_downstream_features()
-    )
+    pattern_count = sum(str(name).startswith("pattern:") for name in clf.get_downstream_features())
     with pytest.warns(RuntimeWarning, match="Pattern-only SHAP reporting would omit"):
         assert shap_values_from_pattern_matrix(clf, X[:5]) is None
     sv_patterns = shap_values_from_pattern_matrix(
@@ -327,19 +328,25 @@ def test_full_model_shap_supports_mixed_downstream_features():
 
 
 class _SHAPContractClassifier:
-    def __init__(self, X_downstream, names, *, classes=(0, 1)):
+    def __init__(
+        self,
+        X_downstream,
+        names,
+        *,
+        classes=(0, 1),
+        feature_mode="original_plus_patterns",
+    ):
         from types import SimpleNamespace
 
         self._X_downstream = np.asarray(X_downstream, dtype=float)
         self._names = list(names)
+        self.feature_mode = feature_mode
         self.classes_ = np.asarray(classes)
         self.feature_names_in_ = ["age", "income"]
         self._original_cat_cols_ = []
         self.model_ = SimpleNamespace(
             named_steps={"clf": SimpleNamespace(n_features_in_=self._X_downstream.shape[1])},
-            predict_proba=lambda Z: np.column_stack(
-                [np.full(len(Z), 0.4), np.full(len(Z), 0.6)]
-            ),
+            predict_proba=lambda Z: np.column_stack([np.full(len(Z), 0.4), np.full(len(Z), 0.6)]),
         )
 
     def transform(self, X):
@@ -420,13 +427,93 @@ def test_pattern_scope_filters_after_full_model_explanation(monkeypatch):
     assert sv.shape == (4, 1)
     assert calls["explained_shape"] == (4, 3)
 
-    legacy = shap_values_from_pattern_matrix(
+    pattern_view = shap_values_from_pattern_matrix(
         clf,
         np.zeros((4, 2)),
         allow_incomplete=True,
     )
-    assert legacy is not None
-    np.testing.assert_allclose(legacy, sv)
+    assert pattern_view is not None
+    np.testing.assert_allclose(pattern_view, sv)
+
+
+@pytest.mark.parametrize(
+    "names",
+    [
+        ["pattern:age=high", "pattern:income=high"],
+        ["pattern:age=high", "augmented_pair:age_times_income"],
+        ["augmented_pair:age_times_income"],
+        [],
+    ],
+)
+def test_pattern_matrix_wrapper_is_complete_for_patterns_only_models(monkeypatch, names):
+    X_downstream = np.arange(24, dtype=float).reshape(6, 4)[:, : len(names)]
+    clf = _SHAPContractClassifier(
+        X_downstream,
+        names,
+        feature_mode="patterns_only",
+    )
+    calls = {}
+    _install_fake_linear_shap(monkeypatch, calls)
+
+    values = shap_values_from_pattern_matrix(clf, np.zeros((4, 2)))
+
+    assert values is not None
+    assert values.shape == (4, len(names))
+    if names:
+        assert calls["explained_shape"] == (4, len(names))
+    else:
+        assert calls == {}
+
+
+@pytest.mark.parametrize(
+    ("names", "expected_pattern_count"),
+    [
+        (["pattern:age=high", "augmented_pair:age_times_income"], 1),
+        (["augmented_pair:age_times_income"], 0),
+        ([], 0),
+    ],
+)
+def test_patterns_only_wrapper_can_return_explicit_partial_view(
+    monkeypatch, names, expected_pattern_count
+):
+    X_downstream = np.arange(24, dtype=float).reshape(6, 4)[:, : len(names)]
+    clf = _SHAPContractClassifier(
+        X_downstream,
+        names,
+        feature_mode="patterns_only",
+    )
+    calls = {}
+    _install_fake_linear_shap(monkeypatch, calls)
+
+    values = shap_values_from_pattern_matrix(
+        clf,
+        np.zeros((4, 2)),
+        allow_incomplete=True,
+    )
+
+    assert values is not None
+    assert values.shape == (4, expected_pattern_count)
+    if names:
+        assert calls["explained_shape"] == (4, len(names))
+    else:
+        assert calls == {}
+
+
+def test_pattern_matrix_wrapper_preserves_multiclass_axis_for_patterns_only(monkeypatch):
+    names = ["pattern:age=high", "augmented_pair:age_times_income"]
+    clf = _SHAPContractClassifier(
+        np.arange(12, dtype=float).reshape(6, 2),
+        names,
+        classes=(0, 1, 2),
+        feature_mode="patterns_only",
+    )
+    calls = {}
+    _install_fake_linear_shap(monkeypatch, calls, multiclass=True)
+
+    values = shap_values_from_pattern_matrix(clf, np.zeros((4, 2)))
+
+    assert values is not None
+    assert values.shape == (4, 2, 3)
 
 
 def test_compute_shap_values_preserves_multiclass_axis(monkeypatch):
@@ -466,8 +553,6 @@ def test_aggregate_pattern_subset_requires_explicit_incomplete_permission():
     with pytest.raises(ValueError, match="Pattern-only SHAP values omit"):
         aggregate_shap_to_features(sv_patterns, clf)
 
-    aggregated = aggregate_shap_to_features(
-        sv_patterns, clf, allow_incomplete=True
-    )
+    aggregated = aggregate_shap_to_features(sv_patterns, clf, allow_incomplete=True)
     assert aggregated["age"] == pytest.approx(1.0)
     assert aggregated["income"] == pytest.approx(1.0)

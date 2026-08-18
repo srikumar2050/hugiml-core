@@ -1,0 +1,27 @@
+{
+  "dataset": "my_dataset",
+  "label": "My causal study",
+  "description": "Optional short study description.",
+  "study_type": "observational",
+  "treatment": "T",
+  "treatment_label": "Treatment",
+  "control_label": "Control",
+  "outcome": "Y",
+  "outcome_label": "Outcome",
+  "outcome_direction": "lower_is_better",
+  "adjustment_set": ["confounder_1", "confounder_2"],
+  "nodes": [
+    {"id": "confounder_1", "label": "Confounder 1", "role": "confounder"},
+    {"id": "confounder_2", "label": "Confounder 2", "role": "confounder"},
+    {"id": "T", "label": "Treatment", "role": "treatment"},
+    {"id": "Y", "label": "Outcome", "role": "outcome"}
+  ],
+  "edges": [
+    ["confounder_1", "T"],
+    ["confounder_1", "Y"],
+    ["confounder_2", "T"],
+    ["confounder_2", "Y"],
+    ["T", "Y"]
+  ],
+  "causal_rationale": "Explain why the declared adjustment set is appropriate for the estimand."
+}

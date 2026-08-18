@@ -6,6 +6,13 @@ The canonical release notes live in ``CHANGELOG.md`` at the repository root. Kee
 Recent releases
 ---------------
 
+1.1.21 — 2026-08-18
+~~~~~~~~~~~~~~~~~~~
+
+* Ensured ``transform(X)`` returns the complete fitted downstream representation across all feature modes, with full-model SHAP support and explicit opt-in for partial pattern reporting.
+* Added causal HUG treatment-effect estimation with a shared supervised vocabulary, repeated cross-fitting, confidence intervals, doubly robust comparisons, and overlap sensitivity analysis.
+* Added the optional Causal Investigation Dashboard for dataset upload, causal metadata and DAG review, treatment-effect diagnostics, model comparison, selected-configuration inspection, and robustness analysis.
+
 1.1.20 - 2026-08-09
 ~~~~~~~~~~~~~~~~~~~
 

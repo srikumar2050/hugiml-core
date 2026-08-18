@@ -108,7 +108,23 @@ SHAP bridge
 
 The optional explainability module computes SHAP values against the complete fitted downstream representation returned by ``transform(X)``. This keeps the explainer input aligned with the estimator for ``patterns_only``, ``original_plus_patterns``, and ``original_plus_interactions``, including retained augmented-pair columns, strict ``topK`` selection, and downstream canonicalization.
 
-``compute_shap_values()`` is the primary API. By default it returns SHAP values for every fitted downstream feature. ``feature_scope="patterns"`` requests only the pattern columns from that full-model explanation. If the fitted model also uses non-pattern columns, that partial reporting view requires ``allow_incomplete=True``; the estimator is still evaluated on the complete downstream matrix. The historical ``shap_values_from_pattern_matrix()`` name remains available as a compatibility wrapper for the pattern-scope view.
+``compute_shap_values()`` is the primary module-level API and is imported from
+``hugiml.explainability``; it is not a method on ``HUGIMLClassifier``. By
+default it returns SHAP values for every fitted downstream feature.
+``feature_scope="patterns"`` requests only the pattern columns from that
+full-model explanation. If the fitted model also uses non-pattern columns,
+that partial reporting view requires ``allow_incomplete=True``; the estimator
+is still evaluated on the complete downstream matrix.
+
+``shap_values_from_pattern_matrix()`` returns the complete fitted downstream
+representation for ``feature_mode="patterns_only"``, including augmented-pair
+columns, when ``allow_incomplete=False``. Setting ``allow_incomplete=True``
+explicitly requests only the pattern columns. For other feature modes the
+wrapper returns ``None`` unless that partial reporting view is explicitly
+enabled. In every case, SHAP is computed using all columns required by the
+configured feature mode before any reporting subset is returned. Use
+``compute_shap_values(clf, X)`` to request the complete fitted-model explanation
+explicitly in every feature mode.
 
 .. code-block:: python
 

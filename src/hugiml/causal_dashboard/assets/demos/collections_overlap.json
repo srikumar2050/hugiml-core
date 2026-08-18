@@ -1,0 +1,31 @@
+{
+  "dataset": "collections_overlap",
+  "label": "Collections policy — overlap stress demo",
+  "description": "Synthetic observational collections study with known heterogeneous effects and deliberately weak overlap in the highest-risk segment.",
+  "study_type": "observational",
+  "treatment": "intensive_contact",
+  "treatment_label": "Intensive contact",
+  "control_label": "Standard contact",
+  "outcome": "cure_60d",
+  "outcome_label": "60-day cure",
+  "outcome_direction": "higher_is_better",
+  "adjustment_set": ["balance", "days_past_due", "prior_contacts", "risk_band", "tenure_months", "age"],
+  "oracle_tau_column": "_oracle_tau",
+  "hidden_columns": ["_oracle_p0", "_oracle_p1", "_oracle_tau"],
+  "nodes": [
+    {"id": "balance", "label": "Balance", "role": "confounder"},
+    {"id": "days_past_due", "label": "Days past due", "role": "confounder"},
+    {"id": "risk_band", "label": "Risk band", "role": "confounder"},
+    {"id": "prior_contacts", "label": "Prior contacts", "role": "confounder"},
+    {"id": "intensive_contact", "label": "Intensive contact", "role": "treatment"},
+    {"id": "cure_60d", "label": "60-day cure", "role": "outcome"}
+  ],
+  "edges": [
+    ["balance", "intensive_contact"], ["balance", "cure_60d"],
+    ["days_past_due", "intensive_contact"], ["days_past_due", "cure_60d"],
+    ["risk_band", "intensive_contact"], ["risk_band", "cure_60d"],
+    ["prior_contacts", "intensive_contact"], ["prior_contacts", "cure_60d"],
+    ["intensive_contact", "cure_60d"]
+  ],
+  "causal_rationale": "Baseline delinquency and exposure variables influence both treatment assignment and cure. The high-risk segment is intentionally treated much more often, creating a visible positivity/overlap warning."
+}

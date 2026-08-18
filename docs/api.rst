@@ -80,6 +80,21 @@ Explainability
    :members:
    :show-inheritance:
 
+Causal-effect estimation
+------------------------
+
+.. automodule:: hugiml.causal
+   :members:
+   :show-inheritance:
+
+.. automodule:: hugiml.causal_baselines
+   :members:
+   :show-inheritance:
+
+.. automodule:: hugiml.causal_evaluation
+   :members:
+   :show-inheritance:
+
 Monitoring
 ----------
 

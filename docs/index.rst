@@ -14,29 +14,26 @@ Why HUGIML?
 
 * **Intrinsic interpretability:** learned HUG patterns are the model representation, not an after-the-fact explanation.
 * **Regulated-domain fit:** model cards, audit artifacts, pruning trails, calibration, drift monitoring, and deployment helpers are included.
-* **Native performance:** computationally intensive mining, transaction construction, interaction-information scoring, pair-aware adaptive binning, matrix construction, and RPTE tree search are C++ accelerated with optional OpenMP support. Version 1.1.20 extends validation, benchmark, and representation-audit capabilities while retaining the complete 1.1.x feature set.
+* **Native performance:** computationally intensive mining, transaction construction, interaction-information scoring, pair-aware adaptive binning, matrix construction, and RPTE tree search are C++ accelerated with optional OpenMP support.
 * **Python ergonomics:** the estimator follows the scikit-learn API and works with pandas DataFrames or NumPy arrays.
 
 
 Current release focus
 ---------------------
 
-The 1.1.20 release extends reproducible validation, representation audit, and
-benchmark coverage without changing the public estimator contract:
+The 1.1.21 release adds causal-effect analysis and completes the fitted
+downstream transformation contract:
 
-* Integrated workflows cover the internal 100-dataset evaluation and four
-  external classification suites: OpenML-CC18, PMLBmini, TabZilla, and
-  TabArena. Each workflow retains its suite-specific validation protocol.
-* Rotating-fold validation uses a dedicated validation fold, and RPTE can use
-  validation-guided tree growth with a bounded estimator budget.
-* Training-only downstream representation controls remove constant, redundant,
-  and highly represented terms before logistic fitting. Their audit metadata is
-  available through the interpretability APIs and benchmark outputs.
-* Benchmark checkpoints and dashboards consistently report performance,
-  tuning, fit and prediction time, RPTE behavior, and model, model-inspection,
-  and instance-inspection complexity.
-* TabArena evaluation uses fold-local model-agnostic preprocessing and supports
-  comparison with the official leaderboard and prediction-derived metrics.
+* ``transform(X)`` returns the complete representation consumed by the fitted
+  downstream estimator across all feature modes.
+* SHAP evaluates the complete downstream representation and supports an
+  explicitly requested partial pattern reporting view.
+* Causal HUG estimates binary-treatment effects using a shared supervised HUG
+  vocabulary, repeated cross-fitting, confidence intervals, doubly robust
+  comparisons, and overlap sensitivity analysis.
+* The optional Causal Investigation Dashboard provides causal metadata review,
+  diagnostics, comparison methods, selected configurations, and robustness
+  analysis.
 
 The complete 1.1.x documentation remains in this guide, including execution
 modes, adaptive binning, feature modes, augmented-pair features, RPTE,
@@ -51,6 +48,7 @@ Installation
    pip install "hugiml-core[plots]"       # optional Plotly dashboards
    pip install "hugiml-core[benchmarks]"  # optional comparison suite
    pip install "hugiml-core[dashboard]"   # optional Dash and Streamlit interfaces
+   pip install "hugiml-core[causal-dashboard]"  # optional causal investigation UI
    pip install "hugiml-core[llm]"         # optional LLM assistant
 
 Paper reference
@@ -74,6 +72,7 @@ The implementation is based on:
    tuning
    mining_pruning
    explanations
+   causal
    dashboard
    llm_assistant
    governance

@@ -1,0 +1,33 @@
+{
+  "dataset": "credit_intervention",
+  "label": "Credit intervention — confounded higher-order demo",
+  "description": "Synthetic credit-risk study with observational treatment assignment, realistic confounding, and a known higher-order treatment-effect region.",
+  "study_type": "observational",
+  "treatment": "enhanced_review",
+  "treatment_label": "Enhanced review",
+  "control_label": "Standard review",
+  "outcome": "default_12m",
+  "outcome_label": "12-month default",
+  "outcome_direction": "lower_is_better",
+  "adjustment_set": ["credit_score", "dti", "credit_util", "prior_delinquency", "annual_income", "age"],
+  "oracle_tau_column": "_oracle_tau",
+  "hidden_columns": ["_oracle_p0", "_oracle_p1", "_oracle_tau"],
+  "nodes": [
+    {"id": "credit_score", "label": "Credit score", "role": "confounder"},
+    {"id": "dti", "label": "Debt-to-income", "role": "confounder"},
+    {"id": "credit_util", "label": "Credit utilization", "role": "confounder"},
+    {"id": "prior_delinquency", "label": "Prior delinquency", "role": "confounder"},
+    {"id": "age", "label": "Age", "role": "confounder"},
+    {"id": "enhanced_review", "label": "Enhanced review", "role": "treatment"},
+    {"id": "default_12m", "label": "12-month default", "role": "outcome"}
+  ],
+  "edges": [
+    ["credit_score", "enhanced_review"], ["credit_score", "default_12m"],
+    ["dti", "enhanced_review"], ["dti", "default_12m"],
+    ["credit_util", "enhanced_review"], ["credit_util", "default_12m"],
+    ["prior_delinquency", "enhanced_review"], ["prior_delinquency", "default_12m"],
+    ["age", "enhanced_review"], ["age", "default_12m"],
+    ["enhanced_review", "default_12m"]
+  ],
+  "causal_rationale": "The declared adjustment set blocks the modeled backdoor paths from baseline risk characteristics into both treatment assignment and default. Treatment-effect heterogeneity is concentrated in a high-utilization, low-score, prior-delinquency region."
+}

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hugiml-core"
-version = "1.1.20"
+version = "1.1.21"
 description = "High-performance interpretable rule-based ML — HUG-IML classifier, adaptive binning, EBM-style plots, pattern pruning, and benchmark runner (IEEE Access 2024)."
 readme = "README.md"
 license = { file = "LICENSE" }
@@ -84,6 +84,18 @@ dashboard = [
     "lightgbm>=4.0",
 ]
 
+# Focused causal investigation UI. Kept separate from the larger dashboard
+# extra so causal users do not need the unrelated Streamlit/reporting stack.
+causal-dashboard = [
+    "dash>=2.17",
+    "dash-bootstrap-components>=1.6",
+    "plotly>=5.18",
+    "openpyxl>=3.1",
+    "pyarrow>=15",
+    "xgboost>=1.7",
+    "lightgbm>=4.0",
+]
+
 # Benchmark comparison suite (HUG vs EBM / XGBoost / RF / LR / RuleFit / GAM)
 # Note: rulefit has only one PyPI release (0.3.1); pin >=0.3, NOT >=0.4.
 benchmarks = [
@@ -135,7 +147,7 @@ mlflow = [
     "mlflow>=2.10",
 ]
 all = [
-    "hugiml-core[dev,plots,dashboard,benchmarks,imbalanced,telemetry,server,explainability,mlflow,llm]",
+    "hugiml-core[dev,plots,dashboard,causal-dashboard,benchmarks,imbalanced,telemetry,server,explainability,mlflow,llm]",
 ]
 
 [project.urls]
@@ -149,6 +161,7 @@ Paper = "https://doi.org/10.1109/ACCESS.2024.3455563"
 hugiml-bench = "hugiml.benchmarks.runner:main"
 hugiml-dashboard = "hugiml.dashboard.launcher:main"
 hugiml-llm = "hugiml.llm.cli:main"
+hugiml-causal-dashboard = "hugiml.causal_dashboard.launcher:main"
 
 [tool.setuptools]
 license-files = [
@@ -163,6 +176,7 @@ where = ["src"]
 [tool.setuptools.package-data]
 "hugiml" = ["py.typed"]
 "hugiml.llm" = ["assets/datasets/builtin/*.csv", "assets/config/*.yaml"]
+"hugiml.causal_dashboard" = ["assets/*.json", "assets/demos/*.json"]
 
 [tool.cibuildwheel]
 build = "cp39-* cp310-* cp311-* cp312-* cp313-*"
@@ -218,9 +232,10 @@ ignore = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
-addopts = "--tb=short -q"
+addopts = "--tb=short -q -m \"not optional\""
 markers = [
     "integration: end-to-end tests on real datasets (deselect with '-m not integration')",
+    "optional: tests for separately installed feature groups (select with '-m optional')",
     "stress: memory, concurrency and large-batch tests (deselect with '-m not stress')",
 ]
 filterwarnings = [

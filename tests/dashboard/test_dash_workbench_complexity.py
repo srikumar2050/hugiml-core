@@ -159,11 +159,11 @@ def test_complexity_panel_contains_comparison_views_and_methodology() -> None:
         "Model inspection units (lower is simpler)"
     )
     assert list(graphs[-1].figure.data[0].x) == [12.0]
-    assert graphs[-1].figure.layout.height > max(
-        graph.figure.layout.height for graph in graphs[:3]
-    )
+    assert graphs[-1].figure.layout.height > max(graph.figure.layout.height for graph in graphs[:3])
     complexity_table = next(
-        component for component in components if getattr(component, "id", None) == "wb-complexity-table"
+        component
+        for component in components
+        if getattr(component, "id", None) == "wb-complexity-table"
     )
     table_columns = [column["name"] for column in complexity_table.columns]
     assert "Mean instance inspection units (95% CI)" in table_columns
@@ -228,7 +228,7 @@ def test_real_sklearn_models_produce_all_three_complexity_measures() -> None:
     assert frame.loc["RF", "model_inspection_units"] >= frame.loc["RF", "instance_inspection_mean"]
 
 
-
+@pytest.mark.skipif(find_spec("interpret") is None, reason="optional EBM dependency is unavailable")
 def test_real_ebm_instance_units_match_nonzero_selected_term_scores() -> None:
     from interpret.glassbox import ExplainableBoostingClassifier
 
@@ -243,10 +243,7 @@ def test_real_ebm_instance_units_match_nonzero_selected_term_scores() -> None:
         }
     )
     y = (
-        1.1 * X["x1"]
-        - 0.7 * X["x2"]
-        + 0.4 * X["x1"] * X["x3"]
-        + rng.normal(scale=0.7, size=len(X))
+        1.1 * X["x1"] - 0.7 * X["x2"] + 0.4 * X["x1"] * X["x3"] + rng.normal(scale=0.7, size=len(X))
         > 0
     ).astype(int)
     model = ExplainableBoostingClassifier(
@@ -278,6 +275,7 @@ def test_real_ebm_instance_units_match_nonzero_selected_term_scores() -> None:
         int(np.sum(np.isfinite(scores) & (np.abs(scores) > 1e-12))) * len(term)
         for scores, term in zip(model.term_scores_, model.term_features_)
     )
+
 
 def test_rulefit_adapter_produces_all_three_complexity_measures() -> None:
     from hugiml.dashboard import workbench as core_workbench

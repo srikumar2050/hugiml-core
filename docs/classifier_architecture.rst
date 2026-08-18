@@ -73,7 +73,7 @@ The canonical lifecycle is:
 #. **Input preparation** — binning and schema metadata such as ``feature_names_in_``, ``cat_cols_mask_``, ``is_int_mask_``, and ``_bin_edges_`` are established.
 #. **Mining** — transaction state, ``raw_patterns_``/``patterns_``, ``x_train_hup_``, mining audit state, and any resource-degradation record are created.
 #. **Downstream assembly** — original-feature preprocessing, augmented-pair state, strict-budget masks, downstream feature names, and ``x_train_downstream_`` are created before ``model_`` is fitted.
-#. **Fitted** — ``fit_metadata_`` summarizes the completed fit. Production execution mode may then discard audit-only training matrices while retaining prediction-critical state.
+#. **Fitted** — ``classes_`` records the learned class labels, ``model_`` stores the fitted downstream estimator pipeline, and ``fit_metadata_`` summarizes the completed fit. Production execution mode may then discard audit-only training matrices while retaining prediction-critical state.
 #. **Transform/predict** — prediction paths read fitted schema, binning, pattern, feature-assembly, and estimator state. Monitoring may update monitoring counters, but fitted model structure is not rebuilt.
 #. **Refit** — fitted lifecycle state is cleared before a new fit establishes a fresh schema, mining audit trail, downstream representation, and estimator.
 

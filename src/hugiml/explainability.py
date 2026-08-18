@@ -558,7 +558,7 @@ def compute_shap_values(
     -------
     np.ndarray or None
         Binary models return ``(n_samples, n_features)`` values using the
-        positive-class convention retained by the historical bridge. Multiclass
+        positive-class convention. Multiclass
         models retain a class axis as ``(n_samples, n_features, n_classes)``.
         ``None`` is returned when SHAP is unavailable or the requested partial
         view is not explicitly permitted.
@@ -611,7 +611,9 @@ def compute_shap_values(
         explainer = shap.LinearExplainer(clf_step, X_downstream)
         shap_values = explainer.shap_values(X_downstream)
     except Exception:
-        logger.debug("SHAP LinearExplainer was not applicable; trying KernelExplainer.", exc_info=True)
+        logger.debug(
+            "SHAP LinearExplainer was not applicable; trying KernelExplainer.", exc_info=True
+        )
 
     if shap_values is None:
         try:
@@ -619,9 +621,7 @@ def compute_shap_values(
             bg_indices = np.random.choice(n_samples, bg_size, replace=False)
             bg = X_downstream[bg_indices]
             explainer = shap.KernelExplainer(classifier.model_.predict_proba, bg)
-            shap_values = explainer.shap_values(
-                X_downstream, check_additivity=check_additivity
-            )
+            shap_values = explainer.shap_values(X_downstream, check_additivity=check_additivity)
         except Exception as exc:
             warnings.warn(f"SHAP computation failed: {exc}", RuntimeWarning, stacklevel=2)
             return None
@@ -646,18 +646,20 @@ def shap_values_from_pattern_matrix(
     check_additivity: bool = False,
     allow_incomplete: bool = False,
 ) -> np.ndarray | None:
-    """Return the pattern-column view of full-model SHAP values.
+    """Return SHAP values for the pattern-based downstream representation.
 
-    This historical function name is retained for compatibility. The fitted
-    estimator is always evaluated on ``classifier.transform(X)``. When the
-    model also uses non-pattern downstream columns, callers must explicitly set
-    ``allow_incomplete=True`` to return only the pattern columns from the
-    complete-model SHAP result.
+    A ``patterns_only`` model returns its complete fitted representation by
+    default, including augmented-pair columns. Setting ``allow_incomplete=True``
+    explicitly requests a pattern-column reporting view. Other feature modes
+    return that partial view only when the same option is enabled. The fitted
+    estimator is always evaluated on ``classifier.transform(X)``.
     """
+    patterns_only = getattr(classifier, "feature_mode", None) == "patterns_only"
+    feature_scope = "all" if patterns_only and not allow_incomplete else "patterns"
     return compute_shap_values(
         classifier,
         X,
-        feature_scope="patterns",
+        feature_scope=feature_scope,
         background_samples=background_samples,
         check_additivity=check_additivity,
         allow_incomplete=allow_incomplete,
@@ -672,10 +674,9 @@ def aggregate_shap_to_features(
 ) -> dict[str, float]:
     """Aggregate downstream SHAP values back to original source features.
 
-    ``shap_values_pattern`` retains its historical parameter name for API
-    compatibility. The input may contain the complete downstream SHAP matrix,
-    or a pattern-only subset when ``allow_incomplete=True``. Multiclass values
-    may include a final class axis.
+    The input may contain the complete downstream SHAP matrix or a pattern-only
+    subset when ``allow_incomplete=True``. Multiclass values may include a final
+    class axis.
     """
     values = np.asarray(shap_values_pattern)
     if values.ndim not in {2, 3}:
@@ -785,6 +786,7 @@ def _normalize_shap_values(
             return normalized[:, :, 1]
         return normalized
     raise RuntimeError("SHAP returned an unsupported output shape.")
+
 
 def _shap_is_available() -> bool:
     try:

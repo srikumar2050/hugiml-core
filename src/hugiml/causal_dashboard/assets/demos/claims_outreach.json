@@ -1,0 +1,82 @@
+{
+  "dataset": "claims_outreach",
+  "label": "Claims outreach \u2014 randomized responder demo",
+  "description": "Synthetic randomized outreach study with mixed-type claims covariates and known three-way and higher-order treatment-effect regions.",
+  "study_type": "randomized",
+  "treatment": "proactive_outreach",
+  "treatment_label": "Proactive outreach",
+  "control_label": "Usual process",
+  "outcome": "escalation_30d",
+  "outcome_label": "30-day escalation",
+  "outcome_direction": "lower_is_better",
+  "adjustment_set": [
+    "claim_amount",
+    "provider_score",
+    "prior_claims",
+    "complexity",
+    "region",
+    "claimant_age",
+    "days_to_file"
+  ],
+  "oracle_tau_column": "_oracle_tau",
+  "hidden_columns": [
+    "_oracle_p0",
+    "_oracle_p1",
+    "_oracle_tau"
+  ],
+  "nodes": [
+    {
+      "id": "claim_amount",
+      "label": "Claim amount",
+      "role": "precision/effect modifier"
+    },
+    {
+      "id": "provider_score",
+      "label": "Provider score",
+      "role": "precision/effect modifier"
+    },
+    {
+      "id": "complexity",
+      "label": "Complexity",
+      "role": "effect modifier"
+    },
+    {
+      "id": "proactive_outreach",
+      "label": "Proactive outreach",
+      "role": "treatment"
+    },
+    {
+      "id": "escalation_30d",
+      "label": "30-day escalation",
+      "role": "outcome"
+    },
+    {
+      "id": "days_to_file",
+      "label": "Days to file",
+      "role": "precision/effect modifier"
+    }
+  ],
+  "edges": [
+    [
+      "claim_amount",
+      "escalation_30d"
+    ],
+    [
+      "provider_score",
+      "escalation_30d"
+    ],
+    [
+      "complexity",
+      "escalation_30d"
+    ],
+    [
+      "proactive_outreach",
+      "escalation_30d"
+    ],
+    [
+      "days_to_file",
+      "escalation_30d"
+    ]
+  ],
+  "causal_rationale": "Treatment is randomized. Baseline covariates are included for precision and heterogeneous-effect discovery rather than confounding control. The strongest responder region combines above-median claim amount, provider score, and complex claims; a smaller adverse region is also present."
+}

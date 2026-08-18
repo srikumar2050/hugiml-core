@@ -58,10 +58,8 @@ _HUGIML_PARAM_KEYS = {
     "ii_partner_size",
     "interaction_relaxed_mining",
     "interaction_relaxed_feature_size",
-    # Preserved so a promoted RPTE-based model keeps using RPTE when
-    # feature-removal pruning re-fits HUGIML on a reduced input set --
-    # without this, _safe_params()/fit_feature_pruned_hugiml() would
-    # silently drop it back to the built-in logistic-regression branch.
+    # Retain the fitted downstream estimator family during feature-removal
+    # pruning and reduced-input refits.
     "base_estimator",
 }
 
@@ -129,15 +127,8 @@ def train_hugiml(X: pd.DataFrame, y, cv: int = 5, scoring: str = "roc_auc", rand
             param_grid=None,
             refit=True,
             use_fast_path=True,
-            # tune() evaluates every search candidate under
-            # execution_mode='production' for speed and refits the returned
-            # best_estimator_ under 'audit' by default -- this dashboard's
-            # own components (patterns, feature_family, pruning, prediction,
-            # governance_evidence, overview) call get_pattern_info() on the
-            # trained model, which needs that 'audit' state; an explicit
-            # override here would silently degrade those views to a sparser
-            # fallback instead of erroring, since each call site wraps
-            # get_pattern_info() in a try/except.
+            # Candidate evaluation uses production mode, while the selected
+            # estimator is refitted in audit mode for pattern and governance views.
         )
 
     return fit_hugiml_config(X, y, params=_default_params(), cv=cv, scoring=scoring, random_state=random_state)

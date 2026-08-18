@@ -4,6 +4,18 @@ All notable changes to hugiml-core are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
+## [1.1.21] - 2026-08-18
+
+### Added
+
+- Added causal HUG treatment-effect estimation with a shared supervised vocabulary, repeated cross-fitting, confidence intervals, doubly robust comparisons, and overlap sensitivity analysis.
+- Added the optional Causal Investigation Dashboard for dataset upload, causal metadata and DAG review, treatment-effect diagnostics, model comparison, selected-configuration inspection, and robustness analysis.
+
+### Changed
+
+- Ensured `transform(X)` returns the complete fitted downstream representation across all feature modes, with full-model SHAP support and explicit opt-in for partial pattern reporting.
+
+---
 ## [1.1.20] - 2026-08-09
 
 ### Changed

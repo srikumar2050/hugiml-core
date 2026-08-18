@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://hugiml.org/schemas/causal_metadata.schema.json",
+  "title": "HUGIML causal dashboard metadata",
+  "type": "object",
+  "required": ["treatment", "outcome", "adjustment_set"],
+  "properties": {
+    "dataset": {"type": "string"},
+    "label": {"type": "string"},
+    "description": {"type": "string"},
+    "study_type": {"enum": ["randomized", "observational"]},
+    "treatment": {"type": "string", "minLength": 1},
+    "treatment_label": {"type": "string"},
+    "control_label": {"type": "string"},
+    "outcome": {"type": "string", "minLength": 1},
+    "outcome_label": {"type": "string"},
+    "outcome_direction": {"enum": ["higher_is_better", "lower_is_better"]},
+    "adjustment_set": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "hidden_columns": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+    "oracle_tau_column": {"type": "string"},
+    "causal_rationale": {"type": "string"},
+    "nodes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id"],
+        "properties": {
+          "id": {"type": "string", "minLength": 1},
+          "label": {"type": "string"},
+          "role": {"type": "string"}
+        },
+        "additionalProperties": true
+      }
+    },
+    "edges": {
+      "type": "array",
+      "items": {
+        "type": "array",
+        "prefixItems": [{"type": "string"}, {"type": "string"}],
+        "minItems": 2,
+        "maxItems": 2
+      }
+    }
+  },
+  "additionalProperties": true
+}
