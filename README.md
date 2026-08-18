@@ -1,6 +1,6 @@
 # HUGIML Interactive Demos
 
-Explore HUGIML through interactive dashboards, guided video demonstrations, and LLM-based model-review examples.
+Explore HUGIML through interactive benchmark, causal-analysis, and governance dashboards, guided video demonstrations, and LLM-based model-review examples.
 
 **Live site:** https://srikumar2050.github.io/hugiml-core/
 
@@ -14,6 +14,10 @@ Explore HUGIML through interactive dashboards, guided video demonstrations, and 
 - [PMLBmini Benchmark Dashboard](https://srikumar2050.github.io/hugiml-core/pmlbmini_benchmark_dashboard.html) PMLBmini binary-classification benchmark.
 - [TabArena Official Leaderboard](https://srikumar2050.github.io/hugiml-core/tabarena_official_leaderboard_dashboard.html) official-reference Elo and metric comparisons.
 - [Scalability Dashboard](https://srikumar2050.github.io/hugiml-core/hugiml_scalability_dashboard.html) fit-time and inference-latency scaling across data size and dimensionality.
+
+### Causal analysis
+
+- [Causal Investigation Studio Demo](https://srikumar2050.github.io/hugiml-core/hugiml_causal_dashboard_demo.html) shared-vocabulary T-HUG analysis with potential outcomes, repeated cross-fitting, DR/AIPW estimates, overlap sensitivity, interpretable regions, and matched T-learner comparisons.
 
 ### Governance
 
