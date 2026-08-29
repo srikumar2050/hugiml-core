@@ -76,6 +76,8 @@ from sklearn.model_selection import train_test_split
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.utils.validation import check_is_fitted
 
+from hugiml._classifier_support import _select_lr_source_policy_mask
+
 # The bounded-lookahead tree grower, the boosting math (Newton leaf
 # values, binomial deviance), and the underlying information-gain
 # kernels all live in the compiled _hugiml_core extension -- see
@@ -1990,6 +1992,8 @@ class LeafWiseBoundedLookaheadRPTEFeatureLR(ClassifierMixin, BaseEstimator):
         hugiml_augmented_catalog: list[dict[str, Any]] | None = None,
         hugiml_pattern_provenance: dict[str, tuple[str, ...] | dict[str, Any]] | None = None,
         hugiml_original_feature_standardization: dict[str, dict[str, Any]] | None = None,
+        hugiml_feature_source_sets: list[frozenset[str]] | None = None,
+        lr_source_policy: str = "standard",
     ):
         self.leaf_config = leaf_config
         self.depth = depth
@@ -2062,6 +2066,8 @@ class LeafWiseBoundedLookaheadRPTEFeatureLR(ClassifierMixin, BaseEstimator):
         # value disclosure. Same clone-safety rationale as
         # the three metadata channels above.
         self.hugiml_original_feature_standardization = hugiml_original_feature_standardization
+        self.hugiml_feature_source_sets = hugiml_feature_source_sets
+        self.lr_source_policy = lr_source_policy
 
     def __sklearn_tags__(self):
         tags = super().__sklearn_tags__()
@@ -2074,6 +2080,8 @@ class LeafWiseBoundedLookaheadRPTEFeatureLR(ClassifierMixin, BaseEstimator):
         augmented_catalog: list[dict[str, Any]],
         pattern_provenance: dict[str, tuple[str, ...] | dict[str, Any]] | None = None,
         original_feature_standardization: dict[str, dict[str, Any]] | None = None,
+        feature_source_sets: list[frozenset[str]] | None = None,
+        lr_source_policy: str | None = None,
     ):
         """Convenience setter -- equivalent to passing the same four
         values as constructor arguments (hugiml_feature_names /
@@ -2090,6 +2098,11 @@ class LeafWiseBoundedLookaheadRPTEFeatureLR(ClassifierMixin, BaseEstimator):
         self.hugiml_augmented_catalog = [dict(item) for item in augmented_catalog]
         self.hugiml_pattern_provenance = dict(pattern_provenance or {})
         self.hugiml_original_feature_standardization = dict(original_feature_standardization or {})
+        self.hugiml_feature_source_sets = [
+            frozenset(map(str, item)) for item in (feature_source_sets or [])
+        ]
+        if lr_source_policy is not None:
+            self.lr_source_policy = str(lr_source_policy)
         return self
 
     @staticmethod
@@ -2265,13 +2278,69 @@ class LeafWiseBoundedLookaheadRPTEFeatureLR(ClassifierMixin, BaseEstimator):
 
         used = self._tree_used_input_columns(self.fe_, self.n_input_features_)
         self.tree_used_input_indices_ = np.asarray(sorted(used), dtype=np.int64)
-        direct_candidates = sorted(set(range(self.n_input_features_)) - used)
+        policy = str(getattr(self, "lr_source_policy", "standard"))
+        layout_names = list(getattr(self, "hugiml_feature_names", None) or [])
+        if len(layout_names) != self.n_input_features_:
+            layout_names = [f"x{idx}" for idx in range(self.n_input_features_)]
+        direct_candidate_set = set(range(self.n_input_features_)) - used
+        if policy == "main_effect":
+            # Preserve original/main-effect columns even when the same source
+            # participates in an accepted RPTE tree. This is the intentional
+            # one-main-effect + one-contextual-component contract.
+            direct_candidate_set.update(
+                idx for idx, name in enumerate(layout_names) if str(name).startswith("orig:")
+            )
+        direct_candidates = sorted(direct_candidate_set)
         self.candidate_direct_input_indices_ = np.asarray(
             direct_candidates, dtype=np.int64
         )
         aliases = self._find_leaf_pattern_aliases(X_csr, leaves, direct_candidates)
         suppressed = {int(item["downstream_feature_index"]) for item in aliases}
         direct = [idx for idx in direct_candidates if idx not in suppressed]
+
+        source_sets = [
+            frozenset(map(str, item))
+            for item in (getattr(self, "hugiml_feature_source_sets", None) or [])
+        ]
+        if len(source_sets) != self.n_input_features_:
+            owner_by_column = dict(getattr(self.fe_, "owner_by_column_names_", {}))
+            source_sets = [
+                frozenset(map(str, owner_by_column.get(idx, {str(idx)})))
+                for idx in range(self.n_input_features_)
+            ]
+        names = layout_names
+
+        tree_sources: set[str] = set()
+        for idx in self.tree_used_input_indices_:
+            tree_sources.update(source_sets[int(idx)])
+        # Native synthesized raw-pair splits may reserve raw input indices that
+        # are not themselves listed as supplied split columns. Include those
+        # tokens when they resolve to supplied input positions.
+        for reserved in getattr(self.fe_, "reserved_raw_features_", []) or []:
+            for token in reserved:
+                if isinstance(token, (int, np.integer)) and 0 <= int(token) < len(source_sets):
+                    tree_sources.update(source_sets[int(token)])
+                elif isinstance(token, str):
+                    tree_sources.add(token)
+
+        if policy != "standard":
+            direct_names = [names[idx] for idx in direct]
+            direct_sources = [source_sets[idx] for idx in direct]
+            direct_keep, source_audit = _select_lr_source_policy_mask(
+                direct_names,
+                direct_sources,
+                policy,
+                protected_context_sources=tree_sources,
+            )
+            direct = [idx for idx, keep in zip(direct, direct_keep) if keep]
+        else:
+            source_audit = {
+                "policy": policy,
+                "retained_columns": len(direct),
+                "removed_columns": 0,
+                "protected_context_sources": sorted(tree_sources),
+            }
+        self.lr_source_policy_audit_ = source_audit
         self.direct_input_indices_ = np.asarray(direct, dtype=np.int64)
         self.suppressed_direct_alias_indices_ = np.asarray(
             sorted(suppressed), dtype=np.int64

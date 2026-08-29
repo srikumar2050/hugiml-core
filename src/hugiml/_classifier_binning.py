@@ -373,6 +373,42 @@ class _BinningMixin:
         lr_C = float(getattr(self, "_benchmark_lr_C", 1.0))
         if lr_solver == "adaptive_l1":
             if n_cls == 2:
+                # For large, highly collinear downstream matrices, use the
+                # existing training-only VIF diagnostics to select bounded
+                # SGD-L1. The alpha mapping approximately preserves
+                # LogisticRegression's C-scaled L1 objective
+                # (mean loss + alpha * L1 penalty).
+                audit = getattr(self, "_downstream_lr_canonicalization_", {})
+                X_down = getattr(self, "x_train_downstream_", None)
+                n_rows = int(X_down.shape[0]) if X_down is not None else 0
+                original_count = int(audit.get("original_columns_in_vif_analysis", 0) or 0)
+                original_bad_fraction = float(
+                    audit.get("original_vif_fraction_above_threshold", 0.0) or 0.0
+                )
+                original_median_vif = float(audit.get("original_median_vif", 0.0) or 0.0)
+                if (
+                    n_rows >= 20_000
+                    and original_count > 0
+                    and original_bad_fraction >= 0.5
+                    and original_median_vif >= 1_000.0
+                ):
+                    alpha = 1.0 / max(lr_C * float(n_rows), np.finfo(float).eps)
+                    self._adaptive_l1_solver_selected_ = "sgd_l1_bounded"
+                    self._adaptive_l1_solver_reason_ = {
+                        "n_rows": n_rows,
+                        "original_vif_fraction_above_threshold": original_bad_fraction,
+                        "original_median_vif": original_median_vif,
+                        "original_vif_threshold": float(audit.get("vif_threshold", 5.0)),
+                    }
+                    return SGDClassifier(
+                        loss="log_loss",
+                        penalty="l1",
+                        alpha=alpha,
+                        random_state=0,
+                        max_iter=25,
+                        tol=None,
+                    )
+                self._adaptive_l1_solver_selected_ = "liblinear"
                 return LogisticRegression(
                     solver="liblinear",
                     C=lr_C,
@@ -501,6 +537,12 @@ class _BinningMixin:
             raise HUGIMLParamError(
                 f"feature_mode must be one of {sorted(allowed_feature_modes)}, "
                 f"got {self.feature_mode!r}."
+            )
+        allowed_lr_source_policies = {"standard", "main_effect", "strict"}
+        if getattr(self, "lr_source_policy", "standard") not in allowed_lr_source_policies:
+            raise HUGIMLParamError(
+                "lr_source_policy must be one of "
+                f"{sorted(allowed_lr_source_policies)}, got {self.lr_source_policy!r}."
             )
         if not isinstance(self.augmented_pair_transforms, bool):
             raise HUGIMLParamError(

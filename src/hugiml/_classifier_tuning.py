@@ -93,7 +93,6 @@ def _hugiml_validate_fast_tune_grid(candidates: list[dict[str, Any]]) -> dict[st
     mining call, candidates are cached in separate constant-G groups. B may
     appear and even vary, but is ignored while adaptive_binning=True because
     per-feature binning supplies the effective discretisation.
-
     base_estimator is safe to allow here even though it isn't a mining
     parameter: it only affects the final "fit an estimator on the already-
     built downstream feature matrix" step (see _make_estimator), never
@@ -112,11 +111,14 @@ def _hugiml_validate_fast_tune_grid(candidates: list[dict[str, Any]]) -> dict[st
         for key in set().union(*(set(c.keys()) for c in candidates))
         if len({repr(c.get(key, None)) for c in candidates}) > 1
     }
-    allowed_varying = {"B", "G", "L", "topK", "feature_mode", "base_estimator"}
+    allowed_varying = {
+        "B", "G", "L", "topK", "feature_mode", "base_estimator", "lr_source_policy"
+    }
     disallowed = sorted(varying - allowed_varying)
     if disallowed:
         raise HUGIMLParamError(
-            "fast_grid_tune requires only G, L, topK, feature_mode, and base_estimator "
+            "fast_grid_tune requires only G, L, topK, feature_mode, lr_source_policy, and "
+            "base_estimator "
             f"to vary (B is ignored under adaptive_binning=True). Varying unsupported keys: {disallowed}."
         )
 
@@ -401,6 +403,7 @@ def _hugiml_fit_downstream_estimator_from_template(
     X_validation_downstream: Any | None = None,
     y_validation: Any | None = None,
     defer_final_downstream: bool = False,
+    lr_source_policy_value: str | None = None,
 ) -> HUGIMLClassifier:
     """Fit one base_estimator candidate's downstream estimator against an
     already-prepared template's cached downstream feature matrix, without
@@ -420,7 +423,11 @@ def _hugiml_fit_downstream_estimator_from_template(
 
     cand = _hugiml_shared_state_candidate(template)
     cand.base_estimator = base_estimator_value
+    if lr_source_policy_value is not None:
+        cand.lr_source_policy = str(lr_source_policy_value)
     X_down = cand.x_train_downstream_
+    if cand._direct_downstream_uses_logistic_fit():
+        X_down = cand._apply_lr_source_policy_fit(X_down)
     if X_validation_downstream is not None:
         X_validation_downstream = cand._apply_lr_downstream_canonical_transform(
             X_validation_downstream
@@ -441,6 +448,8 @@ def _hugiml_fit_downstream_estimator_from_template(
         cand.get_augmented_pair_transforms(),
         cand.get_pattern_provenance(),
         cand.get_original_feature_standardization(),
+        cand._get_downstream_feature_source_sets(),
+        cand._effective_lr_source_policy(),
     )
     downstream_estimator = cand.model_.named_steps["clf"]
     if (
@@ -575,6 +584,7 @@ _FAST_TUNE_ORIGINAL_ATTRS = (
     "_original_scaler_",
     "_original_dummy_columns_",
     "_original_feature_names_downstream_",
+    "_original_downstream_source_map_",
 )
 
 
@@ -932,7 +942,10 @@ def _hugiml_fast_grid_tune(
     # takes precedence) so the cached mining base -- and everything
     # derived from it via _hugiml_shallow_candidate_from_base -- agrees
     # with what every candidate in the grid actually requested.
-    _explicit_keys = {"L", "topK", "feature_mode", "G", "base_estimator", "adaptive_binning"}
+    _explicit_keys = {
+        "L", "topK", "feature_mode", "G", "base_estimator", "adaptive_binning",
+        "lr_source_policy",
+    }
     _grid_keys: set[str] = set()
     for _c in candidates:
         _grid_keys.update(_c.keys())
@@ -1083,6 +1096,9 @@ def _hugiml_fast_grid_tune(
         feature_mode = str(candidate_params.get("feature_mode", "patterns_only"))
         G_value = float(candidate_params.get("G", params0.get("G", 1e-2)))
         base_estimator_value = candidate_params.get("base_estimator", params0.get("base_estimator"))
+        lr_source_policy_value = str(
+            candidate_params.get("lr_source_policy", params0.get("lr_source_policy", "standard"))
+        )
         t_cand = time.perf_counter()
         status = "ok"
         err = None
@@ -1141,6 +1157,7 @@ def _hugiml_fast_grid_tune(
                     validation_downstream,
                     y_val_arr,
                     defer_final_downstream=True,
+                    lr_source_policy_value=lr_source_policy_value,
                 )
                 downstream_fit_seconds += time.perf_counter() - t_downstream_fit
             else:
@@ -1171,6 +1188,7 @@ def _hugiml_fast_grid_tune(
                     repr(base_estimator_value),
                     float(getattr(template, "_benchmark_lr_C", benchmark_lr_C)),
                     str(getattr(template, "lr_solver", params0.get("lr_solver", "auto"))),
+                    lr_source_policy_value,
                     artifact["training_fingerprint"],
                     artifact["validation_fingerprint"],
                     artifact["feature_names"],
@@ -1199,6 +1217,7 @@ def _hugiml_fast_grid_tune(
                         validation_downstream,
                         y_val_arr,
                         defer_final_downstream=True,
+                        lr_source_policy_value=lr_source_policy_value,
                     )
                     downstream_fit_seconds += time.perf_counter() - t_downstream_fit
                     entries.append(

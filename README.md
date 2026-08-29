@@ -230,6 +230,8 @@ HUGIML can use the mined binary pattern matrix in three downstream feature modes
 
 The recommended tuning grid and configuration choices are described in [Hyperparameter Search](#hyperparameter-search). Start there for first-pass model selection, then select a representation based on interpretability and runtime needs.
 
+For downstream LR fits, `lr_source_policy` controls reuse of raw sources in the final LR representation: `"standard"` preserves the current layout, `"main_effect"` retains surviving original-feature main effects while making generated contextual components source-disjoint, and `"strict"` permits each raw source in at most one final component. In `patterns_only`, `"main_effect"` is equivalent to `"strict"` because no original-feature main-effect block is present. RPTE tree construction is unchanged; the policy is applied only immediately before its final LR fit.
+
 ```python
 from hugiml import HUGIMLClassifier
 
@@ -428,7 +430,7 @@ if hasattr(best_model, "rpte_rule_tree"):
     rules = best_model.rpte_rule_table()
 ```
 
-A custom grid is supplied via `param_grid`. For the cached adaptive-binning path, keep the varying dimensions compact and centered on mining or representation choices such as `G`, `L`, `topK`, and `feature_mode`. Fixed values such as `B=-1` and `adaptive_binning=True` may be included for clarity.
+A custom grid is supplied via `param_grid`. For the cached adaptive-binning path, keep the varying dimensions compact and centered on mining or representation choices such as `G`, `L`, `topK`, `feature_mode`, and `lr_source_policy`. Fixed values such as `B=-1` and `adaptive_binning=True` may be included for clarity.
 
 ```python
 custom_grid = {

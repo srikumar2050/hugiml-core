@@ -250,16 +250,18 @@ class _ImbalancedHUGPipeline:
         # Step 1: mine patterns on original data
         self._clf.fit(X, y_arr)
 
-        # Step 2: get binary pattern matrix for training data
-        hup = self._clf.x_train_hup_.toarray()
+        # Step 2: get the final downstream LR matrix produced by fit().
+        # Resampling must preserve the exact representation (canonicalization
+        # and lr_source_policy included) that predict() will reconstruct.
+        downstream = getattr(self._clf, "x_train_downstream_", self._clf.x_train_hup_)
+        downstream_dense = downstream.toarray() if hasattr(downstream, "toarray") else np.asarray(downstream)
 
-        # Step 3: resample pattern matrix
+        # Step 3: resample the final downstream LR matrix.
         sampler = self._make_sampler()
-        hup_res, y_res = sampler.fit_resample(hup, y_arr)
-        hup_res_sparse = csr_matrix(hup_res, dtype=np.float32)
-        self._clf.x_train_hup_ = hup_res_sparse
+        downstream_res, y_res = sampler.fit_resample(downstream_dense, y_arr)
+        downstream_res_sparse = csr_matrix(downstream_res, dtype=np.float32)
 
-        # Step 4: refit downstream classifier on resampled matrix
+        # Step 4: refit downstream classifier on the resampled matrix
         n_cls = len(np.unique(y_arr))
         solver = "liblinear" if n_cls == 2 else "lbfgs"
         new_est = LogisticRegression(solver=solver, random_state=self._rs, max_iter=500)
@@ -267,7 +269,7 @@ class _ImbalancedHUGPipeline:
         params = clf_step_orig.get_params() if hasattr(clf_step_orig, "get_params") else {}
         new_est.set_params(**{k: v for k, v in params.items() if k not in ("solver",)})
         new_model = Pipeline([("clf", new_est)])
-        new_model.fit(hup_res_sparse, y_res)
+        new_model.fit(downstream_res_sparse, y_res)
         self._clf.model_ = new_model
         return self
 

@@ -297,6 +297,11 @@ class HUGIMLClassifier(
         "original_plus_interactions"}, default "patterns_only"
         Downstream representation used by fit/predict/transform APIs.
         ``transform_patterns(X)`` returns the binary HUG pattern matrix.
+    lr_source_policy : {"standard", "main_effect", "strict"}, default "standard"
+        Raw-source reuse policy applied immediately before downstream logistic
+        fitting. ``main_effect`` preserves surviving ``orig:`` main-effect
+        columns while source-disjointing generated contextual terms; in
+        ``patterns_only`` it is equivalent to ``strict``.
     use_hotpath : bool, default True
         Use the fused native ``L=1`` preparation/mining/matrix path when
         eligible. Disable only for diagnostic equivalence checks against the
@@ -455,6 +460,7 @@ class HUGIMLClassifier(
         # from aug_feature_size, which controls the unrelated
         # augmented_pair_mode source-column count.
         interaction_relaxed_feature_size: int = 10,
+        lr_source_policy: str = "standard",
     ) -> None:
         self.allCols = allCols
         self.origColumns = origColumns
@@ -477,6 +483,7 @@ class HUGIMLClassifier(
         self.adaptive_binning_sample_random_state = adaptive_binning_sample_random_state
         self.convert_binary_to_categorical = convert_binary_to_categorical
         self.feature_mode = feature_mode
+        self.lr_source_policy = lr_source_policy
         self.use_hotpath = use_hotpath
         self.augmented_pair_transforms = augmented_pair_transforms
         self.augmented_pair_mode = augmented_pair_mode

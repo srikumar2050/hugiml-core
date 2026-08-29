@@ -40,6 +40,88 @@ AUGMENTED_PAIR_MODES = ("interaction_information", "marginal_ig")
 _II_N_BINS = 4
 
 
+LR_SOURCE_POLICIES = ("standard", "main_effect", "strict")
+
+
+def _select_lr_source_policy_mask(
+    feature_names: list[str],
+    raw_source_sets: list[frozenset[str]],
+    policy: str,
+    *,
+    protected_context_sources: frozenset[str] | set[str] | None = None,
+) -> tuple[np.ndarray, dict[str, Any]]:
+    """Select final-LR columns under a raw-source reuse policy.
+
+    ``standard`` is a no-op. ``main_effect`` preserves every surviving
+    ``orig:`` column while allowing each raw source in at most one generated
+    contextual component. ``strict`` gives generated contextual components
+    first claim on their raw sources, then retains an original-feature group
+    only when its source remains unclaimed.
+
+    Original dummy columns are treated as one conceptual main-effect group by
+    their shared raw-source set, but the returned mask retains/drops the
+    surviving encoded columns together. Generated pattern/augmented columns
+    are individual contextual components.
+    """
+    names = [str(name) for name in feature_names]
+    sources = [frozenset(map(str, item)) for item in raw_source_sets]
+    if len(names) != len(sources):
+        raise ValueError(
+            "feature_names and raw_source_sets must have identical lengths "
+            f"({len(names)} != {len(sources)})."
+        )
+    if policy not in LR_SOURCE_POLICIES:
+        raise HUGIMLParamError(
+            f"lr_source_policy must be one of {list(LR_SOURCE_POLICIES)}, got {policy!r}."
+        )
+
+    keep = np.ones(len(names), dtype=bool)
+    protected = set(map(str, protected_context_sources or ()))
+    if policy == "standard" or not names:
+        return keep, {
+            "policy": policy,
+            "retained_columns": int(len(names)),
+            "removed_columns": 0,
+            "protected_context_sources": sorted(protected),
+        }
+
+    original_groups: dict[frozenset[str], list[int]] = {}
+    context_indices: list[int] = []
+    for idx, (name, source_set) in enumerate(zip(names, sources)):
+        if name.startswith("orig:"):
+            original_groups.setdefault(source_set, []).append(idx)
+        else:
+            context_indices.append(idx)
+
+    keep[:] = False
+    claimed_context = set(protected)
+    # Preserve current downstream ordering: patterns precede augmented pairs in
+    # every feature_mode, so no new scoring/ranking rule is introduced here.
+    for idx in context_indices:
+        source_set = set(sources[idx])
+        if source_set and not source_set.isdisjoint(claimed_context):
+            continue
+        keep[idx] = True
+        claimed_context.update(source_set)
+
+    if policy == "main_effect":
+        for indices in original_groups.values():
+            keep[indices] = True
+    else:  # strict
+        for source_set, indices in original_groups.items():
+            if set(source_set).isdisjoint(claimed_context):
+                keep[indices] = True
+                claimed_context.update(source_set)
+
+    return keep, {
+        "policy": policy,
+        "retained_columns": int(np.count_nonzero(keep)),
+        "removed_columns": int(len(names) - np.count_nonzero(keep)),
+        "protected_context_sources": sorted(protected),
+        "claimed_context_sources": sorted(claimed_context),
+    }
+
+
 def _best_ig_score(score_obj: Any) -> float:
     """Return the best finite IG score from native adaptive-binning metadata."""
     if isinstance(score_obj, dict):
@@ -942,6 +1024,8 @@ def _wire_hugiml_feature_metadata(
     augmented_catalog: list[dict[str, Any]],
     pattern_provenance: dict[str, dict[str, Any]] | None = None,
     original_feature_standardization: dict[str, dict[str, Any]] | None = None,
+    feature_source_sets: list[frozenset[str]] | None = None,
+    lr_source_policy: str = "standard",
 ) -> None:
     """Best-effort: if `estimator` (or, for a meta-estimator wrapper
     exposing `.estimator` -- e.g. sklearn's OneVsRestClassifier -- the
@@ -995,17 +1079,27 @@ def _wire_hugiml_feature_metadata(
                     augmented_catalog,
                     pattern_provenance,
                     original_feature_standardization,
+                    feature_source_sets,
+                    lr_source_policy,
                 )
             except TypeError:
                 try:
                     target.set_hugiml_feature_metadata(
-                        feature_names, augmented_catalog, pattern_provenance
+                        feature_names,
+                        augmented_catalog,
+                        pattern_provenance,
+                        original_feature_standardization,
                     )
                 except TypeError:
                     try:
-                        target.set_hugiml_feature_metadata(feature_names, augmented_catalog)
+                        target.set_hugiml_feature_metadata(
+                            feature_names, augmented_catalog, pattern_provenance
+                        )
                     except TypeError:
-                        pass
+                        try:
+                            target.set_hugiml_feature_metadata(feature_names, augmented_catalog)
+                        except TypeError:
+                            pass
         if hasattr(target, "hugiml_feature_names"):
             target.hugiml_feature_names = list(feature_names)
         if hasattr(target, "hugiml_augmented_catalog"):
@@ -1016,3 +1110,9 @@ def _wire_hugiml_feature_metadata(
             target.hugiml_original_feature_standardization = dict(
                 original_feature_standardization or {}
             )
+        if hasattr(target, "hugiml_feature_source_sets"):
+            target.hugiml_feature_source_sets = [
+                frozenset(map(str, item)) for item in (feature_source_sets or [])
+            ]
+        if hasattr(target, "lr_source_policy"):
+            target.lr_source_policy = str(lr_source_policy)

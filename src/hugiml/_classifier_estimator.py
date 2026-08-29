@@ -188,6 +188,7 @@ class _EstimatorMixin:
             adaptive_binning_sample_random_state=self.adaptive_binning_sample_random_state,
             convert_binary_to_categorical=self.convert_binary_to_categorical,
             feature_mode=self.feature_mode,
+            lr_source_policy=self.lr_source_policy,
             use_hotpath=self.use_hotpath,
             augmented_pair_transforms=self.augmented_pair_transforms,
             augmented_pair_mode=self.augmented_pair_mode,

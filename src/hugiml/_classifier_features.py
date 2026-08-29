@@ -336,6 +336,9 @@ class _FeatureAssemblyMixin:
                     )
                     self._original_dummy_columns_ = []
                     self._original_feature_names_downstream_ = list(names)
+                    self._original_downstream_source_map_ = {
+                        str(name): str(name) for name in names
+                    }
                     return X_num_arr.astype(np.float32, copy=False)
                 num_cols = list(getattr(self, "_original_numeric_cols_", []))
                 if (
@@ -437,6 +440,17 @@ class _FeatureAssemblyMixin:
                 else pd.DataFrame(index=X_df.index)
             )
             self._original_dummy_columns_ = list(X_cat_dum.columns)
+            dummy_source_map: dict[str, str] = {}
+            for raw_col in self._original_cat_cols_:
+                one_col_dummies = pd.get_dummies(
+                    X_cat[[raw_col]].astype("string"), dummy_na=True
+                )
+                for dummy_name in one_col_dummies.columns:
+                    dummy_source_map[str(dummy_name)] = str(raw_col)
+            self._original_downstream_source_map_ = {
+                **{str(name): str(name) for name in self._original_numeric_cols_},
+                **dummy_source_map,
+            }
         else:
             num_cols = getattr(self, "_original_numeric_cols_", [])
             med = getattr(self, "_original_numeric_medians_", pd.Series(dtype=float))
@@ -897,6 +911,53 @@ class _FeatureAssemblyMixin:
         if mask is None:
             return names
         return [name for name, keep in zip(names, np.asarray(mask, dtype=bool)) if keep]
+
+    def _get_downstream_feature_source_sets_full(self) -> list[frozenset[str]]:
+        """Raw-source lineage aligned with the unfiltered downstream columns."""
+        names = self._get_downstream_feature_names_full()
+        original_map = dict(getattr(self, "_original_downstream_source_map_", {}) or {})
+        pattern_provenance = self.get_pattern_provenance()
+        augmented_by_name = {
+            f"augmented_pair:{item.get('name')}": item
+            for item in getattr(self, "augmented_pair_transforms_", [])
+        }
+        out: list[frozenset[str]] = []
+        for name in names:
+            text = str(name)
+            if text.startswith("orig:"):
+                downstream_name = text.removeprefix("orig:")
+                raw_name = original_map.get(downstream_name, downstream_name)
+                out.append(frozenset({str(raw_name)}))
+                continue
+            if text.startswith("pattern:"):
+                entry = pattern_provenance.get(text, {})
+                raw_features = entry.get("raw_features", ()) if isinstance(entry, dict) else ()
+                out.append(
+                    frozenset(map(str, raw_features))
+                    if raw_features
+                    else frozenset({text})
+                )
+                continue
+            if text.startswith("augmented_pair:"):
+                item = augmented_by_name.get(text, {})
+                inputs = item.get("inputs", ()) if isinstance(item, dict) else ()
+                out.append(frozenset(map(str, inputs)) if inputs else frozenset({text}))
+                continue
+            out.append(frozenset({text}))
+        return out
+
+    def _get_downstream_feature_source_sets(self) -> list[frozenset[str]]:
+        """Raw-source lineage aligned with the pre-canonical downstream matrix."""
+        source_sets = self._get_downstream_feature_source_sets_full()
+        mask = getattr(self, "_strict_topk_feature_mask_", None)
+        if mask is None:
+            return source_sets
+        mask_arr = np.asarray(mask, dtype=bool)
+        if mask_arr.size != len(source_sets):
+            raise RuntimeError(
+                "Stored strict-TopK mask does not match downstream source-lineage metadata."
+            )
+        return [item for item, keep in zip(source_sets, mask_arr) if keep]
 
     def _is_discrete_downstream_feature(self, name: str) -> bool:
         return name.startswith("pattern:") or (

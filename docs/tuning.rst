@@ -183,8 +183,8 @@ Fast path eligibility
 
 The cached path is intended for adaptive-binning grids where the varying
 dimensions are limited to mining and representation parameters such as ``G``,
-``L``, ``topK``, and ``feature_mode``. Other grids remain valid and are
-evaluated through the standard path.
+``L``, ``topK``, ``feature_mode``, and ``lr_source_policy``. Other grids
+remain valid and are evaluated through the standard path.
 
 Computational budget notes
 --------------------------

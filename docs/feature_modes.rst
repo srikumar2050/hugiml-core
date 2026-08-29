@@ -147,6 +147,55 @@ Downstream matrix policy
 ``patterns_only`` keeps the downstream representation sparse. Hybrid modes choose dense representation for small or moderate selected widths and CSR representation for larger selected feature spaces. This keeps ordinary sklearn workflows convenient while reducing memory pressure for wider selected feature spaces.
 
 
+Raw-source reuse policy
+-----------------------
+
+``lr_source_policy`` controls how raw input sources are reused across the
+downstream LR representation immediately before the final logistic fit. It has
+no effect on RPTE tree construction; the policy is applied only to the direct
+input columns that enter the final LR layer.
+
+.. list-table::
+   :header-rows: 1
+
+   * - Value
+     - Behaviour
+   * - ``"standard"`` (default)
+     - Preserves the current post-canonicalization column layout unchanged.
+   * - ``"main_effect"``
+     - Retains all surviving original-feature main-effect columns while making
+       generated contextual terms (patterns, augmented pairs) source-disjoint.
+       In ``patterns_only`` mode this is equivalent to ``"strict"`` because no
+       original-feature main-effect block is present.
+   * - ``"strict"``
+     - Generated contextual components receive first claim on their raw sources.
+       An original-feature group is retained only when all of its raw sources
+       remain unclaimed.
+
+``lr_source_policy`` can be varied in ``fast_grid_tune`` grids alongside
+``G``, ``L``, ``topK``, and ``feature_mode``.
+
+.. code-block:: python
+
+   from hugiml import HUGIMLClassifier
+
+   clf = HUGIMLClassifier(
+       B=-1,
+       adaptive_binning=True,
+       L=2,
+       topK=100,
+       feature_mode="original_plus_patterns",
+       lr_source_policy="main_effect",
+   )
+   clf.fit(X_train, y_train)
+
+   # Audit which columns were retained and removed under the policy.
+   audit = clf.get_downstream_redundancy_audit()
+   print(audit["lr_source_policy"])
+   print(audit["lr_source_policy_effective"])
+   print(audit["retained_feature_names"])
+
+
 Interpretation notes
 --------------------
 

@@ -25,6 +25,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 from scipy.sparse import csr_matrix
+from sklearn.linear_model import LogisticRegression, SGDClassifier
 from sklearn.pipeline import Pipeline
 from sklearn.utils.validation import check_is_fitted
 
@@ -34,6 +35,7 @@ from hugiml._classifier_support import (
     HUGIMLClassifier,
     _get_peak_rss_kb,
     _MemoryTracker,
+    _select_lr_source_policy_mask,
     _TransactionDataWrapper,
     _wire_hugiml_feature_metadata,
     logger,
@@ -142,6 +144,7 @@ class _TrainingMixin:
             "_original_numeric_medians_",
             "_original_numeric_medians_array_",
             "_original_feature_names_downstream_",
+            "_original_downstream_source_map_",
             "_pattern_orders_",
             "_interaction_pattern_mask_",
             "x_train_downstream_",
@@ -910,6 +913,10 @@ class _TrainingMixin:
                 self.x_train_downstream_ = self._canonicalize_lr_downstream_fit(
                     self.x_train_downstream_
                 )
+                if self._direct_downstream_uses_logistic_fit():
+                    self.x_train_downstream_ = self._apply_lr_source_policy_fit(
+                        self.x_train_downstream_
+                    )
                 self._cache_downstream_feature_metadata()
                 self.model_ = Pipeline([("clf", self._make_estimator(n_cls))])
                 _downstream_names_for_wiring = self._get_downstream_feature_names()
@@ -928,6 +935,8 @@ class _TrainingMixin:
                     self.get_augmented_pair_transforms(),
                     self.get_pattern_provenance(),
                     self.get_original_feature_standardization(),
+                    self._get_downstream_feature_source_sets(),
+                    self._effective_lr_source_policy(),
                 )
                 self.model_.fit(self.x_train_downstream_, y_train)
                 stage_times["fit_downstream"] = t.ms
@@ -1033,6 +1042,74 @@ class _TrainingMixin:
 
         return self
 
+    def _direct_downstream_uses_logistic_fit(self) -> bool:
+        """Whether the outer downstream estimator is itself logistic/log-loss."""
+        estimator = getattr(self, "base_estimator", None)
+        if estimator is None:
+            return True
+        estimator = getattr(estimator, "estimator", estimator)
+        if isinstance(estimator, LogisticRegression):
+            return True
+        return isinstance(estimator, SGDClassifier) and str(
+            getattr(estimator, "loss", "")
+        ).lower() == "log_loss"
+
+    def _effective_lr_source_policy(self) -> str:
+        policy = str(getattr(self, "lr_source_policy", "standard"))
+        if getattr(self, "feature_mode", "patterns_only") == "patterns_only" and policy == "main_effect":
+            return "strict"
+        return policy
+
+    def _apply_lr_source_policy_fit(self, X: Any) -> Any:
+        """Apply the raw-source policy to a freshly canonicalized LR matrix."""
+        requested_policy = str(getattr(self, "lr_source_policy", "standard"))
+        effective_policy = self._effective_lr_source_policy()
+        canonical_mask = getattr(self, "_downstream_lr_canonical_mask_", None)
+        pre_names = list(super()._get_downstream_feature_names())
+        pre_sources = list(super()._get_downstream_feature_source_sets())
+        if len(pre_names) != len(pre_sources):
+            raise RuntimeError("Downstream source-lineage metadata does not match feature names.")
+        if canonical_mask is None:
+            canonical_mask_arr = np.ones(len(pre_names), dtype=bool)
+        else:
+            canonical_mask_arr = np.asarray(canonical_mask, dtype=bool)
+        if canonical_mask_arr.size != len(pre_names):
+            raise RuntimeError("Canonicalization mask does not match downstream source metadata.")
+        survivor_names = [name for name, keep in zip(pre_names, canonical_mask_arr) if keep]
+        survivor_sources = [item for item, keep in zip(pre_sources, canonical_mask_arr) if keep]
+        if int(X.shape[1]) != len(survivor_names):
+            raise RuntimeError("Canonicalized downstream matrix does not match source metadata.")
+
+        policy_mask, audit = _select_lr_source_policy_mask(
+            survivor_names, survivor_sources, effective_policy
+        )
+        combined_mask = canonical_mask_arr.copy()
+        survivor_indices = np.flatnonzero(canonical_mask_arr)
+        combined_mask[survivor_indices[~policy_mask]] = False
+        self._downstream_lr_canonical_mask_ = combined_mask
+        summary = dict(getattr(self, "_downstream_lr_canonicalization_", {}) or {})
+        summary.update(
+            retained_columns=int(np.count_nonzero(combined_mask)),
+            lr_source_policy=requested_policy,
+            lr_source_policy_effective=effective_policy,
+            lr_source_policy_removed_columns=int(np.count_nonzero(~policy_mask)),
+            lr_source_policy_audit=audit,
+        )
+        self._downstream_lr_canonicalization_ = summary
+        return X[:, policy_mask]
+
+    def _get_downstream_feature_source_sets(self) -> list[frozenset[str]]:
+        source_sets = list(super()._get_downstream_feature_source_sets())
+        mask = getattr(self, "_downstream_lr_canonical_mask_", None)
+        if mask is None:
+            return source_sets
+        mask_arr = np.asarray(mask, dtype=bool)
+        if mask_arr.size != len(source_sets):
+            raise RuntimeError(
+                "Stored downstream canonicalization mask does not match source-lineage metadata."
+            )
+        return [item for item, keep in zip(source_sets, mask_arr) if keep]
+
     def _get_downstream_feature_names(self) -> list[str]:
         names = list(super()._get_downstream_feature_names())
         mask = getattr(self, "_downstream_lr_canonical_mask_", None)
@@ -1127,6 +1204,10 @@ class _TrainingMixin:
             "vif_threshold": 5.0,
             "representation_r2_threshold": 0.8,
             "vif_columns_above_threshold": 0,
+            "original_columns_in_vif_analysis": 0,
+            "original_vif_columns_above_threshold": 0,
+            "original_vif_fraction_above_threshold": 0.0,
+            "original_median_vif": None,
             "removed_high_vif_pattern_columns": 0,
             "removed_high_vif_augmented_pair_columns": 0,
             "maximum_vif": None,
@@ -1202,8 +1283,25 @@ class _TrainingMixin:
                 ],
                 dtype=object,
             )
+            original_mask = families == "original"
+            original_vif = vif[original_mask]
+            generated_vif.update(
+                original_columns_in_vif_analysis=int(original_vif.size),
+                original_vif_columns_above_threshold=int(
+                    np.count_nonzero(original_vif > generated_vif["vif_threshold"])
+                ),
+                original_vif_fraction_above_threshold=float(
+                    np.mean(original_vif > generated_vif["vif_threshold"])
+                )
+                if original_vif.size
+                else 0.0,
+                original_median_vif=float(np.median(original_vif))
+                if original_vif.size
+                else None,
+            )
+
             retained_exact = np.zeros(exact_indices.size, dtype=bool)
-            retained_exact[families == "original"] = True
+            retained_exact[original_mask] = True
 
             for family in ("pattern", "augmented_pair"):
                 for local_index in np.flatnonzero(families == family):
