@@ -1353,11 +1353,11 @@ OpenML-CC18 reports 70 of 72 catalog tasks using official outer splits and neste
 #### Complexity and RPTE behavior
 
 <table>
-  <thead><tr><th rowspan="2">Benchmark</th><th rowspan="2">N</th><th colspan="4">Mean model-inspection units</th><th colspan="4">Mean instance-inspection units</th><th colspan="3">HUGIML active RPTE trees</th><th rowspan="2">HUGIML mean active leaf path length</th></tr><tr><th>HUGIML</th><th>XGB</th><th>LGBM</th><th>RF</th><th>HUGIML</th><th>XGB</th><th>LGBM</th><th>RF</th><th>Mean</th><th>Median</th><th>Maximum</th></tr></thead>
+  <thead><tr><th rowspan="2">Benchmark</th><th rowspan="2">N</th><th colspan="4">Mean model-inspection units</th><th colspan="4">Mean instance-inspection units</th><th colspan="3">HUGIML active RPTE trees</th></tr><tr><th>HUGIML</th><th>XGB</th><th>LGBM</th><th>RF</th><th>HUGIML</th><th>XGB</th><th>LGBM</th><th>RF</th><th>Mean</th><th>Median</th><th>Maximum</th></tr></thead>
   <tbody>
-    <tr><td>OpenML-CC18</td><td>70</td><td><strong>441.9 (1x)</strong></td><td>23,655.3 (53.5x)</td><td>87,924.0 (199.0x)</td><td>225,834.0 (511.0x)</td><td><strong>111.1 (1x)</strong></td><td>2,457.9 (22.1x)</td><td>3,130.6 (28.2x)</td><td>2,289.3 (20.6x)</td><td>5.25</td><td>5.00</td><td>10</td><td>—</td></tr>
-    <tr><td>TabZilla</td><td>34</td><td><strong>186.5 (1x)</strong></td><td>15,026.4 (80.6x)</td><td>59,285.6 (317.8x)</td><td>119,734.4 (641.9x)</td><td><strong>64.1 (1x)</strong></td><td>1,738.3 (27.1x)</td><td>3,003.9 (46.8x)</td><td>1,097.3 (17.1x)</td><td>4.46</td><td>3.00</td><td>15</td><td>—</td></tr>
-    <tr><td>PMLBmini</td><td>44</td><td><strong>11.7 (1x)</strong></td><td>481.8 (41.2x)</td><td>630.9 (54.0x)</td><td>3,644.6 (311.7x)</td><td><strong>6.9 (1x)</strong></td><td>110.6 (15.9x)</td><td>126.4 (18.2x)</td><td>380.8 (54.9x)</td><td>1.72</td><td>1.00</td><td>7</td><td>—</td></tr>
+    <tr><td>OpenML-CC18</td><td>70</td><td><strong>441.9 (1x)</strong></td><td>23,655.3 (53.5x)</td><td>87,924.0 (199.0x)</td><td>225,834.0 (511.0x)</td><td><strong>111.1 (1x)</strong></td><td>2,457.9 (22.1x)</td><td>3,130.6 (28.2x)</td><td>2,289.3 (20.6x)</td><td>5.25</td><td>5.00</td><td>10</td></tr>
+    <tr><td>TabZilla</td><td>34</td><td><strong>186.5 (1x)</strong></td><td>15,026.4 (80.6x)</td><td>59,285.6 (317.8x)</td><td>119,734.4 (641.9x)</td><td><strong>64.1 (1x)</strong></td><td>1,738.3 (27.1x)</td><td>3,003.9 (46.8x)</td><td>1,097.3 (17.1x)</td><td>4.46</td><td>3.00</td><td>15</td></tr>
+    <tr><td>PMLBmini</td><td>44</td><td><strong>11.7 (1x)</strong></td><td>481.8 (41.2x)</td><td>630.9 (54.0x)</td><td>3,644.6 (311.7x)</td><td><strong>6.9 (1x)</strong></td><td>110.6 (15.9x)</td><td>126.4 (18.2x)</td><td>380.8 (54.9x)</td><td>1.72</td><td>1.00</td><td>7</td></tr>
   </tbody>
 </table>
 
@@ -1382,18 +1382,18 @@ HUGIML evaluates only 32 configurations, while each other tuned method evaluates
 
 #### Tuned-pool metric comparison
 
-The delta is HUGIML's dataset-balanced mean minus the strongest official mean. An em dash denotes an unavailable measurement. For Brier score, the sign is reversed so a positive value always favors HUGIML.
+The delta is HUGIML's dataset-balanced mean minus the strongest official mean, so a positive value favors HUGIML.
 
 <table>
-  <thead><tr><th rowspan="2">Scope</th><th colspan="3">ROC AUC, mean (median)</th><th colspan="3">Balanced accuracy, mean (median)</th><th colspan="3">F1, mean (median)</th><th colspan="3">Brier score, mean (median)</th></tr><tr><th>HUGIML</th><th>Best official</th><th>Delta</th><th>HUGIML</th><th>Best official</th><th>Delta</th><th>HUGIML</th><th>Best official</th><th>Delta</th><th>HUGIML</th><th>Best official</th><th>Delta</th></tr></thead>
+  <thead><tr><th rowspan="2">Scope</th><th colspan="3">ROC AUC, mean (median)</th><th colspan="3">Balanced accuracy, mean (median)</th><th colspan="3">F1, mean (median)</th></tr><tr><th>HUGIML</th><th>Best official</th><th>Delta</th><th>HUGIML</th><th>Best official</th><th>Delta</th><th>HUGIML</th><th>Best official</th><th>Delta</th></tr></thead>
   <tbody>
-    <tr><td>Overall</td><td>0.8461 (0.8443)</td><td>0.8579 (0.8694)</td><td>-0.0118 (-0.0252)</td><td>0.6895 (0.7064)</td><td>0.7053 (0.7149)</td><td>-0.0158 (-0.0086)</td><td>0.5645 (0.6391)</td><td>0.5850 (0.6626)</td><td>-0.0205 (-0.0234)</td><td>0.1072 (0.0854)</td><td>—</td><td>—</td></tr>
-    <tr><td>Binary</td><td>0.8357 (0.8247)</td><td>0.8496 (0.8439)</td><td>-0.0139 (-0.0193)</td><td>0.6820 (0.6941)</td><td>0.6982 (0.7044)</td><td>-0.0162 (-0.0103)</td><td>0.5228 (0.5725)</td><td>0.5449 (0.6095)</td><td>-0.0221 (-0.0370)</td><td>0.0959 (0.0854)</td><td>—</td><td>—</td></tr>
-    <tr><td>Multiclass</td><td>0.8849 (0.9348)</td><td>0.8903 (0.9582)</td><td>-0.0054 (-0.0235)</td><td>0.7174 (0.8046)</td><td>0.7323 (0.8529)</td><td>-0.0149 (-0.0483)</td><td>0.7208 (0.8041)</td><td>0.7353 (0.8492)</td><td>-0.0144 (-0.0451)</td><td>0.1494 (0.1095)</td><td>—</td><td>—</td></tr>
+    <tr><td>Overall</td><td>0.8461 (0.8443)</td><td>0.8579 (0.8694)</td><td>-0.0118 (-0.0252)</td><td>0.6895 (0.7064)</td><td>0.7053 (0.7149)</td><td>-0.0158 (-0.0086)</td><td>0.5645 (0.6391)</td><td>0.5850 (0.6626)</td><td>-0.0205 (-0.0234)</td></tr>
+    <tr><td>Binary</td><td>0.8357 (0.8247)</td><td>0.8496 (0.8439)</td><td>-0.0139 (-0.0193)</td><td>0.6820 (0.6941)</td><td>0.6982 (0.7044)</td><td>-0.0162 (-0.0103)</td><td>0.5228 (0.5725)</td><td>0.5449 (0.6095)</td><td>-0.0221 (-0.0370)</td></tr>
+    <tr><td>Multiclass</td><td>0.8849 (0.9348)</td><td>0.8903 (0.9582)</td><td>-0.0054 (-0.0235)</td><td>0.7174 (0.8046)</td><td>0.7323 (0.8529)</td><td>-0.0149 (-0.0483)</td><td>0.7208 (0.8041)</td><td>0.7353 (0.8492)</td><td>-0.0144 (-0.0451)</td></tr>
   </tbody>
 </table>
 
-Each table entry reports mean (median), and positive delta favors HUGIML; the Brier delta follows its lower-is-better direction. For ROC AUC, HUGIML trails the strongest displayed tuned official mean by 0.0139 across binary datasets and by 0.0054 across multiclass datasets. These differences are achieved with 32 HUGIML configurations versus 200 for each tuned official method. HUGIML combines this predictive performance with source-disjoint, interpretable micro-ensembles and commonly uses one to two orders of magnitude fewer model-inspection units. The median active RPTE size is 3 trees in the internal benchmark, 1 tree on PMLBmini, 5 trees on OpenML-CC18, and 3 trees on TabZilla.
+Each table entry reports mean (median), and positive delta favors HUGIML. For ROC AUC, HUGIML trails the strongest displayed tuned official mean by 0.0139 across binary datasets and by 0.0054 across multiclass datasets. These differences are achieved with 32 HUGIML configurations versus 200 for each tuned official method. HUGIML combines this predictive performance with source-disjoint, interpretable micro-ensembles and commonly uses one to two orders of magnitude fewer model-inspection units. The median active RPTE size is 3 trees in the internal benchmark, 1 tree on PMLBmini, 5 trees on OpenML-CC18, and 3 trees on TabZilla.
 
 [Open the TabArena official leaderboard dashboard](https://srikumar2050.github.io/hugiml-core/tabarena_official_leaderboard_dashboard.html) for model filters, rankings, metric distributions, and methodology.
 
