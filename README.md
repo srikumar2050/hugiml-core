@@ -1301,15 +1301,15 @@ The **Governance Studio dashboard** provides interactive governance evidence vie
 
 HUGIML is evaluated on one internal panel and four external classification suites. The internal panel contains 50 real-world and 50 synthetic datasets. OpenML-CC18, PMLBmini, and TabZilla retain their suite-specific validation structures and matched ensemble baselines. TabArena uses repeated outer folds, retained inner-fold ensembles, and the official reference leaderboard.
 
-**Evaluation environment.** All reported runs were performed on a 64-bit Windows 11 25H2 system with a 13th-generation Intel Core i9-13900H processor (14 cores and 20 logical processors), 16 GB of RAM, Python 3.12.7, and HUGIML 1.1.20. GPU acceleration was not used. Parallel execution followed each benchmark runner's configured worker settings, with the same computational environment applied to HUGIML and its matched baselines within each suite. Reported runtimes therefore support within-suite comparisons; cross-suite timing comparisons should also account for differences in validation protocols, fold counts, and retained ensembles.
+**Evaluation environment.** The evaluation workstation is a 64-bit Windows 11 25H2 system with an Intel Core Ultra 9 290HX Plus processor (24 cores and 24 logical processors), 32 GB of RAM, Python 3.12.14, and HUGIML 1.1.22. GPU acceleration was not used. Parallel execution followed each benchmark runner's configured worker settings, with the same computational environment applied to HUGIML and its matched baselines within each suite. Reported runtimes therefore support within-suite comparisons; cross-suite timing comparisons should also account for differences in validation protocols, fold counts, and retained ensembles.
 
 | Benchmark | Completed / catalog | Validation protocol | HUGIML / reference configurations |
 |---|---:|---|---:|
 | Internal panel | 100 / 100 | Controlled outer evaluation with inner model selection | 16 / 16 |
-| OpenML-CC18 | 50 / 72 | Official outer splits plus nested 3-fold selection | 16 / 16 |
+| OpenML-CC18 | 70 / 72 | Official outer splits plus nested 3-fold selection | 16 / 16 |
 | PMLBmini | 44 / 44 | Three repeated rotating 3-fold partitions | 16 / 16 |
-| TabZilla | 31 / 36 | Official rotating train, validation, and test folds | 16 / 16 |
-| TabArena classification | 32 / 38 | Repeated outer 3-fold plus retained inner 8-fold ensemble | 16 / 200 |
+| TabZilla | 34 / 36 | Official rotating train, validation, and test folds | 16 / 16 |
+| TabArena classification | 38 / 38 | Repeated outer 3-fold plus retained inner 8-fold ensemble | 32 / 200 |
 
 ### Internal benchmark
 
@@ -1319,9 +1319,9 @@ The internal benchmark evaluates 100 datasets using controlled outer evaluation 
 
 | Scope | Datasets | Mean ROC AUC | Mean balanced accuracy | Mean F1 | Mean Brier score |
 |---|---:|---:|---:|---:|---:|
-| Overall | 100 | 0.8809 | 0.8265 | 0.8110 | 0.1077 |
-| Real-world | 50 | 0.9020 | 0.8431 | 0.8359 | 0.0989 |
-| Synthetic | 50 | 0.8598 | 0.8099 | 0.7861 | 0.1165 |
+| Overall | 100 | 0.8765 | 0.8221 | 0.8032 | 0.1104 |
+| Real-world | 50 | 0.9031 | 0.8464 | 0.8357 | 0.0988 |
+| Synthetic | 50 | 0.8498 | 0.7977 | 0.7708 | 0.1221 |
 
 #### Inspection complexity
 
@@ -1330,9 +1330,9 @@ Model-inspection units estimate the work required to audit the complete fitted m
 <table>
   <thead><tr><th rowspan="2">Scope</th><th rowspan="2">N</th><th colspan="4">Mean model-inspection units</th><th colspan="2">RPTE-active HUGIML fits</th></tr><tr><th>HUGIML</th><th>XGB</th><th>LGBM</th><th>RF</th><th>Mean active trees</th><th>Mean active leaf path length</th></tr></thead>
   <tbody>
-    <tr><td>Overall</td><td>100</td><td><strong>67.4</strong></td><td>3,971.1</td><td>12,477.7</td><td>157,420.5</td><td>2.78</td><td>3.34</td></tr>
-    <tr><td>Real-world</td><td>50</td><td><strong>24.6</strong></td><td>1,839.3</td><td>6,919.7</td><td>37,007.3</td><td>1.91</td><td>2.46</td></tr>
-    <tr><td>Synthetic</td><td>50</td><td><strong>110.2</strong></td><td>6,102.9</td><td>18,035.7</td><td>277,833.8</td><td>3.19</td><td>3.75</td></tr>
+    <tr><td>Overall</td><td>100</td><td><strong>61.5</strong></td><td>3,956.8</td><td>12,690.4</td><td>157,420.4</td><td>3.04</td><td>3.57</td></tr>
+    <tr><td>Real-world</td><td>50</td><td><strong>22.1</strong></td><td>1,810.7</td><td>6,814.1</td><td>37,007.1</td><td>2.41</td><td>2.94</td></tr>
+    <tr><td>Synthetic</td><td>50</td><td><strong>100.9</strong></td><td>6,102.9</td><td>18,566.6</td><td>277,833.7</td><td>3.34</td><td>3.87</td></tr>
   </tbody>
 </table>
 
@@ -1340,24 +1340,24 @@ Model-inspection units estimate the work required to audit the complete fitted m
 
 ### External benchmarks: OpenML-CC18, TabZilla, and PMLBmini
 
-OpenML-CC18 reports 50 of 72 catalog tasks using official outer splits and nested 3-fold model selection. TabZilla reports 31 of 36 tasks using stored rotating train, validation, and test folds. PMLBmini reports all 44 datasets using three repeated rotating 3-fold partitions. The tables use datasets with matched HUGIML, XGBoost, LightGBM, and Random Forest results.
+OpenML-CC18 reports 70 of 72 catalog tasks using official outer splits and nested 3-fold model selection. TabZilla reports 34 of 36 tasks using stored rotating train, validation, and test folds. PMLBmini reports all 44 datasets using three repeated rotating 3-fold partitions. The tables use datasets with matched HUGIML, XGBoost, LightGBM, and Random Forest results.
 
 #### HUGIML predictive and inspection results
 
 | Benchmark | N | Mean ROC AUC | Mean balanced accuracy | Mean F1 | Mean Brier score | Mean model-inspection units |
 |---|---:|---:|---:|---:|---:|---:|
-| OpenML-CC18 | 50 | 0.9105 | 0.7910 | 0.7330 | 0.1372 | 119.4 |
-| TabZilla | 31 | 0.8934 | 0.7627 | 0.7345 | 0.1858 | 175.8 |
-| PMLBmini | 44 | 0.8248 | 0.7438 | 0.6973 | 0.1399 | 15.0 |
+| OpenML-CC18 | 70 | 0.9135 | 0.7898 | 0.7508 | 0.1561 | 441.9 |
+| TabZilla | 34 | 0.8843 | 0.7576 | 0.7260 | 0.1863 | 186.5 |
+| PMLBmini | 44 | 0.8286 | 0.7533 | 0.7111 | 0.1394 | 11.7 |
 
 #### Complexity and RPTE behavior
 
 <table>
   <thead><tr><th rowspan="2">Benchmark</th><th rowspan="2">N</th><th colspan="4">Mean model-inspection units</th><th colspan="4">Mean instance-inspection units</th><th colspan="3">HUGIML active RPTE trees</th><th rowspan="2">HUGIML mean active leaf path length</th></tr><tr><th>HUGIML</th><th>XGB</th><th>LGBM</th><th>RF</th><th>HUGIML</th><th>XGB</th><th>LGBM</th><th>RF</th><th>Mean</th><th>Median</th><th>Maximum</th></tr></thead>
   <tbody>
-    <tr><td>OpenML-CC18</td><td>50</td><td><strong>119.4 (1x)</strong></td><td>12,338.8 (103.3x)</td><td>50,476.2 (422.7x)</td><td>154,884.9 (1,297.0x)</td><td><strong>54.3 (1x)</strong></td><td>1,458.1 (26.8x)</td><td>2,024.1 (37.3x)</td><td>2,078.6 (38.3x)</td><td>4.66</td><td>4.00</td><td>10</td><td>3.97</td></tr>
-    <tr><td>TabZilla</td><td>31</td><td><strong>175.8 (1x)</strong></td><td>15,326.9 (87.2x)</td><td>60,824.4 (346.0x)</td><td>103,388.0 (588.1x)</td><td><strong>80.1 (1x)</strong></td><td>1,829.3 (22.8x)</td><td>3,184.0 (39.7x)</td><td>1,057.4 (13.2x)</td><td>5.69</td><td>4.00</td><td>15</td><td>4.19</td></tr>
-    <tr><td>PMLBmini</td><td>44</td><td><strong>15.0 (1x)</strong></td><td>481.8 (32.0x)</td><td>630.9 (41.9x)</td><td>3,644.6 (242.2x)</td><td><strong>9.7 (1x)</strong></td><td>110.6 (11.4x)</td><td>126.4 (13.0x)</td><td>380.8 (39.1x)</td><td>1.93</td><td>2.00</td><td>7</td><td>2.26</td></tr>
+    <tr><td>OpenML-CC18</td><td>70</td><td><strong>441.9 (1x)</strong></td><td>23,655.3 (53.5x)</td><td>87,924.0 (199.0x)</td><td>225,834.0 (511.0x)</td><td><strong>111.1 (1x)</strong></td><td>2,457.9 (22.1x)</td><td>3,130.6 (28.2x)</td><td>2,289.3 (20.6x)</td><td>5.25</td><td>5.00</td><td>10</td><td>—</td></tr>
+    <tr><td>TabZilla</td><td>34</td><td><strong>186.5 (1x)</strong></td><td>15,026.4 (80.6x)</td><td>59,285.6 (317.8x)</td><td>119,734.4 (641.9x)</td><td><strong>64.1 (1x)</strong></td><td>1,738.3 (27.1x)</td><td>3,003.9 (46.8x)</td><td>1,097.3 (17.1x)</td><td>4.46</td><td>3.00</td><td>15</td><td>—</td></tr>
+    <tr><td>PMLBmini</td><td>44</td><td><strong>11.7 (1x)</strong></td><td>481.8 (41.2x)</td><td>630.9 (54.0x)</td><td>3,644.6 (311.7x)</td><td><strong>6.9 (1x)</strong></td><td>110.6 (15.9x)</td><td>126.4 (18.2x)</td><td>380.8 (54.9x)</td><td>1.72</td><td>1.00</td><td>7</td><td>—</td></tr>
   </tbody>
 </table>
 
@@ -1365,35 +1365,35 @@ Detailed analysis: [OpenML-CC18](https://srikumar2050.github.io/hugiml-core/open
 
 ### External benchmark: TabArena
 
-TabArena classification uses repeated outer 3-fold evaluation with a retained inner 8-fold ensemble. The current comparison covers 32 of the 38 classification datasets and aligns HUGIML outer-fold results with the official reference pool. The leaderboard dashboard begins with a balanced 2 x 2 dataset-scale analysis using the median row and predictor counts of the completed datasets. TabArena's 2,500-row boundary continues to determine whether the evaluation uses ten or three repeated outer partitions.
+TabArena classification uses repeated outer 3-fold evaluation with a retained inner 8-fold ensemble. The current comparison covers 38 of the 38 classification datasets and aligns HUGIML outer-fold results with the official reference pool. The leaderboard dashboard begins with a balanced 2 x 2 dataset-scale analysis using the median row and predictor counts of the completed datasets. TabArena's 2,500-row boundary continues to determine whether the evaluation uses ten or three repeated outer partitions.
 
-HUGIML evaluates only 16 configurations, while each other tuned method evaluates 200 configurations. The comparison therefore aligns datasets, outer test folds, and evaluation metrics, but not search budget. It shows HUGIML performance under substantially more limited tuning rather than an equal-compute comparison.
+HUGIML evaluates only 32 configurations, while each other tuned method evaluates 200 configurations. The comparison therefore aligns datasets, outer test folds, and evaluation metrics, but not search budget. It shows HUGIML performance under substantially more limited tuning rather than an equal-compute comparison.
 
 #### Official Elo comparison
 
 <table>
   <thead><tr><th rowspan="2">Scope</th><th rowspan="2">N</th><th colspan="2">Default pool</th><th colspan="2">Tuned pool</th><th colspan="2">All official variants</th></tr><tr><th>Elo</th><th>Rank</th><th>Elo</th><th>Rank</th><th>Elo</th><th>Rank</th></tr></thead>
   <tbody>
-    <tr><td>Overall</td><td>32</td><td>1158.6</td><td>11 / 17</td><td>1080.2</td><td>12 / 15</td><td>1056.6</td><td>35 / 46</td></tr>
-    <tr><td>Binary</td><td>26</td><td>1152.7</td><td>11 / 17</td><td>1101.9</td><td>11 / 15</td><td>1074.9</td><td>32 / 46</td></tr>
-    <tr><td>Multiclass</td><td>6</td><td>1205.6</td><td>10 / 17</td><td>972.5</td><td>13 / 15</td><td>968.4</td><td>35 / 46</td></tr>
+    <tr><td>Overall</td><td>38</td><td>1,136.5</td><td>11 / 17</td><td>1,015.4</td><td>12 / 15</td><td>1,005.2</td><td>35 / 46</td></tr>
+    <tr><td>Binary</td><td>30</td><td>1,130.6</td><td>11 / 17</td><td>1,070.4</td><td>11 / 15</td><td>1,051.4</td><td>33 / 46</td></tr>
+    <tr><td>Multiclass</td><td>8</td><td>1,171.0</td><td>9 / 17</td><td>802.9</td><td>13 / 15</td><td>829.7</td><td>35 / 46</td></tr>
   </tbody>
 </table>
 
 #### Tuned-pool metric comparison
 
-The delta is HUGIML's dataset-balanced mean minus the strongest official mean. For Brier score, the sign is reversed so a positive value always favors HUGIML.
+The delta is HUGIML's dataset-balanced mean minus the strongest official mean. An em dash denotes an unavailable measurement. For Brier score, the sign is reversed so a positive value always favors HUGIML.
 
 <table>
   <thead><tr><th rowspan="2">Scope</th><th colspan="3">ROC AUC, mean (median)</th><th colspan="3">Balanced accuracy, mean (median)</th><th colspan="3">F1, mean (median)</th><th colspan="3">Brier score, mean (median)</th></tr><tr><th>HUGIML</th><th>Best official</th><th>Delta</th><th>HUGIML</th><th>Best official</th><th>Delta</th><th>HUGIML</th><th>Best official</th><th>Delta</th><th>HUGIML</th><th>Best official</th><th>Delta</th></tr></thead>
   <tbody>
-    <tr><td>Overall</td><td>0.8425 (0.8365)</td><td>0.8747 (0.8913)</td><td>-0.0321 (-0.0547)</td><td>0.6821 (0.6981)</td><td>0.7244 (0.7268)</td><td>-0.0422 (-0.0287)</td><td>0.5509 (0.6004)</td><td>0.6145 (0.6869)</td><td>-0.0635 (-0.0866)</td><td>0.1169 (0.0976)</td><td>0.1087 (0.0929)</td><td>-0.0082 (-0.0047)</td></tr>
-    <tr><td>Binary</td><td>0.8220 (0.7947)</td><td>0.8520 (0.8309)</td><td>-0.0300 (-0.0362)</td><td>0.6696 (0.6807)</td><td>0.7119 (0.7255)</td><td>-0.0423 (-0.0448)</td><td>0.5067 (0.5607)</td><td>0.5691 (0.6505)</td><td>-0.0623 (-0.0897)</td><td>0.1019 (0.0904)</td><td>0.0971 (0.0896)</td><td>-0.0048 (-0.0008)</td></tr>
-    <tr><td>Multiclass</td><td>0.9315 (0.9348)</td><td>0.9501 (0.9622)</td><td>-0.0187 (-0.0274)</td><td>0.7364 (0.7965)</td><td>0.7668 (0.8670)</td><td>-0.0304 (-0.0704)</td><td>0.7425 (0.7979)</td><td>0.7686 (0.8592)</td><td>-0.0261 (-0.0613)</td><td>0.1820 (0.1668)</td><td>0.1529 (0.1523)</td><td>-0.0290 (-0.0145)</td></tr>
+    <tr><td>Overall</td><td>0.8461 (0.8443)</td><td>0.8579 (0.8694)</td><td>-0.0118 (-0.0252)</td><td>0.6895 (0.7064)</td><td>0.7053 (0.7149)</td><td>-0.0158 (-0.0086)</td><td>0.5645 (0.6391)</td><td>0.5850 (0.6626)</td><td>-0.0205 (-0.0234)</td><td>0.1072 (0.0854)</td><td>—</td><td>—</td></tr>
+    <tr><td>Binary</td><td>0.8357 (0.8247)</td><td>0.8496 (0.8439)</td><td>-0.0139 (-0.0193)</td><td>0.6820 (0.6941)</td><td>0.6982 (0.7044)</td><td>-0.0162 (-0.0103)</td><td>0.5228 (0.5725)</td><td>0.5449 (0.6095)</td><td>-0.0221 (-0.0370)</td><td>0.0959 (0.0854)</td><td>—</td><td>—</td></tr>
+    <tr><td>Multiclass</td><td>0.8849 (0.9348)</td><td>0.8903 (0.9582)</td><td>-0.0054 (-0.0235)</td><td>0.7174 (0.8046)</td><td>0.7323 (0.8529)</td><td>-0.0149 (-0.0483)</td><td>0.7208 (0.8041)</td><td>0.7353 (0.8492)</td><td>-0.0144 (-0.0451)</td><td>0.1494 (0.1095)</td><td>—</td><td>—</td></tr>
   </tbody>
 </table>
 
-Each table entry reports mean (median), and positive delta favors HUGIML; the Brier delta follows its lower-is-better direction. For ROC AUC, HUGIML trails the strongest displayed tuned official mean by 0.0300 across binary datasets and by 0.0187 across multiclass datasets. These differences are achieved with 16 HUGIML configurations versus 200 for each tuned official method. HUGIML combines this predictive performance with source-disjoint, interpretable micro-ensembles and commonly uses one to two orders of magnitude fewer model-inspection units. The median active RPTE size is 3 trees in the internal benchmark, 2 trees on PMLBmini, and 4 trees on both OpenML-CC18 and TabZilla.
+Each table entry reports mean (median), and positive delta favors HUGIML; the Brier delta follows its lower-is-better direction. For ROC AUC, HUGIML trails the strongest displayed tuned official mean by 0.0139 across binary datasets and by 0.0054 across multiclass datasets. These differences are achieved with 32 HUGIML configurations versus 200 for each tuned official method. HUGIML combines this predictive performance with source-disjoint, interpretable micro-ensembles and commonly uses one to two orders of magnitude fewer model-inspection units. The median active RPTE size is 3 trees in the internal benchmark, 1 tree on PMLBmini, 5 trees on OpenML-CC18, and 3 trees on TabZilla.
 
 [Open the TabArena official leaderboard dashboard](https://srikumar2050.github.io/hugiml-core/tabarena_official_leaderboard_dashboard.html) for model filters, rankings, metric distributions, and methodology.
 
@@ -1409,7 +1409,7 @@ Repository runners support dataset download, checkpoint resume, and dashboard as
 
 ### Scalability dashboard
 
-The scalability evaluation measures fit time, prediction latency, memory, pattern counts, and test AUC across row-count, feature-count, and mining-budget sweeps. It compares HUGIML with XGBoost and LightGBM while retaining the evidence needed for model review.
+The scalability evaluation measures fit time, prediction latency, memory, pattern counts, and test AUC across 308 completed row-count, feature-count, and mining-budget measurements, reaching 15 million × 20 and 5 million × 200 rows × features, and 10,000 features in predictor scaling. It compares HUGIML with XGBoost and LightGBM while retaining the evidence needed for model review.
 
 [Open the HUGIML scalability dashboard](https://srikumar2050.github.io/hugiml-core/hugiml_scalability_dashboard.html) for the complete scaling analysis and methodology.
 
@@ -1569,7 +1569,7 @@ With strict budgeting enabled, HUGIML applies the TopK budget during feature con
 | **Adaptive binning** | Per-feature supervised `B` selection with optional stratified sampling  -  addresses the B-sensitivity trap |
 | **Pattern pruning** | Regulated remove/refit/calibrate workflow with full JSON audit trail |
 | **Multiclass & imbalance** | Multiclass report, SMOTE/class-weight pipeline, high-cardinality encoding |
-| **Benchmark suite** | Reproducible internal and external evaluations covering the 100-dataset internal panel, PMLBmini, TabZilla, OpenML-CC18, and a reserved TabArena track; runners share a common benchmark engine while retaining suite-specific validation rules. |
+| **Benchmark suite** | Reproducible internal and external evaluations covering the 100-dataset internal panel, PMLBmini, TabZilla, OpenML-CC18, and the 38-dataset TabArena classification track; runners share a common benchmark engine while retaining suite-specific validation rules. |
 | **Scalability dashboard** | Static runtime, latency, memory, n-scaling, p-scaling, and parameter-sweep evidence reproducible via `experiments/scalability/scalability_dashboard.py` |
 | **Calibration** | ECE, MCE, Brier score, reliability diagram data |
 | **Drift detection** | PSI + symmetric KL divergence + label drift |

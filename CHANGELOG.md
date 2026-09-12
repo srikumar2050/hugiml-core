@@ -4,6 +4,20 @@ All notable changes to hugiml-core are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
+## [1.1.22] - 2026-09-12
+
+### Added
+
+- Added `lr_source_policy` controls for selecting how original features and generated components reuse raw input sources in the final linear/logistic representation.
+- Added parallel execution controls for benchmark workflows.
+
+### Changed
+
+- Refreshed benchmark workflows and published results across the internal and external benchmark suites, with expanded automated test coverage and parallel benchmark runs.
+- Improved large-data behavior through wider sparse-index handling and fit-time memory checks.
+- Updated multiclass linear-model solver selection and RuleFit complexity aggregation for one-vs-rest models.
+
+---
 ## [1.1.21] - 2026-08-18
 
 ### Added

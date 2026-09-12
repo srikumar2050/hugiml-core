@@ -115,7 +115,7 @@ jobs:
           python - << 'EOF'
           import sys, json, time, importlib.metadata as meta
           components = []
-          for dep in ["numpy", "scipy", "scikit-learn", "pandas"]:
+          for dep in ["numpy", "scipy", "scikit-learn", "pandas", "psutil"]:
               try:
                   v = meta.version(dep)
               except Exception:

@@ -198,7 +198,25 @@ class _TrainingMixin:
         if hasattr(X_train, "dtype") and np.iscomplexobj(X_train):
             raise ValueError("Complex data not supported by HUGIMLClassifier.")
 
+        from hugiml._indexing import validate_native_shape
+
+        shape = getattr(X_train, "shape", None)
+        if shape is not None:
+            validate_native_shape(shape)
         self._validate_params()
+
+        self._training_numeric_dtypes_ = (
+            [pd.api.types.is_numeric_dtype(dtype) for dtype in X_train.dtypes]
+            if isinstance(X_train, pd.DataFrame)
+            else None
+        )
+
+        _MemoryTracker.warn_fit_memory(
+            X_train,
+            20000 if self.topK == -1 else self._effective_topK(),
+            include_originals=(self.feature_mode != "patterns_only"),
+            max_length=self.L,
+        )
 
         # Configure OpenMP before adaptive binning.  Adaptive B-selection is
         # column-parallel in the native path, so applying n_jobs after adaptive
@@ -399,17 +417,6 @@ class _TrainingMixin:
             if X_num.shape[0] < n_cls:
                 raise HUGIMLValidationError(
                     f"Fewer samples ({X_num.shape[0]}) than classes ({n_cls})."
-                )
-
-            est_mb = _MemoryTracker.estimate_fit_mb(
-                X_num.shape[0], X_num.shape[1], X_num.shape[1] * 10, self._effective_topK()
-            )
-            if est_mb > 4000:
-                warnings.warn(
-                    f"Estimated peak memory ~{est_mb:.0f} MB.  "
-                    "Consider reducing topK or dataset size.",
-                    HUGIMLWarning,
-                    stacklevel=4,
                 )
 
             if self.verbose:

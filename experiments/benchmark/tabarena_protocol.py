@@ -9,6 +9,7 @@ from typing import Any, Callable
 
 import numpy as np
 import pandas as pd
+from joblib import Parallel, delayed, parallel_config
 from scipy.optimize import minimize
 from sklearn.metrics import log_loss, roc_auc_score
 from sklearn.model_selection import StratifiedKFold
@@ -284,7 +285,7 @@ def detailed_metric_comparison(
     official = pd.read_parquet(detailed_results_path)
     required = {
         "dataset", "fold", "source_model", "regime", "problem_type",
-        "roc_auc", "balanced_accuracy", "f1", "brier",
+        "accuracy", "balanced_accuracy", "f1", "roc_auc", "log_loss",
     }
     missing = sorted(required.difference(official.columns))
     if missing:
@@ -308,10 +309,11 @@ def detailed_metric_comparison(
                     "source_model": "HUGIML",
                     "regime": "hugiml",
                     "problem_type": problem_type,
+                    "accuracy": split.get("accuracy"),
                     "roc_auc": split.get("roc_auc"),
                     "balanced_accuracy": split.get("balanced_accuracy"),
                     "f1": split.get("f1"),
-                    "brier": split.get("brier"),
+                    "log_loss": split.get("log_loss"),
                 }
             )
     local = pd.DataFrame(local_records)
@@ -320,7 +322,7 @@ def detailed_metric_comparison(
     datasets = set(local["dataset"])
     official = official[official["dataset"].astype(str).isin(datasets)].copy()
     official["dataset"] = official["dataset"].astype(str)
-    metrics = ("roc_auc", "balanced_accuracy", "f1", "brier")
+    metrics = ("accuracy", "balanced_accuracy", "f1", "roc_auc", "log_loss")
     output: dict[str, list[dict[str, Any]]] = {}
     for regime in ("default", "tuned"):
         combined = pd.concat(
@@ -349,7 +351,7 @@ def detailed_metric_comparison(
                     record[f"{metric}_mean"] = float(np.mean(values)) if len(values) else None
                     record[f"{metric}_median"] = float(np.median(values)) if len(values) else None
                     paired = aligned[[metric, f"{metric}_hugiml"]].dropna()
-                    if metric == "brier":
+                    if metric == "log_loss":
                         delta = paired[metric] - paired[f"{metric}_hugiml"]
                     else:
                         delta = paired[f"{metric}_hugiml"] - paired[metric]
@@ -408,10 +410,14 @@ def fit_cross_validated_ensemble(
     fit_child: Callable[[dict[str, Any], pd.DataFrame, np.ndarray, pd.DataFrame, np.ndarray], Any],
     probability_fn: Callable[..., np.ndarray],
     n_splits: int = TABARENA_INNER_FOLDS,
+    n_jobs: int = 1,
     prepare_fold: Callable[[pd.DataFrame, np.ndarray, pd.DataFrame, np.ndarray], Any]
     | None = None,
 ) -> tuple[CrossValidatedEnsemble, dict[str, Any], float, float, dict[str, Any]]:
     """Select a configuration by OOF performance and retain all fold models."""
+    if int(n_jobs) == 0 or int(n_jobs) < -1:
+        raise ValueError("n_jobs must be -1 or a positive integer.")
+    fold_n_jobs = int(n_jobs)
     classes = np.unique(y)
     if classes.size < 2:
         raise ValueError("TabArena inner CV requires at least two classes.")
@@ -446,37 +452,53 @@ def fit_cross_validated_ensemble(
     best: tuple[float, int, dict[str, Any], list[Any]] | None = None
     candidate_rows: list[dict[str, Any]] = []
     errors: list[str] = []
+
+    def fit_prepared_fold(
+        params: dict[str, Any],
+        prepared_fold: tuple[
+            np.ndarray, pd.DataFrame, np.ndarray, pd.DataFrame, np.ndarray, Any
+        ],
+    ) -> tuple[np.ndarray, Any, np.ndarray]:
+        validation_idx, X_fit, y_fit, X_validation, y_validation, prepared = prepared_fold
+        fold_params = copy.deepcopy(params)
+        if prepare_fold is None:
+            child = fit_child(fold_params, X_fit, y_fit, X_validation, y_validation)
+        else:
+            child = fit_child(
+                fold_params,
+                X_fit,
+                y_fit,
+                X_validation,
+                y_validation,
+                prepared,
+            )
+        proba = probability_fn(
+            child,
+            X_validation,
+            n_classes,
+            trained_class_labels=np.arange(n_classes, dtype=int),
+        )
+        return validation_idx, child, proba
+
     for candidate_index, raw_params in enumerate(candidates):
         params = copy.deepcopy(raw_params)
         oof = np.zeros((len(y), n_classes), dtype=float)
         children: list[Any] = []
         candidate_started = time.perf_counter()
         try:
-            for (
-                validation_idx,
-                X_fit,
-                y_fit,
-                X_validation,
-                y_validation,
-                prepared,
-            ) in prepared_folds:
-                if prepare_fold is None:
-                    child = fit_child(params, X_fit, y_fit, X_validation, y_validation)
-                else:
-                    child = fit_child(
-                        params,
-                        X_fit,
-                        y_fit,
-                        X_validation,
-                        y_validation,
-                        prepared,
+            if fold_n_jobs == 1 or len(prepared_folds) == 1:
+                fold_outputs = [
+                    fit_prepared_fold(params, prepared_fold)
+                    for prepared_fold in prepared_folds
+                ]
+            else:
+                with parallel_config(backend="loky", inner_max_num_threads=1):
+                    fold_outputs = Parallel(n_jobs=fold_n_jobs)(
+                        delayed(fit_prepared_fold)(params, prepared_fold)
+                        for prepared_fold in prepared_folds
                     )
-                oof[validation_idx] = probability_fn(
-                    child,
-                    X_validation,
-                    n_classes,
-                    trained_class_labels=np.arange(n_classes, dtype=int),
-                )
+            for validation_idx, child, proba in fold_outputs:
+                oof[validation_idx] = proba
                 children.append(child)
             score, metric = selection_score(y, oof)
             candidate_rows.append(
@@ -520,6 +542,7 @@ def fit_cross_validated_ensemble(
         "selection_refit_performed": False,
         "retained_cv_ensemble": True,
         "cv_ensemble_child_count": int(n_splits),
+        "cv_ensemble_n_jobs": fold_n_jobs,
         "candidate_count": len(candidates),
         "candidate_fit_count": sum(int(row["fit_count"]) for row in candidate_rows),
         "candidate_error_count": len(errors),

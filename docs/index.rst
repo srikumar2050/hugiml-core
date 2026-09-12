@@ -21,19 +21,17 @@ Why HUGIML?
 Current release focus
 ---------------------
 
-The 1.1.21 release adds causal-effect analysis and completes the fitted
-downstream transformation contract:
+The 1.1.22 release focuses on benchmark updates and control of the final
+linear/logistic representation:
 
-* ``transform(X)`` returns the complete representation consumed by the fitted
-  downstream estimator across all feature modes.
-* SHAP evaluates the complete downstream representation and supports an
-  explicitly requested partial pattern reporting view.
-* Causal HUG estimates binary-treatment effects using a shared supervised HUG
-  vocabulary, repeated cross-fitting, confidence intervals, doubly robust
-  comparisons, and overlap sensitivity analysis.
-* The optional Causal Investigation Dashboard provides causal metadata review,
-  diagnostics, comparison methods, selected configurations, and robustness
-  analysis.
+* ``lr_source_policy`` controls how original features and generated components
+  reuse raw input sources in the final linear/logistic representation.
+* Benchmark and scalability workflows and published results are refreshed, with
+  expanded automated test coverage and support for parallel benchmark execution.
+* Large-data handling now includes wider sparse-index support and fit-time memory
+  checks.
+* Multiclass linear-model solver selection and RuleFit one-vs-rest complexity
+  aggregation are updated.
 
 The complete 1.1.x documentation remains in this guide, including execution
 modes, adaptive binning, feature modes, augmented-pair features, RPTE,

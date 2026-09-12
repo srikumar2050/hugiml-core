@@ -30,6 +30,7 @@ from hugiml._classifier_support import (
     _continuous_to_quantile_codes,
     _information_gain_from_codes,
 )
+from hugiml._indexing import native_csc_scorer
 from hugiml.exceptions import HUGIMLParamError, HUGIMLSchemaError, HUGIMLWarning
 
 
@@ -139,7 +140,7 @@ class _FeatureAssemblyMixin:
 
     def _prepare_selected_original_features_for_downstream_transform(
         self, X: Any, selected_names: list[str]
-    ) -> tuple[np.ndarray, list[str]]:
+    ) -> tuple[Any, list[str]]:
         """Materialize only persisted selected original downstream columns at predict time.
 
         Fit still prepares the full original block once so scoring/serialization stay
@@ -177,7 +178,7 @@ class _FeatureAssemblyMixin:
             arr = arr.reshape(1, -1)
         n_rows = len(X) if is_df else int(arr.shape[0])
 
-        blocks: list[np.ndarray] = []
+        blocks: list[Any] = []
         block_names: list[str] = []
 
         if selected_numeric:
@@ -258,26 +259,19 @@ class _FeatureAssemblyMixin:
                     not_keep = X_cat_str[col].notna() & ~candidate_names.isin(dummy_set_local)
                     if not_keep.any():
                         X_cat_str.loc[not_keep, col] = _COLLAPSE_SENTINEL
-            X_cat_dum = (
-                pd.get_dummies(X_cat_str, dummy_na=True)
-                if len(cat_cols)
-                else pd.DataFrame(index=range(n_rows))
+            X_cat_sparse, dummy_names, _ = self._sparse_categorical_dummies(
+                X_cat_str,
+                expected_columns=selected_dummy,
             )
-            X_cat_dum = X_cat_dum.reindex(columns=selected_dummy, fill_value=0)
-            blocks.append(X_cat_dum.to_numpy(dtype=np.float32, copy=False))
-            block_names.extend([f"orig:{name}" for name in selected_dummy])
+            blocks.append(X_cat_sparse)
+            block_names.extend([f"orig:{name}" for name in dummy_names])
 
         # Preserve fitted selected_names order even when numeric and dummy columns
         # are interleaved.  The two blocks above are built by type for speed; this
         # final gather restores the exact downstream coefficient alignment.
         if not blocks:
             return self._empty_dense_block(n_rows), []
-        by_name = {}
-        dense_concat = (
-            np.hstack(blocks).astype(np.float32, copy=False) if len(blocks) > 1 else blocks[0]
-        )
-        for j, name in enumerate(block_names):
-            by_name[name] = dense_concat[:, j]
+        by_name = {name: j for j, name in enumerate(block_names)}
         missing_selected = [name for name in selected_names if name not in by_name]
         if missing_selected:
             raise HUGIMLSchemaError(
@@ -286,10 +280,173 @@ class _FeatureAssemblyMixin:
                 "model/metadata mismatch. Refit the model or provide input columns "
                 "matching the training schema."
             )
-        out = np.empty((n_rows, len(selected_names)), dtype=np.float32)
-        for j, name in enumerate(selected_names):
-            out[:, j] = by_name[name]
-        return out, list(selected_names)
+        sparse_blocks = [
+            block.astype(np.float32, copy=False).tocsr()
+            if issparse(block)
+            else csr_matrix(np.asarray(block, dtype=np.float32))
+            for block in blocks
+            if int(block.shape[1]) > 0
+        ]
+        combined = (
+            hstack(sparse_blocks, format="csr", dtype=np.float32)
+            if len(sparse_blocks) > 1
+            else sparse_blocks[0]
+        )
+        order = np.asarray([by_name[name] for name in selected_names], dtype=np.int64)
+        return combined[:, order].tocsr(), list(selected_names)
+
+    def _sparse_categorical_dummies(
+        self,
+        X_cat: pd.DataFrame,
+        expected_columns: list[Any] | None = None,
+    ) -> tuple[csr_matrix, list[Any], dict[str, str]]:
+        """Encode categorical originals as a sparse float32 block."""
+        n_rows = len(X_cat)
+        row_parts: list[np.ndarray] = []
+        column_parts: list[np.ndarray] = []
+
+        if expected_columns is not None:
+            names = list(expected_columns)
+            position = {str(name): j for j, name in enumerate(names)}
+            source_map = dict(getattr(self, "_original_downstream_source_map_", {}) or {})
+            categories = dict(getattr(self, "_original_dummy_categories_", {}) or {})
+            for raw_col in X_cat.columns:
+                raw_name = str(raw_col)
+                selected = [
+                    str(name)
+                    for name in names
+                    if source_map.get(str(name)) == raw_name
+                    or (
+                        str(name).startswith(f"{raw_name}_")
+                        and str(name) not in source_map
+                    )
+                ]
+                if not selected:
+                    continue
+                values = X_cat[raw_col].astype("string")
+                category_values = categories.get(raw_name)
+                if category_values is None:
+                    category_values = [
+                        name.removeprefix(f"{raw_name}_")
+                        for name in selected
+                        if name != f"{raw_name}_<NA>"
+                    ]
+                value_to_column = {
+                    str(value): position[f"{raw_name}_{value}"]
+                    for value in category_values
+                    if f"{raw_name}_{value}" in position
+                }
+                mapped = values.map(value_to_column)
+                valid = mapped.notna().to_numpy()
+                if valid.any():
+                    row_parts.append(np.flatnonzero(valid).astype(np.int64, copy=False))
+                    column_parts.append(
+                        mapped[valid].to_numpy(dtype=np.int64, copy=False)
+                    )
+                missing_name = f"{raw_name}_<NA>"
+                if missing_name in position:
+                    missing = values.isna().to_numpy()
+                    if missing.any():
+                        rows = np.flatnonzero(missing).astype(np.int64, copy=False)
+                        row_parts.append(rows)
+                        column_parts.append(
+                            np.full(rows.size, position[missing_name], dtype=np.int64)
+                        )
+            rows = np.concatenate(row_parts) if row_parts else np.empty(0, dtype=np.int64)
+            columns = (
+                np.concatenate(column_parts) if column_parts else np.empty(0, dtype=np.int64)
+            )
+            data = np.ones(rows.size, dtype=np.float32)
+            return (
+                csr_matrix((data, (rows, columns)), shape=(n_rows, len(names))),
+                names,
+                source_map,
+            )
+
+        names: list[Any] = []
+        source_map: dict[str, str] = {}
+        category_map: dict[str, list[str]] = {}
+        score_parts: list[np.ndarray] = []
+        score_target = getattr(self, "_current_y_for_downstream_topk_", None)
+        if score_target is not None:
+            y_codes, _ = pd.factorize(np.asarray(score_target), sort=True)
+            n_classes = int(np.max(y_codes)) + 1 if y_codes.size else 0
+            class_counts = np.bincount(y_codes, minlength=n_classes).astype(np.float64)
+        else:
+            y_codes = np.empty(0, dtype=np.int64)
+            n_classes = 0
+            class_counts = np.empty(0, dtype=np.float64)
+        offset = 0
+        row_indices = np.arange(n_rows, dtype=np.int64)
+        for raw_col in X_cat.columns:
+            raw_name = str(raw_col)
+            values = X_cat[raw_col].astype("string")
+            codes, uniques = pd.factorize(values, sort=True, use_na_sentinel=True)
+            category_values = [str(value) for value in uniques]
+            one_names = [f"{raw_name}_{value}" for value in category_values]
+            one_names.append(f"{raw_name}_<NA>")
+            encoded = np.asarray(codes, dtype=np.int64)
+            encoded[encoded < 0] = len(category_values)
+            if n_classes > 1 and y_codes.size == n_rows:
+                level_class_counts = np.bincount(
+                    encoded * n_classes + y_codes,
+                    minlength=len(one_names) * n_classes,
+                ).reshape(len(one_names), n_classes)
+                score_parts.append(
+                    self._binary_indicator_information_gain(
+                        level_class_counts.astype(np.float64, copy=False),
+                        class_counts,
+                    )
+                )
+            else:
+                score_parts.append(np.zeros(len(one_names), dtype=np.float64))
+            row_parts.append(row_indices)
+            column_parts.append(encoded + offset)
+            names.extend(one_names)
+            source_map.update({name: raw_name for name in one_names})
+            category_map[raw_name] = category_values
+            offset += len(one_names)
+        self._original_dummy_categories_ = category_map
+        self._original_dummy_scores_downstream_ = (
+            np.concatenate(score_parts) if score_parts else np.zeros(0, dtype=np.float64)
+        )
+        rows = np.concatenate(row_parts) if row_parts else np.empty(0, dtype=np.int64)
+        columns = np.concatenate(column_parts) if column_parts else np.empty(0, dtype=np.int64)
+        data = np.ones(rows.size, dtype=np.float32)
+        return csr_matrix((data, (rows, columns)), shape=(n_rows, offset)), names, source_map
+
+    @staticmethod
+    def _binary_indicator_information_gain(
+        positive_class_counts: np.ndarray,
+        class_counts: np.ndarray,
+    ) -> np.ndarray:
+        """Information gain for many binary indicator columns from class counts."""
+        counts = np.asarray(positive_class_counts, dtype=np.float64)
+        totals = np.asarray(class_counts, dtype=np.float64)
+        n_samples = float(np.sum(totals))
+        if n_samples <= 0 or counts.size == 0:
+            return np.zeros(counts.shape[0], dtype=np.float64)
+
+        def entropy(rows: np.ndarray) -> np.ndarray:
+            row_totals = rows.sum(axis=1, keepdims=True)
+            probabilities = np.divide(
+                rows,
+                row_totals,
+                out=np.zeros_like(rows, dtype=np.float64),
+                where=row_totals > 0,
+            )
+            logs = np.zeros_like(probabilities)
+            np.log2(probabilities, out=logs, where=probabilities > 0)
+            return -np.sum(probabilities * logs, axis=1)
+
+        target_entropy = float(entropy(totals.reshape(1, -1))[0])
+        positive_totals = counts.sum(axis=1)
+        negative_counts = totals.reshape(1, -1) - counts
+        negative_totals = n_samples - positive_totals
+        conditional = (
+            positive_totals * entropy(counts) + negative_totals * entropy(negative_counts)
+        ) / n_samples
+        return np.maximum(0.0, target_entropy - conditional)
 
     def _prepare_original_features_for_downstream(self, X: Any, fit: bool = False):
         """Prepare original input features for hybrid downstream estimators.
@@ -434,23 +591,32 @@ class _FeatureAssemblyMixin:
                 if len(self._original_numeric_cols_)
                 else np.empty((len(X_df), 0))
             )
-            X_cat_dum = (
-                pd.get_dummies(X_cat.astype("string"), dummy_na=True)
-                if len(self._original_cat_cols_)
-                else pd.DataFrame(index=X_df.index)
-            )
-            self._original_dummy_columns_ = list(X_cat_dum.columns)
-            dummy_source_map: dict[str, str] = {}
-            for raw_col in self._original_cat_cols_:
-                one_col_dummies = pd.get_dummies(
-                    X_cat[[raw_col]].astype("string"), dummy_na=True
-                )
-                for dummy_name in one_col_dummies.columns:
-                    dummy_source_map[str(dummy_name)] = str(raw_col)
+            X_cat_arr, dummy_columns, dummy_source_map = self._sparse_categorical_dummies(X_cat)
+            self._original_dummy_columns_ = list(dummy_columns)
             self._original_downstream_source_map_ = {
                 **{str(name): str(name) for name in self._original_numeric_cols_},
                 **dummy_source_map,
             }
+            score_target = getattr(self, "_current_y_for_downstream_topk_", None)
+            if score_target is not None:
+                numeric_names = [f"orig:{name}" for name in self._original_numeric_cols_]
+                numeric_scores = self._strict_topk_dense_column_scores(
+                    X_num_arr,
+                    score_target,
+                    numeric_names,
+                    top_k=-1,
+                )[0]
+                dummy_scores = np.asarray(
+                    getattr(self, "_original_dummy_scores_downstream_", []),
+                    dtype=np.float64,
+                )
+                all_names = numeric_names + [
+                    f"orig:{name}" for name in self._original_dummy_columns_
+                ]
+                all_scores = np.concatenate([numeric_scores, dummy_scores])
+                if len(all_names) == len(all_scores):
+                    self._native_original_feature_names_downstream_ = all_names
+                    self._native_original_feature_scores_downstream_ = all_scores
         else:
             num_cols = getattr(self, "_original_numeric_cols_", [])
             med = getattr(self, "_original_numeric_medians_", pd.Series(dtype=float))
@@ -475,19 +641,19 @@ class _FeatureAssemblyMixin:
                     not_keep = X_cat_str[col].notna() & ~candidate_names.isin(dummy_set_local)
                     if not_keep.any():
                         X_cat_str.loc[not_keep, col] = _COLLAPSE_SENTINEL
-            X_cat_dum = (
-                pd.get_dummies(X_cat_str, dummy_na=True)
-                if len(cat_cols)
-                else pd.DataFrame(index=X_df.index)
+            X_cat_arr, _, _ = self._sparse_categorical_dummies(
+                X_cat_str,
+                expected_columns=list(dummy_cols),
             )
-            X_cat_dum = X_cat_dum.reindex(columns=dummy_cols, fill_value=0)
 
-        X_cat_arr = (
-            X_cat_dum.to_numpy(dtype=np.float64, copy=False)
-            if X_cat_dum.shape[1]
-            else np.empty((len(X_df), 0))
-        )
-        X_base = np.hstack([X_num_arr, X_cat_arr]) if X_cat_arr.shape[1] else X_num_arr
+        if X_cat_arr.shape[1]:
+            X_base = hstack(
+                [csr_matrix(np.asarray(X_num_arr, dtype=np.float32)), X_cat_arr],
+                format="csr",
+                dtype=np.float32,
+            )
+        else:
+            X_base = X_num_arr
         if fit:
             self._original_feature_names_downstream_ = list(
                 getattr(self, "_original_numeric_cols_", [])
@@ -548,10 +714,16 @@ class _FeatureAssemblyMixin:
             mask = np.zeros(n_cols, dtype=bool)
             mask[keep_idx] = True
         else:
-            # Non-fused or schema-mismatch path: still native, but necessarily
-            # uses the dense downstream block because no preparation-stage score
-            # metadata is available for this fit.
-            scores, mask = self._strict_topk_dense_column_scores(X_base, y, names, top_k=budget)
+            if issparse(X_base):
+                scores = self._strict_topk_column_scores(X_base, y, names)
+                order = np.lexsort((np.arange(n_cols), -scores))
+                keep_idx = np.sort(order[:budget])
+                mask = np.zeros(n_cols, dtype=bool)
+                mask[keep_idx] = True
+            else:
+                scores, mask = self._strict_topk_dense_column_scores(
+                    X_base, y, names, top_k=budget
+                )
 
         selected_names = [name for name, keep in zip(names, mask) if keep]
         self._original_feature_scores_downstream_ = scores
@@ -992,10 +1164,11 @@ class _FeatureAssemblyMixin:
             ),
         )
         if _CORE_AVAILABLE and hasattr(_core, "strict_topk_filter_csc"):
-            scores, _ = _core.strict_topk_filter_csc(
+            scorer, index_dtype = native_csc_scorer(_core, X_csc)
+            scores, _ = scorer(
                 np.asarray(X_csc.data, dtype=np.float32),
-                np.asarray(X_csc.indices, dtype=np.int32),
-                np.asarray(X_csc.indptr, dtype=np.int32),
+                np.asarray(X_csc.indices, dtype=index_dtype),
+                np.asarray(X_csc.indptr, dtype=index_dtype),
                 int(X_csc.shape[0]),
                 int(X_csc.shape[1]),
                 np.asarray(y_codes, dtype=np.int64),
@@ -1053,10 +1226,11 @@ class _FeatureAssemblyMixin:
             ),
         )
         if _CORE_AVAILABLE and hasattr(_core, "strict_topk_filter_csc"):
-            scores, mask_native = _core.strict_topk_filter_csc(
+            scorer, index_dtype = native_csc_scorer(_core, X_csc)
+            scores, mask_native = scorer(
                 np.asarray(X_csc.data, dtype=np.float32),
-                np.asarray(X_csc.indices, dtype=np.int32),
-                np.asarray(X_csc.indptr, dtype=np.int32),
+                np.asarray(X_csc.indices, dtype=index_dtype),
+                np.asarray(X_csc.indptr, dtype=index_dtype),
                 int(X_csc.shape[0]),
                 int(X_csc.shape[1]),
                 np.asarray(y_codes, dtype=np.int64),

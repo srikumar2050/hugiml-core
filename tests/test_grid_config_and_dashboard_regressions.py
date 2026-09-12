@@ -888,8 +888,15 @@ def test_benchmark_dashboard_scenarios_keep_existing_selector_ids() -> None:
             scenarios = ast.literal_eval(node.value)
             break
     assert scenarios is not None
-    assert set(scenarios) == {"augmented_pair", "interaction_relaxed"}
+    assert set(scenarios) == {
+        "augmented_pair",
+        "performance_ho_topk200",
+        "performance_ho_topk200_g1e4",
+        "interaction_relaxed",
+    }
     assert scenarios["augmented_pair"]["grid_name"] == "performance_ho"
+    assert scenarios["performance_ho_topk200"]["grid_name"] == "performance_ho_topk200"
+    assert scenarios["performance_ho_topk200_g1e4"]["grid_name"] == "performance_ho_topk200_g1e4"
     assert scenarios["interaction_relaxed"]["grid_name"] == "interpretability_ho"
 
 

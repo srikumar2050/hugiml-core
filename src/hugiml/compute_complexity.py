@@ -1398,6 +1398,23 @@ def _rulefit_rows(model: Any) -> list[dict[str, Any]] | None:
     return rows
 
 
+def _is_rulefit_estimator(model: Any) -> bool:
+    module_name, class_name = _model_identity(model)
+    return bool(
+        module_name.startswith("imodels")
+        or "rulefit" in class_name
+        or callable(getattr(model, "get_rules", None))
+    )
+
+
+def _rulefit_children(model: Any) -> list[Any] | None:
+    """Return fitted RuleFit children from a multiclass wrapper, if present."""
+    children = _flatten_estimators(getattr(model, "estimators_", None))
+    if not children or not all(_is_rulefit_estimator(child) for child in children):
+        return None
+    return children
+
+
 def _count_rule_literals(rule_text: str) -> int:
     text = str(rule_text or "").strip()
     if not text:
@@ -1407,13 +1424,49 @@ def _count_rule_literals(rule_text: str) -> int:
 
 
 def _rulefit_complexity_report(model: Any, tolerance: float) -> dict[str, Any] | None:
-    module_name, class_name = _model_identity(model)
-    if not (
-        module_name.startswith("imodels")
-        or "rulefit" in class_name
-        or callable(getattr(model, "get_rules", None))
-    ):
-        return None
+    if not _is_rulefit_estimator(model):
+        children = _rulefit_children(model)
+        if children is None:
+            return None
+        child_reports = [_rulefit_complexity_report(child, tolerance) for child in children]
+        if any(report is None for report in child_reports):
+            return None
+        reports = [report for report in child_reports if report is not None]
+        active_linear_terms = sum(
+            int(report["model_units"].get("active_linear_term_count", 0))
+            for report in reports
+        )
+        active_rules = sum(
+            int(report["model_units"].get("active_rule_count", 0)) for report in reports
+        )
+        rule_literals = sum(
+            int(report["model_inspection_units"].get("rule_condition_count", 0))
+            for report in reports
+        )
+        return _base_report(
+            model_type="rulefit_one_vs_rest",
+            model_value=sum(int(report["model_units"]["value"]) for report in reports),
+            model_unit="active_linear_terms_plus_rules_across_class_estimators",
+            model_inspection_value=sum(
+                int(report["model_inspection_units"]["value"]) for report in reports
+            ),
+            model_inspection_unit=(
+                "all_linear_terms_plus_rule_conditions_across_class_estimators"
+            ),
+            model_details={
+                "class_estimator_count": len(reports),
+                "active_linear_term_count": active_linear_terms,
+                "active_rule_count": active_rules,
+                "aggregation": "sum_across_class_estimators",
+                "coefficient_tolerance": tolerance,
+            },
+            model_inspection_details={
+                "class_estimator_count": len(reports),
+                "active_linear_term_count": active_linear_terms,
+                "rule_condition_count": rule_literals,
+                "aggregation": "sum_across_class_estimators",
+            },
+        )
     rows = _rulefit_rows(model)
     if rows is None:
         return None
@@ -1535,13 +1588,21 @@ def _rulefit_instance_inspection_units(
     X: Any,
     tolerance: float,
 ) -> np.ndarray | None:
-    module_name, class_name = _model_identity(model)
-    if not (
-        module_name.startswith("imodels")
-        or "rulefit" in class_name
-        or callable(getattr(model, "get_rules", None))
-    ):
-        return None
+    if not _is_rulefit_estimator(model):
+        children = _rulefit_children(model)
+        if children is None:
+            return None
+        child_values = [
+            _rulefit_instance_inspection_units(child, X, tolerance) for child in children
+        ]
+        if any(values is None for values in child_values):
+            return None
+        result = np.zeros(_n_rows(X), dtype=np.int64)
+        for values in child_values:
+            if values is None:
+                return None
+            result += np.asarray(values, dtype=np.int64)
+        return result
     rows = _rulefit_rows(model)
     if rows is None:
         return None

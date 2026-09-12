@@ -17,7 +17,7 @@ The benchmark uses the following model set:
 | `xgb` | XGBoost baseline |
 | `lgb` | LightGBM baseline |
 
-The static `B` comparison is now handled through the `B` parameter sweep rather than as separate full-grid model scenarios. The saga and SGD rows isolate downstream solver scaling while keeping the same deterministic dataset seeds, train/test split, HUGIML mining defaults, `random_state=0`, and `max_iter=500` built-in estimator defaults used by the main classifier path.
+Static `B` values are evaluated through the `B` parameter sweep. The saga and SGD rows isolate downstream solver scaling while keeping the same deterministic dataset seeds, train/test split, HUGIML mining defaults, `random_state=0`, and `max_iter=500` built-in estimator defaults used by the main classifier path.
 
 ## Datasets
 
@@ -30,14 +30,14 @@ The scalability benchmark uses two deterministic synthetic binary-classification
 
 ## Scaling grids
 
-The runner uses predefined `(n, p)` task grids. Size caps filter these predefined tasks; they do not resize an individual task.
+The tables list completed `(n, p)` measurements. The panel uses 24 threads and `lr_source_policy=standard`.
 
 ### n-scaling
 
 | Dataset | Grid |
 |---|---|
-| `sparse_nonlinear` | `(10k,20)`, `(50k,20)`, `(100k,20)`, `(500k,20)`, `(1M,20)`, `(3M,20)`, `(5M,20)`, `(10M,20)`, `(50M,20)`, `(100M,20)`, `(500M,20)`, `(1B,20)` |
-| `threshold_grid` | `(1k,200)`, `(5k,200)`, `(10k,200)`, `(50k,200)`, `(100k,200)`, `(300k,200)`, `(500k,200)`, `(1M,200)`, `(5M,200)`, `(10M,200)`, `(50M,200)`, `(100M,200)` |
+| `sparse_nonlinear` | `(10k,20)`, `(50k,20)`, `(100k,20)`, `(500k,20)`, `(1M,20)`, `(3M,20)`, `(5M,20)`, `(10M,20)`, `(15M,20)` |
+| `threshold_grid` | `(1k,200)`, `(5k,200)`, `(10k,200)`, `(50k,200)`, `(100k,200)`, `(300k,200)`, `(500k,200)`, `(1M,200)`, `(3M,200)`, `(5M,200)` |
 
 ### p-scaling
 
@@ -49,46 +49,18 @@ Both datasets use the same p-scaling grid. The maximum feature count remains `p=
 
 ## Size caps and staged runs
 
-Use `--max-n` and `--max-p` to run only tasks whose configured `n` and `p` are within the selected limits. For n-scaling, `threshold_grid` uses 10x as many predictors as `sparse_nonlinear`, so its effective `--max-n` cap is 10% of the user-supplied value. For example, `--max-n 10M` selects `sparse_nonlinear` n-scaling tasks up to 10M rows and `threshold_grid` n-scaling tasks up to 1M rows. p-scaling and parameter-sweep tasks use the user-supplied `--max-n` value directly.
-
-Supported count formats:
-
-```text
-10000
-10k
-1M
-50M
-100Mn
-500M
-1B
-1Bn
-```
-
-Examples:
+Size caps select predefined tasks without resizing them. For n-scaling, `threshold_grid` uses 10% of the supplied `--max-n` cap. Run the completed grid with these two dataset selections:
 
 ```bash
-python experiments/scalability/scalability_dashboard.py --fresh --max-n 1M --max-p 1000
+python experiments/scalability/scalability_dashboard.py --resume --only-dataset sparse_nonlinear --max-n 15Mn --max-p 10000 --n-jobs 24 --lr-source-policy standard
+python experiments/scalability/scalability_dashboard.py --resume --only-dataset threshold_grid --max-n 50Mn --max-p 10000 --n-jobs 24 --lr-source-policy standard
 ```
 
-Later, expand the same checkpoint with larger tasks:
-
-```bash
-python experiments/scalability/scalability_dashboard.py --resume --max-n 50M --max-p 10000
-```
-
-Then expand again up to the largest n-scaling points:
-
-```bash
-python experiments/scalability/scalability_dashboard.py --resume --max-n 1B --max-p 10000
-```
-
-Task keys do not include the cap values. This is intentional: a small capped run records completed task keys, and a later larger capped run skips those completed tasks while adding newly eligible larger tasks.
-
-Caps apply to n-scaling, p-scaling, and parameter-sweep tasks. If a cap is lower than a sweep task's configured `n` or `p`, that sweep task is not selected for that run. The checkpoint metadata records the selected task summary, the active caps, the selected dataset/model/section filters, and the n-scaling cap fraction used for each dataset.
+The threshold-grid cap of 50Mn selects at most 5 million rows. Both commands include predictor scaling and parameter sweeps. Use a separate output directory for a new experiment. Resume preserves completed tasks and requires matching execution settings; `--fresh` requires an empty directory.
 
 ## Parameter sweeps
 
-The original sweep experiments are preserved and run against `hug_op_adaptive_full` when they are within the selected size caps:
+The sweep experiments run against `hug_op_adaptive_full` when they are within the selected size caps:
 
 | Sweep | Values |
 |---|---|
@@ -98,16 +70,16 @@ The original sweep experiments are preserved and run against `hug_op_adaptive_fu
 | `L` | `1, 2` |
 | `avf` | adaptive binning `True` / static `False` |
 
-With no caps and sweeps enabled, the current grid contains:
+The completed panel contains:
 
 ```text
-192 n-scaling tasks
+152 n-scaling tasks
 112 p-scaling tasks
 44 sweep tasks
-348 total tasks
+308 total tasks
 ```
 
-Use `--no-sweeps` to run only n/p scaling. Rows from retired model keys, such as earlier static `B=8` full-grid scenarios, are ignored during CSV and dashboard assembly so older checkpoints can be resumed without reintroducing obsolete scenarios.
+Use `--no-sweeps` to run only n/p scaling. CSV and dashboard assembly include only model keys in the model scenarios table.
 
 ## Memory metrics
 
@@ -128,7 +100,7 @@ fit_delta_from_after_data_mb
 
 ## CLI
 
-From the repo root:
+From the repo root. To reproduce the completed panel, add `--n-jobs 24 --lr-source-policy standard` to execution commands and keep these settings unchanged when resuming:
 
 ```bash
 python experiments/scalability/scalability_dashboard.py --fresh --max-n 1M --max-p 1000
@@ -137,7 +109,7 @@ python experiments/scalability/scalability_dashboard.py --fresh --max-n 1M --max
 Resume with a larger cap:
 
 ```bash
-python experiments/scalability/scalability_dashboard.py --resume --max-n 50M --max-p 10000
+python experiments/scalability/scalability_dashboard.py --resume --only-dataset sparse_nonlinear --max-n 15Mn --max-p 10000 --n-jobs 24 --lr-source-policy standard
 ```
 
 Assemble from an existing checkpoint without running benchmarks:
@@ -168,13 +140,16 @@ Supported relevant options:
 --include-sbom          Write scalability_reproducibility_sbom.json and embed the same sanitized manifest under Methodology
 --out-dir               Output directory; default is ./experiments/scalability/results
 --output-html           Custom output HTML path
---fresh                 Start fresh by recreating the output directory
---resume                Resume from existing checkpoint
+--fresh                 Start a new run; requires an empty output directory
+--resume                Continue a compatible checkpoint, or initialize an empty output directory
+--plan                  Show selected tasks and capacity estimates without fitting or writing results
+--n-jobs N              Common thread budget for all models; default 4
+--lr-source-policy P    HUGIML policy: standard, main_effect, or strict
 --no-sweeps             Run only n/p scaling; skip parameter sweeps
 --max-n VALUE           Select tasks with n <= VALUE; supports k, M, Mn, B, Bn endings
 --max-p VALUE           Select tasks with p <= VALUE; supports k, M, Mn, B, Bn endings
 --start-task N          Start at selected task index N after filtering
---max-tasks N           Run at most N selected tasks
+--max-tasks N           Run at most N pending tasks after completed tasks are skipped
 --only-section NAME     Run one section: n_scaling, p_scaling, or parameter_sweep_* 
 --only-dataset NAME     Run one dataset: sparse_nonlinear or threshold_grid
 --only-model NAME       Run one model key from the model scenarios table
@@ -203,12 +178,13 @@ python experiments/scalability/scalability_dashboard.py --resume \
   --max-p 10000
 ```
 
-### Largest predefined n-scaling tasks
+### Largest completed n-scaling point
 
 ```bash
 python experiments/scalability/scalability_dashboard.py --resume \
   --only-section n_scaling \
-  --max-n 1B \
+  --only-dataset sparse_nonlinear \
+  --max-n 15Mn \
   --max-p 10000
 ```
 
@@ -217,13 +193,14 @@ python experiments/scalability/scalability_dashboard.py --resume \
 ```bash
 python experiments/scalability/scalability_dashboard.py --resume \
   --only-model hug_op_adaptive_full \
-  --max-n 1B \
+  --only-dataset sparse_nonlinear \
+  --max-n 15Mn \
   --max-p 10000
 ```
 
 ## Dashboard features
 
-The HTML dashboard is self-contained and requires no external dependencies or network access. It includes:
+The HTML dashboard embeds its results and loads Chart.js from a CDN. It includes:
 
 ### Overview section
 
@@ -261,7 +238,7 @@ The HTML dashboard is self-contained and requires no external dependencies or ne
 - Light/dark mode toggle
 - Dataset selector
 - Responsive design for desktop, tablet, and mobile
-- Embedded Chart.js visualizations
+- Chart.js visualizations
 
 ## Outputs
 
@@ -277,6 +254,6 @@ Assembly writes:
 
 ## Reproducibility/SBOM path privacy
 
-`--include-sbom` captures an SBOM-style manifest with artifact hashes, source fingerprints, git metadata, Python runtime details, installed distributions, `pip freeze --all`, selected environment variables, HUGIML package metadata, and discoverable native-extension build/linkage metadata. The same sanitized manifest is written to `scalability_reproducibility_sbom.json` and embedded in the HTML Methodology tab inside a collapsed, expandable block.
+`--include-sbom` captures artifact hashes, source fingerprints, Python runtime details, key dependency versions, selected threading environment variables, HUGIML package metadata, and discoverable native-extension build/linkage metadata. The same sanitized manifest is written to `scalability_reproducibility_sbom.json` and embedded in the HTML Methodology tab inside a collapsed, expandable block.
 
-The sanitizer avoids publishing raw absolute local paths by replacing the source root, working directory, and user home directory with labels such as `<source-root>`, `<output-dir>`, `<cwd>`, and `<home>`. It also redacts credential-like URL userinfo in remotes and package output. For public sharing, prefer the assembled HTML and SBOM JSON over raw checkpoints from older script versions.
+The manifest omits raw command output, local paths, `sys.path`, and full package inventories. Path placeholders such as `<path>` and `<output-dir>` identify redacted locations. Public result JSON and dashboard artifacts contain completed measurements without terminal diagnostics, timestamps, or local absolute paths.

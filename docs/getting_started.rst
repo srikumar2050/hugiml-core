@@ -91,17 +91,23 @@ For smaller datasets, keep ``adaptive_binning_sample_frac=False`` to select bins
 Downstream solver choices
 -------------------------
 
-When ``base_estimator`` is not supplied, HUGIML chooses the downstream linear classifier through ``lr_solver``. The default, ``lr_solver="auto"``, preserves the existing behavior: binary problems use ``LogisticRegression(solver="liblinear")`` and multiclass problems use ``LogisticRegression(solver="lbfgs")``.
+When ``base_estimator`` is not supplied, HUGIML chooses the downstream linear classifier through ``lr_solver``. With ``lr_solver="auto"``, binary problems use ``LogisticRegression(solver="liblinear")`` and multiclass problems use ``LogisticRegression(solver="saga")``.
 
-Use ``lr_solver="saga"`` when you want sklearn's ``LogisticRegression`` with the saga optimizer, especially for larger or sparse downstream matrices. Use ``lr_solver="sgd"`` when the downstream matrix is very large and stochastic optimization through ``SGDClassifier(loss="log_loss")`` is preferable. The built-in choices keep deterministic defaults aligned with the original path, including ``random_state=0`` and ``max_iter=500``.
+Use ``lr_solver="adaptive_l1"`` when benchmark-scale binary fits should keep L1 regularization but may switch to a bounded SGD-L1 fit for large, highly collinear downstream matrices. Use ``lr_solver="saga"`` to force sklearn's saga logistic solver, or ``lr_solver="sgd"`` when stochastic optimization is preferable for a large sparse downstream matrix. The built-in choices remain deterministic with ``random_state=0``.
 
 .. code-block:: python
 
    clf_default = HUGIMLClassifier(lr_solver="auto")
+   clf_adaptive = HUGIMLClassifier(lr_solver="adaptive_l1")
    clf_saga = HUGIMLClassifier(lr_solver="saga", feature_mode="original_plus_patterns")
    clf_sgd = HUGIMLClassifier(lr_solver="sgd", feature_mode="original_plus_patterns")
 
 If a fully configured ``base_estimator`` is supplied, it overrides ``lr_solver``. Versioned model serialization records the selected ``lr_solver`` and natively round-trips both the built-in ``LogisticRegression`` and ``SGDClassifier`` downstream estimators.
+
+Large-data index note
+---------------------
+
+On 64-bit builds, sparse downstream structures can widen to 64-bit indices when required. Native mining dimensions remain bounded by the 32-bit mining index range, and oversized inputs fail early with an explicit error instead of overflowing an index.
 
 Recommended first checks
 ------------------------

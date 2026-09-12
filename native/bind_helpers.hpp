@@ -13,6 +13,7 @@
 #include "pybind_common.hpp"
 #include "transaction.hpp"
 #include "matrix.hpp"
+#include "csr_indices.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -29,6 +30,8 @@ inline void validate_2d_array(const py::array& arr, const char* name) {
         throw std::invalid_argument(
             std::string(name) + " must be 2-D, got " +
             std::to_string(arr.ndim()) + "-D");
+    hugiml::checked_native_dimension(arr.shape(0), "row count");
+    hugiml::checked_native_dimension(arr.shape(1), "feature count");
     if (arr.shape(0) == 0)
         throw std::invalid_argument(std::string(name) + " has 0 rows");
     if (!(arr.flags() & py::array::c_style))
@@ -73,39 +76,7 @@ inline py::tuple coo_to_tuple(hugiml::COO&& coo) {
 // Return (indptr, indices) for a binary all-ones CSR matrix.  The Python
 // caller supplies a float32 data array of ones with length == indices.size().
 inline py::tuple coo_to_csr_tuple(hugiml::COO&& coo, int n_rows, int n_cols) {
-    auto& rv = coo.first;
-    auto& cv = coo.second;
-    if (rv.size() != cv.size()) {
-        throw std::invalid_argument("COO row/column vectors must have equal length");
-    }
-    auto indptr_arr = py::array_t<int32_t>(n_rows + 1);
-    auto indices_arr = py::array_t<int32_t>(cv.size());
-    auto indptr = indptr_arr.mutable_unchecked<1>();
-    auto indices = indices_arr.mutable_unchecked<1>();
-    for (int i = 0; i <= n_rows; ++i) indptr(i) = 0;
-    for (size_t k = 0; k < rv.size(); ++k) {
-        const int rr = rv[k];
-        if (rr < 0 || rr >= n_rows) throw std::out_of_range("COO row out of CSR bounds");
-        indptr(rr + 1) += 1;
-    }
-    for (int i = 0; i < n_rows; ++i) indptr(i + 1) += indptr(i);
-    std::vector<int32_t> cursor(static_cast<size_t>(n_rows));
-    for (int i = 0; i < n_rows; ++i) cursor[static_cast<size_t>(i)] = indptr(i);
-    for (size_t k = 0; k < cv.size(); ++k) {
-        const int rr = rv[k];
-        const int cc = cv[k];
-        if (cc < 0 || cc >= n_cols) throw std::out_of_range("COO col out of CSR bounds");
-        const int pos = cursor[static_cast<size_t>(rr)]++;
-        indices(pos) = cc;
-    }
-    // SciPy permits unsorted CSR indices, but several downstream sparse
-    // operations assume canonical row ordering.  Sort column indices within
-    // each row before handing the structure to Python.
-    int32_t* idx_ptr = static_cast<int32_t*>(indices_arr.mutable_data());
-    for (int i = 0; i < n_rows; ++i) {
-        std::sort(idx_ptr + indptr(i), idx_ptr + indptr(i + 1));
-    }
-    return py::make_tuple(indptr_arr, indices_arr);
+    return hugiml::csr_from_coo(coo.first, coo.second, n_rows, n_cols);
 }
 
 // ── Categorical data pre-extraction (call with GIL held) ─────────────────────

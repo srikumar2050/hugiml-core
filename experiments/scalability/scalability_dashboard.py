@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import errno
 import hashlib
 import importlib.metadata as importlib_metadata
 import json
@@ -13,8 +14,10 @@ import shutil
 import subprocess
 import sys
 import sysconfig
+import tempfile
 import threading
 import time
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -78,10 +81,10 @@ N_SCALING = {
         (3_000_000, 20),
         (5_000_000, 20),
         (10_000_000, 20),
+        (15_000_000, 20),
+        (20_000_000, 20),
+        (30_000_000, 20),
         (50_000_000, 20),
-        (100_000_000, 20),
-        (500_000_000, 20),
-        (1_000_000_000, 20),
     ],
     "threshold_grid": [
         # 10x predictor count versus sparse_nonlinear n-scaling, so keep the
@@ -94,10 +97,10 @@ N_SCALING = {
         (300_000, 200),
         (500_000, 200),
         (1_000_000, 200),
+        (3_000_000, 200),
         (5_000_000, 200),
+        (7_500_000, 200),
         (10_000_000, 200),
-        (50_000_000, 200),
-        (100_000_000, 200),
     ],
 }
 P_SCALING = {
@@ -221,12 +224,10 @@ def get_total_memory_mb() -> int | None:
 
 
 def effective_mem_limit_mb(raw: int | None) -> int | None:
-    if raw is None or int(raw) == 0:
-        return None
-    if int(raw) < 0:
-        total = get_total_memory_mb()
-        return None if total is None else max(1, int(total * 0.90))
-    return int(raw)
+    available = max(1, int(available_memory_mb() * 0.80))
+    if raw is None or int(raw) <= 0:
+        return available
+    return min(int(raw), available)
 
 
 def process_tree_rss_mb(proc: subprocess.Popen) -> float | None:
@@ -274,7 +275,7 @@ def terminate_process_tree(proc: subprocess.Popen) -> None:
 def make_baseline_signal(n: int, p: int, seed: int = 42):
     import numpy as np
     rng = np.random.default_rng(seed + n * 13 + p * 17)
-    X = rng.normal(0, 1, size=(n, p)).astype(np.float32)
+    X = normal_float32(rng, n, p)
     z = np.zeros(n, dtype=np.float32)
     if p >= 1:
         z += 1.20 * X[:, 0]
@@ -292,7 +293,7 @@ def make_baseline_signal(n: int, p: int, seed: int = 42):
 def make_threshold_grid(n: int, p: int, seed: int = 42):
     import numpy as np
     rng = np.random.default_rng(seed + n * 5 + p * 11)
-    X = rng.normal(0, 1, size=(n, p)).astype(np.float32)
+    X = normal_float32(rng, n, p)
     z = np.zeros(n, dtype=np.float32)
     for j, thr in enumerate([0.70, 0.45, 0.20, -0.20, -0.45, -0.70][: min(6, p)]):
         z += (0.65 - 0.04 * j) * (X[:, j] > thr)
@@ -342,14 +343,14 @@ def make_tasks(include_sweeps: bool = True) -> list[dict[str, Any]]:
     return out
 
 
-def hug_params_for(model: str, sweep_name: str | None = None, sweep_value: Any = None) -> dict[str, Any]:
+def hug_params_for(model: str, sweep_name: str | None = None, sweep_value: Any = None, *, n_jobs: int = 4, lr_source_policy: str = "standard") -> dict[str, Any]:
     spec = MODEL_SPECS[model]
     p: dict[str, Any] = {
         "B": 5,
         "L": 1,
         "G": 0.01,
         "topK": 50,
-        "n_jobs": 4,
+        "n_jobs": n_jobs,
         "adaptive_binning": True,
         "b_candidates": [3, 5, 7, 10],
         "adaptive_binning_sample_frac": False,
@@ -360,6 +361,7 @@ def hug_params_for(model: str, sweep_name: str | None = None, sweep_value: Any =
         "execution_mode": "production",
         "feature_mode": spec["feature_mode"],
         "lr_solver": spec.get("lr_solver", "auto"),
+        "lr_source_policy": lr_source_policy,
         "topk_budget_strict": spec["feature_mode"] == "original_plus_patterns",
     }
     scenario = spec["scenario"]
@@ -427,7 +429,7 @@ def worker(args: argparse.Namespace) -> None:
         sweep_value = json.loads(args.sweep_value_json) if getattr(args, "sweep_value_json", None) else None
         if spec["family"] == "hug":
             from hugiml import HUGIMLClassifierNative
-            params = hug_params_for(args.model, getattr(args, "sweep_name", None), sweep_value)
+            params = hug_params_for(args.model, getattr(args, "sweep_name", None), sweep_value, n_jobs=args.n_jobs, lr_source_policy=args.lr_source_policy)
             clf = HUGIMLClassifierNative(**params)
             fit_Xtr = Xtr
             pred_Xte = Xte
@@ -440,7 +442,7 @@ def worker(args: argparse.Namespace) -> None:
                 "subsample": 0.85,
                 "colsample_bytree": 0.85,
                 "tree_method": "hist",
-                "n_jobs": 4,
+                "n_jobs": args.n_jobs,
                 "eval_metric": "logloss",
                 "verbosity": 0,
                 "random_state": 42,
@@ -458,7 +460,7 @@ def worker(args: argparse.Namespace) -> None:
                 "learning_rate": 0.1,
                 "subsample": 0.85,
                 "colsample_bytree": 0.85,
-                "n_jobs": 4,
+                "n_jobs": args.n_jobs,
                 "random_state": 42,
                 "verbose": -1,
             }
@@ -541,20 +543,37 @@ def worker(args: argparse.Namespace) -> None:
 def load_ckpt(path: Path) -> dict[str, Any]:
     if path.exists():
         return json.loads(path.read_text(encoding="utf-8"))
-    return {"created_at": now_iso(), "metadata": {}, "results": []}
+    return {"metadata": {}, "results": []}
+
+
+def clean_results(value):
+    if isinstance(value, dict):
+        excluded = {"error", "last_error", "stdout_tail", "stderr_tail", "generated_at", "created_at", "completed_at"}
+        return {k: clean_results(v) for k, v in value.items() if k not in excluded}
+    if isinstance(value, list):
+        return [clean_results(v) for v in value]
+    return value
 
 
 def save_ckpt(path: Path, ckpt: dict[str, Any]) -> None:
-    """Atomically save the checkpoint.
-
-    Keep this compact rather than pretty-printed because the checkpoint is
-    rewritten after every task. Compact JSON materially reduces write size and
-    avoids spending extra time formatting large result histories.
-    """
+    """Write a complete JSON document and atomically replace its destination."""
+    text = json.dumps(clean_results(ckpt), separators=(",", ":"), allow_nan=False)
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = temp_path_for(path)
-    tmp.write_text(json.dumps(ckpt, separators=(",", ":"), allow_nan=False), encoding="utf-8")
-    tmp.replace(path)
+    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent,
+                                     prefix=path.name+".", suffix=".tmp", delete=False) as stream:
+        stream.write(text)
+        stream.flush()
+        os.fsync(stream.fileno())
+        temporary = Path(stream.name)
+    for attempt in range(10):
+        try:
+            os.replace(temporary, path)
+            return
+        except OSError as exc:
+            transient = exc.errno in (errno.EACCES, errno.EBUSY, errno.EPERM) or getattr(exc, "winerror", None) in (5, 32, 33)
+            if not transient or attempt == 9:
+                raise
+            time.sleep(min(0.1 * 2**attempt, 2.0))
 
 
 def drain_text_stream(stream, parts: list[str], limit: int) -> None:
@@ -601,6 +620,8 @@ def run_worker_task(t: dict[str, Any], args: argparse.Namespace) -> dict[str, An
         "--n", str(t["n"]),
         "--p", str(t["p"]),
         "--seed", str(args.seed),
+        "--n-jobs", str(args.n_jobs),
+        "--lr-source-policy", args.lr_source_policy,
     ]
     if t.get("sweep_name"):
         cmd += ["--sweep-name", str(t["sweep_name"]), "--sweep-value-json", json.dumps(t.get("sweep_value"))]
@@ -608,7 +629,10 @@ def run_worker_task(t: dict[str, Any], args: argparse.Namespace) -> dict[str, An
     peak_tree = None
     status = None
     error = None
-    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace", bufsize=1)
+    env = dict(os.environ)
+    for name in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS", "VECLIB_MAXIMUM_THREADS", "BLIS_NUM_THREADS"):
+        env[name] = str(args.n_jobs)
+    proc = subprocess.Popen(cmd, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace", bufsize=1)
     stdout_parts: list[str] = []
     stderr_parts: list[str] = []
     stdout_thread = threading.Thread(target=drain_text_stream, args=(proc.stdout, stdout_parts, 1_000_000), daemon=True)
@@ -640,10 +664,11 @@ def run_worker_task(t: dict[str, Any], args: argparse.Namespace) -> dict[str, An
         except Exception:
             terminate_process_tree(proc)
     finally:
+        if proc.poll() is None:
+            terminate_process_tree(proc)
         stdout_thread.join(timeout=2)
         stderr_thread.join(timeout=2)
     stdout_text = "".join(stdout_parts)
-    stderr_text = "".join(stderr_parts)
     if status in {"oom", "timeout"}:
         res = {"key": t["key"], **t, "status": status, "error": error}
     else:
@@ -654,14 +679,6 @@ def run_worker_task(t: dict[str, Any], args: argparse.Namespace) -> dict[str, An
         if proc.returncode not in (0, None) and res.get("status") == "ok":
             res["status"] = "error"
             res["error"] = f"worker_returncode={proc.returncode}"
-    # Keep successful rows clean: library warnings emitted to stderr (for example
-    # HUGIMLWarning memory estimates) are not persisted into the checkpoint JSON.
-    # Failure/OOM/timeout rows still keep bounded stdout/stderr tails for debugging.
-    if res.get("status") != "ok":
-        if stdout_text[-2000:]:
-            res["stdout_tail"] = stdout_text[-2000:]
-        if stderr_text[-4000:]:
-            res["stderr_tail"] = stderr_text[-4000:]
     res.setdefault("key", t["key"])
     for k, v in t.items():
         res.setdefault(k, v)
@@ -669,68 +686,183 @@ def run_worker_task(t: dict[str, Any], args: argparse.Namespace) -> dict[str, An
     res["task_timeout_seconds"] = timeout
     res["mem_limit_mb"] = effective_mem
     res["peak_process_tree_rss_mb"] = peak_tree
-    res["completed_at"] = now_iso()
-    return res
+    return clean_results(res)
+
+
+def normal_float32(rng, n, p, block_rows=65536):
+    """Generate the same normal stream with bounded conversion workspace."""
+    import numpy as np
+    X = np.empty((n, p), dtype=np.float32)
+    block_rows = min(block_rows, max(1, 8_388_608 // p))
+    for start in range(0, n, block_rows):
+        stop = min(n, start + block_rows)
+        X[start:stop] = rng.normal(0, 1, size=(stop-start, p))
+    return X
+
+
+def available_memory_mb():
+    import psutil
+    return int(psutil.virtual_memory().available / 1048576)
+
+
+def memory_estimate_mb(task):
+    """Estimate shared capacity for dense data, split copies, mining and fitting."""
+    n, p = int(task["n"]), int(task["p"])
+    # Shared across models: measured task-RSS envelope plus 20% headroom.
+    envelopes = {"sparse_nonlinear": (20, 15_000_000, 13.35),
+                 "threshold_grid": (200, 5_000_000, 13.86)}
+    envelope = envelopes.get(task.get("dataset"))
+    if task.get("section") == "n_scaling" and envelope and p == envelope[0]:
+        _, reference_rows, peak_gib = envelope
+        return 512 + 1.20 * peak_gib * 1024 * n / reference_rows
+    topk = int(task["sweep_value"]) if task.get("sweep_name") == "topK" else 50
+    return (40*n*p + 16*n*topk + 128*n) / 1048576 + 512
+
+
+def index_capacity_exceeded(task):
+    if MODEL_SPECS[task["model"]]["family"] != "hug":
+        return False
+    training_rows = 3*int(task["n"])//4
+    topk = int(task["sweep_value"]) if task.get("sweep_name") == "topK" else 50
+    from hugiml.classifier import _core
+
+    wide_offsets = getattr(_core, "csr_index_bits_max", 32) >= 64
+    return training_rows >= 2**31-1 or (not wide_offsets and training_rows*topk > 2**31-1)
+
+
+def execution_signature(args):
+    digest = hashlib.sha256(Path(__file__).read_bytes())
+    if SOURCE_ROOT is not None:
+        for path in sorted((SOURCE_ROOT / "src" / "hugiml").rglob("*")):
+            if path.is_file() and path.suffix in (".py", ".pyd", ".so"):
+                digest.update(path.relative_to(SOURCE_ROOT).as_posix().encode())
+                digest.update(path.read_bytes())
+    return {"seed": args.seed, "n_jobs": args.n_jobs,
+            "lr_source_policy": args.lr_source_policy,
+            "implementation_sha256": digest.hexdigest(),
+            "packages": _key_package_versions(), "generator": "normal_float32_seeded",
+            "test_fraction": 0.25, "split_seed": 42, "model_specs": MODEL_SPECS}
+
+
+def successful_task(row):
+    import math
+    return (row.get("status") == "ok" and isinstance(row.get("auc"), (int, float))
+            and math.isfinite(row["auc"]) and 0 <= row["auc"] <= 1
+            and isinstance(row.get("fit_s"), (int, float))
+            and math.isfinite(row["fit_s"]) and row["fit_s"] >= 0)
+
+
+def selected_tasks(args):
+    tasks = apply_size_caps(make_tasks(include_sweeps=not args.no_sweeps), max_n=args.max_n, max_p=args.max_p)
+    for attribute, field in (("only_section", "section"), ("only_dataset", "dataset"), ("only_model", "model")):
+        value = getattr(args, attribute, None)
+        if value:
+            tasks = [t for t in tasks if t[field] == value]
+    return sorted(tasks, key=lambda t: (t["n"]*t["p"], t["dataset"], t["section"], t["key"]))
+
+
+@contextmanager
+def output_lock(outdir):
+    """Hold an OS-released exclusive lock for one result directory."""
+    outdir.mkdir(parents=True, exist_ok=True)
+    with (outdir / ".scalability.lock").open("a+b") as stream:
+        stream.seek(0, 2)
+        if stream.tell() == 0:
+            stream.write(b"0")
+            stream.flush()
+        stream.seek(0)
+        if os.name == "nt":
+            import msvcrt
+            try:
+                msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+            except OSError as exc:
+                raise RuntimeError("This output directory already has an active runner.") from exc
+        else:
+            import fcntl
+            try:
+                fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as exc:
+                raise RuntimeError("This output directory already has an active runner.") from exc
+        try:
+            yield
+        finally:
+            stream.seek(0)
+            if os.name == "nt":
+                msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
 
 
 def run_all(args: argparse.Namespace) -> None:
+    if args.plan:
+        return _run_all(args)
+    with output_lock(resolve_outdir(args.outdir)):
+        return _run_all(args)
+
+
+def _run_all(args: argparse.Namespace) -> None:
     outdir = resolve_outdir(args.outdir)
-    if args.fresh and outdir.exists():
-        shutil.rmtree(outdir)
-    outdir.mkdir(parents=True, exist_ok=True)
     ckpt_path = outdir / "scalability_checkpoint.json"
+    if args.fresh and args.resume:
+        raise ValueError("Choose either --fresh or --resume.")
+    if args.fresh and outdir.exists() and any(p.name != ".scalability.lock" for p in outdir.iterdir()):
+        raise ValueError("--fresh requires an empty output directory.")
     ckpt = load_ckpt(ckpt_path)
-    ckpt["metadata"] = {
-        "generated_at": now_iso(),
-        "threads": 4,
-        "system": {"python": platform.python_version(), "platform": platform.platform(), "system_memory_mb": get_total_memory_mb()},
-        "hugiml_config": {"L": 1, "G": 0.01, "topK": 50, "b_candidates": [3, 5, 7, 10], "lr_solver": "auto", "use_hotpath": True, "execution_mode": "production"},
-        "scenarios": MODEL_SPECS,
-        "sweeps": SWEEP,
-        "primary_memory_metric": "peak process-tree RSS during the full worker task",
-        "fit_memory_metric": "peak RSS during clf.fit minus RSS immediately before clf.fit",
-        "task_limits": {
-            "max_n": args.max_n,
-            "max_p": args.max_p,
-            "n_scaling_max_n_fraction": N_SCALING_MAX_N_FRACTION,
-            "include_sweeps": not args.no_sweeps,
-            "only_section": args.only_section,
-            "only_dataset": args.only_dataset,
-            "only_model": args.only_model,
-        },
-    }
-    done = {r["key"] for r in ckpt.get("results", []) if r.get("status") == "ok"}
-    tasks = make_tasks(include_sweeps=not args.no_sweeps)
-    tasks = apply_size_caps(tasks, max_n=args.max_n, max_p=args.max_p)
-    if args.only_section:
-        tasks = [t for t in tasks if t["section"] == args.only_section]
-    if args.only_dataset:
-        tasks = [t for t in tasks if t["dataset"] == args.only_dataset]
-    if args.only_model:
-        tasks = [t for t in tasks if t["model"] == args.only_model]
-    selected_task_summary = task_filter_summary(tasks)
-    ckpt["metadata"]["selected_task_summary"] = selected_task_summary
-    print(
-        "selected "
-        f"{selected_task_summary['task_count']} tasks "
-        f"with n<= {args.max_n if args.max_n else 'all'} "
-        f"and p<= {args.max_p if args.max_p else 'all'}",
-        flush=True,
-    )
-    save_ckpt(ckpt_path, ckpt)
-    if getattr(args, "start_task", 0):
-        tasks = tasks[int(args.start_task):]
+    signature = execution_signature(args)
+    if ckpt.get("results"):
+        if not args.resume:
+            raise ValueError("Existing results require --resume or a new output directory.")
+        if ckpt.get("metadata", {}).get("execution_signature") != signature:
+            raise ValueError("Checkpoint execution settings differ; use a separate output directory.")
+    keys = [r["key"] for r in ckpt.get("results", [])]
+    if len(keys) != len(set(keys)):
+        raise ValueError("Checkpoint contains duplicate task keys.")
+    tasks = selected_tasks(args)
+    done = {r["key"] for r in ckpt.get("results", []) if successful_task(r)}
+    pending = [t for t in tasks if t["key"] not in done]
+    pending = pending[args.start_task:]
     if args.max_tasks is not None:
-        tasks = tasks[: int(args.max_tasks)]
-    for i, t in enumerate(tasks, 1):
-        if args.resume and t["key"] in done:
-            continue
-        print(f"run {i}/{len(tasks)} {t['key']}", flush=True)
-        res = run_worker_task(t, args)
-        ckpt["results"] = [r for r in ckpt.get("results", []) if r.get("key") != t["key"]]
-        ckpt["results"].append(res)
+        pending = pending[:args.max_tasks]
+    print(f"selected {len(tasks)} tasks; {len(pending)} pending", flush=True)
+    if args.plan:
+        shapes = sorted({(t["n"], t["p"]) for t in pending})
+        limit = effective_mem_limit_mb(args.mem_limit_mb)
+        for n, p in shapes:
+            estimate = max(memory_estimate_mb(t) for t in pending if t["n"] == n and t["p"] == p)
+            state = "eligible" if estimate <= limit else "capacity_exceeded"
+            if any(index_capacity_exceeded(t) for t in pending if t["n"] == n and t["p"] == p):
+                state += "; HUGIML conservative row/CSR index bound exceeded"
+            print(f"n={n:,} p={p}: raw={4*n*p/2**30:.2f} GiB; estimated={estimate/1024:.2f} GiB; budget={limit/1024:.2f} GiB; {state}")
+        return
+    outdir.mkdir(parents=True, exist_ok=True)
+    ckpt["metadata"] = {"execution_signature": signature, "threads": args.n_jobs,
+        "lr_source_policy": args.lr_source_policy, "scenarios": MODEL_SPECS, "sweeps": SWEEP,
+        "selected_task_summary": task_filter_summary(tasks),
+        "task_limits": {"max_n": args.max_n, "max_p": args.max_p, "n_scaling_max_n_fraction": N_SCALING_MAX_N_FRACTION},
+        "system": {"python": platform.python_version(), "system_memory_mb": get_total_memory_mb()},
+        "primary_memory_metric": "peak process-tree RSS during the full worker task"}
+    save_ckpt(ckpt_path, ckpt)
+    blocked = 0
+    for i, task in enumerate(pending, 1):
+        limit = effective_mem_limit_mb(args.mem_limit_mb)
+        estimate = memory_estimate_mb(task)
+        if estimate > limit or index_capacity_exceeded(task):
+            status = "index_capacity_exceeded" if index_capacity_exceeded(task) else "capacity_exceeded"
+            result = {**task, "status": status, "estimated_memory_mb": estimate, "mem_limit_mb": limit}
+            blocked += 1
+            print(f"capacity {i}/{len(pending)} {task['key']} needs approximately {estimate/1024:.2f} GiB", flush=True)
+        else:
+            print(f"run {i}/{len(pending)} {task['key']} with {args.n_jobs} threads", flush=True)
+            result = clean_results(run_worker_task(task, args))
+            if not successful_task(result):
+                blocked += 1
+                print(f"task status: {result.get('status')}", flush=True)
+        ckpt["results"] = [r for r in ckpt.get("results", []) if r["key"] != task["key"]]
+        ckpt["results"].append(result)
         save_ckpt(ckpt_path, ckpt)
     build_outputs(argparse.Namespace(outdir=str(outdir), output_html=args.output_html, include_sbom=getattr(args, "include_sbom", False)))
+    if blocked:
+        raise SystemExit(2)
 
 
 def numeric(value: Any) -> float | None:
@@ -965,13 +1097,13 @@ function slopeNote(ds,section,metric,fmt){const xKey=section==='n_scaling'?'n':'
 function fillTable(id,ds,section){const xKey=section==='n_scaling'?'n':'p';const xs=valuesFor(ds,section,xKey);let html='';for(const m of modelOrder){const rows=xs.map(x=>rowsAt(ds,section,xKey,x).find(r=>r.model===m)).filter(Boolean);if(rows.length===0)continue;html+=`<details style="margin-bottom:10px;padding:8px;border:1px solid var(--ln);border-radius:6px"><summary style="cursor:pointer;font-weight:700">${labels[m]}</summary><table style="width:100%;margin-top:8px;font-size:11px"><thead><tr><th style="padding:4px">${xKey}</th><th class="r">Fit</th><th class="r">AUC</th><th class="r">Peak RSS</th><th class="r">Patterns</th></tr></thead><tbody>${rows.map(r=>`<tr><td style="padding:4px">${xKey==='n'?fN(r[xKey]):fP(r[xKey])}</td><td class="r">${fS(r.fit_s)}</td><td class="r">${fA(r.auc)}</td><td class="r">${r.memory_plot_gb!=null?r.memory_plot_gb.toFixed(1):'-'} GB</td><td class="r">${r.patterns??'—'}</td></tr>`).join('')}</tbody></table></details>`;}document.getElementById(id).innerHTML=html;}
 function fillMemoryTable(id,ds,section){const xKey=section==='n_scaling'?'n':'p'; const xs=valuesFor(ds,section,xKey); let head='<thead><tr><th>'+xKey+'</th>'+modelOrder.map(m=>'<th class="r">'+esc(labels[m])+'</th>').join('')+'</tr></thead>'; const rowsHtml=xs.map(x=>'<tr><td>'+esc(xKey==='n'?fN(x):fP(x))+'</td>'+modelOrder.map(m=>{const r=rowsAt(ds,section,xKey,x).find(rr=>rr.model===m);return '<td class="r">'+fGB(r&&r.memory_plot_gb)+'</td>';}).join('')+'</tr>').join(''); document.getElementById(id).innerHTML=head+'<tbody>'+rowsHtml+'</tbody>';}
 function snapshot(ds){const n=latestX(ds,'n_scaling','n'); const rs=rowsAt(ds,'n_scaling','n',n).sort((a,b)=>modelOrder.indexOf(a.model)-modelOrder.indexOf(b.model)); document.getElementById('snapshot_title').textContent='Latest n-scaling snapshot at n='+fN(n); const bf=bestRow(rs,'fit_s'), ba=bestRow(rs,'auc','max'), bm=bestRow(rs,'memory_plot_gb'); document.getElementById('snapshot_note').textContent=rs.length?`Fastest fit: ${labels[bf.model]} (${fS(bf.fit_s)}). Best AUC: ${labels[ba.model]} (${fA(ba.auc)}). Lowest peak memory: ${labels[bm.model]} (${fGB(bm.memory_plot_gb)}).`:'No completed rows.'; document.getElementById('snapshot_tbl').innerHTML='<thead><tr><th>Model</th><th>Scenario</th><th class="r">Fit</th><th class="r">Predict</th><th class="r">AUC</th><th class="r">Peak RSS</th><th class="r">Patterns</th></tr></thead><tbody>'+rs.map(r=>'<tr><td>'+modelTag(r.model)+'</td><td>'+esc(r.scenario)+'</td><td class="r">'+fS(r.fit_s)+'</td><td class="r">'+fS(r.predict_s)+'</td><td class="r">'+fA(r.auc)+'</td><td class="r">'+fGB(r.memory_plot_gb)+'</td><td class="r">'+(r.patterns??'—')+'</td></tr>').join('')+'</tbody>';}
-function updateOverview(){const ds=currentDs(); const ns=rowsFor(ds,'n_scaling'); const ps=rowsFor(ds,'p_scaling'); const maxN=latestX(ds,'n_scaling','n'); const maxP=latestX(ds,'p_scaling','p'); const nModels=uniq(allRows.map(r=>r.model)).length;const nDatasets=uniq(allRows.map(r=>r.dataset)).length;document.getElementById('sideSub').textContent=nModels+' models, '+nDatasets+' datasets'; document.getElementById('dsNote').textContent=ds==='sparse_nonlinear'?'Dense nonlinear signal: completed to '+fN(maxN)+' × 20.':'Threshold/local-interaction signal: completed to '+fN(maxN)+' × 200.'; document.getElementById('ov_title').textContent=dsLabel(ds)+' scalability'; document.getElementById('ov_desc').textContent='End-to-end comparison of the active model scenarios across sample-size scaling, feature-count scaling, peak task memory, and HUGIML hyperparameter sweeps.'; document.getElementById('ov_chips').innerHTML=['Complete coverage',modelOrder.length+' model variants','n up to '+fN(maxN),'p up to '+fP(maxP)].map(x=>'<span class="chip">'+esc(x)+'</span>').join(''); const latest=rowsAt(ds,'n_scaling','n',maxN); const bf=bestRow(latest,'fit_s'), ba=bestRow(latest,'auc','max'), bm=bestRow(latest,'memory_plot_gb'), bp=bestRow(latest,'patterns','max'); const kpis=[['Largest completed n',fN(maxN),latest.length+' model rows'],['Fastest fit',bf?labels[bf.model]:'—',bf?fS(bf.fit_s):'—'],['Best AUC',ba?labels[ba.model]:'—',ba?fA(ba.auc):'—'],['Lowest peak RSS',bm?labels[bm.model]:'—',bm?fGB(bm.memory_plot_gb):'—']]; document.getElementById('kpi_row').innerHTML=kpis.map((k,i)=>'<div class="card kpi"><div class="kl">'+esc(k[0])+'</div><div class="kv">'+esc(k[1])+'</div><div class="ks">'+esc(k[2])+'</div></div>').join(''); document.getElementById('ov_fit_ni').textContent=sectionNote(ds,'n_scaling','fit_s','shortest fit time',fS,'min'); document.getElementById('ov_auc_ni').textContent=sectionNote(ds,'n_scaling','auc','highest test AUC',fA,'max'); document.getElementById('ov_mem_ni').textContent=sectionNote(ds,'n_scaling','memory_plot_gb','lowest peak task RSS',fGB,'min'); const bf2=bestRow(rowsFor(ds,'n_scaling'),'fit_s');const ba2=bestRow(rowsFor(ds,'n_scaling'),'auc','max');const pRows=rowsAt(ds,'p_scaling','p',maxP);const nsAucRows=rowsFor(ds,'n_scaling');const nsAucVals=nsAucRows.map(r=>r.auc).filter(v=>v!=null);const auc_range=nsAucVals.length?`${fA(Math.min(...nsAucVals))} to ${fA(Math.max(...nsAucVals))}`:'-';document.getElementById('ov_insights').innerHTML=[bf2?`${labels[bf2.model]} dominates fit performance at ${fS(bf2.fit_s)}, remaining competitive on accuracy across all data sizes.`:'',ba2?`${labels[ba2.model]} delivers best test AUC (${fA(ba2.auc)}); full range across models is ${auc_range}.`:'',`Strong scaling invariance: fit time and accuracy stable from n=${fN(latestX(ds,'n_scaling','n'))} to n=${fN(latestX(ds,'n_scaling','n'))}; no model degradation at scale.`,`${pRows.length}/${modelOrder.length} models scale to maximum feature count (p=${fP(maxP)}); parameter sweeps reveal sensitivity to hyperparameter tuning choices.`].filter(Boolean).map(x=>'<div>'+esc(x)+'</div>').join(''); snapshot(ds); lineChart('ovFit',ds,'n_scaling','n','fit_s',{legendId:'legend_ov_fit',logY:true}); lineChart('ovAuc',ds,'n_scaling','n','auc',{legendId:'legend_ov_auc'}); lineChart('ovMem',ds,'n_scaling','n','memory_plot_gb',{legendId:'legend_ov_mem'});}
+function updateOverview(){const ds=currentDs(); const ns=rowsFor(ds,'n_scaling'); const ps=rowsFor(ds,'p_scaling'); const maxN=latestX(ds,'n_scaling','n'); const maxP=latestX(ds,'p_scaling','p'); const nModels=uniq(allRows.map(r=>r.model)).length;const nDatasets=uniq(allRows.map(r=>r.dataset)).length;document.getElementById('sideSub').textContent=nModels+' models, '+nDatasets+' datasets'; document.getElementById('dsNote').textContent=ds==='sparse_nonlinear'?'Dense nonlinear signal: completed to '+fN(maxN)+' × 20.':'Threshold/local-interaction signal: completed to '+fN(maxN)+' × 200.'; document.getElementById('ov_title').textContent=dsLabel(ds)+' scalability'; document.getElementById('ov_desc').textContent='End-to-end comparison of the active model scenarios across sample-size scaling, feature-count scaling, peak task memory, and HUGIML hyperparameter sweeps.'; document.getElementById('ov_chips').innerHTML=['Complete coverage',modelOrder.length+' model variants','n up to '+fN(maxN),'p up to '+fP(maxP)].map(x=>'<span class="chip">'+esc(x)+'</span>').join(''); const latest=rowsAt(ds,'n_scaling','n',maxN); const bf=bestRow(latest,'fit_s'), ba=bestRow(latest,'auc','max'), bm=bestRow(latest,'memory_plot_gb'), bp=bestRow(latest,'patterns','max'); const kpis=[['Largest completed n',fN(maxN),latest.length+' model rows'],['Fastest fit',bf?labels[bf.model]:'—',bf?fS(bf.fit_s):'—'],['Best AUC',ba?labels[ba.model]:'—',ba?fA(ba.auc):'—'],['Lowest peak RSS',bm?labels[bm.model]:'—',bm?fGB(bm.memory_plot_gb):'—']]; document.getElementById('kpi_row').innerHTML=kpis.map((k,i)=>'<div class="card kpi"><div class="kl">'+esc(k[0])+'</div><div class="kv">'+esc(k[1])+'</div><div class="ks">'+esc(k[2])+'</div></div>').join(''); document.getElementById('ov_fit_ni').textContent=sectionNote(ds,'n_scaling','fit_s','shortest fit time',fS,'min'); document.getElementById('ov_auc_ni').textContent=sectionNote(ds,'n_scaling','auc','highest test AUC',fA,'max'); document.getElementById('ov_mem_ni').textContent=sectionNote(ds,'n_scaling','memory_plot_gb','lowest peak task RSS',fGB,'min'); const bf2=bestRow(rowsFor(ds,'n_scaling'),'fit_s');const ba2=bestRow(rowsFor(ds,'n_scaling'),'auc','max');const pRows=rowsAt(ds,'p_scaling','p',maxP);const nsAucRows=rowsFor(ds,'n_scaling');const nsAucVals=nsAucRows.map(r=>r.auc).filter(v=>v!=null);const auc_range=nsAucVals.length?`${fA(Math.min(...nsAucVals))} to ${fA(Math.max(...nsAucVals))}`:'-';document.getElementById('ov_insights').innerHTML=[bf2?`${labels[bf2.model]} has the shortest recorded fit (${fS(bf2.fit_s)}) at n=${fN(bf2.n)}.`:'',ba2?`${labels[ba2.model]} delivers best test AUC (${fA(ba2.auc)}); full range across models is ${auc_range}.`:'',`Measured row counts range from ${fN(Math.min(...ns.map(r=>r.n)))} to ${fN(maxN)}; fit time and AUC are shown separately at each level.`,`${pRows.length}/${modelOrder.length} models scale to maximum feature count (p=${fP(maxP)}); parameter sweeps reveal sensitivity to hyperparameter tuning choices.`].filter(Boolean).map(x=>'<div>'+esc(x)+'</div>').join(''); snapshot(ds); lineChart('ovFit',ds,'n_scaling','n','fit_s',{legendId:'legend_ov_fit',logY:true}); lineChart('ovAuc',ds,'n_scaling','n','auc',{legendId:'legend_ov_auc'}); lineChart('ovMem',ds,'n_scaling','n','memory_plot_gb',{legendId:'legend_ov_mem'});}
 function updateScaling(){const ds=currentDs(); const maxN=latestX(ds,'n_scaling','n'), maxP=latestX(ds,'p_scaling','p'); document.getElementById('ns_hero').textContent='Sample size varies while p is fixed for each dataset. Charts use log scaling for fit time to keep small and large runs readable.'; document.getElementById('ps_hero').textContent='Feature count varies while n is adjusted by the configured grid. Ratio view divides each model fit time by XGBoost at the same p.'; document.getElementById('ns_fit_ni').textContent=sectionNote(ds,'n_scaling','fit_s','shortest fit time',fS,'min'); document.getElementById('ns_auc_ni').textContent=sectionNote(ds,'n_scaling','auc','highest test AUC',fA,'max'); document.getElementById('ns_mem_ni').textContent=sectionNote(ds,'n_scaling','memory_plot_gb','lowest peak task RSS',fGB,'min')+' '+slopeNote(ds,'n_scaling','memory_plot_gb',fGB); document.getElementById('ns_pat_ni').textContent=sectionNote(ds,'n_scaling','patterns','highest pattern count',v=>String(v)+' patterns','max'); document.getElementById('ps_fit_ni').textContent=sectionNote(ds,'p_scaling','fit_s','shortest fit time',fS,'min'); document.getElementById('ps_auc_ni').textContent=sectionNote(ds,'p_scaling','auc','highest test AUC',fA,'max'); document.getElementById('ps_mem_ni').textContent=sectionNote(ds,'p_scaling','memory_plot_gb','lowest peak task RSS',fGB,'min'); document.getElementById('ps_ratio_ni').textContent=`At the largest completed p (${fP(maxP)}), values below 1.0 mean the scenario fits faster than XGBoost on the same data.`; lineChart('nsFit',ds,'n_scaling','n','fit_s',{legendId:'legend_ns_fit',logY:true}); lineChart('nsAuc',ds,'n_scaling','n','auc',{legendId:'legend_ns_auc'}); lineChart('nsMem',ds,'n_scaling','n','memory_plot_gb',{legendId:'legend_ns_mem'}); lineChart('nsPat',ds,'n_scaling','n','patterns',{legendId:'legend_ns_pat'}); lineChart('psFit',ds,'p_scaling','p','fit_s',{legendId:'legend_ps_fit',logY:true}); ratioChart(ds); lineChart('psAuc',ds,'p_scaling','p','auc',{legendId:'legend_ps_auc'}); lineChart('psMem',ds,'p_scaling','p','memory_plot_gb',{legendId:'legend_ps_mem'}); fillTable('nsTbl',ds,'n_scaling'); fillTable('psTbl',ds,'p_scaling');}
 function updateMemory(){const ds=currentDs(); document.getElementById('mem_n_ni').textContent=sectionNote(ds,'n_scaling','memory_plot_gb','lowest peak task RSS',fGB,'min')+' '+slopeNote(ds,'n_scaling','memory_plot_gb',fGB); document.getElementById('mem_p_ni').textContent=sectionNote(ds,'p_scaling','memory_plot_gb','lowest peak task RSS',fGB,'min')+' '+slopeNote(ds,'p_scaling','memory_plot_gb',fGB); lineChart('memN',ds,'n_scaling','n','memory_plot_gb',{legendId:'legend_mem_n'}); lineChart('memP',ds,'p_scaling','p','memory_plot_gb',{legendId:'legend_mem_p'}); fillMemoryTable('memTblN',ds,'n_scaling'); fillMemoryTable('memTblP',ds,'p_scaling');}
 function sweepNames(ds){return uniq(allRows.filter(r=>r.dataset===ds && String(r.section||'').startsWith('parameter_sweep_')).map(r=>String(r.sweep_name||r.section.replace('parameter_sweep_','')))).sort();}
 function sweepChart(id,rs,metric){const data=rs.filter(r=>num(r[metric])!=null).sort((a,b)=>String(a.sweep_value).localeCompare(String(b.sweep_value),undefined,{numeric:true})); chart(id,{type:'line',data:{labels:data.map(r=>String(r.sweep_value)),datasets:[{label:metricLabel(metric),data:data.map(r=>num(r[metric])),borderColor:'#2563eb',backgroundColor:'#2563eb22',borderWidth:2,pointRadius:4,tension:.25}]},options:{responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:{callbacks:{label:(ctx)=>metricLabel(metric)+': '+yFormat(metric,ctx.parsed.y)}}},scales:{x:{title:{display:true,text:'sweep value'},grid:{color:gridColor()}},y:{title:{display:true,text:metricLabel(metric)},grid:{color:gridColor()}}}}});}
 function updateSweeps(){const ds=currentDs();const names=sweepNames(ds);const sel=document.getElementById('swSel');const oldVal=sel.value;sel.innerHTML=names.map(n=>'<option value="'+esc(n)+'" '+(n===oldVal?'selected':'')+'>'+esc(n)+'</option>').join('');const sw=sel.value||names[0];const rs=sweepRows(ds,sw);const el=document.getElementById('sw_area');if(!el||rs.length===0){el.innerHTML='<div class="ni">No sweep data.</div>';return;}document.getElementById('sw_hero').textContent='Parameter: '+sw;let html='';if(sw==='B'){html=`<div class="g2"><div class="cc"><h3>B sweep — fit (n=${fN(rs[0].n)}, p=${rs[0].p})</h3><div class="ni">Fit time nearly flat. B chosen on accuracy.</div><div class="ch" style="height:220px"><canvas id="sw_bFit"></canvas></div></div><div class="cc"><h3>B sweep — AUC & patterns</h3><div class="ni">AUC peaks near B=5. Use B=5 as default.</div><div class="ch" style="height:220px"><canvas id="sw_bAuc"></canvas></div></div></div>`;el.innerHTML=html;setTimeout(()=>{const sr=rs.slice().sort((a,b)=>a.sweep_value-b.sweep_value);sweepChart('sw_bFit',sr,'fit_s');const a=sr.map(r=>r.auc),p=sr.map(r=>r.patterns||0),aMn=Math.max(0.5,Math.floor((Math.min(...a)-0.02)*20)/20),aMx=Math.min(1.0,Math.ceil((Math.max(...a)+0.01)*20)/20);chart('sw_bAuc',{type:'line',data:{labels:sr.map(r=>String(r.sweep_value)),datasets:[{label:'AUC',data:a,borderColor:'#2563eb',backgroundColor:'#2563eb22',yAxisID:'y',tension:.3,borderWidth:2.5,pointRadius:5},{label:'Patterns',data:p,borderColor:'#d97706',yAxisID:'y1',tension:.3,borderWidth:2,borderDash:[4,3],pointRadius:5}]},options:{responsive:true,maintainAspectRatio:false,interaction:{mode:'index'},plugins:{legend:{display:true}},scales:{x:{ticks:{color:textColor()}},y:{min:aMn,max:aMx,title:{display:true,text:'AUC'},ticks:{color:textColor(),callback:v=>typeof v==='number'?v.toFixed(2):v}},y1:{position:'right',title:{display:true,text:'Patterns'},ticks:{color:textColor()}}}}});},50);}else if(sw==='G'){html=`<div class="g2"><div class="cc"><h3>G sweep — AUC & patterns (n=${fN(rs[0].n)}, p=${rs[0].p})</h3><div class="ni">Lower G mines more patterns. G=0.01 is default.</div><div class="ch" style="height:230px"><canvas id="sw_gAuc"></canvas></div></div><div class="cc"><h3>G sweep — fit</h3><div class="ni">Fit nearly flat despite pattern changes.</div><div class="ch" style="height:230px"><canvas id="sw_gFit"></canvas></div></div></div>`;el.innerHTML=html;setTimeout(()=>{const sr=rs.slice().sort((a,b)=>b.sweep_value-a.sweep_value);sweepChart('sw_gFit',sr,'fit_s');const a=sr.map(r=>r.auc),p=sr.map(r=>r.patterns||0),aMn=Math.max(0.5,Math.floor((Math.min(...a)-0.02)*20)/20),aMx=Math.min(1.0,Math.ceil((Math.max(...a)+0.01)*20)/20);chart('sw_gAuc',{type:'line',data:{labels:sr.map(r=>String(r.sweep_value)),datasets:[{label:'AUC',data:a,borderColor:'#2563eb',backgroundColor:'#2563eb22',yAxisID:'y',tension:.3,borderWidth:2.5,pointRadius:5},{label:'Patterns',data:p,borderColor:'#d97706',yAxisID:'y1',tension:.3,borderWidth:2,borderDash:[4,3],pointRadius:5}]},options:{responsive:true,maintainAspectRatio:false,interaction:{mode:'index'},plugins:{legend:{display:true}},scales:{x:{ticks:{color:textColor()}},y:{min:aMn,max:aMx,title:{display:true,text:'AUC'},ticks:{color:textColor(),callback:v=>typeof v==='number'?v.toFixed(2):v}},y1:{position:'right',title:{display:true,text:'Patterns'},ticks:{color:textColor()}}}}});},50);}else if(sw==='topK'){html=`<div class="cc" style="max-width:620px"><h3>topK sweep (n=${fN(rs[0].n)}, p=${rs[0].p})</h3><div class="ni">topK caps pattern budget. Binding at lower G.</div><div class="ch" style="height:270px"><canvas id="sw_topk"></canvas></div></div>`;el.innerHTML=html;setTimeout(()=>{const sr=rs.slice().sort((a,b)=>a.sweep_value-b.sweep_value);const a=sr.map(r=>r.auc),p=sr.map(r=>r.patterns||0),f=sr.map(r=>r.fit_s),aMn=Math.max(0.5,Math.floor((Math.min(...a)-0.02)*20)/20),aMx=Math.min(1.0,Math.ceil((Math.max(...a)+0.01)*20)/20);chart('sw_topk',{type:'line',data:{labels:sr.map(r=>String(r.sweep_value)),datasets:[{label:'AUC',data:a,borderColor:'#2563eb',backgroundColor:'#2563eb22',yAxisID:'y',pointRadius:5,tension:.3,borderWidth:2.5},{label:'Patterns',data:p,borderColor:'#d97706',yAxisID:'y1',pointRadius:5,tension:.3,borderWidth:2,borderDash:[4,3]},{label:'Fit',data:f,borderColor:'#16a34a',yAxisID:'y2',pointRadius:4,tension:.3,borderWidth:1.5,borderDash:[2,3]}]},options:{responsive:true,maintainAspectRatio:false,interaction:{mode:'index'},plugins:{legend:{display:true}},scales:{x:{ticks:{color:textColor()}},y:{min:aMn,max:aMx,title:{display:true,text:'AUC'},ticks:{color:textColor(),callback:v=>typeof v==='number'?v.toFixed(2):v}},y1:{position:'right',title:{display:true,text:'Patterns'},ticks:{color:textColor()}},y2:{display:false}}}});},50);}else if(sw==='L'){const sr=rs.slice().sort((a,b)=>a.sweep_value-b.sweep_value);const hasMem=sr.some(r=>r.memory_plot_gb!=null);html=`<div class="g2"><div class="card"><h3 style="font-size:12.5px;font-weight:800;margin-bottom:8px">L=1 vs L=2 (n=${fN(rs[0].n)}, p=${fP(rs[0].p)})</h3>${sr.map(r=>`<div style="border:1px solid var(--ln);border-radius:9px;padding:10px;margin-bottom:7px"><div style="font-size:14px;font-weight:900;color:var(--opp)">L = ${r.sweep_value}</div><div style="display:grid;grid-template-columns:repeat(${hasMem?4:3},1fr);gap:7px;margin-top:8px"><div><div style="font-size:9.5px;color:var(--mu)">Fit</div><div style="font-weight:800">${r.fit_s!=null?r.fit_s.toFixed(3)+'s':'—'}</div></div><div><div style="font-size:9.5px;color:var(--mu)">Patterns</div><div style="font-weight:800">${r.patterns??'—'}</div></div><div><div style="font-size:9.5px;color:var(--mu)">AUC</div><div style="font-weight:800">${r.auc!=null?r.auc.toFixed(4):'—'}</div></div>${hasMem?'<div><div style="font-size:9.5px;color:var(--mu)">Mem Δ</div><div style="font-weight:800">'+(r.memory_plot_gb!=null?r.memory_plot_gb.toFixed(1)+' MB':'—')+'</div></div>':''}</div></div>`).join('')}</div><div class="card"><h3 style="font-size:12.5px;font-weight:800;margin-bottom:8px">When to use L=2</h3><div style="font-size:11.5px;color:var(--mu);line-height:1.9">L=2 adds interactions. AUC gain <0.5%, fit 4.5× slower, patterns double. Prefer L=1 unless validated.</div></div></div>`;el.innerHTML=html;}else if(sw==='avf'){const sr=rs.slice().sort((a,b)=>(a.sweep_value===true||a.sweep_value===1?-1:1));const hasMem=sr.some(r=>r.memory_plot_gb!=null);html=`<div class="g2"><div class="card"><h3 style="font-size:12.5px;font-weight:800;margin-bottom:8px">Adaptive vs Fixed (n=${fN(rs[0].n)}, p=${fP(rs[0].p)})</h3>${sr.map((r,i)=>`<div style="border:1px solid var(--ln);border-radius:9px;padding:10px;margin-bottom:7px"><div style="font-size:13px;font-weight:900;color:var(--${i===0?'opp':'po'})">${r.sweep_value===true||r.sweep_value===1?'Adaptive':'Fixed B=5'}</div><div style="display:grid;grid-template-columns:repeat(${hasMem?4:3},1fr);gap:7px;margin-top:8px"><div><div style="font-size:9.5px;color:var(--mu)">Fit</div><div style="font-weight:800">${r.fit_s!=null?r.fit_s.toFixed(3)+'s':'—'}</div></div><div><div style="font-size:9.5px;color:var(--mu)">Patterns</div><div style="font-weight:800">${r.patterns??'—'}</div></div><div><div style="font-size:9.5px;color:var(--mu)">AUC</div><div style="font-weight:800">${r.auc!=null?r.auc.toFixed(4):'—'}</div></div>${hasMem?'<div><div style="font-size:9.5px;color:var(--mu)">Mem Δ</div><div style="font-weight:800">'+(r.memory_plot_gb!=null?r.memory_plot_gb.toFixed(1)+' MB':'—')+'</div></div>':''}</div></div>`).join('')}</div><div class="card"><h3 style="font-size:12.5px;font-weight:800;margin-bottom:8px">Choosing</h3><div style="font-size:11.5px;color:var(--mu);line-height:1.9"><strong style="color:var(--opp)">Adaptive:</strong> Info gain. Heterogeneous scales. AUC priority.</div><div style="height:1px;background:var(--ln);margin:10px 0"></div><div style="font-size:11.5px;color:var(--mu);line-height:1.9"><strong style="color:var(--po)">Fixed:</strong> Faster, reproducible. Large p. Uniform distributions.</div></div></div>`;el.innerHTML=html;}else{html=`<div class="cc"><h3>${esc(sw)}</h3><div class="ni">Data.</div></div>`;el.innerHTML=html;}}
-function methodology(){const m=payload.metadata||{}, sys=m.system||{}; const env=[['Python',sys.python],['Platform',sys.platform],['Logical CPUs',sys.cpu_count_logical||sys.logical_cpus],['System RAM',sys.system_memory_mb?fGB(sys.system_memory_mb/1024):undefined],['Threads',m.threads],['Train/test split','75% / 25%, stratified'],['Metric','Test-set ROC AUC'],['Dashboard memory','Peak task RSS in GB']]; document.getElementById('envTable').innerHTML='<table><tbody>'+env.map(([k,v])=>'<tr><td>'+esc(k)+'</td><td class="r">'+esc(v??'not recorded')+'</td></tr>').join('')+'</tbody></table>'; document.getElementById('modelTable').innerHTML='<table><thead><tr><th>Model</th><th>Family</th><th>Feature mode</th><th>Scenario</th><th>LR solver</th></tr></thead><tbody>'+modelOrder.map(k=>{const v=models[k]||{};return '<tr><td>'+modelTag(k)+'</td><td>'+esc(v.family)+'</td><td>'+esc(v.feature_mode)+'</td><td>'+esc(v.scenario)+'</td><td>'+esc(v.lr_solver||'—')+'</td></tr>';}).join('')+'</tbody></table>'; document.getElementById('protocolBox').innerHTML=['Two synthetic binary-classification datasets are generated with deterministic seeds.','Each benchmark row uses a single stratified holdout split.','Fit time measures classifier training only; prediction and AUC time are tracked separately.','Peak memory is measured from the parent process as process-tree RSS across the worker task.','Built-in HUGIML solver variants keep deterministic random_state/random_seed defaults aligned with the default downstream classifier.'].map(x=>'<div>'+esc(x)+'</div>').join(''); const sweeps=m.sweeps||{}; const sr=[]; for(const [ds,cfg] of Object.entries(sweeps)){for(const [name,c] of Object.entries(cfg||{})){sr.push([dsLabel(ds),name,c.n,c.p,(c.values||[]).join(', ')]);}} document.getElementById('sweepTable').innerHTML='<table><thead><tr><th>Dataset</th><th>Sweep</th><th>n</th><th>p</th><th>Values</th></tr></thead><tbody>'+sr.map(r=>'<tr>'+r.map(x=>'<td>'+esc(x)+'</td>').join('')+'</tr>').join('')+'</tbody></table>'; const sb=payload.reproducibility_sbom; const sbomCard=document.getElementById('sbomCard'), sbomPre=document.getElementById('sbomPre'); if(sb&&sbomCard&&sbomPre){sbomCard.style.display='block'; sbomPre.textContent=JSON.stringify(sb,null,2);}}
+function methodology(){const m=payload.metadata||{}, sys=m.system||{}; document.querySelector('.foot').textContent=(m.threads||'—')+' threads · test ROC AUC · memory in GB'; const env=[['Python',sys.python],['Platform',sys.platform],['Logical CPUs',sys.cpu_count_logical||sys.logical_cpus||sys.logical_processors],['System RAM',sys.system_memory_mb?fGB(sys.system_memory_mb/1024):undefined],['Threads',m.threads],['Train/test split','75% / 25%, stratified'],['Metric','Test-set ROC AUC'],['Dashboard memory','Peak task RSS in GB']]; document.getElementById('envTable').innerHTML='<table><tbody>'+env.map(([k,v])=>'<tr><td>'+esc(k)+'</td><td class="r">'+esc(v??'not recorded')+'</td></tr>').join('')+'</tbody></table>'; document.getElementById('modelTable').innerHTML='<table><thead><tr><th>Model</th><th>Family</th><th>Feature mode</th><th>Scenario</th><th>LR solver</th></tr></thead><tbody>'+modelOrder.map(k=>{const v=models[k]||{};return '<tr><td>'+modelTag(k)+'</td><td>'+esc(v.family)+'</td><td>'+esc(v.feature_mode)+'</td><td>'+esc(v.scenario)+'</td><td>'+esc(v.lr_solver||'—')+'</td></tr>';}).join('')+'</tbody></table>'; document.getElementById('protocolBox').innerHTML=['Two synthetic binary-classification datasets are generated with deterministic seeds.','Each benchmark row uses a single stratified holdout split.','Fit time measures classifier training only; prediction and AUC time are tracked separately.','Peak memory is measured from the parent process as process-tree RSS across the worker task.', 'LR source policy: '+(m.lr_source_policy||'not recorded')+'.','Built-in HUGIML solver variants keep deterministic random_state/random_seed defaults aligned with the default downstream classifier.'].map(x=>'<div>'+esc(x)+'</div>').join(''); const sweeps=m.sweeps||{}; const sr=[]; for(const [ds,cfg] of Object.entries(sweeps)){for(const [name,c] of Object.entries(cfg||{})){sr.push([dsLabel(ds),name,c.n,c.p,(c.values||[]).join(', ')]);}} document.getElementById('sweepTable').innerHTML='<table><thead><tr><th>Dataset</th><th>Sweep</th><th>n</th><th>p</th><th>Values</th></tr></thead><tbody>'+sr.map(r=>'<tr>'+r.map(x=>'<td>'+esc(x)+'</td>').join('')+'</tr>').join('')+'</tbody></table>'; const sb=payload.reproducibility_sbom; const sbomCard=document.getElementById('sbomCard'), sbomPre=document.getElementById('sbomPre'); if(sb&&sbomCard&&sbomPre){sbomCard.style.display='block'; sbomPre.textContent=JSON.stringify(sb,null,2);}}
 function updateAll(){updateOverview(); updateScaling(); updateMemory(); updateSweeps();}
 function init(){const dsSel=document.getElementById('dsSel'); const dss=(payload.datasets||uniq(allRows.map(r=>r.dataset))).filter(ds=>allRows.some(r=>r.dataset===ds)); dsSel.innerHTML=dss.map(ds=>'<option value="'+esc(ds)+'">'+esc(dsScaleLabel(ds))+'</option>').join(''); dsSel.addEventListener('change',updateAll); document.getElementById('swSel').addEventListener('change',updateSweeps); document.querySelectorAll('[data-th]').forEach(b=>b.addEventListener('click',()=>{document.querySelectorAll('[data-th]').forEach(x=>x.classList.remove('on')); b.classList.add('on'); document.body.dataset.t=b.dataset.th; updateAll();})); document.querySelectorAll('.nb').forEach(b=>b.addEventListener('click',()=>{document.querySelectorAll('.nb').forEach(x=>x.classList.remove('on')); document.querySelectorAll('.sec').forEach(x=>x.classList.remove('on')); b.classList.add('on'); document.getElementById(b.dataset.s).classList.add('on'); setTimeout(updateAll,40);})); document.querySelectorAll('.tab').forEach(b=>b.addEventListener('click',()=>{const sec=b.closest('.sec'); sec.querySelectorAll('.tab').forEach(x=>x.classList.remove('on')); sec.querySelectorAll('.tc').forEach(x=>x.classList.remove('on')); b.classList.add('on'); document.getElementById(b.dataset.tab).classList.add('on'); setTimeout(updateAll,40);})); methodology(); updateAll();}
 init();
@@ -1393,6 +1525,9 @@ def main() -> None:
         description="Run and assemble the HUGIML scalability scenario dashboard from a JSON checkpoint."
     )
     p.add_argument("--worker", action="store_true")
+    p.add_argument("--plan", action="store_true", help="Show capacity estimates without running tasks or writing results.")
+    p.add_argument("--n-jobs", type=int, default=4)
+    p.add_argument("--lr-source-policy", choices=("standard", "main_effect", "strict"), default="main_effect")
     p.add_argument("--key")
     p.add_argument("--dataset", choices=DATASETS)
     p.add_argument("--section")
@@ -1430,6 +1565,10 @@ def main() -> None:
     p.add_argument("--task-timeout", type=float, default=3600)
     p.add_argument("--mem-limit-mb", type=int, default=-1)
     args = p.parse_args()
+    if args.n_jobs < 1 or args.n_jobs > (os.cpu_count() or 1):
+        p.error("--n-jobs must be between 1 and the available logical CPU count")
+    if args.start_task < 0 or (args.max_tasks is not None and args.max_tasks < 0):
+        p.error("Task offsets and limits must be nonnegative")
     if args.worker:
         worker(args)
     elif args.assemble:

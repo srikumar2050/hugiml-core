@@ -2,7 +2,7 @@
 
 This folder targets the official **TabArena-v0.1 classification subset**: 38
 classification datasets from the 51-dataset mixed benchmark using its published
-classification catalog.
+classification catalog. The completed panel contains 38 datasets and 594 outer splits.
 
 The downloader writes to `../../../datasetsTabarena` by default, stores features and encoded/original targets as Parquet, and stores every prescribed split separately. For the supported classification catalog, it uses 10 repeated three-fold partitions below 2,500 rows and 3 repeated three-fold partitions otherwise.
 
@@ -24,7 +24,7 @@ the first `N` datasets in official TabArena order, or `--task-ids` /
 offline cache and exits; `--verify-cache-before-run` validates and then runs.
 
 Validation defaults to `--validation-protocol tabarena`. Every outer training
-partition uses eight-fold stratified CV for configuration selection. The eight
+partition uses eight-fold stratified CV to select among 32 HUGIML configurations. The eight
 child models belonging to the selected configuration are retained and their
 probabilities are averaged for the outer test fold; there is no final refit.
 Binary configurations are selected by ROC AUC and multiclass configurations by
@@ -84,3 +84,7 @@ ROC-AUC error for binary datasets and log loss for multiclass datasets. The
 methodology section at the bottom is collapsed by default. When detailed official
 predictions cover only part of a quadrant, the chart reports the available-data
 mean and median.
+
+The methodology lists the HUGIML hyperparameter grid. The fitted-path table reports LR/RPTE selections and recorded structural distributions. Public results are stored in `tabarena_results/benchmark_results.json`; dashboard HTML is maintained on gh-pages.
+
+`--n-jobs`, `--outer-jobs`, and `--outer-jobs-fallback` control worker allocation. `--lr-source-policy` accepts `standard`, `main_effect`, or `strict`. Resume with the same model-selection and LR-policy settings to retain completed outer splits.

@@ -283,6 +283,11 @@ class _PredictionMixin:
                 "HUGIMLClassifier does not support sparse input.  "
                 "Convert to a dense array via X.toarray() first."
             )
+        from hugiml._indexing import validate_native_shape
+
+        shape = getattr(X_test, "shape", None)
+        if shape is not None:
+            validate_native_shape(shape)
         is_df = isinstance(X_test, pd.DataFrame)
         arr = None
         if not is_df:
@@ -320,12 +325,18 @@ class _PredictionMixin:
                 )
 
         cat_mask = getattr(self, "cat_cols_mask_", None)
+        training_numeric = getattr(self, "_training_numeric_dtypes_", None)
         if is_df and cat_mask is not None and np.any(cat_mask):
             for j, is_cat in enumerate(cat_mask):
                 if j >= n_test_features:
                     break
                 col = X_test.iloc[:, j]
-                if is_cat and pd.api.types.is_numeric_dtype(col):
+                was_numeric = (
+                    training_numeric is not None
+                    and j < len(training_numeric)
+                    and training_numeric[j]
+                )
+                if is_cat and not was_numeric and pd.api.types.is_numeric_dtype(col):
                     warnings.warn(
                         f"Column '{X_test.columns[j]}' was categorical during "
                         f"training but has numeric dtype ({col.dtype}) in test data.",

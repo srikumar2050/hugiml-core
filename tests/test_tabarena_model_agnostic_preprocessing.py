@@ -90,7 +90,8 @@ def test_tabarena_categorical_labels_are_stable_across_missingness() -> None:
     assert set(training_dummy.columns) == set(outer_dummy.columns)
 
 
-def test_tabarena_retains_each_fitted_generator_with_its_child() -> None:
+def test_tabarena_retains_each_fitted_generator_with_its_child(monkeypatch) -> None:
+    monkeypatch.setattr(benchmark_engine, "BENCHMARK_N_JOBS", 8)
     rng = np.random.default_rng(7)
     y = np.tile(np.array([0, 1], dtype=int), 48)
     X = pd.DataFrame(
@@ -114,6 +115,7 @@ def test_tabarena_retains_each_fitted_generator_with_its_child() -> None:
     )
 
     assert metadata["cv_ensemble_child_count"] == 8
+    assert metadata["cv_ensemble_n_jobs"] == 8
     assert len(ensemble.estimators_) == 8
     assert all(
         isinstance(child, benchmark_engine.TabArenaPreprocessedEstimator)

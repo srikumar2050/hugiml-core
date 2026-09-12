@@ -429,6 +429,34 @@ def test_optional_model_shapes_include_instance_counts_without_optional_imports(
     np.testing.assert_array_equal(get_instance_inspection_units(rulefit, X), [1, 3, 1])
 
 
+def test_rulefit_one_vs_rest_aggregates_all_fitted_class_estimators():
+    class FittedOneVsRest:
+        estimators_ = [FakeRuleFitClassifier(), FakeRuleFitClassifier(), FakeRuleFitClassifier()]
+        classes_ = np.asarray([0, 1, 2])
+
+    X = np.asarray([[-1.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 2.0, 0.0]])
+    model = FittedOneVsRest()
+    report = get_complexity_report(model, X=X)
+
+    assert report is not None
+    assert report["model_type"] == "rulefit_one_vs_rest"
+    assert report["model_units"]["value"] == 6
+    assert report["model_units"]["class_estimator_count"] == 3
+    assert report["model_inspection_units"]["value"] == 9
+    assert report["model_inspection_units"]["aggregation"] == "sum_across_class_estimators"
+    np.testing.assert_array_equal(get_instance_inspection_units(model, X), [3, 9, 3])
+
+
+def test_rulefit_one_vs_rest_requires_every_child_to_be_rulefit():
+    class MixedOneVsRest:
+        estimators_ = [FakeRuleFitClassifier(), object()]
+
+    model = MixedOneVsRest()
+    X = np.zeros((2, 3), dtype=float)
+    assert get_complexity_report(model, X=X) is None
+    assert get_instance_inspection_units(model, X) is None
+
+
 
 def test_ebm_interaction_arity_expands_inspection_but_not_model_units():
     class EBMWithHigherOrderTerms:

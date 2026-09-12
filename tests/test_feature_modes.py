@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 import pytest
+from scipy import sparse
 from sklearn.base import clone
 from sklearn.datasets import load_breast_cancer, make_moons
 from sklearn.model_selection import train_test_split
@@ -155,6 +156,52 @@ def test_sklearn_clone_preserves_feature_mode():
     clf = HUGIMLClassifierNative(feature_mode="original_plus_patterns")
     cloned = clone(clf)
     assert cloned.feature_mode == "original_plus_patterns"
+
+
+def test_high_cardinality_originals_remain_sparse_through_topk_selection(monkeypatch):
+    n_rows = 4000
+    X = pd.DataFrame(
+        {
+            "numeric": np.linspace(-1.0, 1.0, n_rows),
+            "identifier": [f"id_{index}" for index in range(n_rows)],
+            "group": np.where(np.arange(n_rows) % 2, "a", "b"),
+        }
+    )
+    y = np.arange(n_rows) % 2
+    clf = HUGIMLClassifierNative(topK=25, feature_mode="original_plus_patterns")
+    clf.feature_names_in_ = list(X.columns)
+    clf.cat_cols_mask_ = np.asarray([False, True, True], dtype=bool)
+    clf._current_y_for_downstream_topk_ = y
+
+    original = clf._prepare_original_features_for_downstream(X, fit=True)
+
+    assert sparse.isspmatrix_csr(original)
+    assert original.dtype == np.float32
+    assert original.shape[1] > n_rows
+    assert original.nnz <= n_rows * X.shape[1]
+    dummy_names = [f"orig:{name}" for name in clf._original_dummy_columns_]
+    expected_dummy_scores = clf._strict_topk_column_scores(original[:, 1:], y, dummy_names)
+    np.testing.assert_allclose(
+        clf._original_dummy_scores_downstream_, expected_dummy_scores, rtol=0, atol=1e-12
+    )
+    monkeypatch.setattr(
+        clf,
+        "_as_dense_float32",
+        lambda value: pytest.fail("sparse original selection must not materialize dense data"),
+    )
+    names = [f"orig:{name}" for name in clf._original_feature_names_downstream_]
+    selected, selected_names = clf._select_original_topk_fit(original, y, names)
+
+    assert sparse.isspmatrix_csr(selected)
+    assert selected.shape == (n_rows, 25)
+    transformed, transformed_names = (
+        clf._prepare_selected_original_features_for_downstream_transform(
+            X.iloc[:20], selected_names
+        )
+    )
+    assert sparse.isspmatrix_csr(transformed)
+    assert transformed.shape == (20, 25)
+    assert transformed_names == selected_names
 
 
 @pytest.mark.parametrize("mode", MODES)

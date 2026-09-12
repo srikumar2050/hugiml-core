@@ -27,6 +27,11 @@ class OfflineSuiteConfig:
     tabarena_official_results: Path | None = None
     tabarena_detailed_metrics: Path | None = None
     default_validation_protocol: str = "nested"
+    default_n_jobs: int = 1
+    default_outer_jobs: int = 1
+    default_outer_jobs_fallback: int | None = None
+    default_defer_task_ids: tuple[int, ...] = ()
+    clean_output_json: bool = False
 
 
 def configure_engine(config: OfflineSuiteConfig) -> None:
@@ -55,6 +60,11 @@ def configure_engine(config: OfflineSuiteConfig) -> None:
         None if config.tabarena_detailed_metrics is None else config.tabarena_detailed_metrics.resolve()
     )
     engine.DEFAULT_VALIDATION_PROTOCOL = str(config.default_validation_protocol)
+    engine.DEFAULT_WORKER_JOBS = int(config.default_n_jobs)
+    engine.DEFAULT_OUTER_JOBS = int(config.default_outer_jobs)
+    engine.DEFAULT_OUTER_JOBS_FALLBACK = config.default_outer_jobs_fallback
+    engine.DEFAULT_DEFER_TASK_IDS = tuple(int(value) for value in config.default_defer_task_ids)
+    engine.CLEAN_OUTPUT_JSON = bool(config.clean_output_json)
 
 
 def run_suite(config: OfflineSuiteConfig, argv: Sequence[str] | None = None) -> int:

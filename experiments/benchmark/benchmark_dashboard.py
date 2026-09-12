@@ -3,6 +3,7 @@ from __future__ import annotations
 # ruff: noqa: E402
 import argparse
 import copy
+import errno
 import hashlib
 import html
 import importlib.metadata as importlib_metadata
@@ -16,6 +17,7 @@ import shutil
 import subprocess
 import sys
 import sysconfig
+import tempfile
 import time
 import warnings
 from pathlib import Path
@@ -52,6 +54,8 @@ if SOURCE_ROOT is not None and (SOURCE_ROOT / "src").exists():
 
 import numpy as np
 import pandas as pd
+import psutil
+from joblib import Parallel, cpu_count, delayed, parallel_config
 from pandas.api.types import (
     is_bool_dtype,
     is_numeric_dtype,
@@ -59,16 +63,10 @@ from pandas.api.types import (
     is_string_dtype,
 )
 
-# is_categorical_dtype was removed in pandas 2.2+; provide a safe fallback.
-try:
-    from pandas.api.types import is_categorical_dtype as _is_categorical_dtype
-except ImportError:
-    def _is_categorical_dtype(arr_or_dtype) -> bool:
-        try:
-            return isinstance(getattr(arr_or_dtype, "dtype", arr_or_dtype), pd.CategoricalDtype)
-        except Exception:
-            return False
-is_categorical_dtype = _is_categorical_dtype
+
+def is_categorical_dtype(arr_or_dtype) -> bool:
+    return isinstance(getattr(arr_or_dtype, "dtype", arr_or_dtype), pd.CategoricalDtype)
+
 
 try:
     import statsmodels.api as sm
@@ -403,6 +401,12 @@ except Exception:
             ),
         ]
         grids["interpretability_ho"] = interaction_l1
+        grids["performance_ho_topk200"] = copy.deepcopy(grids["performance_ho"])
+        grids["performance_ho_topk200"]["topK"] = [50, 100, 150, 200]
+        grids["performance_ho_topk200_g1e4"] = copy.deepcopy(
+            grids["performance_ho_topk200"]
+        )
+        grids["performance_ho_topk200_g1e4"]["G"] = [0.01, 0.001, 0.0001]
 
         resolved = name or DEFAULT_HUGIML_GRID_NAME
         if resolved not in grids:
@@ -471,6 +475,22 @@ except Exception:
             },
         }
         return copy.deepcopy(grids[model])
+
+
+_PACKAGE_HUGIML_GRID_PROVIDER = get_hugiml_grid
+
+
+def get_hugiml_grid(name: str = DEFAULT_HUGIML_GRID_NAME) -> dict[str, list[Any]]:
+    """Return benchmark grids, including additions newer than the installed wheel."""
+    if name == "performance_ho_topk200":
+        grid = _PACKAGE_HUGIML_GRID_PROVIDER("performance_ho")
+        grid["topK"] = [50, 100, 150, 200]
+        return grid
+    if name == "performance_ho_topk200_g1e4":
+        grid = get_hugiml_grid("performance_ho_topk200")
+        grid["G"] = [0.01, 0.001, 0.0001]
+        return grid
+    return _PACKAGE_HUGIML_GRID_PROVIDER(name)
 
 
 _BASELINE_GRID_PROVIDER = get_baseline_grid
@@ -553,6 +573,24 @@ HUGIML_SCENARIOS: dict[str, dict[str, Any]] = {
             "and its corresponding adaptive RPTE branch"
         ),
         "grid_name": "performance_ho",
+        "overrides": {},
+    },
+    "performance_ho_topk200": {
+        "label": "Performance HO, expanded topK",
+        "description": (
+            "The 32-candidate performance_ho variant with topK values "
+            "50, 100, 150, and 200."
+        ),
+        "grid_name": "performance_ho_topk200",
+        "overrides": {},
+    },
+    "performance_ho_topk200_g1e4": {
+        "label": "Performance HO, expanded topK and support",
+        "description": (
+            "The 48-candidate performance_ho variant with topK values "
+            "50, 100, 150, and 200 and G values 0.01, 0.001, and 0.0001."
+        ),
+        "grid_name": "performance_ho_topk200_g1e4",
         "overrides": {},
     },
     "interaction_relaxed": {
@@ -1780,13 +1818,14 @@ def _hugiml_base_params_from_grid(
     grid_dict: dict[str, list[Any]],
     *,
     hugiml_max_fit_seconds: float | None,
+    n_jobs: int = 1,
 ) -> dict[str, Any]:
     base_params: dict[str, Any] = {}
     for key, values in grid_dict.items():
         if len(values) == 1:
             base_params[key] = copy.deepcopy(values[0])
     base_params.setdefault("execution_mode", "production")
-    base_params.setdefault("n_jobs", 1)
+    base_params["n_jobs"] = int(n_jobs)
     if hugiml_max_fit_seconds is not None:
         base_params.setdefault("max_fit_seconds", float(hugiml_max_fit_seconds))
     return base_params
@@ -1800,27 +1839,34 @@ def _tune_hugiml_inner_cv(
     inner_splits: int,
     random_state: int,
     hugiml_max_fit_seconds: float | None,
+    n_jobs: int = 1,
 ) -> tuple[Any, dict[str, Any], float, float, dict[str, Any]]:
     inner_splits = _validated_stratified_splits(y_tr, inner_splits, label="Inner HUGIML tuning CV")
     if not hasattr(HUGIMLClassifierNative, "tune"):
         raise RuntimeError("HUGIMLClassifierNative.tune is required for inner-CV tuning.")
     grid_dict = _candidate_grid_dict(candidates)
     base_params = _hugiml_base_params_from_grid(
-        grid_dict, hugiml_max_fit_seconds=hugiml_max_fit_seconds
+        grid_dict,
+        hugiml_max_fit_seconds=hugiml_max_fit_seconds,
+        n_jobs=n_jobs,
     )
     t0 = time.perf_counter()
-    result = HUGIMLClassifierNative.tune(
-        X_tr,
-        y_tr,
-        cv=inner_splits,
-        shuffle=True,
-        random_state=random_state,
-        scoring="roc_auc",
-        param_grid=grid_dict,
-        base_params=base_params,
-        refit=True,
-        use_fast_path=True,
-    )
+    with parallel_config(backend="loky", inner_max_num_threads=1, max_nbytes=None):
+        result = HUGIMLClassifierNative.tune(
+            X_tr,
+            y_tr,
+            cv=inner_splits,
+            shuffle=True,
+            random_state=random_state,
+            scoring="roc_auc",
+            param_grid=grid_dict,
+            base_params=base_params,
+            refit=True,
+            use_fast_path=True,
+            cv_n_jobs=min(inner_splits, n_jobs) if n_jobs > 0 else n_jobs,
+            refit_n_jobs=1,
+            suppress_expected_candidate_warnings=True,
+        )
     tune_ms = (time.perf_counter() - t0) * 1000.0
     refit_seconds = _safe_number_or_none(getattr(result, "refit_time_", None))
     final_refit_ms = (refit_seconds * 1000.0) if refit_seconds is not None else None
@@ -1832,6 +1878,10 @@ def _tune_hugiml_inner_cv(
         "hugiml_fast_path_used": bool(getattr(result, "fast_path_used_", True)),
         "hugiml_tune_elapsed_seconds": getattr(result, "elapsed_seconds_", None),
         "hugiml_tune_n_splits": getattr(result, "n_splits_", inner_splits),
+        "hugiml_tune_cv_n_jobs": getattr(result, "cv_n_jobs_", 1),
+        "hugiml_refit_n_jobs": getattr(
+            getattr(result, "best_estimator_", None), "n_jobs", None
+        ),
     }
     return (
         result.best_estimator_,
@@ -1850,6 +1900,7 @@ def _tune_pipeline_gridsearch(
     *,
     inner_splits: int,
     random_state: int,
+    n_jobs: int = 1,
 ) -> tuple[Any, dict[str, Any], float, float, dict[str, Any]]:
     inner_splits = _validated_stratified_splits(y_tr, inner_splits, label="Inner tuning CV")
     grid_dict = _candidate_grid_dict(candidates)
@@ -1865,12 +1916,19 @@ def _tune_pipeline_gridsearch(
         _prefix_grid_for_wrapped_model(grid_dict),
         scoring="roc_auc",
         cv=cv,
-        n_jobs=1,
+        n_jobs=n_jobs,
+        pre_dispatch=n_jobs if n_jobs > 0 else "n_jobs",
         refit=True,
         error_score=np.nan,
     )
     t0 = time.perf_counter()
-    search.fit(X_tr, y_tr)
+    if n_jobs == 1:
+        search.fit(X_tr, y_tr)
+    else:
+        with parallel_config(backend="loky", inner_max_num_threads=1, max_nbytes=None):
+            search.fit(X_tr, y_tr)
+    if not math.isfinite(float(search.best_score_)):
+        raise RuntimeError("No candidate completed every inner validation fold.")
     tune_ms = (time.perf_counter() - t0) * 1000.0
     final_refit_ms = None
     if hasattr(search, "refit_time_"):
@@ -1889,31 +1947,46 @@ def _tune_budgeted_pipeline_inner_cv(
     budget: float,
     inner_splits: int,
     random_state: int,
+    n_jobs: int = 1,
 ) -> tuple[Any, dict[str, Any], float, float, dict[str, Any]]:
     inner_splits = _validated_stratified_splits(y_tr, inner_splits, label="Inner budgeted tuning CV")
     cv = StratifiedKFold(n_splits=inner_splits, shuffle=True, random_state=random_state)
     scored: list[tuple[float, float, dict[str, Any]]] = []
     errors: list[str] = []
     t0 = time.perf_counter()
-    for params in candidates:
-        fold_scores: list[float] = []
-        fold_complexities: list[float] = []
-        for tr_idx, va_idx in cv.split(X_tr, y_tr):
-            X_i_tr = X_tr.iloc[tr_idx] if isinstance(X_tr, pd.DataFrame) else X_tr[tr_idx]
-            X_i_va = X_tr.iloc[va_idx] if isinstance(X_tr, pd.DataFrame) else X_tr[va_idx]
-            y_i_tr, y_i_va = y_tr[tr_idx], y_tr[va_idx]
-            try:
-                clf = baseline_pipeline(builder(params))
-                clf.fit(X_i_tr, y_i_tr)
-                fold_scores.append(safe_auc(y_i_va, probas(clf, X_i_va)))
-                comp = complexity_fn(clf) if complexity_fn else None
-                if comp is not None:
-                    fold_complexities.append(float(comp))
-            except Exception as exc:
-                errors.append(repr(exc))
-                fold_scores.append(float("nan"))
-        score = float(np.nanmean(fold_scores)) if fold_scores else float("nan")
-        mean_comp = float(np.nanmean(fold_complexities)) if fold_complexities else float("inf")
+
+    def evaluate_fold(
+        params: dict[str, Any], tr_idx: np.ndarray, va_idx: np.ndarray
+    ) -> tuple[float, float | None, str | None]:
+        X_i_tr = X_tr.iloc[tr_idx] if isinstance(X_tr, pd.DataFrame) else X_tr[tr_idx]
+        X_i_va = X_tr.iloc[va_idx] if isinstance(X_tr, pd.DataFrame) else X_tr[va_idx]
+        y_i_tr, y_i_va = y_tr[tr_idx], y_tr[va_idx]
+        try:
+            clf = baseline_pipeline(builder(copy.deepcopy(params)))
+            clf.fit(X_i_tr, y_i_tr)
+            score = safe_auc(y_i_va, probas(clf, X_i_va))
+            comp = complexity_fn(clf) if complexity_fn else None
+            return float(score), None if comp is None else float(comp), None
+        except Exception as exc:
+            return float("nan"), None, repr(exc)
+
+    fold_indices = list(cv.split(X_tr, y_tr))
+    jobs = [(params, tr, va) for params in candidates for tr, va in fold_indices]
+    if n_jobs == 1:
+        outputs = [evaluate_fold(*args) for args in jobs]
+    else:
+        with parallel_config(backend="loky", inner_max_num_threads=1, max_nbytes=None):
+            outputs = Parallel(n_jobs=n_jobs, pre_dispatch=n_jobs)(
+                delayed(evaluate_fold)(*args) for args in jobs
+            )
+    for index, params in enumerate(candidates):
+        fold_outputs = outputs[index * inner_splits:(index + 1) * inner_splits]
+        errors.extend(row[2] for row in fold_outputs if row[2] is not None)
+        if not all(math.isfinite(row[0]) and row[1] is not None
+                   and math.isfinite(row[1]) and row[2] is None for row in fold_outputs):
+            continue
+        score = float(np.mean([row[0] for row in fold_outputs]))
+        mean_comp = float(np.mean([row[1] for row in fold_outputs]))
         scored.append((score, mean_comp, copy.deepcopy(params)))
     scored.sort(key=lambda item: ((-1.0 if math.isnan(item[0]) else item[0]), -item[1]), reverse=True)
     viable = [item for item in scored if math.isfinite(item[1]) and item[1] <= float(budget)]
@@ -1926,6 +1999,8 @@ def _tune_budgeted_pipeline_inner_cv(
             clf.fit(X_tr, y_tr)
             final_refit_ms = (time.perf_counter() - t_fit) * 1000.0
             comp = complexity_fn(clf) if complexity_fn else None
+            if comp is None or not math.isfinite(float(comp)):
+                continue
             if viable and comp is not None and comp > budget:
                 continue
             tune_ms = (time.perf_counter() - t0) * 1000.0
@@ -2659,10 +2734,11 @@ def _hugiml_grid_for_scenario(hugiml_scenario: str | None) -> tuple[str, list[di
             f"Unknown HUGIML scenario {scenario!r}. Allowed: {list(HUGIML_SCENARIOS)}"
         )
     spec = HUGIML_SCENARIOS[scenario]
-    grid_dict = get_hugiml_grid(str(spec["grid_name"]))
+    grid_name = str(spec["grid_name"])
+    grid_dict = get_hugiml_grid(grid_name)
     for key, values in dict(spec.get("overrides", {})).items():
         grid_dict[key] = list(values)
-    return str(spec["grid_name"]), list(ParameterGrid(grid_dict))
+    return grid_name, list(ParameterGrid(grid_dict))
 
 
 HUGIML_MODEL_GRIDS = {
@@ -2711,6 +2787,46 @@ def _model_inspection_complexity(model: Any) -> int | float | None:
     return get_complexity(model, "model inspection units")
 
 
+class SampleAwareRuleFitClassifier(RuleFitClassifier if RuleFitClassifier is not None else BaseEstimator):
+    """Bound RuleFit's internal CV by the smallest training class."""
+
+    def _score_rules(self, X, y, rules):
+        from types import FunctionType
+
+        from imodels.util import score
+
+        _, counts = np.unique(y, return_counts=True)
+        splits = min(5, int(counts.min()))
+        self.internal_cv_splits_ = splits if self.cv else 0
+        if not self.cv or splits == 5:
+            return super()._score_rules(X, y, rules)
+        if splits < 2:
+            raise ValueError("RuleFit internal CV needs two samples per class.")
+
+        def bounded_cross_val_score(estimator, features, target, **kwargs):
+            kwargs["cv"] = splits
+            return score.cross_val_score(estimator, features, target, **kwargs)
+
+        # Bind the scoring functions locally so concurrent fits do not mutate
+        # the dependency's module globals or another estimator's CV settings.
+        alpha_globals = dict(score.get_best_alpha_under_max_rules.__globals__)
+        alpha_globals["cross_val_score"] = bounded_cross_val_score
+        alpha_selector = FunctionType(
+            score.get_best_alpha_under_max_rules.__code__, alpha_globals,
+            argdefs=score.get_best_alpha_under_max_rules.__defaults__,
+        )
+        linear_globals = dict(score.score_linear.__globals__)
+        linear_globals["get_best_alpha_under_max_rules"] = alpha_selector
+        linear_score = FunctionType(
+            score.score_linear.__code__, linear_globals,
+            argdefs=score.score_linear.__defaults__,
+        )
+        method = RuleFitClassifier._score_rules
+        method_globals = dict(method.__globals__)
+        method_globals["score_linear"] = linear_score
+        return FunctionType(method.__code__, method_globals)(self, X, y, rules)
+
+
 class AdaptiveSolverLogisticRegression(LogisticRegression):
     """Use liblinear for binary targets and saga for multiclass targets."""
 
@@ -2723,7 +2839,9 @@ def get_model_spec(
     *,
     hugiml_scenario: str | None = None,
     hugiml_max_fit_seconds: float | None = None,
+    random_state: int | None = None,
 ):
+    seed = RANDOM_STATE if random_state is None else int(random_state)
     if is_hugiml_model(model):
         _, grid = _hugiml_grid_for_model(model, hugiml_scenario)
 
@@ -2754,31 +2872,36 @@ def get_model_spec(
     lgb_budget_grid = list(ParameterGrid(get_budgeted_baseline_grid("LightGBM")))
     rf_budget_grid = list(ParameterGrid(get_budgeted_baseline_grid("RandomForest")))
 
+    constants = {
+        family: dict(baseline_constant_parameters(family), random_state=seed)
+        for family in ("XGBoost", "LightGBM", "RandomForest", "LogisticRegression", "EBM", "RuleFit")
+    }
+
     def xgb_builder(params):
-        return XGBClassifier(**baseline_constant_parameters("XGBoost"), **params)
+        return XGBClassifier(**dict(constants["XGBoost"]), **params)
 
     def lgb_builder(params):
-        return LGBMClassifier(**baseline_constant_parameters("LightGBM"), **params)
+        return LGBMClassifier(**dict(constants["LightGBM"]), **params)
 
     def rf_builder(params):
-        return RandomForestClassifier(**baseline_constant_parameters("RandomForest"), **params)
+        return RandomForestClassifier(**dict(constants["RandomForest"]), **params)
 
     def lr_builder(params):
-        pp = baseline_constant_parameters("LogisticRegression")
+        pp = dict(constants["LogisticRegression"])
         pp.update(params)
         return AdaptiveSolverLogisticRegression(**pp)
 
     def ebm_builder(params):
         if ExplainableBoostingClassifier is None:
             raise ImportError("interpret.glassbox.ExplainableBoostingClassifier is required for EBM")
-        pp = baseline_constant_parameters("EBM")
+        pp = dict(constants["EBM"])
         pp.update(params)
         return ExplainableBoostingClassifier(**pp)
 
     def rulefit_builder(params):
         if RuleFitClassifier is None:
             raise ImportError("imodels.RuleFitClassifier is required for RuleFit")
-        pp = baseline_constant_parameters("RuleFit")
+        pp = dict(constants["RuleFit"])
         pp.update(
             {
                 str(key).replace("estimator__", "", 1): value
@@ -2788,7 +2911,7 @@ def get_model_spec(
         # Keep max_rules authoritative. imodels ignores max_rules when alpha
         # is explicitly numeric, so alpha remains None for every candidate.
         pp["alpha"] = None
-        return OneVsRestClassifier(RuleFitClassifier(**pp), n_jobs=1)
+        return OneVsRestClassifier(SampleAwareRuleFitClassifier(**pp), n_jobs=1)
 
     specs = {
         "XGB standard": (xgb_grid, xgb_builder, _model_inspection_complexity, None),
@@ -2804,6 +2927,87 @@ def get_model_spec(
     return specs[model]
 
 
+
+def _parallel_layout(
+    X: pd.DataFrame, model: str, grid: list[dict[str, Any]], *,
+    outer_jobs: int, n_jobs: int, n_splits: int, inner_splits: int,
+    tune: bool, available_bytes: int | None = None, processors: int | None = None,
+) -> dict[str, Any]:
+    """Bound concurrent fits by CPU capacity and a conservative RAM allowance."""
+    processors = max(1, cpu_count() if processors is None else int(processors))
+    max_outer = min(n_splits, processors, processors if outer_jobs == -1 else outer_jobs)
+    max_inner = processors if n_jobs == -1 else n_jobs
+    if not tune:
+        max_inner = 1
+    else:
+        max_inner = min(max_inner, inner_splits)
+    n, p = X.shape
+    frame_bytes = int(X.memory_usage(index=True, deep=True).sum())
+    if is_hugiml_model(model):
+        from hugiml._classifier_support import _MemoryTracker
+
+        components = _MemoryTracker.estimate_fit_bytes(
+            n, p, max(20000 if c.get('topK') == -1 else int(c.get('topK', 100)) for c in grid),
+            n_numeric=sum(is_numeric_dtype(d) and not is_bool_dtype(d) for d in X.dtypes),
+            include_originals=any(c.get('feature_mode') != 'patterns_only' for c in grid),
+            max_length=max(6 if c.get('L') == -1 else int(c.get('L', 2)) for c in grid),
+        )
+        fit_bytes = sum(components.values())
+    else:
+        # Dense one-hot working matrices plus a tree/rule construction allowance.
+        width = sum(1 if is_numeric_dtype(X[c]) and not is_bool_dtype(X[c])
+                    else max(1, X[c].nunique(dropna=False)) for c in X.columns)
+        trees = max(int(c.get('n_estimators', 200)) for c in grid)
+        fit_bytes = n * width * 8 * 4 + n * trees * 128
+    # Include process imports, model objects, and allocator headroom per fit.
+    fit_bytes += 384 * 1024**2
+    if available_bytes is None:
+        try:
+            available_bytes = int(psutil.virtual_memory().available)
+        except (OSError, RuntimeError, ValueError, AttributeError, NotImplementedError):
+            available_bytes = 0
+    memory_budget = max(0, int(available_bytes * 0.7))
+    candidates = []
+    for outer in range(1, max_outer + 1):
+        # Outer processes retain their training partitions while children tune.
+        parent_bytes = outer * (frame_bytes * 3 + 256 * 1024**2)
+        total = min(processors, outer * max_inner,
+                    max(0, (memory_budget - parent_bytes) // fit_bytes))
+        if total < outer:
+            continue
+        # Every outer fold receives the same inner-worker budget.
+        total = (total // outer) * outer
+        counts = [total // outer] * outer
+        candidates.append((total, outer, counts, parent_bytes + total * fit_bytes))
+    if candidates:
+        _, outer, counts, estimated = max(candidates, key=lambda c: (c[0], c[1]))
+    else:
+        outer, counts = 1, [1]
+        estimated = frame_bytes * 3 + 256 * 1024**2 + fit_bytes
+    return {'outer_jobs': outer, 'n_jobs': max(counts), 'inner_jobs_by_slot': counts,
+            'estimated_concurrent_bytes': estimated, 'available_bytes': int(available_bytes)}
+
+
+def _dataset_parallel_layout(
+    X, models, scenarios, *, n_splits, inner_splits, n_jobs, outer_jobs, tune,
+):
+    try:
+        available = int(psutil.virtual_memory().available)
+    except (OSError, RuntimeError, ValueError, AttributeError, NotImplementedError):
+        available = 0
+    layouts = []
+    for model in models:
+        for scenario in scenarios if is_hugiml_model(model) else [None]:
+            grid, _, _, _ = get_model_spec(model, hugiml_scenario=scenario)
+            layouts.append(_parallel_layout(
+                X, model, grid, outer_jobs=outer_jobs, n_jobs=n_jobs,
+                n_splits=n_splits, inner_splits=inner_splits, tune=tune,
+                available_bytes=available,
+            ))
+    common = min(layouts, key=lambda item: (sum(item["inner_jobs_by_slot"]), item["outer_jobs"]))
+    return {key: common[key] for key in ("outer_jobs", "n_jobs", "inner_jobs_by_slot")}
+
+
 def run_pair(
     dataset: str,
     model: str,
@@ -2816,7 +3020,18 @@ def run_pair(
     tune: bool = True,
     random_state: int | None = None,
     fold_checkpoint_dir: Path | None = None,
+    n_jobs: int = 1,
+    outer_jobs: int = 1,
+    lr_source_policy: str = "standard",
+    worker_layout: dict[str, Any] | None = None,
+    dataset_progress: tuple[int, int] | None = None,
 ) -> dict[str, Any]:
+    progress = f"[{dataset_progress[0]}/{dataset_progress[1]}] " if dataset_progress else ""
+    if n_jobs == 0 or n_jobs < -1 or outer_jobs == 0 or outer_jobs < -1:
+        raise ValueError("Worker counts must be -1 or positive")
+    if lr_source_policy not in ("standard", "main_effect", "strict"):
+        raise ValueError("Unknown lr_source_policy")
+    requested_n_jobs = n_jobs
     random_state = RANDOM_STATE if random_state is None else int(random_state)
     X, y, group = load_dataset(dataset)
     X, y = _apply_row_cap(X, y, row_cap=row_cap, random_state=random_state)
@@ -2834,8 +3049,16 @@ def run_pair(
         model,
         hugiml_scenario=hugiml_scenario,
         hugiml_max_fit_seconds=hugiml_max_fit_seconds,
+        random_state=random_state,
     )
     n_splits = _validated_stratified_splits(y, n_splits, label="Outer benchmark CV")
+    if is_hugiml_model(model):
+        grid = [dict(candidate, lr_source_policy=lr_source_policy) for candidate in grid]
+        original_builder = builder
+
+        def builder(params):
+            return original_builder(dict(params, lr_source_policy=lr_source_policy))
+
     cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
     rows_by_fold: dict[int, dict[str, Any]] = {}
     feature_counts_by_fold: dict[int, int] = {}
@@ -2847,7 +3070,11 @@ def run_pair(
             "dataset": dataset, "model": model, "hugiml_scenario": hugiml_scenario,
             "row_cap": row_cap, "n_splits": n_splits, "inner_splits": inner_splits,
             "tune": tune, "random_state": random_state,
+            "n_jobs": int(requested_n_jobs), "outer_jobs": int(outer_jobs),
+            "lr_source_policy": lr_source_policy,
+            "hugiml_max_fit_seconds": hugiml_max_fit_seconds,
             "dataset_feature_policy": DATASET_FEATURE_POLICY,
+            "worker_layout": worker_layout,
         }
         token = hashlib.sha256(json.dumps(identity, sort_keys=True, default=str).encode()).hexdigest()[:20]
         fold_checkpoint_path = fold_checkpoint_dir / f"{token}.json"
@@ -2878,21 +3105,25 @@ def run_pair(
                 rows_by_fold = {}
                 feature_counts_by_fold = {}
     successful_fold_ids = {
-        fold_id
-        for fold_id, row in rows_by_fold.items()
-        if (
-            row.get("status") == "ok"
-            or (
-                row.get("status") is None
-                and int(row.get("error_count", 0) or 0) == 0
-                and row.get("roc_auc") is not None
-            )
-        )
+        fold_id for fold_id, row in rows_by_fold.items()
+        if 0 <= fold_id < n_splits and row.get("status") in (None, "ok")
+        and int(row.get("error_count", 0) or 0) == 0
+        and _safe_number_or_none(row.get("roc_auc")) is not None
     }
+    rows_by_fold = {key: value for key, value in rows_by_fold.items() if 0 <= key < n_splits}
+    feature_counts_by_fold = {key: value for key, value in feature_counts_by_fold.items()
+                              if key in successful_fold_ids}
+    pending = [(i, tr, te) for i, (tr, te) in enumerate(cv.split(X, y))
+               if i not in successful_fold_ids]
+    layout = worker_layout or _parallel_layout(
+        X, model, grid, outer_jobs=outer_jobs, n_jobs=requested_n_jobs,
+        n_splits=max(1, len(pending)), inner_splits=inner_splits, tune=tune,
+    )
+    n_jobs = layout["n_jobs"]
+    print(f"{progress}workers {dataset} :: {model}: {layout['outer_jobs']} outer; "
+          f"inner allocation {layout['inner_jobs_by_slot']}", flush=True)
 
-    for fold_idx, (tr_idx, te_idx) in enumerate(cv.split(X, y)):
-        if fold_idx in successful_fold_ids:
-            continue
+    def evaluate_fold(fold_idx, tr_idx, te_idx, n_jobs):
         X_train_native = _force_writable_frame(X.iloc[tr_idx].reset_index(drop=True))
         X_test_native = _force_writable_frame(X.iloc[te_idx].reset_index(drop=True))
         y_train = np.asarray(y[tr_idx], dtype=int, copy=True)
@@ -2916,6 +3147,7 @@ def run_pair(
                         inner_splits=inner_splits,
                         random_state=random_state,
                         hugiml_max_fit_seconds=hugiml_max_fit_seconds,
+                        n_jobs=n_jobs,
                     )
                     fit_ms = _final_refit_ms_from_info(clf, selection_info)
                 else:
@@ -2932,6 +3164,7 @@ def run_pair(
                             y_train,
                             inner_splits=inner_splits,
                             random_state=random_state,
+                            n_jobs=n_jobs,
                         )
                         fit_ms = _final_refit_ms_from_info(clf, selection_info)
                     else:
@@ -2945,6 +3178,7 @@ def run_pair(
                                 budget=float(budget),
                                 inner_splits=inner_splits,
                                 random_state=random_state,
+                                n_jobs=n_jobs,
                             )
                         )
                         fit_ms = _final_refit_ms_from_info(clf, selection_info)
@@ -3076,13 +3310,20 @@ def run_pair(
                 "outer_n_splits": int(n_splits),
                 "inner_n_splits": int(inner_splits) if tune else None,
                 "random_state": int(random_state),
+                "n_jobs": int(n_jobs),
+                "outer_jobs": int(layout["outer_jobs"]),
+                "lr_source_policy": lr_source_policy if is_hugiml_model(model) else None,
                 "status": "ok" if error_count == 0 else "error",
                 "error_count": error_count,
                 "last_error": last_error,
             }
         )
+        return fold_idx, fold_row, int(feature_count) if error_count == 0 else None
+
+    def accept_fold(output):
+        fold_idx, fold_row, feature_count = output
         rows_by_fold[int(fold_idx)] = fold_row
-        if error_count == 0:
+        if fold_row["status"] == "ok":
             feature_counts_by_fold[int(fold_idx)] = int(feature_count)
         else:
             feature_counts_by_fold.pop(int(fold_idx), None)
@@ -3096,9 +3337,22 @@ def run_pair(
                     for key in sorted(feature_counts_by_fold)
                 },
             }
-            tmp = fold_checkpoint_path.with_suffix(fold_checkpoint_path.suffix + ".tmp")
-            tmp.write_text(json.dumps(checkpoint_payload, indent=2, default=_json_default))
-            tmp.replace(fold_checkpoint_path)
+            save_checkpoint(fold_checkpoint_path, checkpoint_payload)
+        print(f"{progress}fold {fold_idx + 1}/{n_splits} {dataset} :: {model} "
+              f"{hugiml_scenario or ''}: {fold_row['status']}", flush=True)
+
+    if layout["outer_jobs"] == 1:
+        for args in pending:
+            accept_fold(evaluate_fold(*args, layout["n_jobs"]))
+    else:
+        with parallel_config(backend="loky", inner_max_num_threads=1, max_nbytes=None):
+            outputs = Parallel(n_jobs=layout["outer_jobs"], return_as="generator_unordered",
+                               pre_dispatch=layout["outer_jobs"])(
+                delayed(evaluate_fold)(*args, layout["inner_jobs_by_slot"][i % layout["outer_jobs"]])
+                for i, args in enumerate(pending)
+            )
+            for output in outputs:
+                accept_fold(output)
 
     fold_rows = [rows_by_fold[key] for key in sorted(rows_by_fold)]
     row = _aggregate_fold_rows(fold_rows)
@@ -3130,6 +3384,17 @@ def run_pair(
             "outer_n_splits": int(n_splits),
             "inner_n_splits": int(inner_splits) if tune else None,
             "random_state": int(random_state),
+            "n_jobs": int(n_jobs),
+            "outer_jobs": int(layout["outer_jobs"]),
+            "requested_n_jobs": int(requested_n_jobs),
+            "requested_outer_jobs": int(outer_jobs),
+            "resumed_outer_folds": len(successful_fold_ids),
+            "timing_comparable": not bool(successful_fold_ids),
+            "lr_source_policy": lr_source_policy if is_hugiml_model(model) else None,
+            "status": "ok" if len(fold_rows) == n_splits and all(
+                r.get("status") == "ok" and _safe_number_or_none(r.get("roc_auc")) is not None
+                for r in fold_rows
+            ) else "error",
             "scoring": "roc_auc",
             "tuned": bool(tune),
         }
@@ -3287,56 +3552,10 @@ def methodology_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
 
     hugiml_models = []
     for scenario_id, spec in HUGIML_SCENARIOS.items():
-        stored = dict(scenario_snapshot.get(scenario_id, {}) or {})
-        grid = dict(stored.get("grid", {}) or {})
-        if not grid:
-            grid = get_hugiml_grid(str(spec["grid_name"]))
-            grid.update(dict(spec.get("overrides", {})))
-        automatic_lr_C = float((grid.get("lr_C") or [1.0])[0])
-        notes = [
-            "execution_mode=production",
-            "n_jobs=1",
-            "Automatic linear base estimator: logistic regression with L2 penalty, "
-            f"binary lbfgs / multiclass lbfgs-OvR, C={automatic_lr_C:g}, "
-            "random_state=0, and max_iter=300 for every binary fit.",
-        ]
-        if scenario_id == "augmented_pair":
-            notes.extend(
-                [
-                    "Inner cross-validation selects between the stated logistic-regression base estimator and one-vs-rest RPTE.",
-                    "Numeric 0/1 columns remain numeric and eligible for augmented-pair transforms.",
-                    "RPTE uses leaf indicators together with downstream inputs not selected in accepted tree splits.",
-                    "RPTE lookahead is adaptive for this path.",
-                ]
-            )
-        else:
-            notes.extend(
-                [
-                    "Inner cross-validation selects between the stated logistic-regression base estimator and one-vs-rest RPTE.",
-                    "Numeric 0/1 indicators are treated categorically for the pattern-mining surface.",
-                    "Interaction relaxation is performed by the pattern miner; augmented pairs are disabled.",
-                    "RPTE uses the sequential backend with lookahead inactive for this path.",
-                ]
-            )
-        hugiml_models.append(
-            {
-                "model": f'HUGIML — {spec["label"]}',
-                "grid_name": str(spec["grid_name"]),
-                "candidate_count": _methodology_candidate_count(grid),
-                "parameters": _methodology_parameter_rows(grid),
-                "constant_settings": notes,
-                "complexity": (
-                    "Model inspection units represent the complete fitted HUGIML model that a reviewer "
-                    "must inspect. Linear branches count active source contributions; RPTE branches count "
-                    "conditions across active terminal paths plus direct terms. Intercepts are excluded, "
-                    "and fitted numeric components are active when their absolute value exceeds 1e-12."
-                ),
-            }
-        )
-
-    # Present each regularization variant separately for both HUGIML scenarios.
-    hugiml_models = []
-    for scenario_id, spec in HUGIML_SCENARIOS.items():
+        if scenario_id not in metadata.get("hugiml_dashboard_scenarios", HUGIML_SCENARIOS):
+            continue
+        if "HUGIML" not in metadata.get("model_order", MODEL_ORDER):
+            continue
         stored = dict(scenario_snapshot.get(scenario_id, {}) or {})
         stored_model_grids = dict(stored.get("model_grids", {}) or {})
         for model in ("HUGIML",):
@@ -3354,6 +3573,7 @@ def methodology_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
             )
             notes = [
                 "execution_mode=production",
+                f"lr_source_policy={metadata.get('lr_source_policy', 'standard')}",
                 "n_jobs=1",
                 solver_note,
                 "Downstream redundancy uses one training-only VIF analysis; generated terms with VIF greater than 5 are reduced when an earlier preferred term explains at least 80 percent of their variance, while originals are preserved and patterns precede augmented pairs.",
@@ -3433,6 +3653,8 @@ def methodology_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
         ),
     }
     for label, family, budgeted in baseline_labels:
+        if label not in metadata.get("model_order", MODEL_ORDER):
+            continue
         grid = budgeted_grids[family] if budgeted else standard_grids[family]
         notes = [
             f"{key}={_methodology_display_value(value)}"
@@ -3473,6 +3695,7 @@ def methodology_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
         f"Reported dataset AUC: arithmetic mean of the {outer_splits} outer-fold ROC-AUC values.",
         "Statistical comparisons use dataset-level outer-CV aggregates, Friedman ranking, paired Wilcoxon tests, and Holm adjustment where shown.",
     ]
+    protocol.append("Each dataset uses the same recorded worker allocation for every model. Full-run wall-time comparisons use datasets with uninterrupted timings for every selected model.")
     preprocessing = [
         "HUGIML receives the native pandas table, including categorical columns, and performs its own binning and pattern construction inside each training fold.",
         "HUGIML applies exact downstream canonicalization followed by one training-only VIF analysis. Original terms are preserved; patterns and augmented pairs with VIF greater than 5 are reduced in that order when an earlier preferred term explains at least 80 percent of their variance.",
@@ -3515,11 +3738,38 @@ def load_checkpoint(path: Path) -> dict[str, Any]:
     }
 
 
+def _replace_checkpoint_file(
+    source: Path, destination: Path, *, attempts: int = 10, delay_seconds: float = 0.1,
+) -> None:
+    """Retry atomic replacement while Windows readers release a file handle."""
+    if attempts < 1:
+        raise ValueError("Replacement attempts must be positive")
+    for attempt in range(attempts):
+        try:
+            os.replace(source, destination)
+            return
+        except OSError as exc:
+            locked = getattr(exc, "winerror", None) in (5, 32, 33) or exc.errno in (
+                errno.EACCES, errno.EBUSY, errno.EPERM,
+            )
+            if not locked or attempt + 1 == attempts:
+                raise
+            time.sleep(min(delay_seconds * 2**attempt, 2.0))
+
+
 def save_checkpoint(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(json.dumps(payload, indent=2, default=_json_default))
-    tmp.replace(path)
+    serialized = json.dumps(_clean_result_payload(payload), indent=2, allow_nan=False)
+    with tempfile.NamedTemporaryFile(
+        mode="w", encoding="utf-8", dir=path.parent,
+        prefix=path.name + ".", suffix=".tmp", delete=False,
+    ) as stream:
+        temporary = Path(stream.name)
+        stream.write(serialized)
+        stream.flush()
+        os.fsync(stream.fileno())
+    # A blocked replacement leaves both the destination and complete temporary data intact.
+    _replace_checkpoint_file(temporary, path)
 
 
 def _canonical_model_label(model: Any) -> str:
@@ -3541,12 +3791,14 @@ def _pair_key(dataset: str, model: str, hugiml_scenario: str | None = None) -> t
     )
 
 
-def pair_plan(datasets: list[str], models: list[str]) -> list[tuple[str, str, str | None]]:
+def pair_plan(
+    datasets: list[str], models: list[str], hugiml_scenarios: list[str] | None = None,
+) -> list[tuple[str, str, str | None]]:
     pairs: list[tuple[str, str, str | None]] = []
     for d in datasets:
         for m in models:
             if is_hugiml_model(m):
-                for scenario in HUGIML_SCENARIOS:
+                for scenario in (hugiml_scenarios if hugiml_scenarios is not None else HUGIML_SCENARIOS):
                     pairs.append((d, m, scenario))
             else:
                 pairs.append((d, m, None))
@@ -3557,6 +3809,8 @@ def completed_keys(payload: dict[str, Any]) -> set[tuple[str, str, str | None]]:
     return {
         _pair_key(str(r.get("dataset")), str(r.get("model")), _hugiml_scenario_for_row(r))
         for r in payload.get("results", [])
+        if r.get("status") != "error" and int(r.get("error_count", 0) or 0) == 0
+        and _safe_number_or_none(r.get("roc_auc")) is not None
     }
 
 
@@ -3661,13 +3915,22 @@ def _summary_for_scope(df_scope: pd.DataFrame, scope: str) -> dict[str, Any]:
             "hugiml_mean_rank": None,
         }
 
+    timed_sets = []
+    for model in MODEL_ORDER:
+        timed = df_scope[df_scope.model == model]
+        values = pd.to_numeric(timed.get("pair_seconds", pd.Series(index=timed.index, dtype=float)),
+                               errors="coerce")
+        valid = values.notna() & timed.get("timing_comparable", pd.Series(True, index=timed.index))
+        timed_sets.append(set(timed.loc[valid, "dataset"]))
+    timed_datasets = set.intersection(*timed_sets) if timed_sets else set()
     for m in MODEL_ORDER:
         sub = df_scope[df_scope.model == m]
         auc = pd.to_numeric(sub["auc"], errors="coerce")
         f1 = pd.to_numeric(sub.get("f1", pd.Series(dtype=float)), errors="coerce")
         acc = pd.to_numeric(sub.get("accuracy", pd.Series(dtype=float)), errors="coerce")
         fit = pd.to_numeric(sub.get("fit_seconds", pd.Series(dtype=float)), errors="coerce")
-        pair = pd.to_numeric(sub.get("pair_seconds", pd.Series(dtype=float)), errors="coerce")
+        timing_sub = sub[sub.dataset.isin(timed_datasets)]
+        pair = pd.to_numeric(timing_sub.get("pair_seconds", pd.Series(dtype=float)), errors="coerce")
         comp = _model_inspection_complexity_series(sub).dropna()
         model_units = pd.to_numeric(
             sub.get("complexity_model_units", pd.Series(dtype=float)), errors="coerce"
@@ -3712,6 +3975,7 @@ def _summary_for_scope(df_scope: pd.DataFrame, scope: str) -> dict[str, Any]:
                 "instance_inspection_n_datasets": instance_ci["n_samples"],
                 "mean_fit_seconds": None if fit.dropna().empty else float(fit.mean()),
                 "mean_pair_seconds": None if pair.dropna().empty else float(pair.mean()),
+                "timed_dataset_count": len(timed_datasets),
             }
         )
 
@@ -4123,7 +4387,7 @@ def _make_data_single(details: list[dict[str, Any]]) -> dict[str, Any]:
         "side": side_rows,
         "overall": overall,
         "details": df.drop(
-            columns=[c for c in df.columns if _is_local_provenance_key(c)]
+            columns=[c for c in df.columns if _is_local_location_key(c)]
         ).to_dict(orient="records"),
         "heat": heat,
         "global": global_rows,
@@ -4244,7 +4508,7 @@ def make_data(details: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def extract_original_data(html_path: Path) -> dict[str, Any]:
-    text = html_path.read_text(errors="ignore")
+    text = html_path.read_text(encoding="utf-8", errors="ignore")
     model_order_pos = text.index(";\nconst MODEL_ORDER")
     data_pos = text.index("const DATA=")
     scenarios_pos = text.find("const DASHBOARD_SCENARIOS=")
@@ -5395,7 +5659,7 @@ def render_html(
     out_html: Path,
 ) -> None:
     text = (
-        template_html.read_text(errors="ignore")
+        template_html.read_text(encoding="utf-8", errors="ignore")
         if template_html.exists()
         else _default_dashboard_template()
     )
@@ -5461,8 +5725,9 @@ def render_html(
     best = overall.sort_values(["mean_auc", "mean_rank"], ascending=[False, True]).iloc[0]
     hug = overall.loc[overall["model"] == "HUGIML"].iloc[0]
     best_rank = overall.sort_values(["mean_rank", "mean_auc"], ascending=[True, False]).iloc[0]
-    p = float(data["global"][0]["p_value"])
-    p_text = f"{p:.4g}"
+    p_value = _safe_number_or_none(data["global"][0]["p_value"])
+    p = float("nan") if p_value is None else p_value
+    p_text = "Unavailable" if p_value is None else f"{p:.4g}"
     budget_over = int(sum(int(r.get("n_over_budget", 0)) for r in data["budget"]))
     vs_rows = list(data.get("vs_hugiml", []))
     pairwise_rows = list(data.get("pairwise_all", []))
@@ -5485,6 +5750,9 @@ def render_html(
         if p < 0.05
         else "no significant global rank difference at alpha 0.05"
     )
+    if p_value is None:
+        global_text = "Global rank test unavailable"
+        interp = "global rank test unavailable"
     hug_interp = (
         f"{hug_sig_count} of {vs_total} HUGIML-vs-baseline comparisons are significant after Holm correction."
         if sig_vs
@@ -5538,8 +5806,15 @@ def render_html(
         "Mean model complexity (leaves or patterns)":
             "Mean model inspection units",
     }
+    static_replacements.update({
+        "HUGIML complexity is measured as selected patterns.": "HUGIML complexity is measured in model inspection units.",
+        "Budgeted tree variants are constrained by learned model complexity, measured as terminal leaves across the fitted ensemble.": "Budgeted tree variants are constrained by model inspection units across the fitted ensemble.",
+        "Leaves for tree ensembles and RuleFit rules; EBM active cells; selected patterns for HUGIML": "Model inspection units across all model families",
+        "Tree budget: ≤100 leaves": "Tree budget: ≤200 model inspection units",
+    })
     for old, new in static_replacements.items():
         text = text.replace(old, new)
+        text = re.sub(r"\s+".join(re.escape(part) for part in old.split()), lambda m: new, text)
 
     for pat, repl in replacements.items():
         text = re.sub(pat, repl, text, count=1)
@@ -5604,18 +5879,18 @@ def render_html(
     if methodology:
         text = _inject_before_body_end(text, _methodology_section_html(methodology))
     out_html.parent.mkdir(parents=True, exist_ok=True)
-    out_html.write_text(text)
+    out_html.write_text(text, encoding="utf-8")
 
 
 
 
-_LOCAL_PROVENANCE_KEYS = {"checkpoint", "out_dir", "template_html"}
+_LOCAL_LOCATION_KEYS = {"checkpoint", "out_dir", "template_html"}
 
 
-def _is_local_provenance_key(key: Any) -> bool:
+def _is_local_location_key(key: Any) -> bool:
     name = str(key).lower()
     return (
-        name in _LOCAL_PROVENANCE_KEYS
+        name in _LOCAL_LOCATION_KEYS
         or name in {"baseline_source", "source_root"}
         or name.endswith("_imported_from")
     )
@@ -5634,21 +5909,47 @@ def _sanitize_local_text(value: str) -> str:
     return _LOCAL_ABSOLUTE_PATH_RE.sub("<local-path>", text)
 
 
-def _remove_local_provenance(value: Any) -> Any:
-    """Remove machine-specific locations from data written by dashboard assembly."""
+def _remove_local_location_data(value: Any) -> Any:
+    """Remove machine-specific locations from dashboard output data."""
     if isinstance(value, dict):
         return {
-            key: _remove_local_provenance(item)
+            key: _remove_local_location_data(item)
             for key, item in value.items()
-            if not _is_local_provenance_key(key)
+            if not _is_local_location_key(key)
         }
     if isinstance(value, list):
-        return [_remove_local_provenance(item) for item in value]
+        return [_remove_local_location_data(item) for item in value]
     if isinstance(value, tuple):
-        return tuple(_remove_local_provenance(item) for item in value)
+        return tuple(_remove_local_location_data(item) for item in value)
     if isinstance(value, str):
         return _sanitize_local_text(value)
     return value
+
+
+def _clean_result_payload(value: Any) -> Any:
+    """Keep portable result data and numeric durations without diagnostic text."""
+    omitted = {
+        "last_error", "error", "errors", "warning", "warnings", "error_log", "warning_log",
+        "traceback", "stdout", "stderr", "logs", "timestamp", "timestamps",
+        "created_at", "updated_at", "started_at", "finished_at", "completed_at",
+        "generated_at", "history", "provenance",
+    }
+    if isinstance(value, dict):
+        return {
+            str(key): _clean_result_payload(item) for key, item in value.items()
+            if str(key).lower() not in omitted and not _is_local_location_key(key)
+            and not str(key).lower().endswith(("_timestamp", "_log", "_logs"))
+        }
+    if isinstance(value, (list, tuple)):
+        return [_clean_result_payload(item) for item in value]
+    if isinstance(value, str):
+        if value.lstrip().startswith(("{", "[")):
+            try:
+                return json.dumps(_clean_result_payload(json.loads(value)), sort_keys=True)
+            except (ValueError, TypeError):
+                pass
+        return _sanitize_local_text(value)
+    return _safe_jsonable(value)
 
 
 def assemble_outputs(
@@ -5659,12 +5960,23 @@ def assemble_outputs(
     include_sbom: bool = False,
 ) -> dict[str, Path]:
     global MODEL_ORDER
-    payload = _remove_local_provenance(load_checkpoint(checkpoint))
+    saved_order = MODEL_ORDER
+    payload = load_checkpoint(checkpoint)
+    selected = payload.get("metadata", {}).get("model_order")
+    observed = {str(row.get("model")) for row in payload.get("results", [])}
+    MODEL_ORDER = list(selected) if selected else [m for m in MODEL_ORDER if m in observed]
+    try:
+        return _assemble_selected_outputs(checkpoint, out_dir, template_html, include_sbom=include_sbom)
+    finally:
+        MODEL_ORDER = saved_order
+
+
+def _assemble_selected_outputs(
+    checkpoint: Path, out_dir: Path, template_html: Path, *, include_sbom: bool = False,
+) -> dict[str, Path]:
+    payload = _clean_result_payload(load_checkpoint(checkpoint))
     details = payload.get("results", [])
-    observed_models = {
-        _canonical_model_label(row.get("model")) for row in details
-    }
-    MODEL_ORDER = [model for model in MODEL_ORDER if model in observed_models]
+    metadata = payload.get("metadata", {})
     order = {d: i for i, d in enumerate(DATASET_NAMES)}
     mo = {m: i for i, m in enumerate(MODEL_ORDER)}
     so = {s: i for i, s in enumerate(HUGIML_SCENARIOS)}
@@ -5676,12 +5988,14 @@ def assemble_outputs(
             so.get(_hugiml_scenario_for_row(r), 999),
         ),
     )
-    expected_keys = set(pair_plan(DATASET_NAMES, MODEL_ORDER))
+    selected_scenarios = list(metadata.get("hugiml_dashboard_scenarios", HUGIML_SCENARIOS))
+    expected_keys = set(pair_plan(metadata.get("dataset_names", DATASET_NAMES), MODEL_ORDER,
+                                  selected_scenarios))
     actual_keys = {
         _pair_key(str(r.get("dataset")), str(r.get("model")), _hugiml_scenario_for_row(r))
         for r in details
     }
-    if actual_keys != expected_keys:
+    if actual_keys != expected_keys or len(details) != len(actual_keys):
         missing = sorted(expected_keys - actual_keys, key=lambda x: (order.get(x[0], 999), mo.get(x[1], 999), so.get(x[2], 999)))
         extra = sorted(actual_keys - expected_keys, key=lambda x: (order.get(x[0], 999), mo.get(x[1], 999), so.get(x[2], 999)))
         raise RuntimeError(
@@ -5689,12 +6003,16 @@ def assemble_outputs(
             f"missing {len(missing)} pairs, extra {len(extra)} pairs, "
             f"first missing={missing[:5]}, first extra={extra[:5]}"
         )
-    data = _remove_local_provenance(make_data(details))
+    if any(row.get("status") == "error" or int(row.get("error_count", 0) or 0)
+           or _safe_number_or_none(row.get("roc_auc")) is None for row in details):
+        raise RuntimeError("Every selected result must complete successfully before assembly.")
+    data = _clean_result_payload(make_data(details))
     methodology = methodology_snapshot(payload)
     data["methodology"] = methodology
     for scenario in data.get("dashboard_scenarios", []):
         if isinstance(scenario, dict) and isinstance(scenario.get("data"), dict):
             scenario["data"]["methodology"] = methodology
+    data = _clean_result_payload(data)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     paths: dict[str, Path] = {
@@ -5806,6 +6124,10 @@ def main(argv=None) -> int:
     )
     ap.add_argument("--datasets", default="all", help="Comma-separated dataset names, or all")
     ap.add_argument("--models", default="all", help="Comma-separated model labels, or all")
+    ap.add_argument("--execute-models", default="all",
+                    help="Models to execute from the selected panel; other results are retained")
+    ap.add_argument("--hugiml-scenarios", default="augmented_pair,interaction_relaxed",
+                    help="Comma-separated HUGIML scenarios, or all")
     ap.add_argument("--start-pair", type=int, default=0)
     ap.add_argument("--max-pairs", type=int, default=None)
     ap.add_argument("--resume", action="store_true")
@@ -5831,6 +6153,16 @@ def main(argv=None) -> int:
     ap.add_argument("--n-splits", type=int, default=5, help="Outer StratifiedKFold split count")
     ap.add_argument("--inner-splits", type=int, default=3, help="Inner tuning StratifiedKFold split count")
     ap.add_argument("--random-state", type=int, default=42, help="Random seed for data generation and CV")
+    ap.add_argument(
+        "--n-jobs",
+        type=int,
+        default=1,
+        help="Inner validation workers per outer fold; bounded by CPU and memory capacity",
+    )
+    ap.add_argument("--outer-jobs", type=int, default=1,
+                    help="Concurrent outer folds; -1 uses up to the available CPUs")
+    ap.add_argument("--lr-source-policy", choices=("standard", "main_effect", "strict"),
+                    default="standard", help="HUGIML linear source selection policy")
     ap.add_argument("--no-tune", action="store_true", help="Disable inner-CV hyperparameter tuning")
     ap.add_argument(
         "--hugiml-max-fit-seconds",
@@ -5839,6 +6171,8 @@ def main(argv=None) -> int:
         help="Optional base parameter for constrained environments",
     )
     args = ap.parse_args(argv)
+    if args.n_jobs == 0 or args.n_jobs < -1 or args.outer_jobs == 0 or args.outer_jobs < -1:
+        raise ValueError("--n-jobs and --outer-jobs must be -1 or positive integers")
 
     global RANDOM_STATE
     RANDOM_STATE = int(args.random_state)
@@ -5863,7 +6197,9 @@ def main(argv=None) -> int:
 
     datasets = parse_list(args.datasets, DATASET_NAMES)
     models = parse_list(args.models, MODEL_ORDER)
-    plan = pair_plan(datasets, models)
+    execution_models = parse_list(args.execute_models, models)
+    scenarios = parse_list(args.hugiml_scenarios, list(HUGIML_SCENARIOS))
+    plan = pair_plan(datasets, models, scenarios)
     if args.start_pair:
         plan = plan[args.start_pair :]
     if args.max_pairs is not None:
@@ -5936,9 +6272,31 @@ def main(argv=None) -> int:
     payload = load_checkpoint(checkpoint)
     if args.resume:
         _validate_resume_feature_policy(payload)
+        if payload.get("results") or (out_dir / "fold_checkpoints").exists():
+            for name, value in {
+                "n_jobs": args.n_jobs, "outer_jobs": args.outer_jobs,
+                "dataset_names": datasets, "model_order": models,
+                "hugiml_dashboard_scenarios": {key: HUGIML_SCENARIOS[key] for key in scenarios},
+                "lr_source_policy": args.lr_source_policy,
+                "n_splits": args.n_splits, "inner_splits": args.inner_splits,
+                "row_cap": args.row_cap, "random_state": args.random_state,
+                "tune": not args.no_tune,
+                "hugiml_max_fit_seconds": args.hugiml_max_fit_seconds,
+            }.items():
+                if payload.get("metadata", {}).get(name) != value:
+                    raise RuntimeError(f"Resume requires the recorded {name} value: "
+                                       f"{payload.get('metadata', {}).get(name)!r}")
     payload["metadata"].update(
         {
             "random_state": RANDOM_STATE,
+            "n_jobs": int(args.n_jobs),
+            "outer_jobs": int(args.outer_jobs),
+            "lr_source_policy": args.lr_source_policy,
+            "dataset_names": datasets,
+            "model_order": models,
+            "execution_models": execution_models,
+            "execution_result_rows": len(pair_plan(datasets, execution_models, scenarios)),
+            "expected_result_rows": len(pair_plan(datasets, models, scenarios)),
             "row_cap": args.row_cap,
             "n_splits": args.n_splits,
             "inner_splits": args.inner_splits,
@@ -5946,20 +6304,43 @@ def main(argv=None) -> int:
             "evaluation_protocol": "outer_cv_inner_cv_tuning" if not args.no_tune else "outer_cv_no_inner_tuning",
             "hugiml_max_fit_seconds": args.hugiml_max_fit_seconds,
             "grid_snapshot": grid_snapshot(),
-            "hugiml_dashboard_scenarios": HUGIML_SCENARIOS,
+            "hugiml_dashboard_scenarios": {key: HUGIML_SCENARIOS[key] for key in scenarios},
             "default_hugiml_dashboard_scenario": DEFAULT_DASHBOARD_HUGIML_SCENARIO,
             "dataset_feature_policy": DATASET_FEATURE_POLICY,
         }
     )
+    save_checkpoint(checkpoint, payload)
     done = completed_keys(payload) if args.resume else set()
+    failed = False
+    dataset_numbers = {name: index for index, name in enumerate(datasets, start=1)}
 
     for dataset, model, hugiml_scenario in plan:
+        if model not in execution_models:
+            continue
+        dataset_progress = (dataset_numbers[dataset], len(datasets))
+        progress = f"[{dataset_progress[0]}/{dataset_progress[1]}] "
         key = _pair_key(dataset, model, hugiml_scenario)
         scenario_suffix = f" :: {hugiml_scenario}" if is_hugiml_model(model) else ""
         if key in done:
-            print(f"skip {dataset} :: {model}{scenario_suffix}", flush=True)
+            print(f"{progress}skip {dataset} :: {model}{scenario_suffix}", flush=True)
             continue
-        print(f"run {dataset} :: {model}{scenario_suffix}", flush=True)
+        print(f"{progress}run {dataset} :: {model}{scenario_suffix}", flush=True)
+        layouts = payload["metadata"].setdefault("dataset_parallel_layouts", {})
+        if dataset not in layouts:
+            X_layout, y_layout, _ = load_dataset(dataset)
+            X_layout, y_layout = _apply_row_cap(
+                X_layout, y_layout, row_cap=args.row_cap, random_state=args.random_state,
+            )
+            layouts[dataset] = _dataset_parallel_layout(
+                X_layout, models, scenarios, n_splits=args.n_splits,
+                inner_splits=args.inner_splits, n_jobs=args.n_jobs,
+                outer_jobs=args.outer_jobs, tune=not args.no_tune,
+            )
+            del X_layout, y_layout
+            save_checkpoint(checkpoint, payload)
+        worker_layout = layouts[dataset]
+        if sum(worker_layout["inner_jobs_by_slot"]) > cpu_count():
+            raise RuntimeError("The recorded worker allocation exceeds available processors.")
         started = time.perf_counter()
         row = run_pair(
             dataset,
@@ -5971,9 +6352,16 @@ def main(argv=None) -> int:
             inner_splits=args.inner_splits,
             tune=not args.no_tune,
             random_state=args.random_state,
+            n_jobs=args.n_jobs,
+            outer_jobs=args.outer_jobs,
+            lr_source_policy=args.lr_source_policy,
+            worker_layout=worker_layout,
+            dataset_progress=dataset_progress,
             fold_checkpoint_dir=out_dir / "fold_checkpoints",
         )
-        row["pair_seconds"] = float(time.perf_counter() - started)
+        row["invocation_seconds"] = float(time.perf_counter() - started)
+        row["pair_seconds"] = row["invocation_seconds"] if row["timing_comparable"] else None
+        failed = failed or row["status"] != "ok"
         payload["results"] = [
             r
             for r in payload["results"]
@@ -5997,7 +6385,7 @@ def main(argv=None) -> int:
             ),
             flush=True,
         )
-    return 0
+    return 1 if failed else 0
 
 
 if __name__ == "__main__":

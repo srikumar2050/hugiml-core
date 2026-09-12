@@ -103,6 +103,64 @@ def test_tabarena_reuses_fold_preparation_without_changing_oof_selection() -> No
     assert cached[4]["preprocessing_reuse_count"] == 3
 
 
+def test_tabarena_parallel_folds_match_serial_selection_and_child_order() -> None:
+    X, y = make_classification(
+        n_samples=160,
+        n_features=6,
+        n_informative=4,
+        random_state=23,
+    )
+    frame = pd.DataFrame(X)
+
+    def fit_child(params, X_fit, y_fit, X_validation, y_validation):
+        child = DummyClassifier(strategy=params["strategy"]).fit(X_fit, y_fit)
+        child.fold_marker_ = float(X_validation.iloc[:, 0].sum())
+        return child
+
+    common = {
+        "candidates": [{"strategy": "prior"}, {"strategy": "most_frequent"}],
+        "X": frame,
+        "y": y,
+        "random_state": 17,
+        "fit_child": fit_child,
+        "probability_fn": runner.probability_matrix,
+        "n_splits": 4,
+    }
+    serial = tabarena_protocol.fit_cross_validated_ensemble(**common, n_jobs=1)
+    parallel = tabarena_protocol.fit_cross_validated_ensemble(**common, n_jobs=4)
+
+    assert serial[1] == parallel[1]
+    assert serial[2] == pytest.approx(parallel[2], abs=1e-12)
+    np.testing.assert_allclose(
+        serial[0].predict_proba(frame), parallel[0].predict_proba(frame), atol=1e-12
+    )
+    assert [child.fold_marker_ for child in serial[0].estimators_] == [
+        child.fold_marker_ for child in parallel[0].estimators_
+    ]
+    assert serial[4]["cv_ensemble_n_jobs"] == 1
+    assert parallel[4]["cv_ensemble_n_jobs"] == 4
+
+
+@pytest.mark.parametrize("n_jobs", [0, -2])
+def test_tabarena_rejects_invalid_worker_budget(n_jobs: int) -> None:
+    X = pd.DataFrame({"x": np.arange(12, dtype=float)})
+    y = np.tile(np.array([0, 1], dtype=int), 6)
+
+    with pytest.raises(ValueError, match="n_jobs"):
+        tabarena_protocol.fit_cross_validated_ensemble(
+            candidates=[{}],
+            X=X,
+            y=y,
+            random_state=1,
+            fit_child=lambda params, X_fit, y_fit, X_validation, y_validation: (
+                DummyClassifier(strategy="prior").fit(X_fit, y_fit)
+            ),
+            probability_fn=runner.probability_matrix,
+            n_splits=3,
+            n_jobs=n_jobs,
+        )
+
+
 def test_protocol_cli_defaults_preserve_nested_cv() -> None:
     args = runner.build_parser().parse_args([])
     assert args.validation_protocol == "nested"
@@ -121,6 +179,27 @@ def test_resume_order_finishes_partial_dataset_before_lower_workload_task() -> N
         tasks,
         models=models,
         completed_pairs={(2, "HUGIML")},
+        deferred_task_ids={3},
+    )
+    assert [row["task_id"] for row in ordered] == [2, 1, 3]
+
+
+def test_resume_order_prioritizes_datasets_with_retained_baselines() -> None:
+    tasks = [
+        {"task_id": 1, "n_rows": 10, "n_features": 1, "n_classes": 2},
+        {"task_id": 2, "n_rows": 1000, "n_features": 20, "n_classes": 2},
+        {"task_id": 3, "n_rows": 100, "n_features": 2, "n_classes": 2},
+    ]
+    models = ["HUGIML", "XGB standard", "LightGBM standard", "RandomForest standard"]
+    retained_baselines = {
+        (2, "XGB standard"),
+        (2, "LightGBM standard"),
+        (2, "RandomForest standard"),
+    }
+    ordered = runner.order_execution_tasks(
+        tasks,
+        models=models,
+        completed_pairs=retained_baselines,
         deferred_task_ids={3},
     )
     assert [row["task_id"] for row in ordered] == [2, 1, 3]

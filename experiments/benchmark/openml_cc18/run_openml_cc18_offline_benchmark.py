@@ -24,6 +24,7 @@ CONFIG = OfflineSuiteConfig(
     dashboard_name="openml_cc18_benchmark_dashboard.html",
     output_prefix="openml_cc18",
     default_validation_protocol="nested",
+    clean_output_json=True,
 )
 
 

@@ -20,6 +20,8 @@ inline void validate_2d_shape(const py::array& arr, const char* name) {
         throw std::invalid_argument(
             std::string(name) + " must be 2-D, got " +
             std::to_string(arr.ndim()) + "-D");
+    checked_native_dimension(arr.shape(0), "row count");
+    checked_native_dimension(arr.shape(1), "feature count");
     if (arr.shape(0) == 0)
         throw std::invalid_argument(std::string(name) + " has 0 rows");
 }
@@ -109,35 +111,10 @@ void bind_prepare_mine_l1(py::module_& m)
             },
             "Return (rows, cols) COO arrays for the sparse training matrix.")
         .def("get_csr",
-            [](const L1FitResult& r, int n_rows, int n_cols) {
-                if (n_rows < 0 || n_cols < 0)
-                    throw std::invalid_argument("n_rows and n_cols must be non-negative");
-                py::array_t<int32_t> indptr_arr({n_rows + 1});
-                py::array_t<int32_t> indices_arr({static_cast<py::ssize_t>(r.coo_cols.size())});
-                auto indptr = indptr_arr.mutable_unchecked<1>();
-                auto indices = indices_arr.mutable_unchecked<1>();
-                for (int i = 0; i <= n_rows; ++i) indptr(i) = 0;
-                for (size_t k = 0; k < r.coo_rows.size(); ++k) {
-                    const int rr = r.coo_rows[k];
-                    if (rr < 0 || rr >= n_rows) throw std::out_of_range("COO row out of CSR bounds");
-                    indptr(rr + 1) += 1;
-                }
-                for (int i = 0; i < n_rows; ++i) indptr(i + 1) += indptr(i);
-
-                std::vector<int32_t> cursor(static_cast<size_t>(n_rows));
-                for (int i = 0; i < n_rows; ++i) cursor[static_cast<size_t>(i)] = indptr(i);
-                for (size_t k = 0; k < r.coo_cols.size(); ++k) {
-                    const int rr = r.coo_rows[k];
-                    const int cc = r.coo_cols[k];
-                    if (cc < 0 || cc >= n_cols) throw std::out_of_range("COO col out of CSR bounds");
-                    const int pos = cursor[static_cast<size_t>(rr)]++;
-                    indices(pos) = cc;
-                }
-                int32_t* idx_ptr = static_cast<int32_t*>(indices_arr.mutable_data());
-                for (int i = 0; i < n_rows; ++i) {
-                    std::sort(idx_ptr + indptr(i), idx_ptr + indptr(i + 1));
-                }
-                return py::make_tuple(indptr_arr, indices_arr);
+            [](const L1FitResult& r, int64_t n_rows, int64_t n_cols) {
+                checked_native_dimension(n_rows, "row count");
+                checked_native_dimension(n_cols, "feature count");
+                return csr_from_coo(r.coo_rows, r.coo_cols, n_rows, n_cols);
             },
             py::arg("n_rows"), py::arg("n_cols"),
             "Return (indptr, indices) CSR structure directly, avoiding Python COO arrays.");

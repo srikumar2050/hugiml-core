@@ -10,10 +10,10 @@ include setup.py
 
 recursive-include THIRD_PARTY_LICENSES *.txt
 
-recursive-include native *.cpp *.hpp
+recursive-include native *.cpp *.hpp *.md
 recursive-include src/hugiml *.py py.typed
 recursive-include src/hugiml/causal_dashboard/assets *.json
-recursive-include tests *.py *.csv *.data
+recursive-include tests *.py *.csv *.data *.cpp
 recursive-include benchmarks *.py *.json
 recursive-include experiments *.py *.md *.cmd *.txt
 exclude experiments/benchmark/analyze_checkpoint_results.py

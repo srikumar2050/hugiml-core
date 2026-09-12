@@ -23,12 +23,14 @@ successful results produced with the same run configuration.
 
 import argparse
 import copy
+import gc
 import hashlib
 import html
 import importlib
 import json
 import math
 import os
+import re
 import shutil
 import sys
 import time
@@ -56,6 +58,7 @@ import benchmark_dashboard as benchmark_base
 import numpy as np
 import pandas as pd
 import tabarena_protocol
+from joblib import Parallel, delayed, parallel_config
 from scipy import sparse
 from scipy.stats import friedmanchisquare, rankdata, wilcoxon
 from scipy.stats import t as student_t
@@ -68,9 +71,11 @@ from sklearn.metrics import (
     log_loss,
     roc_auc_score,
 )
-from sklearn.model_selection import GridSearchCV, StratifiedKFold
+from sklearn.model_selection import GridSearchCV, StratifiedKFold, StratifiedShuffleSplit
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import LabelEncoder, label_binarize
+
+from hugiml._classifier_tuning import _hugiml_candidate_warning_scope
 
 try:
     from lightgbm import early_stopping as lightgbm_early_stopping
@@ -120,6 +125,13 @@ MODEL_ALIASES = {
     "rule fit": "RuleFit",
 }
 HUGIML_MODELS = ("HUGIML",)
+BENCHMARK_N_JOBS = 1
+DEFAULT_WORKER_JOBS = 1
+DEFAULT_OUTER_JOBS = 1
+DEFAULT_OUTER_JOBS_FALLBACK: int | None = None
+DEFAULT_DEFER_TASK_IDS: tuple[int, ...] = ()
+BENCHMARK_LR_SOURCE_POLICY = "standard"
+CLEAN_OUTPUT_JSON = False
 
 
 def is_hugiml_model(model: str) -> bool:
@@ -236,9 +248,13 @@ def _public_dashboard_json(value: Any) -> Any:
             normalized = str(key).lower()
             if any(token in normalized for token in ("sha", "hash", "checksum")):
                 continue
-            if any(token in normalized for token in ("revision", "rerun", "history")):
+            if any(token in normalized for token in ("rerun", "history")):
                 continue
             if normalized.endswith(("_at_utc", "_timestamp")):
+                continue
+            if "version" in normalized or any(
+                token in normalized for token in ("path", "directory", "checkpoint")
+            ):
                 continue
             cleaned[str(key)] = _public_dashboard_json(item)
         return cleaned
@@ -247,9 +263,41 @@ def _public_dashboard_json(value: Any) -> Any:
     return value
 
 
+def _clean_checkpoint_json(value: Any) -> Any:
+    """Retain execution state and measurements while omitting unrelated metadata."""
+    if isinstance(value, dict):
+        active_run = value.get("active_run_id")
+        cleaned: dict[str, Any] = {}
+        for key, item in value.items():
+            normalized = str(key).lower()
+            if normalized == "source":
+                continue
+            if any(token in normalized for token in ("version", "checksum", "sha256")):
+                continue
+            if normalized.endswith(("_at_utc", "_timestamp")):
+                continue
+            if normalized in {"conversation", "messages"} or normalized.endswith("_history"):
+                continue
+            if key == "runs" and active_run is not None and isinstance(item, dict):
+                run_key = str(active_run)
+                item = {run_key: item[run_key]} if run_key in item else {}
+            cleaned[str(key)] = _clean_checkpoint_json(item)
+        return cleaned
+    if isinstance(value, list):
+        return [_clean_checkpoint_json(item) for item in value]
+    if isinstance(value, str) and (
+        os.path.isabs(value) or re.search(r"(?:[A-Za-z]:[\\/]|\\\\)[^\s]+", value)
+    ):
+        return None
+    return value
+
+
 def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    text = json.dumps(safe_jsonable(payload), indent=2, allow_nan=False)
+    serializable = safe_jsonable(payload)
+    if CLEAN_OUTPUT_JSON:
+        serializable = _clean_checkpoint_json(serializable)
+    text = json.dumps(serializable, indent=2, allow_nan=False)
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     backup = path.with_suffix(path.suffix + ".bak")
     backup_temporary = backup.with_name(f".{backup.name}.{os.getpid()}.tmp")
@@ -517,7 +565,7 @@ def configure_openml(cache_dir: Path | None) -> Any:
         cache_dir.mkdir(parents=True, exist_ok=True)
         if hasattr(openml.config, "set_root_cache_directory"):
             openml.config.set_root_cache_directory(str(cache_dir))
-        else:  # pragma: no cover - older openml-python
+        else:  # pragma: no cover - alternate OpenML API signature
             openml.config.cache_directory = str(cache_dir)
     return openml
 
@@ -945,7 +993,10 @@ def rotating_baseline_grid(model: str) -> dict[str, list[Any]]:
 def rotating_hugiml_candidates(hugiml_scenario: str) -> list[dict[str, Any]]:
     """Return the package-standard HUGIML search space."""
     _, candidates = benchmark_base._hugiml_grid_for_scenario(hugiml_scenario)
-    return copy.deepcopy(candidates)
+    return [
+        {**copy.deepcopy(candidate), "lr_source_policy": BENCHMARK_LR_SOURCE_POLICY}
+        for candidate in candidates
+    ]
 
 
 def _fit_baseline_with_rotating_validation(
@@ -1158,7 +1209,7 @@ def _fit_hugiml_with_rotating_validation_cached(
         key: copy.deepcopy(values[0]) for key, values in grid.items() if len(values) == 1
     }
     base_params.setdefault("execution_mode", "production")
-    base_params.setdefault("n_jobs", 1)
+    base_params["n_jobs"] = BENCHMARK_N_JOBS
     selection_scoring = (
         "roc_auc"
         if set(np.unique(y_validation).tolist()) == set(np.unique(y_train).tolist())
@@ -1261,6 +1312,8 @@ def _fit_tabarena_cv_ensemble(
     """Fit the selected configuration as TabArena's eight-child CV ensemble."""
 
     canonicalize_hugiml_categories = is_hugiml_model(model_name)
+    fold_n_jobs = min(int(DEFAULT_NESTED_CV_ENSEMBLE_FOLDS or 8), BENCHMARK_N_JOBS) if BENCHMARK_N_JOBS > 0 else BENCHMARK_N_JOBS
+    child_n_jobs = 1 if fold_n_jobs != 1 else BENCHMARK_N_JOBS
 
     def prepare_fold(X_fit, y_fit, X_validation, y_validation):
         feature_generator, transformed_fit, transformed_validation = (
@@ -1293,25 +1346,30 @@ def _fit_tabarena_cv_ensemble(
                 key: copy.deepcopy(values[0]) for key, values in grid.items() if len(values) == 1
             }
             base_params.setdefault("execution_mode", "production")
-            base_params.setdefault("n_jobs", 1)
+            base_params["n_jobs"] = child_n_jobs
             child_scoring = "roc_auc" if np.unique(y_fit).size == 2 else "neg_log_loss"
-            result = benchmark_base.HUGIMLClassifierNative.fast_grid_tune(
-                X_fit,
-                y_fit,
-                X_validation,
-                y_validation,
-                param_grid=grid,
-                base_params=base_params,
-                scoring=child_scoring,
-                refit_full=False,
-                return_results=False,
-            )
+            with _hugiml_candidate_warning_scope(True):
+                result = benchmark_base.HUGIMLClassifierNative.fast_grid_tune(
+                    X_fit,
+                    y_fit,
+                    X_validation,
+                    y_validation,
+                    param_grid=grid,
+                    base_params=base_params,
+                    scoring=child_scoring,
+                    refit_full=False,
+                    return_results=False,
+                )
             return TabArenaPreprocessedEstimator(
                 feature_generator=feature_generator,
                 estimator=result["best_model"],
                 canonicalize_categorical=True,
             )
         estimator = baseline_pipeline(builder(params))
+        child_model = estimator.named_steps.get("model")
+        if child_model is not None and hasattr(child_model, "get_params"):
+            if "n_jobs" in child_model.get_params(deep=False):
+                child_model.set_params(n_jobs=child_n_jobs)
         if model_name in {"XGB standard", "LightGBM standard"}:
             estimator, _ = _fit_baseline_with_rotating_validation(
                 model_name, estimator, X_fit, y_fit, X_validation, y_validation
@@ -1334,6 +1392,7 @@ def _fit_tabarena_cv_ensemble(
         fit_child=fit_child,
         probability_fn=probability_matrix,
         n_splits=int(DEFAULT_NESTED_CV_ENSEMBLE_FOLDS or 8),
+        n_jobs=fold_n_jobs,
         prepare_fold=prepare_fold,
     )
 
@@ -1381,8 +1440,24 @@ def fit_or_tune_model(
         hugiml_scenario=hugiml_scenario if is_hugiml_model(model_name) else None,
         hugiml_max_fit_seconds=hugiml_max_fit_seconds,
     )
+    original_builder = builder
+
+    def builder(params):
+        estimator = original_builder(params)
+        available = estimator.get_params(deep=False) if hasattr(estimator, "get_params") else {}
+        if "n_jobs" in available:
+            estimator.set_params(n_jobs=BENCHMARK_N_JOBS)
+        if is_hugiml_model(model_name) and "lr_source_policy" in available:
+            estimator.set_params(lr_source_policy=BENCHMARK_LR_SOURCE_POLICY)
+        return estimator
+
     if is_hugiml_model(model_name):
-        candidates = _configure_hugiml_candidates(candidates, early_stopping=early_stopping)
+        candidates = [
+            {**candidate, "lr_source_policy": BENCHMARK_LR_SOURCE_POLICY}
+            for candidate in _configure_hugiml_candidates(
+                candidates, early_stopping=early_stopping
+            )
+        ]
     elif validation_protocol in {"rotating", "tabarena"}:
         rotating_family = {
             "XGB standard": "XGBoost",
@@ -1505,6 +1580,7 @@ def fit_or_tune_model(
                     inner_splits=inner_splits,
                     random_state=random_state,
                     hugiml_max_fit_seconds=hugiml_max_fit_seconds,
+                    n_jobs=BENCHMARK_N_JOBS,
                 )
         else:
             estimator, params, best_score, tune_ms, info = tune_baseline(
@@ -2131,6 +2207,97 @@ def distribution_summary(values: Iterable[Any]) -> dict[str, Any]:
     }
 
 
+def _numeric_target_correlation(values: pd.Series, y: np.ndarray) -> float:
+    numeric = pd.to_numeric(values, errors="coerce").to_numpy(dtype=float)
+    finite = np.isfinite(numeric)
+    if not finite.any():
+        return float("-inf")
+    numeric = np.where(finite, numeric, float(np.median(numeric[finite])))
+    if float(np.std(numeric)) == 0.0:
+        return 0.0
+    scores = []
+    for label in np.unique(y):
+        indicator = (y == label).astype(float)
+        if float(np.std(indicator)) == 0.0:
+            continue
+        value = np.corrcoef(numeric, indicator)[0, 1]
+        if np.isfinite(value):
+            scores.append(abs(float(value)))
+    return max(scores, default=0.0)
+
+
+def _categorical_target_correlation(values: pd.Series, y: np.ndarray) -> float:
+    categories = values.astype("string").fillna("<NA>")
+    if categories.nunique(dropna=False) <= 1:
+        return 0.0
+    codes, _ = pd.factorize(categories, sort=True)
+    counts = np.bincount(codes)
+    scores = []
+    for label in np.unique(y):
+        indicator = (y == label).astype(float)
+        variance = float(np.var(indicator))
+        if variance == 0.0:
+            continue
+        group_means = np.bincount(codes, weights=indicator) / counts
+        between = float(np.sum(counts * (group_means - float(np.mean(indicator))) ** 2) / len(y))
+        scores.append(math.sqrt(max(0.0, min(1.0, between / variance))))
+    return max(scores, default=0.0)
+
+
+def limit_outer_training_data(
+    X_train: pd.DataFrame,
+    y_train: np.ndarray,
+    X_test: pd.DataFrame,
+    *,
+    max_rows: int | None,
+    max_predictors: int | None,
+    random_state: int,
+) -> tuple[pd.DataFrame, np.ndarray, pd.DataFrame, dict[str, Any]]:
+    """Limit only outer-training data and apply its selected columns to the full test fold."""
+    original_rows = len(X_train)
+    original_predictors = X_train.shape[1]
+    sampled = False
+    if max_rows is not None and original_rows > max_rows:
+        splitter = StratifiedShuffleSplit(n_splits=1, train_size=max_rows, random_state=random_state)
+        sampled_indices, _ = next(splitter.split(np.zeros(original_rows), y_train))
+        sampled_indices = np.sort(sampled_indices)
+        X_train = X_train.iloc[sampled_indices].reset_index(drop=True)
+        y_train = np.asarray(y_train)[sampled_indices]
+        sampled = True
+
+    selected_columns = list(X_train.columns)
+    if max_predictors is not None and len(selected_columns) > max_predictors:
+        scored = []
+        for position, column in enumerate(selected_columns):
+            series = X_train[column]
+            if pd.api.types.is_numeric_dtype(series.dtype) and not pd.api.types.is_bool_dtype(
+                series.dtype
+            ):
+                score = _numeric_target_correlation(series, y_train)
+            else:
+                score = _categorical_target_correlation(series, y_train)
+            scored.append((score, -position, column))
+        selected_columns = [item[2] for item in sorted(scored, reverse=True)[:max_predictors]]
+        selected_columns.sort(key=lambda column: X_train.columns.get_loc(column))
+        X_train = X_train.loc[:, selected_columns].copy()
+        X_test = X_test.loc[:, selected_columns].copy()
+
+    return X_train, y_train, X_test, {
+        "outer_train_rows_original": int(original_rows),
+        "outer_train_rows_used": int(len(X_train)),
+        "outer_train_stratified_sampled": sampled,
+        "outer_predictors_original": int(original_predictors),
+        "outer_predictors_used": int(X_train.shape[1]),
+        "outer_predictor_selection": (
+            "training_only_type_aware_target_correlation"
+            if X_train.shape[1] < original_predictors
+            else "all"
+        ),
+        "outer_selected_predictors_json": json.dumps(selected_columns),
+        "outer_test_rows_evaluated": int(len(X_test)),
+    }
+
+
 def evaluate_official_split(
     *,
     model_name: str,
@@ -2145,6 +2312,8 @@ def evaluate_official_split(
     hugiml_max_fit_seconds: float | None,
     validation_protocol: str = "nested",
     early_stopping: bool = False,
+    max_train_rows: int | None = None,
+    max_train_predictors: int | None = None,
 ) -> tuple[dict[str, Any], int | None, dict[str, Any] | None]:
     validate_official_split(split, len(y))
     split_started = time.perf_counter()
@@ -2205,6 +2374,8 @@ def evaluate_official_split(
         "status": "error",
         "error_count": 1,
         "last_error": None,
+        "max_train_rows": max_train_rows,
+        "max_train_predictors": max_train_predictors,
     }
     try:
         effective_tune = bool(tune)
@@ -2239,6 +2410,19 @@ def evaluate_official_split(
             )
         elif validation_error is not None:
             raise ValueError(validation_error)
+        X_train, y_train, X_test, training_limit_fields = limit_outer_training_data(
+            X_train,
+            y_train,
+            X_test,
+            max_rows=max_train_rows,
+            max_predictors=max_train_predictors,
+            random_state=split_seed,
+        )
+        row.update(training_limit_fields)
+        row["n_train"] = int(len(y_train))
+        if X_validation is not None:
+            selected_columns = json.loads(training_limit_fields["outer_selected_predictors_json"])
+            X_validation = X_validation.loc[:, selected_columns].copy()
         estimator, params, best_inner_score, fit_ms, tune_ms, info, complexity_fn = (
             fit_or_tune_model(
                 model_name,
@@ -2301,6 +2485,7 @@ def evaluate_official_split(
                 "selection_refit_performed": info.get("selection_refit_performed", True),
                 "retained_cv_ensemble": info.get("retained_cv_ensemble", False),
                 "cv_ensemble_child_count": info.get("cv_ensemble_child_count"),
+                "cv_ensemble_n_jobs": info.get("cv_ensemble_n_jobs"),
                 "candidate_fit_count": info.get("candidate_fit_count"),
                 "preprocessing_fit_count": info.get("preprocessing_fit_count"),
                 "preprocessing_reuse_count": info.get("preprocessing_reuse_count"),
@@ -2398,6 +2583,41 @@ def evaluate_official_split(
 # ---------------------------------------------------------------------------
 # Pair checkpointing and aggregation
 # ---------------------------------------------------------------------------
+
+
+def _evaluate_official_split_with_worker_budget(
+    *,
+    split: dict[str, Any],
+    inner_jobs: int,
+    common_kwargs: dict[str, Any],
+    suite_context: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any], int | None, dict[str, Any] | None]:
+    """Evaluate one outer split in an isolated coordinator process."""
+
+    global BENCHMARK_N_JOBS, BENCHMARK_LR_SOURCE_POLICY, DEFAULT_NESTED_CV_ENSEMBLE_FOLDS
+    global DEFAULT_NESTED_EARLY_STOPPING, DEFAULT_TABARENA_REPORTING
+    previous_n_jobs = BENCHMARK_N_JOBS
+    previous_lr_source_policy = BENCHMARK_LR_SOURCE_POLICY
+    previous_folds = DEFAULT_NESTED_CV_ENSEMBLE_FOLDS
+    previous_early_stopping = DEFAULT_NESTED_EARLY_STOPPING
+    previous_reporting = DEFAULT_TABARENA_REPORTING
+    BENCHMARK_N_JOBS = int(inner_jobs)
+    BENCHMARK_LR_SOURCE_POLICY = str(suite_context["lr_source_policy"])
+    DEFAULT_NESTED_CV_ENSEMBLE_FOLDS = suite_context.get("nested_cv_ensemble_folds")
+    DEFAULT_NESTED_EARLY_STOPPING = bool(suite_context.get("nested_early_stopping", False))
+    DEFAULT_TABARENA_REPORTING = bool(suite_context.get("tabarena_reporting", False))
+    try:
+        row, feature_count, prediction = evaluate_official_split(
+            split=split,
+            **common_kwargs,
+        )
+        return split, row, feature_count, prediction
+    finally:
+        BENCHMARK_N_JOBS = previous_n_jobs
+        BENCHMARK_LR_SOURCE_POLICY = previous_lr_source_policy
+        DEFAULT_NESTED_CV_ENSEMBLE_FOLDS = previous_folds
+        DEFAULT_NESTED_EARLY_STOPPING = previous_early_stopping
+        DEFAULT_TABARENA_REPORTING = previous_reporting
 
 
 def pair_key(task_id: int, model: str) -> tuple[int, str]:
@@ -3109,8 +3329,47 @@ def run_pair(
     resume: bool,
     validation_protocol: str = "nested",
     early_stopping: bool = False,
+    outer_jobs: int = 1,
+    inner_jobs: int = 1,
+    lr_source_policy: str = "standard",
+    outer_jobs_fallback: int | None = None,
+    outer_jobs_min_memory_gb: float = 0.0,
+    max_train_rows: int | None = None,
+    max_train_predictors: int | None = None,
 ) -> dict[str, Any]:
     task, X, y, task_meta = load_task(task_id, retries=retries)
+    requested_outer_jobs = int(outer_jobs)
+    raw_dataset_gb, estimated_outer_job_gb = _dataset_worker_memory_estimate_gb(
+        X, y, model_name=model_name
+    )
+    dataset_available_memory_gb = _available_memory_gb()
+    outer_jobs, inner_jobs, allocation_reasons = _select_tabarena_parallelism(
+        requested_outer_jobs=requested_outer_jobs,
+        requested_inner_jobs=inner_jobs,
+        fallback_outer_jobs=outer_jobs_fallback,
+        available_memory_gb=dataset_available_memory_gb,
+        requested_memory_threshold_gb=outer_jobs_min_memory_gb,
+        estimated_memory_per_outer_job_gb=estimated_outer_job_gb,
+    )
+    allocation = {
+        "outer_jobs_requested": requested_outer_jobs,
+        "outer_jobs_effective": int(outer_jobs),
+        "inner_jobs_effective": int(inner_jobs),
+        "available_memory_gb": dataset_available_memory_gb,
+        "raw_dataset_memory_gb": raw_dataset_gb,
+        "estimated_memory_per_outer_job_gb": estimated_outer_job_gb,
+        "memory_estimate_representation": (
+            "sparse_original_features"
+            if is_hugiml_model(model_name)
+            else "dense_equivalent_features"
+        ),
+        "reasons": allocation_reasons,
+    }
+    print(
+        "  dataset parallel allocation: "
+        + json.dumps(allocation, sort_keys=True, default=json_default),
+        flush=True,
+    )
     raw_splits = official_splits(
         task,
         max_splits=max_official_splits if validation_protocol in {"nested", "tabarena"} else None,
@@ -3119,6 +3378,22 @@ def run_pair(
         rotating_validation_splits(raw_splits, len(y), max_splits=max_official_splits)
         if validation_protocol == "rotating"
         else raw_splits
+    )
+    repeat_split_counts: dict[int, int] = {}
+    for split in splits:
+        repeat = int(split["repeat"])
+        repeat_split_counts[repeat] = repeat_split_counts.get(repeat, 0) + 1
+    scheduled_outer_max = max(
+        (min(int(outer_jobs), count) for count in repeat_split_counts.values()),
+        default=0,
+    )
+    allocation.update(
+        {
+            "outer_executor_backend": "loky" if scheduled_outer_max > 1 else "serial",
+            "outer_jobs_scheduled_max": int(scheduled_outer_max),
+            "parallel_worker_budget_max": int(scheduled_outer_max * inner_jobs),
+            "outer_parallel_grouping": "official_repeat",
+        }
     )
     identity = {
         "run_id": run_id,
@@ -3130,6 +3405,7 @@ def run_pair(
         "random_state": int(random_state),
         "max_official_splits": max_official_splits,
         "hugiml_scenario": hugiml_scenario if is_hugiml_model(model_name) else None,
+        "lr_source_policy": lr_source_policy if is_hugiml_model(model_name) else None,
         "official_dimensions": [
             int(task_meta["official_repeats"]),
             int(task_meta["official_folds"]),
@@ -3138,7 +3414,10 @@ def run_pair(
         "dataset_sha256": safe_jsonable(task_meta.get("sha256", {})),
         "validation_protocol": validation_protocol,
         "early_stopping": bool(early_stopping),
+        "max_train_rows": max_train_rows,
+        "max_train_predictors": max_train_predictors,
     }
+    saved_identity = _clean_checkpoint_json(identity) if CLEAN_OUTPUT_JSON else identity
     token = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()[:20]
     split_checkpoint = out_dir / "split_checkpoints" / f"{token}.json"
     split_checkpoint.parent.mkdir(parents=True, exist_ok=True)
@@ -3148,7 +3427,7 @@ def run_pair(
     if resume and split_checkpoint.exists():
         try:
             saved = read_json_with_backup(split_checkpoint)
-            if saved.get("identity") == identity:
+            if saved.get("identity") == saved_identity:
                 for row in saved.get("split_rows", []):
                     if row.get("split_id") is not None:
                         rows_by_split[int(row["split_id"])] = dict(row)
@@ -3172,50 +3451,27 @@ def run_pair(
         for split_id, row in rows_by_split.items()
         if row.get("status") == "ok" and split_id in predictions_by_split
     }
-    for split in splits:
+    def record_split_result(
+        split: dict[str, Any],
+        row: dict[str, Any],
+        feature_count: int | None,
+        prediction: dict[str, Any] | None,
+        *,
+        scheduled_outer_jobs: int,
+        executor_backend: str,
+    ) -> None:
         split_id = int(split["split_id"])
-        if split_id in successful:
-            row = rows_by_split[split_id]
-            print(
-                f"  split r={split['repeat']} f={split['fold']} s={split['sample']} (reused)",
-                flush=True,
-            )
-            print(
-                json.dumps(
-                    {
-                        "split_id": row["split_id"],
-                        "status": row["status"],
-                        "roc_auc": row.get("roc_auc"),
-                        "balanced_accuracy": row.get("balanced_accuracy"),
-                        "error": row.get("last_error"),
-                        "reused_split_checkpoint": True,
-                    },
-                    default=json_default,
-                ),
-                flush=True,
-            )
-            continue
-        previous = rows_by_split.get(split_id, {})
-        print(
-            f"  split r={split['repeat']} f={split['fold']} s={split['sample']}",
-            flush=True,
-        )
-        row, feature_count, prediction = evaluate_official_split(
-            model_name=model_name,
-            task_meta=task_meta,
-            X=X,
-            y=y,
-            split=split,
-            tune=tune,
-            inner_splits=inner_splits,
-            random_state=random_state,
-            hugiml_scenario=hugiml_scenario,
-            hugiml_max_fit_seconds=hugiml_max_fit_seconds,
-            validation_protocol=validation_protocol,
-            early_stopping=early_stopping,
-        )
-        row["attempt_count"] = int(previous.get("attempt_count", 0)) + 1
+        stored_row = rows_by_split.get(split_id, {})
+        row["attempt_count"] = int(stored_row.get("attempt_count", 0)) + 1
         row["attempted_at_utc"] = utc_now()
+        row["outer_jobs_effective"] = int(outer_jobs)
+        row["inner_jobs_effective"] = int(inner_jobs)
+        row["outer_jobs_scheduled"] = int(scheduled_outer_jobs)
+        row["outer_executor_backend"] = str(executor_backend)
+        row["parallel_worker_budget"] = int(scheduled_outer_jobs * inner_jobs)
+        row["parallel_allocation_json"] = json.dumps(
+            allocation, sort_keys=True, default=json_default
+        )
         rows_by_split[split_id] = row
         if feature_count is not None:
             feature_counts_by_split[split_id] = int(feature_count)
@@ -3228,7 +3484,7 @@ def run_pair(
         atomic_write_json(
             split_checkpoint,
             {
-                "identity": identity,
+                "identity": saved_identity,
                 "task_meta": task_meta,
                 "split_rows": split_rows,
                 "model_feature_counts": {
@@ -3255,8 +3511,116 @@ def run_pair(
             flush=True,
         )
 
+    pending_by_repeat: dict[int, list[dict[str, Any]]] = {}
+    for split in splits:
+        split_id = int(split["split_id"])
+        if split_id in successful:
+            row = rows_by_split[split_id]
+            print(
+                f"  split r={split['repeat']} f={split['fold']} s={split['sample']} (reused)",
+                flush=True,
+            )
+            print(
+                json.dumps(
+                    {
+                        "split_id": row["split_id"],
+                        "status": row["status"],
+                        "roc_auc": row.get("roc_auc"),
+                        "balanced_accuracy": row.get("balanced_accuracy"),
+                        "error": row.get("last_error"),
+                        "reused_split_checkpoint": True,
+                    },
+                    default=json_default,
+                ),
+                flush=True,
+            )
+            continue
+        pending_by_repeat.setdefault(int(split["repeat"]), []).append(split)
+
+    common_kwargs = {
+        "model_name": model_name,
+        "task_meta": task_meta,
+        "X": X,
+        "y": y,
+        "tune": tune,
+        "inner_splits": inner_splits,
+        "random_state": random_state,
+        "hugiml_scenario": hugiml_scenario,
+        "hugiml_max_fit_seconds": hugiml_max_fit_seconds,
+        "validation_protocol": validation_protocol,
+        "early_stopping": early_stopping,
+        "max_train_rows": max_train_rows,
+        "max_train_predictors": max_train_predictors,
+    }
+    suite_context = {
+        "nested_cv_ensemble_folds": DEFAULT_NESTED_CV_ENSEMBLE_FOLDS,
+        "nested_early_stopping": DEFAULT_NESTED_EARLY_STOPPING,
+        "tabarena_reporting": DEFAULT_TABARENA_REPORTING,
+        "lr_source_policy": lr_source_policy,
+    }
+    for repeat in sorted(pending_by_repeat):
+        repeat_splits = sorted(
+            pending_by_repeat[repeat],
+            key=lambda split: (int(split["fold"]), int(split["sample"]), int(split["split_id"])),
+        )
+        for split in repeat_splits:
+            print(
+                f"  split r={split['repeat']} f={split['fold']} s={split['sample']}",
+                flush=True,
+            )
+        if outer_jobs == 1 or len(repeat_splits) == 1:
+            scheduled_outer_jobs = 1
+            executor_backend = "serial"
+            for split in repeat_splits:
+                row, feature_count, prediction = evaluate_official_split(
+                    split=split, **common_kwargs
+                )
+                record_split_result(
+                    split,
+                    row,
+                    feature_count,
+                    prediction,
+                    scheduled_outer_jobs=scheduled_outer_jobs,
+                    executor_backend=executor_backend,
+                )
+        else:
+            scheduled_outer_jobs = min(int(outer_jobs), len(repeat_splits))
+            executor_backend = "loky"
+            try:
+                with parallel_config(backend="loky", inner_max_num_threads=1):
+                    outputs = Parallel(
+                        n_jobs=scheduled_outer_jobs,
+                        return_as="generator_unordered",
+                    )(
+                        delayed(_evaluate_official_split_with_worker_budget)(
+                            split=split,
+                            inner_jobs=inner_jobs,
+                            common_kwargs=common_kwargs,
+                            suite_context=suite_context,
+                        )
+                        for split in repeat_splits
+                    )
+                    for split, row, feature_count, prediction in outputs:
+                        record_split_result(
+                            split,
+                            row,
+                            feature_count,
+                            prediction,
+                            scheduled_outer_jobs=scheduled_outer_jobs,
+                            executor_backend=executor_backend,
+                        )
+            except Exception as exc:
+                cleanup_error = _shutdown_parallel_workers(wait=False)
+                detail = f"{type(exc).__name__}: {exc}"
+                if cleanup_error is not None:
+                    detail += f"; worker cleanup: {cleanup_error}"
+                raise RuntimeError(
+                    f"Parallel outer evaluation stopped for task {task_id}, "
+                    f"repeat {repeat}: {detail}"
+                ) from exc
+
     split_rows = [rows_by_split[key] for key in sorted(rows_by_split)]
-    return aggregate_pair_rows(
+    aggregated = aggregate_pair_rows(
         split_rows,
         split_predictions=predictions_by_split,
         task_meta=task_meta,
@@ -3269,6 +3633,32 @@ def run_pair(
         hugiml_scenario=hugiml_scenario,
         official_splits_expected=len(splits),
     )
+    aggregated["outer_jobs_effective"] = int(outer_jobs)
+    aggregated["outer_jobs_requested"] = requested_outer_jobs
+    aggregated["inner_jobs_effective"] = int(inner_jobs)
+    aggregated["outer_jobs_scheduled_max"] = max(
+        (int(row.get("outer_jobs_scheduled", 1)) for row in split_rows), default=0
+    )
+    aggregated["parallel_worker_budget_max"] = max(
+        (int(row.get("parallel_worker_budget", inner_jobs)) for row in split_rows), default=0
+    )
+    aggregated["outer_executor_backends"] = sorted(
+        {str(row.get("outer_executor_backend", "serial")) for row in split_rows}
+    )
+    aggregated["max_train_rows"] = max_train_rows
+    aggregated["max_train_predictors"] = max_train_predictors
+    aggregated["lr_source_policy"] = lr_source_policy if is_hugiml_model(model_name) else None
+    aggregated["outer_train_rows_used_max"] = max(
+        (int(row.get("outer_train_rows_used", 0)) for row in split_rows), default=0
+    )
+    aggregated["outer_predictors_used_max"] = max(
+        (int(row.get("outer_predictors_used", 0)) for row in split_rows), default=0
+    )
+    aggregated["outer_parallel_grouping"] = "official_repeat"
+    aggregated["parallel_allocation_json"] = json.dumps(
+        allocation, sort_keys=True, default=json_default
+    )
+    return aggregated
 
 
 def grid_snapshot(
@@ -3292,6 +3682,9 @@ def grid_snapshot(
             "candidate_count": len(hug_candidates),
             "grid": hug_grid,
         }
+        snapshot[hugiml_model]["grid"]["lr_source_policy"] = [
+            BENCHMARK_LR_SOURCE_POLICY
+        ]
     families = {
         "XGB standard": "XGBoost",
         "LightGBM standard": "LightGBM",
@@ -3980,7 +4373,7 @@ pre{margin:0;border-top:1px solid var(--border);white-space:pre-wrap;word-break:
     </div>
     <div>
       <p class="subsection-label">HUGIML inspection efficiency — baseline / HUGIML</p>
-      <p class="note" style="margin:0 0 8px">Ratios are baseline model inspection units divided by each HUGIML variant?s model inspection units, on tasks where that variant?s AUC is within tolerance.</p>
+      <p class="note" style="margin:0 0 8px">Ratios are baseline model inspection units divided by each HUGIML variant's model inspection units, on tasks where that variant's AUC is within tolerance.</p>
       <div class="table-wrap"><table id="ratioTable"></table></div>
     </div>
   </div>
@@ -4045,7 +4438,7 @@ function theme(){return THEMES[currentTheme]}
 function plotLayout(extra={}){const t=theme();return Object.assign({paper_bgcolor:'rgba(0,0,0,0)',plot_bgcolor:'rgba(0,0,0,0)',font:{color:t.ink,size:12},colorway:t.colors,margin:{l:70,r:24,t:24,b:80},legend:{orientation:'h',y:-.2}},extra)}
 function applyTheme(name){currentTheme=name;const t=theme(),root=document.documentElement;['bg','panel','panel2','ink','muted','border','accent','accent2','grid','good','warn','danger'].forEach(k=>root.style.setProperty('--'+k,t[k]));document.querySelectorAll('.theme-btn').forEach(b=>b.classList.toggle('active',b.dataset.theme===name));renderComplexity()}
 function tableMarkup(headers,rows){return `<thead><tr>${headers.map((h,i)=>`<th${i===0?' scope="col"':''}>${esc(h)}</th>`).join('')}</tr></thead><tbody>${rows.length?rows.join(''):`<tr><td colspan="${headers.length}" class="empty">No rows available.</td></tr>`}</tbody>`}
-function renderHero(){const m=DATA.metadata||{};const taskCount=(DATA.per_task||[]).length;const modelCount=(DATA.model_order||[]).length;const tuning=m.tune?`${m.inner_splits??3}-fold inner CV`:'Tuning disabled';const chips=[`Primary metric: AUC`,`{{SUITE_LABEL}}: ${taskCount} of {{SUITE_TASK_COUNT}} tasks`,`Models: ${modelCount}`,tuning,`AUC tolerance: ${fmt(DATA.complexity_auc_tolerance,3)}`];document.getElementById('heroChips').innerHTML=chips.map(x=>`<span class="chip">${esc(x)}</span>`).join('')}
+function renderHero(){const m=DATA.metadata||{};const taskCount=(DATA.per_task||[]).length;const modelCount=(DATA.model_order||[]).length;const tuning=!m.tune?'Tuning disabled':m.validation_protocol==='rotating'?'Rotating validation':`${m.inner_splits??3}-fold inner CV`;const chips=[`Primary metric: AUC`,`{{SUITE_LABEL}}: ${taskCount} of {{SUITE_TASK_COUNT}} tasks`,`Models: ${modelCount}`,tuning,`AUC tolerance: ${fmt(DATA.complexity_auc_tolerance,3)}`];document.getElementById('heroChips').innerHTML=chips.map(x=>`<span class="chip">${esc(x)}</span>`).join('')}
 function renderMetrics(){const overall=DATA.overall||[];const valid=overall.filter(r=>num(r.mean_auc)!=null).sort((a,b)=>b.mean_auc-a.mean_auc);const best=valid[0]||{};const primary=DATA.primary_hugiml_model||'HUGIML';const hug=overall.find(r=>r.model===primary)||{};const comp=(DATA.complexity_summary||[]).find(r=>r.hugiml_model===primary&&r.baseline_model==='XGB standard')||(DATA.complexity_summary||[]).find(r=>num(r.median_inspection_ratio_baseline_to_hugiml)!=null)||{};const fr=DATA.friedman||{};const cards=[['Best mean AUC',fmt(best.mean_auc),textOr(best.model)],[primary+' mean AUC',fmt(hug.mean_auc),`mean rank ${textOr(fmt(hug.mean_rank,2))}`],[primary+' median inspection',fmt(hug.median_model_inspection_units,1),'model inspection units'],['Comparable inspection ratio',num(comp.median_inspection_ratio_baseline_to_hugiml)==null?'Not available':fmt(comp.median_inspection_ratio_baseline_to_hugiml,2)+'×',comp.baseline_model?`vs ${comp.baseline_model} on ${comp.comparable_or_better_tasks||0} tasks`:'insufficient paired data'],['Friedman p-value',textOr(fmt(fr.p_value,5)),fr.n_tasks?`${fr.n_tasks} complete paired tasks`:'insufficient paired tasks']];document.getElementById('metrics').innerHTML=cards.map(x=>`<div class="card stat"><div class="label">${esc(x[0])}</div><div class="value ${String(x[1]).length>12?'small':''}">${esc(x[1])}</div><div class="sub">${esc(x[2])}</div></div>`).join('');const specs=[['Balanced accuracy','mean_balanced_accuracy',true],['F1 score','mean_f1',true],['Brier score','mean_brier',false]];document.getElementById('metricComparisons').innerHTML=specs.map(([label,key,higher])=>{const rows=overall.filter(r=>num(r[key])!=null).sort((a,b)=>higher?Number(b[key])-Number(a[key]):Number(a[key])-Number(b[key]));const winner=rows[0]||{};const ranks=rows.map(r=>`<span class="metric-rank ${String(r.model).startsWith('HUGIML')?'hugiml':''}">${esc(r.model.replace(' standard',''))} ${fmt(r[key])}</span>`).join('');return `<div class="card stat metric-comparison"><div class="label">${esc(label)} · ${higher?'higher':'lower'} is better</div><div class="value">${textOr(fmt(winner[key]))}<span class="winner">${esc(winner.model||'Not available')}</span></div><div class="metric-ranking">${ranks}</div></div>`}).join('')}
 function renderOverall(){const rows=DATA.overall||[];const best=Math.max(...rows.map(r=>num(r.mean_auc)??-Infinity));const hasCi=rows.length>0&&rows.every(r=>num(r.mean_instance_inspection_units)!=null&&num(r.instance_inspection_ci_lower)!=null&&num(r.instance_inspection_ci_upper)!=null);const hasInstance=rows.length>0&&rows.every(r=>num(r.mean_instance_inspection_units)!=null);const headers=['Model','Completed','Mean AUC','Std AUC','Mean rank','Wins','Mean model inspection','Median model inspection'];if(hasCi)headers.push('Mean instance inspection (95% CI)');else if(hasInstance)headers.push('Mean instance inspection');headers.push('Tune s','Fit s','Predict s','Complexity s','Overhead s');const body=rows.map(r=>{const cells=[`<span class="pill">${esc(r.model)}</span>`,`${r.tasks_completed??0}/${r.tasks_attempted??r.tasks_completed??0}`,`<span class="${num(r.mean_auc)===best?'best':''}">${fmt(r.mean_auc)}</span>`,fmt(r.std_auc),fmt(r.mean_rank,2),String(r.wins??0),fmt(r.mean_model_inspection_units,1),fmt(r.median_model_inspection_units,1)];if(hasCi)cells.push(ciText(r.mean_instance_inspection_units,r.instance_inspection_ci_lower,r.instance_inspection_ci_upper,1));else if(hasInstance)cells.push(fmt(r.mean_instance_inspection_units,1));cells.push(fmt(r.mean_tune_seconds,2),fmt(r.mean_fit_seconds,2),fmt(r.mean_predict_seconds,2),fmt(r.mean_complexity_seconds,2),fmt(r.mean_evaluation_overhead_seconds,2));return `<tr>${cells.map(c=>`<td>${c}</td>`).join('')}</tr>`});document.getElementById('overallTable').innerHTML=tableMarkup(headers,body)}
 function renderComplexity(){const rows=DATA.complexity_points||[];const fallback=document.getElementById('plotFallback');fallback.textContent='';if(!rows.length){fallback.textContent='No model-inspection values are available.';return}if(!window.Plotly){fallback.textContent='Interactive chart unavailable; the same values remain available in the tables and exported CSV files.';return}const models=[...new Set(rows.map(r=>r.model))];const traces=models.map(model=>{const sub=rows.filter(r=>r.model===model);return {type:'scatter',mode:'markers',name:model,x:sub.map(r=>r.model_inspection_units),y:sub.map(r=>r.roc_auc),text:sub.map(r=>`${r.dataset} · task ${r.task_id}`),customdata:sub.map(r=>[ciText(r.instance_inspection_units_mean,r.instance_inspection_units_ci_lower,r.instance_inspection_units_ci_upper,1)]),hovertemplate:'%{text}<br>Model inspection=%{x:.2f}<br>Instance inspection=%{customdata[0]}<br>AUC=%{y:.4f}<extra>%{fullData.name}</extra>',marker:{size:10,opacity:.78}}});const positive=rows.every(r=>Number(r.model_inspection_units)>0);const t=theme();Plotly.react('complexityPlot',traces,plotLayout({xaxis:{title:'Model inspection units',type:positive?'log':'linear',automargin:true,gridcolor:t.grid},yaxis:{title:'ROC AUC',range:[0,1.02],automargin:true,gridcolor:t.grid},hovermode:'closest'}),{responsive:true,displaylogo:false})}
@@ -4055,7 +4448,7 @@ function metricScoreClass(values,index){const rounded=values.map(v=>num(v)==null
 function renderDatasetMetrics(){const models=DATA.model_order||[];const short={'HUGIML':'HUGIML','HUGIML':'HUGIML','XGB standard':'XGB','LightGBM standard':'LightGBM','RandomForest standard':'RandomForest'};const metrics=[['roc_auc','ROC-AUC'],['balanced_accuracy','Balanced accuracy'],['f1','F1 (binary / macro)']];const row1=`<tr><th rowspan="2" class="dataset-sticky">Dataset</th><th rowspan="2" class="task-sticky">Task</th>${metrics.map(([,label])=>`<th colspan="${models.length}" class="metric-group-head">${esc(label)}</th>`).join('')}</tr>`;const row2=`<tr>${metrics.flatMap(()=>models).map((model,i)=>`<th class="${i%models.length===0?'group-start':''}">${esc(short[model]||model)}</th>`).join('')}</tr>`;const body=(DATA.per_task||[]).map(task=>{const byModel=Object.fromEntries((task.rows||[]).map(row=>[row.model,row]));const cells=[];for(const [key] of metrics){const values=models.map(model=>byModel[model]?.[key]);values.forEach((value,i)=>{const classes=[metricScoreClass(values,i),i===0?'group-start':''].filter(Boolean).join(' ');cells.push(`<td class="${classes}" title="${num(value)==null?'':esc(String(value))}">${fmt(value,4)}</td>`)});}return `<tr><td class="dataset-sticky">${esc(task.dataset)}</td><td class="task-sticky">${task.task_id}</td>${cells.join('')}</tr>`}).join('');document.getElementById('datasetMetricTable').innerHTML=`<thead>${row1}${row2}</thead><tbody>${body||`<tr><td colspan="${2+metrics.length*models.length}" class="empty">No rows available.</td></tr>`}</tbody>`}
 {{RPTE_SCRIPT}}
 function renderPaired(){const rows=DATA.versus_hugiml||[];document.getElementById('paired').innerHTML=rows.map(r=>`<div class="paired-row"><strong>${esc(r.comparison)}</strong>${r.significant_holm_0_05?'<span class="badge">Significant</span>':''}<div class="note">Mean AUC difference: ${fmt(r.mean_auc_difference_hugiml_minus_baseline)} · raw p=${fmt(r.p_value,5)} · Holm p=${fmt(r.p_value_holm,5)} · paired tasks=${r.n_tasks??0}</div></div>`).join('')||'<div class="note">Insufficient complete paired tasks.</div>'}
-function renderProtocol(){const m=DATA.metadata||{};const rotating=m.validation_protocol==='rotating';const outer=rotating?'For test fold F_i, validation is F_(i+1) mod K and all remaining folds train the model':'Every stored task-defined train/test split';const selection=rotating?(m.tune?'Select by validation ROC AUC (balanced accuracy only when AUC is undefined); retain the fitted winner without refit':'Tuning disabled; fit estimator defaults on the rotating training folds'):(m.tune?`${m.inner_splits??3}-fold stratified CV inside each outer training partition`:'Disabled; estimator defaults fitted on each outer training partition');const stopping=m.early_stopping?`RPTE staged early stopping monitors log loss on the ${rotating?'rotating validation fold':'private stratified training holdout'} (maximum 15 trees, patience 3)`:'RPTE early stopping disabled; n_estimators=10';const baselineStopping=rotating?'XGBoost and LightGBM: maximum 200 trees, patience 20; Random Forest: tune 100 or 200 trees':'Defined by the nested-protocol baseline grids';const rows=[['Outer evaluation',outer],['Model selection',selection],['Downstream redundancy','Training-only single-pass reduction of generated terms with VIF greater than 5 when an earlier preferred term explains at least 80 percent of their variance; originals are preserved and patterns precede augmented pairs'],['RPTE early stopping',stopping],['Tree baseline budgets',baselineStopping],['Primary metric','Binary ROC AUC or multiclass OVR macro ROC AUC'],['Models',(DATA.model_order||[]).join(', ')],['Inspection comparison',`HUGIML AUC within ${fmt(DATA.complexity_auc_tolerance,3)} of or above the baseline`],['Task selection',m.selection_description||'Selected tasks']];if(m.methodology_note)rows.push(['Fallback methodology',m.methodology_note]);document.getElementById('protocol').innerHTML=rows.map(([k,v])=>`<div><strong>${esc(k)}</strong></div><div>${esc(v)}</div>`).join('');renderMethodology(rows,rotating)}
+function renderProtocol(){const m=DATA.metadata||{};const rotating=m.validation_protocol==='rotating';const outer=rotating?'For test fold F_i, validation is F_(i+1) mod K and all remaining folds train the model':'Every stored task-defined train/test split';const selection=rotating?(m.tune?'Select by validation ROC AUC (balanced accuracy only when AUC is undefined); retain the fitted winner without refit':'Tuning disabled; fit estimator defaults on the rotating training folds'):(m.tune?`${m.inner_splits??3}-fold stratified CV inside each outer training partition`:'Disabled; estimator defaults fitted on each outer training partition');const stopping=m.early_stopping?`RPTE staged early stopping monitors log loss on the ${rotating?'rotating validation fold':'private stratified training holdout'} (maximum 15 trees, patience 3)`:'RPTE early stopping disabled; n_estimators=10';const baselineStopping=rotating?'XGBoost and LightGBM: maximum 200 trees, patience 20; Random Forest: tune 100 or 200 trees':'Defined by the nested-protocol baseline grids';const rows=[['Outer evaluation',outer],['Model selection',selection],['Downstream redundancy','Training-only single-pass reduction of generated terms with VIF greater than 5 when a higher-priority term explains at least 80 percent of their variance; originals are preserved and patterns precede augmented pairs'],['RPTE early stopping',stopping],['Tree baseline budgets',baselineStopping],['Primary metric','Binary ROC AUC or multiclass OVR macro ROC AUC'],['Models',(DATA.model_order||[]).join(', ')],['Inspection comparison',`HUGIML AUC within ${fmt(DATA.complexity_auc_tolerance,3)} of or above the baseline`],['Task selection',m.selection_description||'Selected tasks']];if(m.methodology_note)rows.push(['Fallback methodology',m.methodology_note]);document.getElementById('protocol').innerHTML=rows.map(([k,v])=>`<div><strong>${esc(k)}</strong></div><div>${esc(v)}</div>`).join('');renderMethodology(rows,rotating)}
 function renderComplexityDefinitions(){const familyDefinitions={'HUGIML':'HUGIML: sparse linear branches count active source contributions; RPTE branches count conditions across active terminal paths plus active direct terms.','HUGIML':'HUGIML: linear branches count active source contributions; RPTE branches count conditions across active terminal paths plus active direct terms.','XGB standard':'XGBoost: complete-model units sum conditions across all active root-to-leaf paths; instance units count the reached path in every tree.','LightGBM standard':'LightGBM: complete-model units sum conditions across all active root-to-leaf paths; instance units count the reached path in every tree.','RandomForest standard':'Random Forest: complete-model units sum conditions across every root-to-leaf path; instance units count the reached path in every tree.','Logistic Regression':'Logistic regression: complete-model units count nonzero coefficients across fitted class models; instance units count active source contributions for one row.','EBM':'EBM: active term-score cells are weighted by source-feature arity; instance units count the selected cell for each term with the same arity weighting.','RuleFit':'RuleFit: complete-model units count active linear terms and all conditions in active rules; instance units count active linear contributions and conditions in rules satisfied by one row.'};const complexity=['Model inspection units measure the expanded evidence needed to inspect the complete fitted model. They count reviewed source elements, rule conditions, active score cells, or all tree-path conditions according to model family.','Instance inspection units measure the expanded evidence used for one prediction. Reported values are means across held-out instances, with a two-sided 95% Student-t confidence interval when available.','Fitted numeric components and terminal outputs are active when their absolute value exceeds 1e-12; intercepts are excluded.',...(DATA.model_order||[]).map(model=>familyDefinitions[model]).filter(Boolean)];document.getElementById('methodologyComplexity').innerHTML=complexity.map(x=>`<li>${esc(x)}</li>`).join('')}
 function methodologyValue(model,name,value){if(String(model).startsWith('HUGIML')&&name==='base_estimator'){if(value===null)return 'Automatic sparse logistic regression (binary: liblinear/L1; multiclass: SAGA/L1; C=0.5)';if(String(value).includes('LeafWiseBoundedLookaheadRPTEFeatureLR'))return 'RPTE adaptive sequential/lookahead (liblinear/L1 downstream; One-vs-Rest multiclass; leaf_config=3xD; depth=4; lr_C=0.5)'}if(value===null)return 'None';if(value===true)return 'True';if(value===false)return 'False';return String(value)}
 function renderMethodology(protocolRows,rotating){const m=DATA.metadata||{};const bullets=protocolRows.map(([k,v])=>`${k}: ${v}`);document.getElementById('methodologyProtocol').innerHTML=bullets.map(x=>`<li>${esc(x)}</li>`).join('');const ta=m.tabarena_protocol||{};const preprocessing=ta.model_agnostic_preprocessing?['AutoMLPipelineFeatureGenerator is fitted independently on each inner child training fold.','The corresponding fitted generator transforms that child validation fold and remains attached to the child for outer-test prediction.','HUGIML then applies its native feature handling; baseline models apply their existing model-specific numeric and categorical transformations.','No validation or outer-test rows contribute to preprocessing fit state.']:['All preprocessing is fitted using training data only within each outer split.','Numeric features use median imputation; categorical features use most-frequent imputation and one-hot encoding for baseline models.','Tuning, fitting, and prediction times are recorded separately for every official split.'];document.getElementById('methodologyPreprocessing').innerHTML=preprocessing.map(x=>`<li>${esc(x)}</li>`).join('');const grids=m.grid_snapshot||{};const cards=(DATA.model_order||[]).map(model=>{const spec=grids[model]||{};const grid=spec.grid||{};const params=Object.entries(grid).map(([name,values])=>`<tr><th scope="row">${esc(name)}</th><td>${esc((Array.isArray(values)?values:[values]).map(value=>methodologyValue(model,name,value)).join(', '))}</td></tr>`).join('');let runtime=[];if(String(model).startsWith('HUGIML'))runtime=m.early_stopping?['RPTE early_stopping=True','maximum estimators=15','patience=3','monitoring metric=log loss',rotating?'validation source=rotating validation fold':'validation source=private stratified 10% training holdout','minimum improvement=1e-4']:['RPTE early_stopping=False','n_estimators=10'];else if(model==='XGB standard'&&rotating)runtime=[`validation early stopping enabled`,`maximum estimators=${m.baseline_early_stopping_max_estimators??200}`,`patience=${m.baseline_early_stopping_patience??20}`];else if(model==='LightGBM standard'&&rotating)runtime=[`validation early stopping callback enabled`,`maximum estimators=${m.baseline_early_stopping_max_estimators??200}`,`patience=${m.baseline_early_stopping_patience??20}`];else if(model==='RandomForest standard'&&rotating)runtime=['no iterative early stopping','validation selects n_estimators from 100 or 200'];else runtime=['no additional validation-time stopping setting'];const constants=Object.entries(spec.constants||{}).map(([k,v])=>`${k}=${methodologyValue(model,k,v)}`);return `<article class="methodology-model"><h4>${esc(model)}</h4><div class="methodology-model-meta">Search space: ${esc(spec.grid_name||model)} · ${esc(spec.candidate_count??1)} candidate configurations</div><table class="methodology-table"><thead><tr><th>Parameter</th><th>Values considered</th></tr></thead><tbody>${params}</tbody></table><p><strong>Constant settings:</strong> ${esc(constants.join('; ')||'None recorded')}</p><p><strong>Validation-time behavior:</strong> ${esc(runtime.join('; '))}</p></article>`});document.getElementById('methodologyModels').innerHTML=cards.join('')}
@@ -4081,6 +4474,8 @@ def render_dashboard(
     template = (
         template_html.read_text(encoding="utf-8") if template_html is not None else DEFAULT_TEMPLATE
     )
+    if DEFAULT_BENCHMARK_LABEL == "PMLBmini":
+        template = template.replace("Official OpenML train/test indices", "Stored dataset train/test indices")
     required = ["{{TITLE}}", "{{DATA_JSON}}"]
     missing = [token for token in required if token not in template]
     if missing:
@@ -4251,6 +4646,7 @@ def build_tabarena_quadrant_analysis(
             subset, official_results_path, regime="tuned"
         )
         ranking = list(comparison.get("leaderboard", []))
+        ranked_methods = {str(row["method"]) for row in ranking}
         dataset_names = {str(row["dataset"]) for row in subset}
         scores: dict[str, np.ndarray] = {
             "HUGIML": np.asarray([float(row["roc_auc"]) for row in subset], dtype=float)
@@ -4264,7 +4660,11 @@ def build_tabarena_quadrant_analysis(
             frame = frame.dropna(subset=["roc_auc"])
             if frame.empty:
                 continue
-            scores[str(method)] = frame["roc_auc"].to_numpy(dtype=float)
+            method_name = str(method)
+            tuned_name = f"{method_name} (tuned)"
+            scores[tuned_name if tuned_name in ranked_methods else method_name] = (
+                frame["roc_auc"].to_numpy(dtype=float)
+            )
         official_scores = {method: values for method, values in scores.items() if method != "HUGIML"}
         best_mean_method = max(official_scores, key=lambda method: float(np.mean(official_scores[method])))
         best_median_method = max(official_scores, key=lambda method: float(np.median(official_scores[method])))
@@ -4274,6 +4674,8 @@ def build_tabarena_quadrant_analysis(
         for rank, ranking_row in enumerate(ranking, start=1):
             method = str(ranking_row["method"])
             values = scores.get(method)
+            if values is None:
+                continue
             mean_auc = None if values is None else float(np.mean(values))
             median_auc = None if values is None else float(np.median(values))
             mean_delta = None if mean_auc is None else mean_auc - best_mean
@@ -4289,6 +4691,8 @@ def build_tabarena_quadrant_analysis(
                 "mean_delta": mean_delta,
                 "median_delta": median_delta,
             })
+        for rank, model in enumerate(models, start=1):
+            model["rank"] = rank
         hugiml_rank = next(model["rank"] for model in models if model["method"] == "HUGIML")
         output_groups[name] = {
             "dataset_count": len(subset),
@@ -4311,6 +4715,87 @@ def build_tabarena_quadrant_analysis(
         "delta_axis_step": 0.04,
         "groups": output_groups,
     }
+
+
+def tabarena_details(data):
+    from collections import Counter
+    grid = data.get("metadata", {}).get("grid_snapshot", {}).get("HUGIML", {})
+    datasets = []
+    complete = True
+    for row in data.get("pair_results", []):
+        if row.get("model") != "HUGIML":
+            continue
+        selected = row.get("best_params_by_split_json", [])
+        if isinstance(selected, str):
+            selected = json.loads(selected)
+        complete = complete and bool(selected)
+        counts = Counter()
+        for split in selected:
+            params = split.get("best_params", {})
+            if "base_estimator" not in params:
+                complete = False
+                continue
+            estimator = params.get("base_estimator")
+            if estimator is not None and "RPTE" not in str(estimator):
+                complete = False
+                continue
+            branch = "LR" if estimator is None else "RPTE"
+            counts[branch] += 1
+        datasets.append({"dataset": row["dataset"], "LR": counts["LR"], "RPTE": counts["RPTE"],
+                         "selected_parameters": selected})
+    totals = {branch: sum(r[branch] for r in datasets) for branch in ("LR", "RPTE")}
+    return {"hyperparameters": grid, "branch_counts": totals, "datasets": datasets,
+            "complete_selection": complete and bool(datasets),
+            "rpte_distributions": data.get("hugiml_rpte_distributions", [])}
+
+
+def tabarena_sections(data):
+    details = tabarena_details(data)
+    esc = lambda value: html.escape(str(value))
+    grid = details["hyperparameters"]
+    def value_text(name, value):
+        if name == "base_estimator":
+            return "LR (automatic sparse logistic regression); One-vs-Rest LeafWiseBoundedLookaheadRPTEFeatureLR (lr_C=0.5, lr_penalty=l1)"
+        return ", ".join(json.dumps(v) for v in value) if isinstance(value, list) else str(value)
+    body = "".join(f"<tr><td>{esc(k)}</td><td>{esc(value_text(k,v))}</td></tr>" for k,v in grid.get("grid", {}).items())
+    parameters = f'<h3>HUGIML hyperparameters</h3><p>{grid.get("candidate_count", 0)} configurations per outer split; eight retained inner-fold models per selected configuration. Binary selection uses ROC AUC; multiclass selection uses log loss. Selected parameters are recorded for each dataset and outer split.</p><div class="table-wrap"><table><thead><tr><th>Parameter</th><th>Search values</th></tr></thead><tbody>{body}</tbody></table></div>'
+    counts = details["branch_counts"]
+    if not details["complete_selection"]:
+        return parameters, ""
+    distributions = {r["dataset"]: r for r in details["rpte_distributions"]}
+    rpte_datasets = [r for r in details["datasets"] if r["RPTE"]]
+    metrics = [("rpte_inputs_passed", "Inputs"),
+               ("rpte_active_tree_count", "Active trees"),
+               ("rpte_active_leaf_count", "Active leaves"),
+               ("rpte_direct_term_count", "Active direct terms")]
+    metrics = [(key, label) for key, label in metrics if rpte_datasets and all(
+        distributions.get(r["dataset"], {}).get(key + "_n") == r["RPTE"]
+        and all(distributions[r["dataset"]].get(key + "_" + suffix) is not None
+                for suffix in ("median", "q25", "q75")) for r in rpte_datasets)]
+    def distribution(row, key):
+        if not row["RPTE"]:
+            return "—"
+        values = distributions[row["dataset"]]
+        def fmt(suffix):
+            return f'{values[key + "_" + suffix]:.1f}'.rstrip('0').rstrip('.')
+        return f'{fmt("median")} [{fmt("q25")}, {fmt("q75")}]'
+    rows = []
+    for r in sorted(details["datasets"], key=lambda r: r["dataset"].lower()):
+        cells = [esc(r["dataset"]), str(r["LR"] + r["RPTE"]), str(r["LR"]), str(r["RPTE"])]
+        cells.extend(distribution(r, key) for key, _ in metrics)
+        rows.append('<tr>' + ''.join(f'<td>{value}</td>' for value in cells) + '</tr>')
+    headers = ["Dataset", "Splits", "LR splits", "RPTE splits"] + [label for _, label in metrics]
+    note = ('RPTE values show median [Q25, Q75] of recorded outer-split observations. '
+            'An em dash indicates that no RPTE branch was selected.') if metrics else ''
+    branch = (
+        '<section class="panel-card" id="branch-selection"><div class="section-head"><div>'
+        '<span class="eyebrow">HUGIML</span><h3>Fitted paths and RPTE distributions</h3></div>'
+        f'<p>{sum(counts.values())} outer splits · LR {counts["LR"]} · RPTE {counts["RPTE"]}</p></div>'
+        f'<p>Counts identify the selected configuration for each outer split. {note}</p>'
+        '<div class="table-scroll leaderboard-scroll"><table><thead><tr>'
+        + ''.join(f'<th>{label}</th>' for label in headers)
+        + '</tr></thead><tbody>' + ''.join(rows) + '</tbody></table></div></section>')
+    return parameters, branch
 
 
 def render_tabarena_official_dashboard(data: dict[str, Any], out_html: Path) -> None:
@@ -4412,10 +4897,11 @@ def render_tabarena_official_dashboard(data: dict[str, Any], out_html: Path) -> 
     detailed_sections: list[str] = []
     detailed = data.get("tabarena_detailed_metric_comparison", {})
     metric_specs = (
-        ("roc_auc", "ROC AUC"),
+        ("accuracy", "Accuracy"),
         ("balanced_accuracy", "Balanced accuracy"),
         ("f1", "F1"),
-        ("brier", "Brier"),
+        ("roc_auc", "ROC AUC"),
+        ("log_loss", "Log loss"),
     )
     for regime in ("default", "tuned"):
         for scope in ("overall", "binary", "multiclass"):
@@ -4466,11 +4952,58 @@ def render_tabarena_official_dashboard(data: dict[str, Any], out_html: Path) -> 
                 f'<article class="panel-card detailed-panel" data-detailed-panel="{detailed_view_name}"{detailed_hidden}><div class="section-head"><div><span class="eyebrow">{regime.title()} · {scope}</span><h3>Predictive metrics and HUGIML deltas</h3></div><p>Positive delta favors HUGIML. Rows are ordered by mean ROC AUC.</p></div><div class="table-scroll leaderboard-scroll"><table><thead><tr><th rowspan="2">Method</th>{group_headers}</tr><tr>{subheaders}</tr></thead><tbody>{"".join(body)}</tbody></table></div></article>'
             )
 
+    non_neural_methods = {
+        "HUGIML", "CatBoost", "ExplainableBM", "ExtraTrees", "KNeighbors",
+        "LightGBM", "LinearModel", "RandomForest", "XGBoost",
+    }
+    non_neural_tables: list[str] = []
+    for regime in ("default", "tuned"):
+        rows = [row for row in detailed.get(f"{regime}_overall", []) if row.get("method") in non_neural_methods]
+        rows.sort(key=lambda row: (row.get("method") != "HUGIML", str(row.get("method"))))
+        body: list[str] = []
+        for row in rows:
+            cells = [f"<td>{html.escape(str(row.get('method', '')))}</td>"]
+            for metric, _ in metric_specs:
+                value = display(row.get(f"{metric}_mean"), 4)
+                delta = row.get(f"{metric}_hugiml_delta")
+                if row.get("method") == "HUGIML":
+                    cells.append(f'<td><strong>{value}</strong><small class="cell-note">reference</small></td>')
+                else:
+                    delta_class = "positive" if delta is not None and float(delta) >= 0 else "negative"
+                    cells.append(f'<td>{value}<small class="cell-note {delta_class}">HUGIML Δ {display(delta, 4)}</small></td>')
+            row_class = ' class="hugiml-row"' if row.get("method") == "HUGIML" else ""
+            body.append(f"<tr{row_class}>" + "".join(cells) + "</tr>")
+        headers = "".join(f"<th>{label}</th>" for _, label in metric_specs)
+        non_neural_tables.append(
+            f'<article class="non-neural-card"><span class="eyebrow">{regime.title()} models</span>'
+            f'<h3>{regime.title()} comparison</h3><div class="table-scroll"><table><thead><tr>'
+            f'<th>Method</th>{headers}</tr></thead><tbody>{"".join(body)}</tbody></table></div></article>'
+        )
+    non_neural_section = ""
+    if any(detailed.get(f"{regime}_overall") for regime in ("default", "tuned")):
+        non_neural_section = (
+            '<section class="non-neural-section"><div class="section-head"><div><span class="eyebrow">Multi-metric comparison</span>'
+            '<h2>HUGIML and non-neural models</h2></div><p>Dataset-balanced means across all completed datasets. '
+            'Each delta is the paired HUGIML advantage; positive values favor HUGIML, including log loss after reversing its lower-is-better direction.'
+            f'</p></div><div class="non-neural-grid">{"".join(non_neural_tables)}</div></section>'
+        )
+    grid_snapshot = data.get("metadata", {}).get("grid_snapshot", {})
+    hugiml_candidates = next(
+        (spec.get("candidate_count") for name, spec in grid_snapshot.items() if str(name).startswith("HUGIML")),
+        "the recorded",
+    )
     matched = int(comparison.get("matched_dataset_count", 0))
     document = f"""<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>HUGIML · TabArena official leaderboard analysis</title>
 <style>
 :root{{--bg:#07101f;--panel:#101b31;--panel2:#15233d;--ink:#edf4ff;--muted:#9eacc6;--border:#293a59;--accent:#7da7ff;--accent2:#63e6be;--good:#69db7c;--bad:#ff8787}}*{{box-sizing:border-box}}body{{margin:0;background:radial-gradient(circle at 10% 0,#152749 0,transparent 34%),var(--bg);color:var(--ink);font-family:Inter,ui-sans-serif,system-ui,Segoe UI,sans-serif}}.wrap{{width:min(1540px,calc(100% - 32px));margin:auto;padding:30px 0 54px}}.hero{{padding:28px;border:1px solid var(--border);border-radius:22px;background:linear-gradient(135deg,#142747,#0d172a);box-shadow:0 22px 70px #0005}}.eyebrow{{color:var(--accent2);font-size:11px;font-weight:800;text-transform:uppercase;letter-spacing:.14em}}h1{{font-size:clamp(30px,4vw,52px);line-height:1.05;margin:9px 0 12px}}h2{{font-size:28px;margin:4px 0}}h3{{font-size:20px;margin:4px 0}}p{{color:var(--muted);line-height:1.6}}.hero-meta{{display:flex;gap:10px;flex-wrap:wrap;margin-top:18px}}.chip{{padding:7px 11px;border:1px solid var(--border);border-radius:999px;background:#ffffff08;color:var(--muted);font-size:12px}}.tabs{{display:flex;gap:9px;flex-wrap:wrap;margin:24px 0 18px}}.pool-tab{{border:1px solid var(--border);border-radius:999px;padding:10px 17px;background:var(--panel);color:var(--muted);font:inherit;font-weight:750;cursor:pointer}}.pool-tab.active{{background:color-mix(in srgb,var(--accent) 24%,var(--panel));border-color:var(--accent);color:var(--ink)}}.pool-panel[hidden],.detailed-panel[hidden]{{display:none}}.pool-intro{{display:flex;align-items:end;justify-content:space-between;gap:20px;margin:8px 2px 16px}}.pool-intro p{{max-width:760px;text-align:right;margin:0}}.metric-grid{{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:12px}}.metric,.panel-card,.methodology{{border:1px solid var(--border);border-radius:16px;background:color-mix(in srgb,var(--panel) 96%,transparent)}}.metric{{padding:16px}}.metric span{{display:block;color:var(--muted);font-size:11px;text-transform:uppercase;letter-spacing:.07em}}.metric strong{{display:block;font-size:27px;margin:8px 0 5px}}.metric small{{color:var(--muted)}}.panel-card{{padding:18px;margin-top:16px}}.section-head{{display:flex;align-items:end;justify-content:space-between;gap:18px;margin-bottom:12px}}.section-head p{{margin:0;text-align:right;font-size:12px}}.table-scroll{{overflow:auto;border:1px solid var(--border);border-radius:12px}}.leaderboard-scroll{{max-height:570px}}.pairwise-scroll{{max-height:470px}}table{{width:100%;border-collapse:collapse;font-size:13px}}th,td{{padding:10px 12px;border-bottom:1px solid #293a5988;text-align:right;white-space:nowrap}}th{{position:sticky;top:0;background:var(--panel2);color:var(--muted);z-index:2}}th:nth-child(2),td:nth-child(2),.pairwise-scroll th:first-child,.pairwise-scroll td:first-child{{text-align:left}}.rank{{display:inline-grid;place-items:center;min-width:26px;height:26px;border-radius:50%;background:#ffffff0a;color:var(--muted)}}.hugiml-row{{background:color-mix(in srgb,var(--accent2) 14%,transparent);font-weight:750}}.positive{{color:var(--good);font-weight:750}}.negative{{color:var(--bad);font-weight:750}}.methodology{{padding:22px;margin-top:20px}}.methodology ul{{color:var(--muted);line-height:1.65}}footer{{color:var(--muted);font-size:12px;margin-top:18px;text-align:right}}@media(max-width:1000px){{.metric-grid{{grid-template-columns:repeat(2,minmax(0,1fr))}}.pool-intro,.section-head{{align-items:flex-start;flex-direction:column}}.pool-intro p{{text-align:right;margin:0}}.section-head p{{text-align:left}}}}@media(max-width:560px){{.wrap{{width:min(100% - 18px,1540px)}}.hero{{padding:20px}}.metric-grid{{grid-template-columns:1fr}}}}
 </style></head><body><main class="wrap"><header class="hero"><span class="eyebrow">Official-test comparison</span><h1>HUGIML in the TabArena reference landscape</h1><p>A dedicated leaderboard view for aligned outer-test comparisons. Search budgets and ensemble construction remain method-specific, so each pool is presented separately.</p><div class="hero-meta"><span class="chip">{matched} completed datasets</span><span class="chip">Exact outer-split matching</span><span class="chip">Dataset-balanced aggregation</span><span class="chip">200 Elo bootstraps</span></div></header><nav class="tabs" role="tablist">{"".join(buttons)}</nav>{"".join(panels)}{"".join(detailed_sections)}<section class="methodology"><span class="eyebrow">Methodology and interpretation</span><h3>Comparison design</h3><ul><li>Local HUGIML results are joined to published TabArena results by exact dataset name and outer-split number.</li><li>Binary error is 1 − ROC AUC; multiclass error is log loss. Split errors are averaged within dataset before aggregation, giving every dataset equal weight.</li><li>Each tab is an independent comparison pool. Elo, ranks, normalized score, improvability, confidence intervals, and HUGIML pairwise results are recomputed within that pool.</li><li>AutoMLPipelineFeatureGenerator is fitted separately on every inner child training fold and retained with that child for validation and outer-test transformation; no validation or test rows contribute to preprocessing state.</li><li>The outer tests and metrics align. HUGIML evaluates 16 configurations, while each tuned official baseline evaluates 200; retained ensembles and compute budgets remain method-specific.</li><li>Detailed metric tables show mean, median, and the paired HUGIML advantage. Positive deltas favor HUGIML; Brier uses the lower-is-better direction.</li></ul></section></main><script>const tabs=[...document.querySelectorAll('[data-pool-tab]')],panels=[...document.querySelectorAll('[data-pool-panel]')],details=[...document.querySelectorAll('[data-detailed-panel]')];tabs.forEach(tab=>tab.addEventListener('click',()=>{{tabs.forEach(item=>item.classList.toggle('active',item===tab));panels.forEach(panel=>panel.hidden=panel.dataset.poolPanel!==tab.dataset.poolTab);details.forEach(detail=>detail.hidden=detail.dataset.detailedPanel!==tab.dataset.poolTab)}}));</script></body></html>"""
+    document = document.replace(
+        "HUGIML evaluates 16 configurations",
+        f"HUGIML evaluates {hugiml_candidates} configurations",
+    ).replace(
+        "Detailed metric tables show mean, median, and the paired HUGIML advantage. Positive deltas favor HUGIML; Brier uses the lower-is-better direction.",
+        "Detailed metric tables show mean, median, and the paired HUGIML advantage across accuracy, balanced accuracy, F1, ROC AUC, and log loss. Positive deltas favor HUGIML; log loss uses the lower-is-better direction.",
+    )
     quadrant_data = data.get("tabarena_quadrant_analysis", {})
     if quadrant_data.get("groups"):
         quadrant_section = """
@@ -4482,7 +5015,7 @@ def render_tabarena_official_dashboard(data: dict[str, Any], out_html: Path) -> 
 </section>"""
         document = document.replace(
             "</header><nav class=\"tabs\"",
-            f"</header>{quadrant_section}<nav class=\"tabs\"",
+            f"</header>{quadrant_section}{non_neural_section}<nav class=\"tabs\"",
             1,
         )
         quadrant_json = json.dumps(
@@ -4532,6 +5065,7 @@ renderQuadrants();
         document = document.replace("</script></body>", quadrant_script + "</script></body>")
     extra_css = """
 .tabs{display:grid;grid-template-columns:repeat(9,minmax(0,1fr));gap:5px;margin:20px 0 18px}.pool-tab{min-width:0;padding:8px 5px;font-size:10.5px;line-height:1.2;white-space:nowrap}.quadrant-section{padding:20px;margin-top:20px;border:1px solid var(--border);border-radius:16px;background:color-mix(in srgb,var(--panel) 96%,transparent)}.quadrant-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px}.quadrant-panel{min-width:0}.quadrant-panel h3{margin-bottom:2px}.quadrant-note,.quadrant-reference{margin:0 0 4px;font-size:12px;color:var(--muted)}.quadrant-panel svg{display:block;width:100%}.quadrant-panel text{fill:var(--ink);font-size:11px}.quadrant-panel .muted{fill:var(--muted)}.quadrant-panel .gridline{stroke:var(--border)}.quadrant-panel .peer-bar{fill:var(--accent)}.quadrant-panel .hug-bar{fill:var(--accent2)}.quadrant-panel .median-dot{fill:var(--ink);stroke:var(--bg);stroke-width:1}.quadrant-panel .hug-label{font-weight:800}.quadrant-legend{display:flex;justify-content:center;gap:18px;flex-wrap:wrap;margin-top:8px;color:var(--muted);font-size:12px}.legend-swatch,.legend-dot{display:inline-block;width:9px;height:9px;border-radius:50%;margin-right:5px}.legend-swatch.hug{background:var(--accent2)}.legend-swatch.peer{background:var(--accent)}.legend-dot{background:var(--ink)}.quadrant-order-note{margin:12px 0 0;color:var(--muted);font-size:12px}.methodology{padding:0}.methodology summary{cursor:pointer;padding:20px 22px;font-weight:800}.methodology-content{padding:0 22px 20px}@media(max-width:1160px){.tabs{display:flex;flex-wrap:wrap}.pool-tab{padding:8px 12px}}@media(max-width:760px){.quadrant-grid{grid-template-columns:1fr}}
+.non-neural-section{padding:20px;margin-top:20px;border:1px solid var(--border);border-radius:16px;background:color-mix(in srgb,var(--panel) 96%,transparent)}.non-neural-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px}.non-neural-card{min-width:0;padding:16px;border:1px solid var(--border);border-radius:13px;background:#ffffff04}.non-neural-card h3{margin:4px 0 12px}.non-neural-card th:first-child,.non-neural-card td:first-child{text-align:left}.cell-note{display:block;margin-top:3px;color:var(--muted);font-size:10px;font-weight:650}@media(max-width:1160px){.non-neural-grid{grid-template-columns:1fr}}
 """
     document = document.replace("</style>", extra_css + "</style>", 1)
     methodology_start = '<section class="methodology"><span class="eyebrow">'
@@ -4546,6 +5080,9 @@ renderQuadrants();
             "</ul></div></details></section></main>",
             1,
         )
+    parameters, branch_section = tabarena_sections(data)
+    document = document.replace('<section class="methodology">', branch_section + '<section class="methodology">', 1)
+    document = document.replace('</ul></div></details></section></main>', '</ul>' + parameters + '</div></details></section></main>', 1)
     out_html.parent.mkdir(parents=True, exist_ok=True)
     out_html.write_text(document, encoding="utf-8")
 
@@ -4620,6 +5157,17 @@ def assemble_outputs(
                     DEFAULT_TABARENA_DETAILED_METRICS,
                 )
             )
+            non_neural_methods = {
+                "HUGIML", "CatBoost", "ExplainableBM", "ExtraTrees", "KNeighbors",
+                "LightGBM", "LinearModel", "RandomForest", "XGBoost",
+            }
+            data["tabarena_non_neural_metric_comparison"] = {
+                regime: [
+                    row for row in data["tabarena_detailed_metric_comparison"].get(f"{regime}_overall", [])
+                    if row.get("method") in non_neural_methods
+                ]
+                for regime in ("default", "tuned")
+            }
             if (
                 DEFAULT_TABARENA_OFFICIAL_RESULTS is not None
                 and DEFAULT_TABARENA_OFFICIAL_RESULTS.exists()
@@ -4657,6 +5205,9 @@ def assemble_outputs(
     )
     tabarena_official_pairwise_csv = (
         out_dir / f"{DEFAULT_OUTPUT_PREFIX}_official_reference_pairwise.csv"
+    )
+    tabarena_non_neural_metrics_csv = (
+        out_dir / f"{DEFAULT_OUTPUT_PREFIX}_non_neural_metric_comparison.csv"
     )
     data_json = out_dir / f"{DEFAULT_OUTPUT_PREFIX}_dashboard_data.json"
     dashboard_html = out_dir / DEFAULT_DASHBOARD_NAME
@@ -4698,7 +5249,13 @@ def assemble_outputs(
         ] or official_comparison.get("hugiml_pairwise", [])
         pd.DataFrame(leaderboard_export).to_csv(tabarena_official_leaderboard_csv, index=False)
         pd.DataFrame(pairwise_export).to_csv(tabarena_official_pairwise_csv, index=False)
-    atomic_write_json(data_json, data)
+        non_neural_export = [
+            {"regime": regime, **row}
+            for regime, rows in data.get("tabarena_non_neural_metric_comparison", {}).items()
+            for row in rows
+        ]
+        pd.DataFrame(non_neural_export).to_csv(tabarena_non_neural_metrics_csv, index=False)
+    atomic_write_json(data_json, _public_dashboard_json(data))
     if not DEFAULT_TABARENA_REPORTING:
         render_dashboard(
             data,
@@ -4723,6 +5280,7 @@ def assemble_outputs(
         outputs["tabarena_leaderboard_csv"] = tabarena_leaderboard_csv
         outputs["tabarena_official_leaderboard_csv"] = tabarena_official_leaderboard_csv
         outputs["tabarena_official_pairwise_csv"] = tabarena_official_pairwise_csv
+        outputs["tabarena_non_neural_metrics_csv"] = tabarena_non_neural_metrics_csv
         if tabarena_official_dashboard_html.exists():
             outputs["tabarena_official_dashboard_html"] = tabarena_official_dashboard_html
     return outputs
@@ -4757,7 +5315,54 @@ def build_parser() -> argparse.ArgumentParser:
             "hugiml. Aliases: xgb, lightgbm, rf, lr, ebm, rulefit. Default: all."
         ),
     )
+    parser.add_argument(
+        "--execute-models",
+        default=None,
+        help=(
+            "Restrict execution to a subset of --models without changing the stored run "
+            "configuration. Intended for selective resume after removing chosen results."
+        ),
+    )
     parser.add_argument("--inner-splits", type=int, default=DEFAULT_INNER_SPLITS)
+    parser.add_argument(
+        "--n-jobs",
+        type=int,
+        default=DEFAULT_WORKER_JOBS,
+        help=(
+            "Shared validation-worker budget for HUGIML and baselines. TabArena's eight "
+            "retained child folds use this budget; candidates and final refits remain "
+            "serial. With --outer-jobs, this is the budget per outer fold. "
+            f"Default: {DEFAULT_WORKER_JOBS}."
+        ),
+    )
+    parser.add_argument(
+        "--outer-jobs",
+        type=int,
+        default=DEFAULT_OUTER_JOBS,
+        help=(
+            "Concurrent official folds within one repeat. TabArena has three folds per "
+            "repeat, so 3 uses up to 3 x --n-jobs workers. "
+            f"Default: {DEFAULT_OUTER_JOBS}."
+        ),
+    )
+    parser.add_argument(
+        "--outer-jobs-fallback",
+        type=int,
+        default=DEFAULT_OUTER_JOBS_FALLBACK,
+        help=(
+            "First fallback when the requested outer concurrency exceeds CPU or memory "
+            "capacity. Further reduction remains automatic. Default: outer-jobs minus 1."
+        ),
+    )
+    parser.add_argument(
+        "--outer-jobs-min-memory-gb",
+        type=float,
+        default=0.0,
+        help=(
+            "Optional explicit memory threshold for the requested outer concurrency. "
+            "Zero uses an automatic estimate based on outer-jobs and n-jobs. Default: 0."
+        ),
+    )
     parser.add_argument("--random-state", type=int, default=DEFAULT_RANDOM_STATE)
     parser.add_argument("--no-tune", action="store_true", help="Fit defaults without inner CV")
     parser.add_argument(
@@ -4782,11 +5387,35 @@ def build_parser() -> argparse.ArgumentParser:
         help="Development-only cap; default evaluates every OpenML-defined split",
     )
     parser.add_argument(
+        "--max-train-rows",
+        type=int,
+        default=None,
+        help=(
+            "Maximum rows used from each official outer-training partition. Excess rows "
+            "are sampled deterministically with class stratification; outer-test rows are unchanged."
+        ),
+    )
+    parser.add_argument(
+        "--max-train-predictors",
+        type=int,
+        default=None,
+        help=(
+            "Maximum raw predictors fitted per official split. Selection uses target "
+            "correlation computed only from that split's limited training rows."
+        ),
+    )
+    parser.add_argument(
         "--hugiml-scenario",
         choices=sorted(benchmark_base.HUGIML_SCENARIOS),
         default=DEFAULT_HUGIML_SCENARIO,
     )
     parser.add_argument("--hugiml-max-fit-seconds", type=float, default=None)
+    parser.add_argument(
+        "--lr-source-policy",
+        choices=("standard", "main_effect", "strict"),
+        default="standard",
+        help="Raw-source reuse policy for HUGIML's downstream logistic model.",
+    )
     parser.add_argument(
         "--complexity-auc-tolerance",
         type=float,
@@ -4816,8 +5445,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--reuse-baseline-results",
         action="store_true",
         help=(
-            "Deprecated compatibility alias. With --resume, all fitting-compatible "
-            "completed results are reused automatically."
+            "Alias for result continuation behavior used with --resume."
         ),
     )
     parser.add_argument(
@@ -4849,7 +5477,7 @@ def build_parser() -> argparse.ArgumentParser:
     offline.add_argument("--task-ids-file", type=Path, action="append", default=[])
     offline.add_argument(
         "--defer-task-ids",
-        default="",
+        default=None,
         help=(
             "Comma-separated task IDs to execute after every other selected task. "
             "This changes execution order only, not checkpoint identity."
@@ -4918,6 +5546,9 @@ def pair_error_row(
         ),
         "tuned": bool(tune),
         "hugiml_scenario": hugiml_scenario if is_hugiml_model(model_name) else None,
+        "lr_source_policy": (
+            BENCHMARK_LR_SOURCE_POLICY if is_hugiml_model(model_name) else None
+        ),
         "accuracy": None,
         "roc_auc": None,
         "auc": None,
@@ -4978,6 +5609,183 @@ def pair_error_row(
     }
 
 
+def _available_memory_gb() -> float | None:
+    try:
+        import psutil
+
+        return float(psutil.virtual_memory().available) / float(1024**3)
+    except Exception:
+        return None
+
+
+def _shutdown_parallel_workers(*, wait: bool) -> str | None:
+    """Terminate reusable Joblib workers and return a concise error if needed."""
+    try:
+        from joblib.externals.loky import get_reusable_executor
+
+        get_reusable_executor().shutdown(wait=wait, kill_workers=True)
+        return None
+    except Exception as exc:
+        return f"{type(exc).__name__}: {exc}"
+
+
+def _flush_dataset_boundary_memory() -> dict[str, Any]:
+    """Release completed parallel workers and collect unreachable objects."""
+
+    available_before = _available_memory_gb()
+    executor_shutdown = False
+    executor_error: str | None = None
+    try:
+        executor_error = _shutdown_parallel_workers(wait=True)
+        if executor_error is not None:
+            raise RuntimeError(executor_error)
+        executor_shutdown = True
+    except Exception as exc:  # cleanup is best-effort; allocation remains conservative
+        executor_error = f"{type(exc).__name__}: {exc}"
+    collected_objects = int(gc.collect())
+    available_after = _available_memory_gb()
+    reclaimed_gb = (
+        float(available_after - available_before)
+        if available_before is not None and available_after is not None
+        else None
+    )
+    return {
+        "executor_shutdown": executor_shutdown,
+        "executor_error": executor_error,
+        "collected_objects": collected_objects,
+        "available_memory_before_gb": available_before,
+        "available_memory_after_gb": available_after,
+        "available_memory_change_gb": reclaimed_gb,
+    }
+
+
+def _select_tabarena_parallelism(
+    *,
+    requested_outer_jobs: int,
+    requested_inner_jobs: int,
+    fallback_outer_jobs: int | None,
+    available_memory_gb: float | None,
+    logical_processors: int | None = None,
+    requested_memory_threshold_gb: float = 0.0,
+    estimated_memory_per_outer_job_gb: float = 1.0,
+) -> tuple[int, int, list[str]]:
+    """Choose nested concurrency without exceeding CPU or estimated memory capacity."""
+
+    logical = max(1, int(logical_processors or os.cpu_count() or 1))
+    outer = max(1, int(requested_outer_jobs))
+    if requested_inner_jobs == -1:
+        inner = -1 if outer == 1 else max(1, logical // outer)
+    else:
+        inner = max(1, int(requested_inner_jobs))
+    inner_for_capacity = logical if inner == -1 else inner
+    reasons: list[str] = []
+
+    cpu_cap = max(1, logical // inner_for_capacity)
+    if outer > cpu_cap:
+        reasons.append(
+            f"CPU capacity limits outer jobs from {outer} to {cpu_cap} "
+            f"({logical} logical processors, {inner_for_capacity} inner workers each)"
+        )
+        outer = cpu_cap
+
+    fallback = (
+        max(1, int(fallback_outer_jobs))
+        if fallback_outer_jobs is not None
+        else max(1, int(requested_outer_jobs) - 1)
+    )
+    fallback = min(fallback, outer)
+
+    def required_memory(candidate_outer: int) -> float:
+        # Inner folds share the same outer dataset and are already represented by
+        # one complete outer-job estimate. Only lightweight process overhead is
+        # added per inner worker; expensive state scales with outer coordinators.
+        automatic = (
+            6.0
+            + (float(estimated_memory_per_outer_job_gb) + 0.15 * inner_for_capacity)
+            * candidate_outer
+        )
+        if candidate_outer == requested_outer_jobs and requested_memory_threshold_gb > 0:
+            return max(automatic, float(requested_memory_threshold_gb))
+        return automatic
+
+    if available_memory_gb is not None:
+        while outer > 1 and available_memory_gb < required_memory(outer):
+            next_outer = fallback if outer > fallback else outer - 1
+            next_outer = max(1, min(next_outer, outer - 1))
+            reasons.append(
+                f"available memory {available_memory_gb:.1f} GB is below the "
+                f"{required_memory(outer):.1f} GB estimate for outer_jobs={outer}; "
+                f"using {next_outer}"
+            )
+            outer = next_outer
+
+    if requested_inner_jobs == -1 and outer > 1:
+        inner = max(1, logical // outer)
+    return int(outer), int(inner), reasons
+
+
+def _dataset_worker_memory_estimate_gb(
+    X: pd.DataFrame,
+    y: np.ndarray,
+    *,
+    model_name: str | None = None,
+) -> tuple[float, float]:
+    """Estimate raw and transformed memory for one complete outer job.
+
+    Raw dataframe size is a poor proxy for categorical datasets because compact
+    category codes can expand into a much wider numeric working representation.
+    HUGIML keeps original categorical indicators in CSR form, so its estimate is
+    based on an upper bound for sparse nonzeros. Other model families retain the
+    conservative dense-equivalent-width estimate.
+    """
+
+    raw_bytes = int(X.memory_usage(index=True, deep=True).sum()) + int(np.asarray(y).nbytes)
+    raw_gb = float(raw_bytes) / float(1024**3)
+    n_features = max(1, int(X.shape[1]))
+    transform_multiplier = 6.0 + min(18.0, 3.0 * math.sqrt(n_features / 32.0))
+
+    categorical_columns = [
+        column
+        for column in X.columns
+        if not pd.api.types.is_numeric_dtype(X[column])
+        or pd.api.types.is_bool_dtype(X[column])
+        or isinstance(X[column].dtype, pd.CategoricalDtype)
+    ]
+    numeric_width = max(0, n_features - len(categorical_columns))
+    categorical_width = sum(
+        max(1, int(X[column].nunique(dropna=False))) for column in categorical_columns
+    )
+    dense_equivalent_width = max(n_features, numeric_width + categorical_width)
+    dense_equivalent_gb = (
+        float(len(X)) * float(dense_equivalent_width) * float(np.dtype(np.float32).itemsize)
+    ) / float(1024**3)
+
+    if is_hugiml_model(str(model_name)):
+        # Every numeric original can contribute one nonzero per row and every
+        # categorical source contributes at most one active indicator. CSR uses
+        # one float32 value and one int32 column index per nonzero, plus indptr.
+        # Category dictionaries are already represented in raw_bytes.
+        sparse_nonzeros_upper = int(len(X)) * int(
+            numeric_width + len(categorical_columns)
+        )
+        sparse_encoded_bytes = (
+            sparse_nonzeros_upper
+            * (np.dtype(np.float32).itemsize + np.dtype(np.int32).itemsize)
+            + (int(len(X)) + 1) * np.dtype(np.int32).itemsize
+        )
+        sparse_encoded_gb = float(sparse_encoded_bytes) / float(1024**3)
+        representation_gb = sparse_encoded_gb
+    else:
+        representation_gb = dense_equivalent_gb
+
+    per_outer_job_gb = max(
+        1.0,
+        0.75 + raw_gb * transform_multiplier,
+        1.0 + 4.0 * representation_gb,
+    )
+    return raw_gb, float(per_outer_job_gb)
+
+
 def benchmark_main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     effective_early_stopping = (
@@ -5028,12 +5836,52 @@ def benchmark_main(argv: Sequence[str] | None = None) -> int:
 
     if args.smallest is not None and args.smallest <= 0:
         raise ValueError("--smallest must be greater than zero")
+    if args.max_train_rows is not None and args.max_train_rows <= 0:
+        raise ValueError("--max-train-rows must be greater than zero")
+    if args.max_train_predictors is not None and args.max_train_predictors <= 0:
+        raise ValueError("--max-train-predictors must be greater than zero")
     if args.complexity_auc_tolerance < 0:
         raise ValueError("--complexity-auc-tolerance must be zero or greater")
+    if args.n_jobs == 0 or args.n_jobs < -1:
+        raise ValueError("--n-jobs must be -1 or a positive integer")
+    if args.outer_jobs < 1:
+        raise ValueError("--outer-jobs must be a positive integer")
+    if args.outer_jobs_fallback is not None and (
+        args.outer_jobs_fallback < 1 or args.outer_jobs_fallback > args.outer_jobs
+    ):
+        raise ValueError(
+            "--outer-jobs-fallback must be positive and no greater than --outer-jobs"
+        )
+    if args.outer_jobs_min_memory_gb < 0:
+        raise ValueError("--outer-jobs-min-memory-gb must be zero or greater")
+    if args.outer_jobs > 1 and args.validation_protocol not in {"tabarena", "rotating", "nested"}:
+        raise ValueError("--outer-jobs greater than 1 is unavailable for this validation protocol")
+    available_memory_gb = _available_memory_gb()
+    effective_outer_jobs, effective_inner_jobs, parallelism_reasons = (
+        _select_tabarena_parallelism(
+            requested_outer_jobs=args.outer_jobs,
+            requested_inner_jobs=args.n_jobs,
+            fallback_outer_jobs=args.outer_jobs_fallback,
+            available_memory_gb=None,
+            requested_memory_threshold_gb=0.0,
+        )
+    )
+    for reason in parallelism_reasons:
+        print(f"outer-fold concurrency adjustment: {reason}", flush=True)
+    global BENCHMARK_LR_SOURCE_POLICY, BENCHMARK_N_JOBS
+    BENCHMARK_N_JOBS = int(args.n_jobs)
+    BENCHMARK_LR_SOURCE_POLICY = str(args.lr_source_policy)
     configure_openml(
         args.cache_dir.expanduser().resolve() if args.cache_dir else out_dir / "openml_cache"
     )
     models = parse_models(args.models)
+    execute_models = models if args.execute_models is None else parse_models(args.execute_models)
+    unconfigured_execute_models = [model for model in execute_models if model not in models]
+    if unconfigured_execute_models:
+        raise ValueError(
+            "--execute-models must be a subset of --models; not configured: "
+            + ", ".join(unconfigured_execute_models)
+        )
     explicit_task_ids = [int(x) for x in parse_csv(args.task_ids)]
     suite_meta, selected_tasks = resolve_suite_tasks(
         as_suite_identifier(args.suite),
@@ -5072,9 +5920,22 @@ def benchmark_main(argv: Sequence[str] | None = None) -> int:
         "models": models,
         "model_order": models,
         "inner_splits": int(args.inner_splits),
+        "n_jobs": int(args.n_jobs),
+        "inner_jobs_effective": int(effective_inner_jobs),
+        "outer_jobs_requested": int(args.outer_jobs),
+        "outer_jobs_cpu_cap": int(effective_outer_jobs),
+        "outer_jobs_allocation": "per_dataset",
+        "outer_jobs_fallback": (
+            None if args.outer_jobs_fallback is None else int(args.outer_jobs_fallback)
+        ),
+        "outer_jobs_min_memory_gb": float(args.outer_jobs_min_memory_gb),
+        "outer_jobs_available_memory_gb_at_start": available_memory_gb,
+        "outer_parallel_grouping": "official_repeat",
         "tune": not args.no_tune,
         "random_state": int(args.random_state),
         "max_official_splits": args.max_official_splits,
+        "max_train_rows": args.max_train_rows,
+        "max_train_predictors": args.max_train_predictors,
         "validation_protocol": args.validation_protocol,
         "early_stopping": effective_early_stopping,
         "baseline_validation_early_stopping": bool(
@@ -5095,6 +5956,7 @@ def benchmark_main(argv: Sequence[str] | None = None) -> int:
         ),
         "primary_metric": "ROC AUC; multiclass OVR macro",
         "hugiml_scenario": args.hugiml_scenario,
+        "lr_source_policy": args.lr_source_policy,
         "hugiml_max_fit_seconds": args.hugiml_max_fit_seconds,
         "complexity_auc_tolerance": float(args.complexity_auc_tolerance),
         "methodology_note": DEFAULT_METHODOLOGY_NOTE,
@@ -5107,15 +5969,19 @@ def benchmark_main(argv: Sequence[str] | None = None) -> int:
         "tasks": [task_signature(task) for task in selected_tasks],
         "models": models,
         "inner_splits": int(args.inner_splits),
+        "n_jobs": int(args.n_jobs),
         "tune": not args.no_tune,
         "random_state": int(args.random_state),
         "max_official_splits": args.max_official_splits,
+        "max_train_rows": args.max_train_rows,
+        "max_train_predictors": args.max_train_predictors,
         "validation_protocol": args.validation_protocol,
         "early_stopping": effective_early_stopping,
         "baseline_validation_early_stopping": bool(
             args.validation_protocol == "rotating" and not args.no_tune
         ),
         "hugiml_scenario": args.hugiml_scenario,
+        "lr_source_policy": args.lr_source_policy,
         "hugiml_max_fit_seconds": args.hugiml_max_fit_seconds,
         "complexity_auc_tolerance": float(args.complexity_auc_tolerance),
         "grid_snapshot": grid,
@@ -5133,6 +5999,9 @@ def benchmark_main(argv: Sequence[str] | None = None) -> int:
         current_comparable = dict(configuration)
         existing_configuration.pop("source", None)
         current_comparable.pop("source", None)
+        if CLEAN_OUTPUT_JSON:
+            existing_configuration = _clean_checkpoint_json(existing_configuration)
+            current_comparable = _clean_checkpoint_json(current_comparable)
         if safe_jsonable(existing_configuration) != safe_jsonable(current_comparable):
             raise ValueError(
                 "--resume-run-id settings do not match the stored run configuration. "
@@ -5154,7 +6023,8 @@ def benchmark_main(argv: Sequence[str] | None = None) -> int:
     if not args.resume:
         payload["results"] = [row for row in payload["results"] if str(row.get("run_id")) != run_id]
     reused_by_model: dict[str, int] = {}
-    if args.resume and not args.no_reuse_compatible_results:
+    # Clean checkpoints continue only the active run identity.
+    if args.resume and not args.no_reuse_compatible_results and not CLEAN_OUTPUT_JSON:
         reused_by_model = reuse_completed_compatible_results(
             payload,
             target_run_id=run_id,
@@ -5171,14 +6041,21 @@ def benchmark_main(argv: Sequence[str] | None = None) -> int:
             print(f"reused {reused_total} compatible completed result(s) ({detail})", flush=True)
     atomic_write_json(checkpoint, payload)
 
-    deferred_task_ids = {int(value) for value in parse_csv(args.defer_task_ids)}
+    configured_deferred_task_ids = {int(value) for value in DEFAULT_DEFER_TASK_IDS}
+    explicit_deferred_task_ids = args.defer_task_ids is not None
+    deferred_task_ids = (
+        {int(value) for value in parse_csv(args.defer_task_ids)}
+        if explicit_deferred_task_ids
+        else configured_deferred_task_ids
+    )
     selected_task_ids = {int(task["task_id"]) for task in selected_tasks}
     unknown_deferred = deferred_task_ids - selected_task_ids
-    if unknown_deferred:
+    if unknown_deferred and explicit_deferred_task_ids:
         raise ValueError(
             "--defer-task-ids contains task IDs outside the selected panel: "
             + ", ".join(str(value) for value in sorted(unknown_deferred))
         )
+    deferred_task_ids &= selected_task_ids
     done = completed_pair_keys(payload, run_id) if args.resume else set()
     execution_tasks = order_execution_tasks(
         selected_tasks,
@@ -5186,7 +6063,9 @@ def benchmark_main(argv: Sequence[str] | None = None) -> int:
         completed_pairs=done,
         deferred_task_ids=deferred_task_ids,
     )
-    plan = [(int(task["task_id"]), model) for task in execution_tasks for model in models]
+    plan = [
+        (int(task["task_id"]), model) for task in execution_tasks for model in execute_models
+    ]
     plan = [item for item in plan if pair_key(*item) not in done]
     pending_task_ids = list(dict.fromkeys(task_id for task_id, _ in plan))
     completed_task_count = len(execution_tasks) - len(pending_task_ids)
@@ -5197,7 +6076,9 @@ def benchmark_main(argv: Sequence[str] | None = None) -> int:
     pending_by_model: dict[str, int] = {}
     for _, model in plan:
         pending_by_model[model] = pending_by_model.get(model, 0) + 1
-    pending_detail = ", ".join(f"{model}: {pending_by_model.get(model, 0)}" for model in models)
+    pending_detail = ", ".join(
+        f"{model}: {pending_by_model.get(model, 0)}" for model in execute_models
+    )
     print(f"pending {len(plan)} pair(s) ({pending_detail})", flush=True)
     if args.start_pair:
         plan = plan[int(args.start_pair) :]
@@ -5213,6 +6094,12 @@ def benchmark_main(argv: Sequence[str] | None = None) -> int:
         if key in done:
             print(f"skip {progress} task {task_id} ({task_label}) :: {model_name}", flush=True)
             continue
+        cleanup = _flush_dataset_boundary_memory()
+        print(
+            "  execution memory cleanup: "
+            + json.dumps(cleanup, sort_keys=True, default=json_default),
+            flush=True,
+        )
         print(f"run {progress} task {task_id} ({task_label}) :: {model_name}", flush=True)
         started = time.perf_counter()
         try:
@@ -5231,6 +6118,13 @@ def benchmark_main(argv: Sequence[str] | None = None) -> int:
                 resume=args.resume,
                 validation_protocol=args.validation_protocol,
                 early_stopping=effective_early_stopping,
+                outer_jobs=effective_outer_jobs,
+                inner_jobs=effective_inner_jobs,
+                lr_source_policy=args.lr_source_policy,
+                outer_jobs_fallback=args.outer_jobs_fallback,
+                outer_jobs_min_memory_gb=args.outer_jobs_min_memory_gb,
+                max_train_rows=args.max_train_rows,
+                max_train_predictors=args.max_train_predictors,
             )
         except Exception as exc:
             result = pair_error_row(
@@ -5262,10 +6156,12 @@ def benchmark_main(argv: Sequence[str] | None = None) -> int:
                     "task_id": task_id,
                     "dataset": task_label,
                     "model": model_name,
+                    "status": result.get("status"),
                     "roc_auc": result.get("roc_auc"),
                     "balanced_accuracy": result.get("balanced_accuracy"),
                     "official_splits_successful": result.get("official_splits_successful"),
                     "errors": result.get("error_count"),
+                    "error": result.get("last_error"),
                     "pair_seconds": result.get("pair_seconds"),
                 },
                 default=json_default,

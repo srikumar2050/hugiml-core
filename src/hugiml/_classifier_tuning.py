@@ -22,23 +22,41 @@ import dataclasses
 import hashlib
 import os
 import time
+import warnings
+from contextlib import contextmanager
 from types import MethodType
 from typing import Any
 
 import numpy as np
 import pandas as pd
+from joblib import Parallel, delayed, parallel_config
 from scipy.sparse import csr_matrix, issparse
 from sklearn.base import clone
+from sklearn.exceptions import ConvergenceWarning
 from sklearn.multiclass import OneVsRestClassifier
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import LabelBinarizer
 
 from hugiml._classifier_runtime import _CORE_AVAILABLE, _core
 from hugiml._classifier_support import _wire_hugiml_feature_metadata
-from hugiml.exceptions import HUGIMLParamError, HUGIMLValidationError
+from hugiml.exceptions import HUGIMLParamError, HUGIMLValidationError, HUGIMLWarning
 from hugiml.hyperparameter_configs import get_hugiml_grid
 
 HUGIMLClassifier = Any
+
+
+@contextmanager
+def _hugiml_candidate_warning_scope(suppress_expected: bool):
+    """Optionally silence expected search-candidate warnings in this process."""
+    with warnings.catch_warnings():
+        if suppress_expected:
+            warnings.filterwarnings("ignore", category=ConvergenceWarning)
+            warnings.filterwarnings(
+                "ignore",
+                message=r".*no augmented pair features will be added\.$",
+                category=HUGIMLWarning,
+            )
+        yield
 
 
 def _hugiml_auc_score_for_fast_grid(y_true: Any, proba: np.ndarray, classes: np.ndarray) -> float:
@@ -463,13 +481,13 @@ def _hugiml_fit_downstream_estimator_from_template(
         label_binarizer = LabelBinarizer(sparse_output=True)
         encoded = label_binarizer.fit_transform(y_train_arr)
         encoded = csr_matrix(encoded).tocsc()
-        estimators = []
         class_targets = (
             [label_binarizer.classes_[1]]
             if len(label_binarizer.classes_) == 2
             else list(label_binarizer.classes_)
         )
-        for column_index, class_value in enumerate(class_targets):
+
+        def fit_one_class(column_index: int, class_value: Any):
             binary_train = np.asarray(encoded[:, column_index].toarray()).ravel().astype(int)
             binary_validation = (y_validation_arr == class_value).astype(int)
             estimator = clone(downstream_estimator.estimator)
@@ -481,7 +499,12 @@ def _hugiml_fit_downstream_estimator_from_template(
                 X_validation_downstream,
                 binary_validation,
             )
-            estimators.append(estimator)
+            return estimator
+
+        estimators = Parallel(n_jobs=downstream_estimator.n_jobs)(
+            delayed(fit_one_class)(column_index, class_value)
+            for column_index, class_value in enumerate(class_targets)
+        )
         downstream_estimator.estimators_ = estimators
         downstream_estimator.label_binarizer_ = label_binarizer
         downstream_estimator.classes_ = label_binarizer.classes_
@@ -1379,6 +1402,7 @@ class HUGIMLTuneResult:
     cv_splits_: list[tuple[np.ndarray, np.ndarray]]
     shuffle: bool
     random_state: int | None
+    cv_n_jobs_: int = 1
 
     # Backward-compatible aliases for dict-style code in notebooks.
     @property
@@ -1557,6 +1581,9 @@ def _hugiml_tune(
     cv_splits: list[tuple[Any, Any]] | None = None,
     use_fast_path: bool = True,
     return_dataframe: bool = True,
+    cv_n_jobs: int = 1,
+    refit_n_jobs: int | None = None,
+    suppress_expected_candidate_warnings: bool = False,
 ) -> HUGIMLTuneResult:
     """Tune HUGIML on full X, y using stratified CV and optional fast-grid caching.
 
@@ -1605,6 +1632,18 @@ def _hugiml_tune(
         fall back to ordinary per-candidate evaluation.
     return_dataframe : bool, default=True
         Return ``results_`` as a pandas DataFrame when pandas is available.
+    cv_n_jobs : int, default=1
+        Number of independent CV folds to evaluate concurrently. When greater
+        than one, each fold-local HUGIML search is constrained to one internal
+        worker to avoid nested parallelism; the final refit retains the
+        ``n_jobs`` value supplied through ``base_params``.
+    refit_n_jobs : int or None, default=None
+        Optional worker count used only for the final refit. ``None`` retains
+        the ``n_jobs`` value supplied through ``base_params``.
+    suppress_expected_candidate_warnings : bool, default=False
+        Suppress convergence warnings and the expected no-augmented-pair
+        candidate warning inside each CV worker. Intended for benchmark sweeps;
+        all other warnings remain visible.
 
     Returns
     -------
@@ -1670,6 +1709,9 @@ def _hugiml_tune(
         ]
     if not splits:
         raise HUGIMLParamError("cv produced no splits.")
+    if int(cv_n_jobs) == 0 or int(cv_n_jobs) < -1:
+        raise HUGIMLParamError("cv_n_jobs must be -1 or a positive integer.")
+    fold_n_jobs = int(cv_n_jobs)
 
     def _take_rows(obj: Any, idx: np.ndarray) -> Any:
         if hasattr(obj, "iloc"):
@@ -1694,13 +1736,14 @@ def _hugiml_tune(
         except Exception:
             fast_path_allowed = False
 
-    fold_rows: list[dict[str, Any]] = []
-    fold_methods: list[str] = []
-    for fold_idx, (train_idx, val_idx) in enumerate(splits, start=1):
+    def _evaluate_fold_unfiltered(fold_idx: int, train_idx: np.ndarray, val_idx: np.ndarray):
         X_train = _take_rows(X, train_idx)
         X_val = _take_rows(X, val_idx)
         y_train = y_arr[train_idx]
         y_val = y_arr[val_idx]
+        fold_base_params = dict(base_params0)
+        if fold_n_jobs != 1 and "n_jobs" in fold_base_params:
+            fold_base_params["n_jobs"] = 1
         if fast_path_allowed:
             try:
                 split_result = cls.fast_grid_tune(
@@ -1709,7 +1752,7 @@ def _hugiml_tune(
                     X_val,
                     y_val,
                     param_grid=param_grid,
-                    base_params=base_params0,
+                    base_params=fold_base_params,
                     scoring=scoring,
                     refit_full=False,
                     return_results=True,
@@ -1718,7 +1761,6 @@ def _hugiml_tune(
                 # Preserve correctness over speed: an unexpected cached-path
                 # failure for one fold should fall back to the ordinary
                 # per-candidate evaluation rather than aborting tuning.
-                fast_path_allowed = False
                 split_result = _hugiml_standard_grid_tune_one_split(
                     cls,
                     X_train,
@@ -1726,7 +1768,7 @@ def _hugiml_tune(
                     X_val,
                     y_val,
                     candidates,
-                    base_params0,
+                    fold_base_params,
                     scoring,
                 )
         else:
@@ -1737,13 +1779,13 @@ def _hugiml_tune(
                 X_val,
                 y_val,
                 candidates,
-                base_params0,
+                fold_base_params,
                 scoring,
             )
-        fold_methods.append(str(split_result.get("method", "unknown")))
+        rows = []
         for row in split_result.get("cv_results") or []:
             params = dict(row.get("params", {}))
-            fold_rows.append(
+            rows.append(
                 {
                     "fold": fold_idx,
                     "params_key": _hugiml_params_key(params),
@@ -1757,6 +1799,25 @@ def _hugiml_tune(
                     "elapsed_seconds": row.get("elapsed_seconds", np.nan),
                 }
             )
+        return str(split_result.get("method", "unknown")), rows
+
+    def _evaluate_fold(fold_idx: int, train_idx: np.ndarray, val_idx: np.ndarray):
+        with _hugiml_candidate_warning_scope(suppress_expected_candidate_warnings):
+            return _evaluate_fold_unfiltered(fold_idx, train_idx, val_idx)
+
+    indexed_splits = [
+        (fold_idx, train_idx, val_idx)
+        for fold_idx, (train_idx, val_idx) in enumerate(splits, start=1)
+    ]
+    if fold_n_jobs == 1 or len(indexed_splits) == 1:
+        fold_outputs = [_evaluate_fold(*args) for args in indexed_splits]
+    else:
+        with parallel_config(backend="loky", inner_max_num_threads=1):
+            fold_outputs = Parallel(n_jobs=fold_n_jobs)(
+                delayed(_evaluate_fold)(*args) for args in indexed_splits
+            )
+    fold_methods = [method for method, _ in fold_outputs]
+    fold_rows = [row for _, rows in fold_outputs for row in rows]
 
     if not fold_rows:
         raise HUGIMLValidationError("No tuning results were produced.")
@@ -1786,20 +1847,33 @@ def _hugiml_tune(
                 "status": "ok" if finite.size == len(splits) else "partial_or_failed",
             }
         )
+    # Match GridSearchCV's candidate eligibility: a configuration must produce
+    # a finite score on every requested split.  Otherwise a configuration that
+    # happened to succeed only on an easy fold could outrank fully evaluated
+    # configurations.
     summary_rows.sort(
         key=lambda r: (
+            0 if r["n_successful_splits"] == len(splits) else 1,
             -float(r["mean_test_score"]) if np.isfinite(r["mean_test_score"]) else np.inf,
             repr(r["params"]),
         )
     )
-    if not summary_rows or not np.isfinite(summary_rows[0]["mean_test_score"]):
-        raise HUGIMLValidationError("All tune candidates failed across CV splits.")
+    complete_rows = [
+        row
+        for row in summary_rows
+        if row["n_successful_splits"] == len(splits)
+        and np.isfinite(row["mean_test_score"])
+    ]
+    if not complete_rows:
+        raise HUGIMLValidationError(
+            "No tune candidate completed every requested CV split."
+        )
     for rank, row in enumerate(summary_rows, start=1):
         row["rank_test_score"] = rank
 
     best_params = dict(base_params0)
-    best_params.update(dict(summary_rows[0]["params"]))
-    best_score = float(summary_rows[0]["mean_test_score"])
+    best_params.update(dict(complete_rows[0]["params"]))
+    best_score = float(complete_rows[0]["mean_test_score"])
     # The search above evaluates every candidate under 'production' by
     # default for speed; best_estimator_ is the model the caller actually
     # keeps and is the natural target for get_pattern_info(), detect_drift(),
@@ -1810,6 +1884,11 @@ def _hugiml_tune(
     if not _caller_set_execution_mode:
         best_params["execution_mode"] = "audit"
     refit_params = dict(best_params)
+    if refit_n_jobs is not None:
+        if int(refit_n_jobs) == 0 or int(refit_n_jobs) < -1:
+            raise HUGIMLParamError("refit_n_jobs must be -1 or a positive integer.")
+        refit_params["n_jobs"] = int(refit_n_jobs)
+        best_params["n_jobs"] = int(refit_n_jobs)
     refit_lr_C = float(refit_params.pop("lr_C", 1.0))
     if refit:
         best_estimator = cls(**refit_params)
@@ -1846,4 +1925,5 @@ def _hugiml_tune(
         cv_splits_=[(tr.copy(), va.copy()) for tr, va in splits],
         shuffle=bool(shuffle),
         random_state=random_state,
+        cv_n_jobs_=fold_n_jobs,
     )

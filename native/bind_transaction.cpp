@@ -11,6 +11,7 @@
  */
 
 #include "pybind_common.hpp"
+#include "csr_indices.hpp"
 #include "transaction.hpp"
 
 namespace py = pybind11;
@@ -28,11 +29,13 @@ static TransactionDataCpp make_transaction_data_from_transactions(
     int n_items,
     std::vector<int> item_col_in = {})
 {
+    const int transaction_count = checked_native_dimension(transactions_in.size(), "transaction count");
     int max_item = n_items;
     for (const auto& t : transactions_in)
         for (const auto& iu : t)
             if (iu.first > max_item) max_item = iu.first;
 
+    checked_native_dimension(std::max(max_item, 0), "item count");
     TransactionDataCpp td;
     td.transactions.reserve(transactions_in.size());
     td.item_twu.assign(static_cast<size_t>(std::max(max_item, 0)), 0.0);
@@ -47,7 +50,7 @@ static TransactionDataCpp make_transaction_data_from_transactions(
         for (int iid = 1; iid <= max_item; ++iid)
             td.item_col[static_cast<size_t>(iid - 1)] = iid - 1;
     }
-    td.disc_n = static_cast<int>(transactions_in.size());
+    td.disc_n = transaction_count;
     td.disc_p = max_item;
 
     td.transaction_utils.reserve(transactions_in.size());

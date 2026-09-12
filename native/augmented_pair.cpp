@@ -1022,10 +1022,11 @@ py::tuple strict_topk_filter_dense(
     return py::make_tuple(scores_arr, mask_arr);
 }
 
+template <typename Index>
 py::tuple strict_topk_filter_csc(
     py::array_t<float, py::array::c_style | py::array::forcecast> data_arr,
-    py::array_t<int32_t, py::array::c_style | py::array::forcecast> indices_arr,
-    py::array_t<int32_t, py::array::c_style | py::array::forcecast> indptr_arr,
+    py::array_t<Index, py::array::c_style | py::array::forcecast> indices_arr,
+    py::array_t<Index, py::array::c_style | py::array::forcecast> indptr_arr,
     int64_t n_rows,
     int64_t n_cols,
     py::array_t<int64_t, py::array::c_style | py::array::forcecast> y_arr,
@@ -1034,14 +1035,18 @@ py::tuple strict_topk_filter_csc(
     int max_bins
 ) {
     if (n_rows < 0 || n_cols < 0) throw std::invalid_argument("n_rows and n_cols must be non-negative.");
+    if (n_rows >= 2147483647LL || n_cols >= 2147483647LL) throw std::overflow_error("CSC dimensions exceed native scoring index limits.");
     auto data = data_arr.unchecked<1>();
-    auto indices = indices_arr.unchecked<1>();
-    auto indptr = indptr_arr.unchecked<1>();
+    auto indices = indices_arr.template unchecked<1>();
+    auto indptr = indptr_arr.template unchecked<1>();
+    if (data.shape(0) != indices.shape(0)) throw std::invalid_argument("CSC data and indices lengths differ.");
     auto y = y_arr.unchecked<1>();
     auto discrete_mask = discrete_mask_arr.unchecked<1>();
     if (y.shape(0) != static_cast<py::ssize_t>(n_rows)) throw std::invalid_argument("y length does not match n_rows.");
     if (discrete_mask.shape(0) != static_cast<py::ssize_t>(n_cols)) throw std::invalid_argument("discrete_mask length does not match n_cols.");
     if (indptr.shape(0) != static_cast<py::ssize_t>(n_cols + 1)) throw std::invalid_argument("indptr length does not match n_cols + 1.");
+
+    if (indptr(0) != 0 || indptr(n_cols) != data.shape(0)) throw std::invalid_argument("CSC offsets do not cover the data array.");
 
     py::array_t<double> scores_arr({static_cast<py::ssize_t>(n_cols)});
     py::array_t<uint8_t> mask_arr({static_cast<py::ssize_t>(n_cols)});
@@ -1645,10 +1650,24 @@ void bind_augmented_pair(py::module_& m)
 
     m.def(
         "strict_topk_filter_csc",
-        &strict_topk_filter_csc,
+        &strict_topk_filter_csc<int32_t>,
         py::arg("data"),
-        py::arg("indices"),
-        py::arg("indptr"),
+        py::arg("indices").noconvert(),
+        py::arg("indptr").noconvert(),
+        py::arg("n_rows"),
+        py::arg("n_cols"),
+        py::arg("y"),
+        py::arg("discrete_mask"),
+        py::arg("top_k"),
+        py::arg("max_bins"),
+        "Score final downstream CSC columns by IG and return scores plus a topK mask."
+    );
+    m.def(
+        "strict_topk_filter_csc64",
+        &strict_topk_filter_csc<int64_t>,
+        py::arg("data"),
+        py::arg("indices").noconvert(),
+        py::arg("indptr").noconvert(),
         py::arg("n_rows"),
         py::arg("n_cols"),
         py::arg("y"),

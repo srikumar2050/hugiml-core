@@ -171,3 +171,81 @@ def test_parser_defaults_match_requested_protocol() -> None:
     assert args.max_official_splits is None
     assert args.validation_protocol == "nested"
     assert args.early_stopping is None
+    assert args.lr_source_policy == "standard"
+
+
+def test_nested_hugiml_tuner_uses_requested_worker_budget(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    def fake_tune(X, y, **kwargs):
+        captured.update(kwargs)
+        return SimpleNamespace(
+            best_estimator_=SimpleNamespace(n_jobs=kwargs["refit_n_jobs"]),
+            best_params_={"L": 1, "n_jobs": kwargs["refit_n_jobs"]},
+            best_score_=0.75,
+            refit_time_=0.01,
+            fast_path_used_=True,
+            elapsed_seconds_=0.02,
+            n_splits_=2,
+        )
+
+    monkeypatch.setattr(cc18.benchmark_base.HUGIMLClassifierNative, "tune", fake_tune)
+    candidates = [{"L": 1, "n_jobs": 1}, {"L": 2, "n_jobs": 1}]
+    X = pd.DataFrame({"x": [0.0, 1.0, 2.0, 3.0]})
+    y = np.array([0, 0, 1, 1])
+
+    _, params, _, _, _ = cc18.benchmark_base._tune_hugiml_inner_cv(
+        candidates,
+        X,
+        y,
+        inner_splits=2,
+        random_state=42,
+        hugiml_max_fit_seconds=None,
+        n_jobs=8,
+    )
+
+    assert captured["base_params"]["n_jobs"] == 8
+    assert captured["cv_n_jobs"] == 2
+    assert captured["refit_n_jobs"] == 1
+    assert captured["suppress_expected_candidate_warnings"] is True
+    assert params["n_jobs"] == 1
+
+
+def test_nested_engine_forwards_shared_worker_budget_to_hugiml(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    monkeypatch.setattr(cc18, "BENCHMARK_N_JOBS", 8)
+    monkeypatch.setattr(cc18, "BENCHMARK_LR_SOURCE_POLICY", "strict")
+    monkeypatch.setattr(
+        cc18.benchmark_base,
+        "get_model_spec",
+        lambda *_args, **_kwargs: ([{"L": 1}], lambda _params: SimpleNamespace(), lambda _m: 0, None),
+    )
+
+    def fake_nested_tune(candidates, *_args, **kwargs):
+        captured.update(kwargs)
+        captured["candidates"] = candidates
+        return SimpleNamespace(), {"L": 1, "n_jobs": kwargs["n_jobs"]}, 0.75, 1.0, {
+            "_final_refit_ms": 0.5
+        }
+
+    monkeypatch.setattr(cc18.benchmark_base, "_tune_hugiml_inner_cv", fake_nested_tune)
+    X = pd.DataFrame({"x": [0.0, 1.0, 2.0, 3.0]})
+    y = np.array([0, 0, 1, 1])
+
+    _, params, _, _, _, _, _ = cc18.fit_or_tune_model(
+        "HUGIML",
+        X,
+        y,
+        tune=True,
+        inner_splits=2,
+        random_state=42,
+        hugiml_scenario="augmented_pair",
+        hugiml_max_fit_seconds=None,
+        validation_protocol="nested",
+        early_stopping=False,
+    )
+
+    assert captured["n_jobs"] == 8
+    assert captured["candidates"] == [{"L": 1, "lr_source_policy": "strict"}]
+    assert params["n_jobs"] == 8

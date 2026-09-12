@@ -23,6 +23,7 @@ CONFIG = OfflineSuiteConfig(
     checkpoint_name="tabzilla_checkpoint.json",
     dashboard_name="tabzilla_benchmark_dashboard.html",
     output_prefix="tabzilla",
+    default_defer_task_ids=(189356,),
     methodology_note=(
         "Multiclass ROC-AUC uses macro one-vs-rest on each official test fold and is "
         "averaged across folds when every fold is defined. If rare classes are absent "
@@ -35,6 +36,7 @@ CONFIG = OfflineSuiteConfig(
         "complete outer-training partition is fitted without validation selection, "
         "and the split remains available for pooled out-of-fold metrics."
     ),
+    clean_output_json=True,
 )
 
 

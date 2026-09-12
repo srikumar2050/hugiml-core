@@ -21,7 +21,7 @@ def test_csr_sorted_contract_helper_shape():
 
 
 def test_native_csr_helpers_return_sorted_indices_when_available():
-    core = pytest.importorskip("hugiml._hugiml_core")
+    core = pytest.importorskip("_hugiml_core")
     if not hasattr(core, "build_train_matrix_csr"):
         pytest.skip(
             "installed native extension does not expose build_train_matrix_csr; rebuild the current native extension to exercise this contract"
@@ -59,7 +59,7 @@ def test_native_csr_helpers_return_sorted_indices_when_available():
 
 
 def test_fused_l1_result_get_csr_returns_sorted_indices_when_available():
-    core = pytest.importorskip("hugiml._hugiml_core")
+    core = pytest.importorskip("_hugiml_core")
     if not hasattr(core, "prepare_and_mine_l1_adaptive"):
         pytest.skip("installed native extension does not expose fused adaptive L1 helper")
 

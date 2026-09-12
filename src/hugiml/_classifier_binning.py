@@ -359,14 +359,33 @@ class _BinningMixin:
         return survivors, (rows_filtered, cols_filtered)
 
     def _make_estimator(self, n_cls: int) -> Any:
+        requested_jobs = int(getattr(self, "n_jobs", 1))
+        downstream = getattr(self, "x_train_downstream_", None)
+        downstream_rows = int(downstream.shape[0]) if downstream is not None else 0
+        ovr_jobs = (
+            1
+            if requested_jobs != 1 and 0 < downstream_rows < 10_000
+            else requested_jobs
+        )
+        self._downstream_n_jobs_selected_ = int(ovr_jobs)
+        self._downstream_n_jobs_reason_ = (
+            "small_training_partition_process_overhead"
+            if ovr_jobs == 1 and requested_jobs != 1
+            else "requested_job_budget"
+        )
         if self.base_estimator is not None:
             estimator = copy.deepcopy(self.base_estimator)
+            if isinstance(estimator, OneVsRestClassifier):
+                estimator.set_params(n_jobs=ovr_jobs)
+                return estimator
+            if hasattr(estimator, "get_params") and "n_jobs" in estimator.get_params(deep=False):
+                estimator.set_params(n_jobs=self.n_jobs)
             if (
                 n_cls > 2
                 and isinstance(estimator, LogisticRegression)
                 and str(getattr(estimator, "solver", "")).lower() == "liblinear"
             ):
-                return OneVsRestClassifier(estimator, n_jobs=1)
+                return OneVsRestClassifier(estimator, n_jobs=ovr_jobs)
             return estimator
 
         lr_solver = str(getattr(self, "lr_solver", "auto")).lower()

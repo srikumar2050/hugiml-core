@@ -29,6 +29,8 @@ void bind_rpte_tree(py::module_& m);
 PYBIND11_MODULE(_hugiml_core, m)
 {
     m.doc() = "HUGIMLClassifierNative — C++ core extension (pybind11)";
+    m.attr("csr_index_bits_max") = sizeof(void*) >= 8 ? 64 : 32;
+    m.attr("mining_row_count_max") = int64_t{2147483646};
     bind_transaction(m);
     bind_pattern(m);
     bind_openmp(m);

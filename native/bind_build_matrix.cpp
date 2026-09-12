@@ -20,6 +20,8 @@ void bind_build_matrix(py::module_& m)
         [](const TransactionDataCpp& td,
            const std::vector<PatternEntry>& patterns)
         {
+            checked_native_dimension(td.transactions.size(), "transaction count");
+            checked_native_dimension(patterns.size(), "pattern count");
             if (patterns.empty())
                 throw std::invalid_argument(
                     "patterns list is empty — nothing to build");
@@ -44,6 +46,8 @@ void bind_build_matrix(py::module_& m)
         [](const TransactionDataCpp& td,
            const std::vector<PatternEntry>& patterns)
         {
+            checked_native_dimension(td.transactions.size(), "transaction count");
+            checked_native_dimension(patterns.size(), "pattern count");
             if (patterns.empty())
                 throw std::invalid_argument(
                     "patterns list is empty — nothing to build");
@@ -59,7 +63,7 @@ void bind_build_matrix(py::module_& m)
                     "HUGIML native OOM while building the training pattern matrix");
                 throw py::error_already_set();
             }
-            return coo_to_csr_tuple(std::move(coo), static_cast<int>(td.transactions.size()), static_cast<int>(patterns.size()));
+            return coo_to_csr_tuple(std::move(coo), hugiml::checked_native_dimension(td.transactions.size(), "transaction count"), hugiml::checked_native_dimension(patterns.size(), "pattern count"));
         },
         py::arg("td"), py::arg("patterns"),
         "Build CSR (indptr, indices) arrays for the training binary pattern matrix.");
@@ -71,6 +75,7 @@ void bind_build_matrix(py::module_& m)
            const std::vector<PatternEntry>& patterns)
         {
             validate_2d_array(X_raw, "X_raw");
+            checked_native_dimension(patterns.size(), "pattern count");
             if (patterns.empty())
                 throw std::invalid_argument(
                     "patterns list is empty — nothing to build");
@@ -110,6 +115,7 @@ void bind_build_matrix(py::module_& m)
            const std::vector<PatternEntry>& patterns)
         {
             validate_2d_array(X_raw, "X_raw");
+            checked_native_dimension(patterns.size(), "pattern count");
             if (patterns.empty())
                 throw std::invalid_argument(
                     "patterns list is empty — nothing to build");
@@ -136,7 +142,7 @@ void bind_build_matrix(py::module_& m)
                     "HUGIML native OOM while building the test pattern matrix");
                 throw py::error_already_set();
             }
-            return coo_to_csr_tuple(std::move(coo), n, static_cast<int>(patterns.size()));
+            return coo_to_csr_tuple(std::move(coo), n, hugiml::checked_native_dimension(patterns.size(), "pattern count"));
         },
         py::arg("X_raw"), py::arg("td"), py::arg("X_cat_raw"),
         py::arg("patterns"),

@@ -20,15 +20,17 @@ import dataclasses
 import logging
 import threading
 import tracemalloc
+import warnings
 from typing import Any
 
 import numpy as np
 import pandas as pd
+import psutil
 from scipy.sparse import csr_matrix
 
 from hugiml._binning import _quantile_edges as _adap_quantile_edges
 from hugiml._classifier_runtime import _CORE_AVAILABLE, _core
-from hugiml.exceptions import HUGIMLParamError
+from hugiml.exceptions import HUGIMLParamError, HUGIMLWarning
 
 HUGIMLClassifier = Any
 
@@ -146,9 +148,12 @@ def _dense_full_csr(Z: np.ndarray) -> csr_matrix:
     n_rows, n_cols = Z.shape
     if n_cols == 0:
         return csr_matrix((n_rows, 0), dtype=np.float32)
+    from hugiml._indexing import sparse_index_dtype
+
+    index_dtype = sparse_index_dtype(n_rows, n_cols, n_rows * n_cols)
     data = np.ascontiguousarray(Z, dtype=np.float32).ravel()
-    indices = np.tile(np.arange(n_cols, dtype=np.int32), n_rows)
-    indptr = np.arange(0, (n_rows + 1) * n_cols, n_cols, dtype=np.int32)
+    indices = np.tile(np.arange(n_cols, dtype=index_dtype), n_rows)
+    indptr = np.arange(n_rows + 1, dtype=index_dtype) * n_cols
     return csr_matrix((data, indices, indptr), shape=(n_rows, n_cols), dtype=np.float32)
 
 
@@ -932,14 +937,90 @@ class _MemoryTracker:
         self.rss_mb = (_get_peak_rss_kb() - self._rss_before) / 1024
 
     @staticmethod
-    def estimate_fit_mb(n: int, p: int, n_items: int, K: int) -> float:
-        """Rough peak-memory estimate in MB for a fit() call."""
-        disc_mb = n * p * 4 / 1e6
-        trans_mb = n * p * 16 / 1e6
-        ul_mb = n_items * n * 24 / 1e6
-        matrix_mb = n * min(K, n_items) * 4 / 1e6
-        overhead = 50
-        return disc_mb + trans_mb + ul_mb + matrix_mb + overhead
+    def estimate_fit_bytes(
+        n: int,
+        p: int,
+        K: int,
+        *,
+        n_numeric: int,
+        include_originals: bool,
+        max_length: int,
+    ) -> dict[str, int]:
+        """Estimate additional fit allocations, excluding the caller's input.
+
+        Transaction occurrences are bounded by one item per source per row.
+        Mining workspace allows one occurrence list per search depth; actual
+        pattern density and allocator overhead remain data dependent. Numeric
+        preparation allows float64 working copies and float32 output. Sparse
+        matrices allow an eight-byte value/index pair and four-byte row offsets.
+        These allowances describe working storage, not a guaranteed peak bound.
+        """
+        n, p, K = max(0, int(n)), max(0, int(p)), max(0, int(K))
+        numeric = min(p, max(0, int(n_numeric)))
+        categorical = p - numeric
+        occurrences = n * p
+        components = {
+            "preprocessing": n * numeric * 24 + n * categorical * 16 + occurrences * 4,
+            "transactions": occurrences * 4 + n * 24,
+            "mining": occurrences * 24 * (6 if int(max_length) < 0 else max(1, int(max_length))),
+            "pattern_features": n * K * 8 + (n + 1) * 4,
+            "overhead": 50 * 1024**2,
+        }
+        if include_originals:
+            components["original_features"] = (
+                n * numeric * 20 + n * categorical * 8 + (n + 1) * 4
+            )
+        # Allow a selected-feature workspace in addition to the sparse blocks.
+        selected_width = K + (min(K, p) if include_originals else 0)
+        components["downstream"] = n * selected_width * 8
+        return components
+
+    @staticmethod
+    def warn_fit_memory(
+        X: Any, K: int, *, include_originals: bool, max_length: int
+    ) -> None:
+        """Warn when estimated additional storage exceeds 80% of available RAM."""
+        try:
+            available = int(psutil.virtual_memory().available)
+        except (OSError, RuntimeError, ValueError, AttributeError, NotImplementedError):
+            return
+        if available < 0:
+            return
+        if not hasattr(X, "shape") or len(X.shape) != 2:
+            return
+        n, p = X.shape
+        if isinstance(X, pd.DataFrame):
+            numeric = sum(
+                pd.api.types.is_numeric_dtype(dtype)
+                and not pd.api.types.is_bool_dtype(dtype)
+                for dtype in X.dtypes
+            )
+        else:
+            numeric = p if np.issubdtype(X.dtype, np.number) else 0
+        components = _MemoryTracker.estimate_fit_bytes(
+            n,
+            p,
+            K,
+            n_numeric=numeric,
+            include_originals=include_originals,
+            max_length=max_length,
+        )
+        estimated = sum(components.values())
+        if estimated > available * 0.8:
+            dominant = max(components, key=components.get)
+            advice = (
+                "Consider reducing topK or dataset size."
+                if dominant in {"pattern_features", "downstream"}
+                else "Consider reducing dataset size or making more memory available."
+            )
+            warnings.warn(
+                f"Estimated additional fit memory ~{estimated / 1024**3:.2f} GiB; "
+                f"available RAM ~{available / 1024**3:.2f} GiB "
+                f"(80% working budget). Largest estimated component: {dominant}. "
+                f"Actual peak depends on the data and mining workload. {advice}",
+                HUGIMLWarning,
+                stacklevel=3,
+            )
 
 
 # =============================================================================

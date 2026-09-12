@@ -188,12 +188,9 @@ input columns that enter the final LR layer.
        lr_source_policy="main_effect",
    )
    clf.fit(X_train, y_train)
-
-   # Audit which columns were retained and removed under the policy.
    audit = clf.get_downstream_redundancy_audit()
    print(audit["lr_source_policy"])
    print(audit["lr_source_policy_effective"])
-   print(audit["retained_feature_names"])
 
 
 Interpretation notes

@@ -39,6 +39,9 @@ CONFIG = OfflineSuiteConfig(
         / "tabarena_official_metrics.parquet"
     ),
     default_validation_protocol="tabarena",
+    default_n_jobs=8,
+    default_outer_jobs=3,
+    default_outer_jobs_fallback=2,
 )
 
 

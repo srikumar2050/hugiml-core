@@ -243,10 +243,12 @@ class HUGIMLClassifier(
         the ``liblinear`` solver is fitted directly for binary targets and
         through one-vs-rest classification for targets with three or more
         classes.
-    lr_solver : {"auto", "saga", "sgd"}, default "auto"
+    lr_solver : {"auto", "adaptive_l1", "saga", "sgd"}, default "auto"
         Downstream linear classifier used when ``base_estimator`` is not supplied.
         ``"auto"`` uses L1-regularized logistic regression: binary classifiers use
-        the ``liblinear`` solver and multiclass classifiers use the ``saga`` solver. ``"saga"`` uses
+        the ``liblinear`` solver and multiclass classifiers use the ``saga`` solver.
+        ``"adaptive_l1"`` keeps the same L1 objective but may use a bounded SGD-L1
+        fit for large, highly collinear binary training matrices. ``"saga"`` uses
         ``LogisticRegression(solver="saga")``. ``"sgd"`` uses
         ``SGDClassifier(loss="log_loss")`` so large sparse downstream matrices can
         be trained with stochastic gradient descent. All built-in choices keep the

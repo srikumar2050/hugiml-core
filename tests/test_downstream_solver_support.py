@@ -142,12 +142,24 @@ def test_auto_solver_keeps_native_multiclass_linear_path() -> None:
 
     assert isinstance(estimator, LogisticRegression)
     assert estimator.solver == "saga"
+    assert estimator.max_iter == 500
     assert getattr(estimator, "l1_ratio", None) == 1.0 or getattr(estimator, "penalty", None) == "l1"
+
+
+@pytest.mark.parametrize("solver", ["adaptive_l1", "saga"])
+def test_multiclass_saga_solver_uses_standard_iteration_budget(solver: str) -> None:
+    clf = HUGIMLClassifierNative(lr_solver=solver)
+
+    estimator = clf._make_estimator(3)
+
+    assert isinstance(estimator, LogisticRegression)
+    assert estimator.solver == "saga"
+    assert estimator.max_iter == 500
 
 
 def test_explicit_liblinear_base_estimator_is_class_aware() -> None:
     base = make_l1_logistic_base_estimator()
-    clf = HUGIMLClassifierNative(base_estimator=base)
+    clf = HUGIMLClassifierNative(base_estimator=base, n_jobs=3)
 
     binary = clf._make_estimator(2)
     multiclass = clf._make_estimator(3)
@@ -155,7 +167,7 @@ def test_explicit_liblinear_base_estimator_is_class_aware() -> None:
     assert isinstance(binary, LogisticRegression)
     assert binary.solver == "liblinear"
     assert isinstance(multiclass, OneVsRestClassifier)
-    assert multiclass.n_jobs == 1
+    assert multiclass.n_jobs == 3
     assert isinstance(multiclass.estimator, LogisticRegression)
     assert multiclass.estimator.solver == "liblinear"
     assert (
@@ -163,6 +175,41 @@ def test_explicit_liblinear_base_estimator_is_class_aware() -> None:
         or getattr(multiclass.estimator, "penalty", None) == "l1"
     )
     assert clf.base_estimator is base
+
+
+def test_existing_ovr_base_estimator_receives_parent_job_budget() -> None:
+    base = OneVsRestClassifier(make_l1_logistic_base_estimator(), n_jobs=1)
+    clf = HUGIMLClassifierNative(base_estimator=base, n_jobs=4)
+
+    estimator = clf._make_estimator(3)
+
+    assert isinstance(estimator, OneVsRestClassifier)
+    assert estimator.n_jobs == 4
+    assert base.n_jobs == 1
+
+
+def test_small_downstream_partition_avoids_process_startup_overhead() -> None:
+    base = OneVsRestClassifier(make_l1_logistic_base_estimator(), n_jobs=1)
+    clf = HUGIMLClassifierNative(base_estimator=base, n_jobs=4)
+    clf.x_train_downstream_ = np.zeros((9999, 2))
+
+    estimator = clf._make_estimator(3)
+
+    assert estimator.n_jobs == 1
+    assert clf._downstream_n_jobs_selected_ == 1
+    assert clf._downstream_n_jobs_reason_ == "small_training_partition_process_overhead"
+
+
+def test_moderate_downstream_partition_uses_requested_job_budget() -> None:
+    base = OneVsRestClassifier(make_l1_logistic_base_estimator(), n_jobs=1)
+    clf = HUGIMLClassifierNative(base_estimator=base, n_jobs=4)
+    clf.x_train_downstream_ = np.zeros((10_000, 2))
+
+    estimator = clf._make_estimator(3)
+
+    assert estimator.n_jobs == 4
+    assert clf._downstream_n_jobs_selected_ == 4
+    assert clf._downstream_n_jobs_reason_ == "requested_job_budget"
 
 
 @requires_extension
@@ -236,3 +283,99 @@ def test_fast_grid_tune_supports_explicit_l1_multiclass_base_estimator() -> None
     assert isinstance(estimator, OneVsRestClassifier)
     assert len(estimator.estimators_) == 3
     assert result["best_model"].predict_proba(X_valid).shape == (len(X_valid), 3)
+
+
+@requires_extension
+def test_fast_grid_tune_parallel_ovr_matches_serial_results() -> None:
+    X, y = load_iris(return_X_y=True, as_frame=True)
+    X_train, X_valid, y_train, y_valid = train_test_split(
+        X,
+        y,
+        test_size=0.30,
+        random_state=7,
+        stratify=y,
+    )
+    X_train = np.tile(X_train.to_numpy(), (100, 1))
+    y_train = np.tile(np.asarray(y_train), 100)
+    X_valid = X_valid.to_numpy()
+    grid = {
+        "B": [-1],
+        "adaptive_binning": [True],
+        "L": [1],
+        "topK": [10],
+        "feature_mode": ["original_plus_patterns"],
+        "G": [0.01],
+        "convert_binary_to_categorical": [False],
+        "base_estimator": [make_l1_logistic_base_estimator()],
+    }
+
+    serial = HUGIMLClassifierNative.fast_grid_tune(
+        X_train,
+        y_train,
+        X_valid,
+        y_valid,
+        param_grid=grid,
+        base_params={"execution_mode": "production", "n_jobs": 1},
+        scoring="roc_auc",
+    )
+    parallel = HUGIMLClassifierNative.fast_grid_tune(
+        X_train,
+        y_train,
+        X_valid,
+        y_valid,
+        param_grid=grid,
+        base_params={"execution_mode": "production", "n_jobs": 2},
+        scoring="roc_auc",
+    )
+
+    serial_model = serial["best_model"]
+    parallel_model = parallel["best_model"]
+    parallel_ovr = parallel_model.model_.named_steps["clf"]
+    assert isinstance(parallel_ovr, OneVsRestClassifier)
+    assert parallel_ovr.n_jobs == 2
+    assert serial["best_params"] == parallel["best_params"]
+    assert serial["best_score"] == pytest.approx(parallel["best_score"], abs=1e-12)
+    np.testing.assert_allclose(
+        serial_model.predict_proba(X_valid),
+        parallel_model.predict_proba(X_valid),
+        rtol=1e-12,
+        atol=1e-12,
+    )
+
+
+@requires_extension
+def test_tune_parallel_folds_match_serial_selection_and_predictions() -> None:
+    X, y = load_iris(return_X_y=True, as_frame=True)
+    grid = {
+        "B": [-1],
+        "adaptive_binning": [True],
+        "L": [1, 2],
+        "topK": [10],
+        "feature_mode": ["original_plus_patterns"],
+        "G": [0.01],
+        "convert_binary_to_categorical": [False],
+        "base_estimator": [None],
+    }
+    common = {
+        "cv": 3,
+        "shuffle": True,
+        "random_state": 19,
+        "scoring": "roc_auc",
+        "param_grid": grid,
+        "base_params": {"execution_mode": "production", "n_jobs": 1},
+        "refit": True,
+        "use_fast_path": True,
+    }
+
+    serial = HUGIMLClassifierNative.tune(X, y, cv_n_jobs=1, **common)
+    parallel = HUGIMLClassifierNative.tune(X, y, cv_n_jobs=3, **common)
+
+    assert parallel.cv_n_jobs_ == 3
+    assert serial.best_params_ == parallel.best_params_
+    assert serial.best_score_ == pytest.approx(parallel.best_score_, abs=1e-12)
+    np.testing.assert_allclose(
+        serial.best_estimator_.predict_proba(X),
+        parallel.best_estimator_.predict_proba(X),
+        rtol=1e-12,
+        atol=1e-12,
+    )

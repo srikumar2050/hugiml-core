@@ -8,7 +8,7 @@ A coarse count of active fitted components in the complete model.
 
 - Linear models: active fitted terms.
 - Decision trees and ensembles: active terminal leaves.
-- RuleFit: active linear terms and active rules.
+- RuleFit: active linear terms and active rules; one-vs-rest multiclass models sum these across fitted class estimators.
 - EBM: active additive terms.
 - HUGIML RPTE: active terminal leaves plus active direct terms.
 
@@ -18,7 +18,7 @@ The expanded burden of inspecting the complete fitted model.
 
 - HUGIML linear terms are expanded into their original source elements.
 - Tree models sum the conditions on every active root-to-leaf path.
-- RuleFit sums direct linear terms and the literals in every active rule.
+- RuleFit sums direct linear terms and the literals in every active rule, across class estimators for one-vs-rest multiclass models.
 - EBM counts active term-score cells.
 - HUGIML RPTE sums every active terminal path and active direct source terms.
 
