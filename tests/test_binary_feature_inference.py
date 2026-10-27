@@ -78,7 +78,7 @@ def test_original_feature_downstream_respects_binary_categorical_mask() -> None:
 
 
 def test_binary_categorical_columns_are_serialized(tmp_path) -> None:
-    pytest.importorskip("hugiml._hugiml_core")
+    pytest.importorskip("_hugiml_core")
     X, y = _binary_frame()
     clf = HUGIMLClassifierNative(
         B=4, L=1, topK=5, G=0.0, feature_mode="patterns_only", convert_binary_to_categorical=True

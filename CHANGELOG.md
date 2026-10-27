@@ -4,6 +4,12 @@ All notable changes to hugiml-core are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
+## [1.1.23] - 2026-10-27
+
+- Restricted model loading and validated archive sizes, native RPTE inputs, and integer labels.
+- Preserved binning column types across save/load and included all rows in dataset fingerprints.
+
+---
 ## [1.1.22] - 2026-09-12
 
 ### Added

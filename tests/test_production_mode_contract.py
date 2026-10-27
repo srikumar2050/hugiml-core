@@ -73,7 +73,7 @@ def test_production_save_load_predict_and_summary(feature_mode):
 
 
 def test_production_fused_l1_hotpath_save_load_predict_and_summary():
-    core = pytest.importorskip("hugiml._hugiml_core")
+    core = pytest.importorskip("_hugiml_core")
     if not hasattr(core, "prepare_and_mine_l1_adaptive"):
         pytest.skip("installed native extension does not expose fused adaptive L1 helper")
     X, y = _data()

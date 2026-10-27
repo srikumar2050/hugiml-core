@@ -122,7 +122,7 @@ def test_sgd_solver_uses_native_serialization(tmp_path, synthetic_split) -> None
         manifest = json.loads(zf.read("manifest.json"))
         estimator_config = json.loads(zf.read("estimator.json"))
 
-    assert manifest["schema_version"] == MODEL_SCHEMA_VERSION == 11
+    assert manifest["schema_version"] == MODEL_SCHEMA_VERSION == 12
     assert estimator_config["class"] == "sklearn.pipeline.Pipeline"
     step_configs = {step["name"]: step["estimator"] for step in estimator_config["steps"]}
     assert step_configs["clf"]["class"] == "sklearn.linear_model.SGDClassifier"

@@ -54,7 +54,7 @@ class _BinningMixin:
     """Implement input preparation and binning operations."""
 
     def prepareXy(self, X: pd.DataFrame, y: Any) -> tuple[pd.DataFrame, np.ndarray]:
-        """Detect column types and encode the target variable.
+        """Detect column types and validate integer class labels.
 
         Call on the full dataset **before** any train/test split.  Records
         which columns are integer, float, or categorical, and performs
@@ -129,45 +129,41 @@ class _BinningMixin:
         self.is_int_mask_ = np.array([c in set(intCols) for c in X.columns], dtype=bool)
         self.binary_categorical_cols_ = list(binaryCatCols)
 
-        y = np.asarray(y)
-        try:
-            y_float = y.astype(float)
-            if np.isnan(y_float).any():
-                raise HUGIMLValidationError("y contains NaN values.")
-        except (ValueError, TypeError) as e:
-            if "NaN" in str(e):
-                raise
-
-        if np.issubdtype(y.dtype, np.floating):
-            if np.allclose(y, y.astype(int)):
-                y = y.astype(np.int64)
-            else:
-                raise HUGIMLValidationError(
-                    "y contains non-integer float values.  HUG-IML requires integer class labels."
-                )
-
-        return X, y
+        return X, self._safe_cast_y(y)
 
     @staticmethod
     def _safe_cast_y(y: Any) -> np.ndarray:
-        """Cast label array to int64, raising a clear error if y is non-finite.
-
-        ``np.asarray(y, dtype=np.int64)`` silently produces undefined values
-        (typically INT64_MIN = -9223372036854775808) when y contains NaN or
-        infinity; the C++ mining kernel then processes garbage class codes.
-        This helper converts via float first and raises ``HUGIMLValidationError``
-        if any non-finite values are present, which is the correct contract
-        for a classifier that requires integer class labels.
-        """
+        """Validate exact integer class labels before conversion to int64."""
         y_arr = np.asarray(y)
-        if np.issubdtype(y_arr.dtype, np.floating) or y_arr.dtype == object:
-            y_float = y_arr.astype(float, copy=False)
-            if not np.all(np.isfinite(y_float)):
-                raise HUGIMLValidationError(
-                    "y contains NaN or infinite values. HUG-IML requires integer class labels."
-                )
-            return y_float.astype(np.int64)
-        return y_arr.astype(np.int64)
+        error = "y must contain finite integer class labels within the int64 range."
+        kind = y_arr.dtype.kind
+        if kind in "biu":
+            if kind == "u" and y_arr.size and np.any(y_arr > np.iinfo(np.int64).max):
+                raise HUGIMLValidationError(error)
+            return y_arr.astype(np.int64)
+        if kind == "f":
+            if (
+                not np.all(np.isfinite(y_arr))
+                or np.any(y_arr != np.trunc(y_arr))
+                or np.any(y_arr < -(2**63))
+                or np.any(y_arr >= 2**63)
+            ):
+                raise HUGIMLValidationError(error)
+            return y_arr.astype(np.int64)
+        if kind == "O":
+            out = np.empty(y_arr.shape, dtype=np.int64)
+            for index, value in np.ndenumerate(y_arr):
+                if not isinstance(value, (int, float, np.integer, np.floating, bool)):
+                    raise HUGIMLValidationError(error)
+                try:
+                    integer = int(value)
+                except (ValueError, OverflowError) as exc:
+                    raise HUGIMLValidationError(error) from exc
+                if value != integer or not -(2**63) <= integer < 2**63:
+                    raise HUGIMLValidationError(error)
+                out[index] = integer
+            return out
+        raise HUGIMLValidationError(error)
 
     def _adaptive_binning_sample_fraction_for_native(self) -> float:
         frac = getattr(self, "adaptive_binning_sample_frac", False)

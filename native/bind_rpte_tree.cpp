@@ -15,6 +15,9 @@
 #include "rpte_tree.hpp"
 
 #include <cstring>
+#include <cmath>
+#include <limits>
+#include <stdexcept>
 
 namespace py = pybind11;
 using namespace hugiml::rpte;
@@ -110,6 +113,10 @@ FittedTree fitted_tree_from_dict(const py::dict& d) {
     auto threshold = d["node_threshold"].cast<std::vector<double>>();
     auto left = d["node_left"].cast<std::vector<int32_t>>();
     auto right = d["node_right"].cast<std::vector<int32_t>>();
+    if (is_leaf.empty() || is_leaf.size() > static_cast<size_t>(std::numeric_limits<int32_t>::max()) ||
+        feature_index.size() != is_leaf.size() || threshold.size() != is_leaf.size() ||
+        left.size() != is_leaf.size() || right.size() != is_leaf.size())
+        throw std::invalid_argument("Tree node arrays must have equal nonzero lengths.");
     tree.nodes.resize(is_leaf.size());
     for (size_t i = 0; i < is_leaf.size(); ++i) {
         tree.nodes[i].is_leaf = is_leaf[i] != 0;
@@ -126,6 +133,46 @@ FittedTree fitted_tree_from_dict(const py::dict& d) {
     tree.used_columns = d["used_columns"].cast<std::vector<int32_t>>();
     tree.used_raw_features = d["used_raw_features"].cast<std::vector<int32_t>>();
     return tree;
+}
+
+void validate_tree(const FittedTree& tree, int64_t p_base) {
+    if (!tree.is_fitted) throw std::invalid_argument("Tree is not fitted.");
+    for (const auto& spec : tree.synthetic_specs) {
+        if (spec.a_idx < 0 || spec.a_idx >= p_base || spec.b_idx < 0 || spec.b_idx >= p_base ||
+            spec.op < 0 || spec.op > 3 || !std::isfinite(spec.a_threshold) || !std::isfinite(spec.b_threshold))
+            throw std::invalid_argument("Invalid synthetic column specification.");
+    }
+    std::vector<bool> seen(tree.nodes.size(), false);
+    std::vector<int32_t> pending{0};
+    while (!pending.empty()) {
+        const int32_t index = pending.back();
+        pending.pop_back();
+        if (index < 0 || static_cast<size_t>(index) >= tree.nodes.size())
+            throw std::invalid_argument("Tree child index is out of range.");
+        if (seen[index]) throw std::invalid_argument("Tree contains a cycle or shared child.");
+        seen[index] = true;
+        const auto& node = tree.nodes[index];
+        if (!node.is_leaf) {
+            if (node.feature_index < 0 ||
+                static_cast<int64_t>(node.feature_index) >= p_base + static_cast<int64_t>(tree.synthetic_specs.size()) ||
+                !std::isfinite(node.threshold))
+                throw std::invalid_argument("Invalid tree split feature or threshold.");
+            pending.push_back(node.left);
+            pending.push_back(node.right);
+        }
+    }
+    for (bool visited : seen)
+        if (!visited) throw std::invalid_argument("Tree contains unreachable nodes.");
+}
+
+template <typename T>
+void validate_vector(const py::array_t<T, py::array::c_style | py::array::forcecast>& array,
+                     const char* name, int64_t upper) {
+    if (array.ndim() != 1) throw std::invalid_argument(std::string(name) + " must be 1D.");
+    const T* values = array.data();
+    for (py::ssize_t i = 0; i < array.size(); ++i)
+        if (values[i] < 0 || values[i] >= upper)
+            throw std::invalid_argument(std::string(name) + " contains an out-of-range value.");
 }
 
 }  // namespace
@@ -151,6 +198,24 @@ static py::dict py_rpte_grow_tree(
     if (X_info.ndim != 2) throw std::invalid_argument("X must be 2D.");
     const int64_t n_rows = X_info.shape[0];
     const int64_t p_base = X_info.shape[1];
+    if (n_rows <= 0 || p_base <= 0 || n_rows > std::numeric_limits<int32_t>::max() ||
+        p_base > std::numeric_limits<int32_t>::max())
+        throw std::invalid_argument("Training dimensions must be positive and fit native counters.");
+    validate_vector(labels, "labels", 2);
+    if (labels.size() != n_rows) throw std::invalid_argument("labels length must match X.");
+    validate_vector(grow_rows, "grow_rows", n_rows);
+    validate_vector(probe_rows, "probe_rows", n_rows);
+    validate_vector(eligible_columns, "eligible_columns", p_base);
+    validate_vector(raw_indices, "raw_indices", p_base);
+    validate_vector(roots, "roots", p_base);
+    validate_vector(lookahead_ops, "lookahead_ops", 4);
+    if (max_depth < 0 || max_leaf_nodes < 1 || min_samples_leaf < 1 || min_probe_leaf < 1 ||
+        lookahead_beam_width < 1 || max_root_thresholds < 1 || raw_pair_max_candidates < 0 ||
+        aug_child_max_candidates < 0 || !std::isfinite(greedy_stall_probe_ig) ||
+        !std::isfinite(lookahead_min_probe_ig) || !std::isfinite(lookahead_min_increment) ||
+        !std::isfinite(min_weighted_probe_gain) || !std::isfinite(significance_alpha) ||
+        significance_alpha <= 0.0 || significance_alpha > 1.0)
+        throw std::invalid_argument("Invalid tree growth parameters.");
     if (static_cast<int64_t>(owner_by_column.size()) != p_base) {
         throw std::invalid_argument("owner_by_column must have one entry per base column.");
     }
@@ -231,6 +296,7 @@ static py::array_t<int64_t> py_rpte_apply_tree(
     const double* X_ptr = static_cast<const double*>(X_info.ptr);
 
     FittedTree tree = fitted_tree_from_dict(tree_dict);
+    validate_tree(tree, p_base);
     std::vector<int64_t> leaf_ids;
     {
         py::gil_scoped_release release;

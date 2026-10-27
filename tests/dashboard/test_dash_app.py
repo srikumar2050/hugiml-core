@@ -460,7 +460,7 @@ class TestRepresentationPruningExecution:
             {"name": "age__x__income", "operation": "product", "inputs": ["age", "income"]}
         ]
 
-        def transform(self, X):
+        def transform_patterns(self, X):
             from scipy.sparse import csr_matrix
 
             values = np.column_stack(
@@ -470,6 +470,9 @@ class TestRepresentationPruningExecution:
                 ]
             )
             return csr_matrix(values)
+
+        def transform(self, X):
+            return self._make_downstream_features(X, self.transform_patterns(X))
 
         def _make_downstream_features(self, X, patterns, fit=False):
             pattern_values = (

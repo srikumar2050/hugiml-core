@@ -197,7 +197,7 @@ def test_require_audit_artifact_checks_missing_attrs_in_audit_mode():
 
 
 def test_fixedB_L_gt_1_clean_numeric_fit_path_keeps_missing_edges_empty():
-    pytest.importorskip("hugiml._hugiml_core")
+    pytest.importorskip("_hugiml_core")
     rng = np.random.default_rng(7)
     X = rng.normal(size=(40, 4))
     y = (X[:, 0] + X[:, 1] > 0).astype(int)
@@ -219,7 +219,7 @@ def test_fixedB_L_gt_1_clean_numeric_fit_path_keeps_missing_edges_empty():
 
 
 def test_fixedB_training_missing_numeric_full_fit_path_prebins_and_predict_handles_new_nan():
-    pytest.importorskip("hugiml._hugiml_core")
+    pytest.importorskip("_hugiml_core")
     rng = np.random.default_rng(23)
     X = rng.normal(size=(48, 4))
     y = (X[:, 0] - 0.5 * X[:, 1] + X[:, 3] > 0).astype(int)

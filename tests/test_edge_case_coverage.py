@@ -49,7 +49,6 @@ class PickleFriendlyDoubleTransformer:
         return np.asarray(X) * 2
 
 
-
 class TestBinningHelperEdges:
     def test_entropy_empty_and_binning_fallbacks(self):
         from hugiml._binning import (
@@ -427,8 +426,11 @@ class TestSerializationHelperEdges:
 
         import hugiml.serialization as ser
 
-        old_safe_modules = ser._SAFE_MODULES
-        ser._SAFE_MODULES = (*ser._SAFE_MODULES, __name__)
+        old_globals = ser._PICKLE_GLOBALS
+        ser._PICKLE_GLOBALS = ser._PICKLE_GLOBALS | {
+            (__name__, "PickleFriendlyEstimator"),
+            (__name__, "PickleFriendlyDoubleTransformer"),
+        }
         try:
             est = PickleFriendlyEstimator(value=7)
             config, arrays = ser._serialize_estimator(est)
@@ -436,7 +438,7 @@ class TestSerializationHelperEdges:
             restored = ser._deserialize_estimator(config, arrays)
             assert restored.value == 7
         finally:
-            ser._SAFE_MODULES = old_safe_modules
+            ser._PICKLE_GLOBALS = old_globals
 
         X = np.array([[0.0, 1.0], [1.0, 0.0], [2.0, 1.0], [3.0, 0.0]])
         y = np.array([0, 0, 1, 1])
@@ -448,18 +450,24 @@ class TestSerializationHelperEdges:
         np.testing.assert_allclose(pipe.predict_proba(X), pipe2.predict_proba(X))
 
         pipe_fallback = Pipeline(
-            [("double", PickleFriendlyDoubleTransformer()), ("lr", LogisticRegression(max_iter=1000))]
+            [
+                ("double", PickleFriendlyDoubleTransformer()),
+                ("lr", LogisticRegression(max_iter=1000)),
+            ]
         )
         pipe_fallback.fit(X, y)
-        old_safe_modules = ser._SAFE_MODULES
-        ser._SAFE_MODULES = (*ser._SAFE_MODULES, __name__)
+        old_globals = ser._PICKLE_GLOBALS
+        ser._PICKLE_GLOBALS = ser._PICKLE_GLOBALS | {
+            (__name__, "PickleFriendlyEstimator"),
+            (__name__, "PickleFriendlyDoubleTransformer"),
+        }
         try:
             fallback_config, fallback_arrays = ser._serialize_pipeline(pipe_fallback)
             assert fallback_config["steps"][0]["estimator"]["_pickle_fallback"] is True
             pipe3 = ser._deserialize_pipeline(fallback_config, fallback_arrays)
             np.testing.assert_allclose(pipe_fallback.predict_proba(X), pipe3.predict_proba(X))
         finally:
-            ser._SAFE_MODULES = old_safe_modules
+            ser._PICKLE_GLOBALS = old_globals
 
     def test_deserialization_rejects_unknown_estimator_and_unsafe_pickle(self):
         import hugiml.serialization as ser

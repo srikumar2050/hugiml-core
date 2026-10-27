@@ -44,6 +44,10 @@ Serialization
    sbom = generate_sbom(restored, output_path="sbom.json")
 
 The serializer uses a versioned ZIP/JSON/NumPy model format and avoids unrestricted pickle loading for the current schema.
+Model loading permits only approved estimator constructors and pickle globals.
+``HUGIML_MODEL_MAX_BYTES`` bounds expanded model payloads (default: 2 GiB);
+increase it explicitly for larger trusted models. Existing HMAC controls remain available.
+
 
 Telemetry
 ---------

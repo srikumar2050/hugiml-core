@@ -6,6 +6,12 @@ The canonical release notes live in ``CHANGELOG.md`` at the repository root. Kee
 Recent releases
 ---------------
 
+1.1.23 — 2026-10-27
+~~~~~~~~~~~~~~~~~~~
+
+* Restricted model loading and validated archive sizes, native RPTE inputs, and integer labels.
+* Preserved binning column types across save/load and included all rows in dataset fingerprints.
+
 1.1.22 — 2026-09-12
 ~~~~~~~~~~~~~~~~~~~
 

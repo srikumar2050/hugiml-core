@@ -113,7 +113,7 @@ def test_hugiml_lookahead_rpte_archive_is_structured(tmp_path):
         estimator_config = json.loads(archive.read("estimator.json"))
         estimator_array_names = set(np.load(archive.open("estimator_arrays.npz")).files)
 
-    assert manifest["schema_version"] == serialization.MODEL_SCHEMA_VERSION == 11
+    assert manifest["schema_version"] == serialization.MODEL_SCHEMA_VERSION == 12
     assert not _contains_key(estimator_config, "_pickle_fallback")
     assert not any("pickle_payload" in key for key in estimator_array_names)
     np.testing.assert_allclose(before, restored.predict_proba(X), rtol=3e-6, atol=1e-7)

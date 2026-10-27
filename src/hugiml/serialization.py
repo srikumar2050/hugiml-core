@@ -35,6 +35,13 @@ Archive layout::
     estimator_arrays.npz   – downstream estimator numpy arrays
     hmac.sig               – HMAC-SHA256 over all content files (hex)
 
+Resource limits
+---------------
+``HUGIML_MODEL_MAX_BYTES`` limits expanded archive and NumPy payload bytes
+(default 2 GiB). Increase it explicitly for larger trusted model artifacts.
+Duplicate ZIP entries and pickle extension opcodes are rejected. Model loading
+supports only explicitly registered estimator classes and pickle globals.
+
 Authentication
 --------------
 Set ``HUGIML_MODEL_HMAC_KEY`` (hex-encoded, 32+ bytes) before saving or
@@ -45,7 +52,7 @@ Backward compatibility (v1/v2)
 -------------------------------
 Models saved with schema version 1 or 2 (the legacy HMAC-pickle format) are
 still loadable via a restricted Unpickler that permits only known HUG-IML and
-sklearn modules.  v1/v2 writing is not supported.
+sklearn globals.  v1/v2 writing is not supported.
 """
 
 from __future__ import annotations
@@ -55,6 +62,7 @@ import hmac
 import io
 import json
 import logging
+import math
 import os
 import struct
 import time
@@ -97,8 +105,8 @@ __all__ = [
 # downstream branch: bare, or OneVsRestClassifier-wrapped for multiclass, as
 # produced by the "performance_ho" grid). clf_init.json stores each
 # estimator-valued hyperparameter as a reconstructable {class, params}
-# record (module-prefix-allowlisted the same way the restricted Unpickler
-# already is, via _SAFE_MODULES) via _json_safe_params, and _load_v3
+# record (class-allowlisted the same way the restricted Unpickler
+# already is, via _ESTIMATOR_CLASSES) via _json_safe_params, and _load_v3
 # reconstructs it via _reconstruct_params so the reloaded classifier's own
 # `base_estimator` attribute -- not just the fitted `self.model_` Pipeline,
 # which is stored separately -- matches what was actually fit. This is what
@@ -107,7 +115,8 @@ __all__ = [
 # rely on. Loading remains backward-compatible with v1-v8: those files'
 # `base_estimator` value is always plain None (RPTE did not exist yet) and
 # round-trips through the same code unchanged.
-MODEL_SCHEMA_VERSION: int = 11
+# Schema v12 preserves column-key types in fitted binning state.
+MODEL_SCHEMA_VERSION: int = 12
 MIN_SCHEMA_VERSION: int = 1
 
 # ── Legacy (v1/v2) pickle-envelope constants ──────────────────────────────────
@@ -116,31 +125,87 @@ _HMAC_LEN = 32
 _LEGACY_HEADER_LEN = 4 + 4 + _HMAC_LEN
 
 # ── Modules / classes permitted by the legacy restricted Unpickler ────────────
-_SAFE_MODULES = (
-    "builtins",
-    "collections",
-    "numpy",
-    "numpy.core",
-    "numpy._core",
-    "scipy.sparse",
-    "sklearn",
-    "pandas",
-    "hugiml",
-    "hugiml.classifier",
-    "hugiml.monitoring",
-    "hugiml.exceptions",
-    "hugiml.serialization",
+# Only these estimator constructors may be called from JSON records.
+_ESTIMATOR_CLASSES = frozenset(
+    """
+sklearn.linear_model._logistic.LogisticRegression
+sklearn.linear_model._stochastic_gradient.SGDClassifier
+sklearn.linear_model._ridge.RidgeClassifier
+sklearn.tree._classes.DecisionTreeClassifier
+sklearn.tree._classes.ExtraTreeClassifier
+sklearn.ensemble._forest.RandomForestClassifier
+sklearn.ensemble._forest.ExtraTreesClassifier
+sklearn.ensemble._gb.GradientBoostingClassifier
+sklearn.ensemble._weight_boosting.AdaBoostClassifier
+sklearn.svm._classes.SVC
+sklearn.svm._classes.LinearSVC
+sklearn.naive_bayes.GaussianNB
+sklearn.naive_bayes.BernoulliNB
+sklearn.naive_bayes.MultinomialNB
+sklearn.neighbors._classification.KNeighborsClassifier
+sklearn.dummy.DummyClassifier
+sklearn.multiclass.OneVsRestClassifier
+sklearn.preprocessing._data.StandardScaler
+sklearn.preprocessing._data.MinMaxScaler
+sklearn.preprocessing._data.MaxAbsScaler
+sklearn.preprocessing._data.RobustScaler
+sklearn.preprocessing._encoders.OneHotEncoder
+sklearn.preprocessing._encoders.OrdinalEncoder
+sklearn.preprocessing._label.LabelEncoder
+sklearn.preprocessing._label.LabelBinarizer
+sklearn.impute._base.SimpleImputer
+sklearn.pipeline.Pipeline
+hugiml.rpte_bounded_lookahead_leafwise.LeafWiseBoundedLookaheadRPTEFeatureLR
+hugiml.rpte_bounded_lookahead_leafwise._DefaultRPTEFeatureLR
+""".split()
 )
-_SAFE_TYPES = frozenset(
-    [
-        "HUGIMLClassifierNative",
-        "HUGIMLClassifier",
-        "_TransactionDataWrapper",
-        "FitMetadata",
-        "PredictionMonitor",
-        "DriftDetector",
-        "NativeAugmentedPairTransformBlock",
-    ]
+
+# Exact pickle globals, including inert state containers used by supported models.
+_PICKLE_GLOBALS = frozenset(tuple(path.rsplit(".", 1)) for path in _ESTIMATOR_CLASSES) | frozenset(
+    {
+        ("builtins", "set"),
+        ("builtins", "frozenset"),
+        ("builtins", "slice"),
+        ("builtins", "complex"),
+        ("collections", "OrderedDict"),
+        ("collections", "defaultdict"),
+        ("collections", "deque"),
+        ("numpy", "ndarray"),
+        ("numpy", "dtype"),
+        ("numpy.core.multiarray", "_reconstruct"),
+        ("numpy._core.multiarray", "_reconstruct"),
+        ("numpy.core.multiarray", "scalar"),
+        ("numpy._core.multiarray", "scalar"),
+        ("numpy.core.numeric", "_frombuffer"),
+        ("numpy._core.numeric", "_frombuffer"),
+        ("numpy.random._pickle", "__randomstate_ctor"),
+        ("numpy.random._pickle", "__bit_generator_ctor"),
+        ("scipy.sparse._csr", "csr_matrix"),
+        ("scipy.sparse._csc", "csc_matrix"),
+        ("scipy.sparse._coo", "coo_matrix"),
+        ("sklearn.tree._tree", "Tree"),
+        ("pandas.core.frame", "DataFrame"),
+        ("pandas.core.series", "Series"),
+        ("pandas.core.internals.managers", "BlockManager"),
+        ("pandas.core.internals.managers", "SingleBlockManager"),
+        ("pandas._libs.internals", "_unpickle_block"),
+        ("pandas.core.indexes.base", "_new_Index"),
+        ("pandas.core.indexes.base", "Index"),
+        ("pandas.core.indexes.range", "RangeIndex"),
+        ("hugiml.classifier", "HUGIMLClassifier"),
+        ("hugiml.classifier", "HUGIMLClassifierNative"),
+        ("hugiml.classifier", "_TransactionDataWrapper"),
+        ("hugiml.classifier", "FitMetadata"),
+        ("hugiml._classifier_support", "_TransactionDataWrapper"),
+        ("hugiml._classifier_support", "FitMetadata"),
+        ("hugiml._classifier_support", "NativeAugmentedPairTransformBlock"),
+        ("hugiml.classifier", "NativeAugmentedPairTransformBlock"),
+        ("hugiml.monitoring", "PredictionMonitor"),
+        ("hugiml.monitoring", "DriftDetector"),
+        ("hugiml.rpte_bounded_lookahead_leafwise", "_BoostingRound"),
+        ("hugiml.rpte_bounded_lookahead_leafwise", "_DefaultRPTEFeatureExtractor"),
+        ("hugiml.rpte_bounded_lookahead_leafwise", "LeafWiseBoundedLookaheadRPTEFeatureExtractor"),
+    }
 )
 
 
@@ -228,10 +293,7 @@ def _json_safe_params(params: dict[str, Any]) -> dict[str, Any]:
     estimator like OneVsRestClassifier(estimator=RPTE(...)) is captured
     fully, not just its outer class) and converts each into a
     {_ESTIMATOR_PARAM_MARKER: True, "class": "<module>.<qualname>", "params":
-    {...}} record IF its module is allowlisted the same way the legacy
-    restricted Unpickler already allowlists modules for pickle fallback
-    (_SAFE_MODULES) -- this is the same trust boundary already used
-    elsewhere in this file, not a new one. Anything else non-JSON-native
+    {...}} record when its class is in _ESTIMATOR_CLASSES. Anything else non-JSON-native
     (an object this format has no allowlisted way to reconstruct) becomes a
     {_UNRECONSTRUCTABLE_PARAM_MARKER: True, "class": ..., "repr": ...}
     record instead of raising, with a warning at save time -- prediction
@@ -253,7 +315,7 @@ def _json_safe_param_value(value: Any) -> Any:
     if hasattr(value, "get_params") and callable(getattr(value, "get_params")):
         module = type(value).__module__
         qualname = type(value).__qualname__
-        if any(module == m or module.startswith(m + ".") for m in _SAFE_MODULES):
+        if f"{module}.{qualname}" in _ESTIMATOR_CLASSES:
             try:
                 inner_params = value.get_params(deep=False)
             except Exception as exc:
@@ -276,11 +338,11 @@ def _json_safe_param_value(value: Any) -> Any:
             }
         logger.warning(
             "base_estimator-style param of class %s.%s is outside the allowlisted "
-            "modules for reconstruction (%s); it will be saved as a non-reconstructable "
+            "classes for reconstruction (%s); it will be saved as a non-reconstructable "
             "record and not restored on load.",
             module,
             qualname,
-            ", ".join(_SAFE_MODULES),
+            ", ".join(sorted(_ESTIMATOR_CLASSES)),
         )
         return {
             _UNRECONSTRUCTABLE_PARAM_MARKER: True,
@@ -304,13 +366,7 @@ def _json_safe_param_value(value: Any) -> Any:
 
 
 def _reconstruct_params(params: dict[str, Any]) -> dict[str, Any]:
-    """Inverse of _json_safe_params: rebuild estimator-valued params from
-    clf_init.json's records. Never raises -- a record this file's HUGIML
-    version doesn't know how to reconstruct (e.g. saved by a newer HUGIML
-    with a class this installation doesn't have) is warned about and
-    resolved to None rather than failing the whole load, since prediction
-    does not depend on this value (self.model_ carries the fitted state).
-    """
+    """Rebuild approved estimator-valued parameters; reject unapproved constructors."""
     out: dict[str, Any] = {}
     for key, value in params.items():
         out[key] = _reconstruct_param_value(key, value)
@@ -321,16 +377,10 @@ def _reconstruct_param_value(key: str, value: Any) -> Any:
     if isinstance(value, dict) and value.get(_ESTIMATOR_PARAM_MARKER):
         class_path = str(value.get("class", ""))
         module_name, _, class_name = class_path.rpartition(".")
-        if not module_name or not any(
-            module_name == m or module_name.startswith(m + ".") for m in _SAFE_MODULES
-        ):
-            logger.warning(
-                "clf_init.json's %r references class %r outside the allowlisted "
-                "reconstruction modules; leaving it as None.",
-                key,
-                class_path,
+        if class_path not in _ESTIMATOR_CLASSES:
+            raise HUGIMLSerializationError(
+                f"Estimator constructor {class_path!r} is not approved for model loading."
             )
-            return None
         try:
             import importlib
 
@@ -338,6 +388,8 @@ def _reconstruct_param_value(key: str, value: Any) -> Any:
             cls = getattr(module, class_name)
             inner_params = _reconstruct_params(value.get("params", {}) or {})
             return cls(**inner_params)
+        except HUGIMLSerializationError:
+            raise
         except Exception as exc:
             logger.warning(
                 "Failed to reconstruct %r for clf_init.json's %r (%s); leaving it as "
@@ -1205,6 +1257,10 @@ def save_model(clf: Any, path: str | os.PathLike) -> None:
     # so versioned save/load can round-trip predictions without relying on
     # pickle.  The augmented pair block is reconstructed during load using
     # these JSON fields plus scaler arrays stored in arrays.npz.
+    fit_state["column_keyed_binning_state"] = {
+        field: list((getattr(clf, field, None) or {}).items())
+        for field in ("_missing_col_edges_", "_bin_edges_", "per_feature_b_", "ig_scores_")
+    }
     aug_block = getattr(clf, "_augmented_pair_block_", None)
     fit_state["augmented_pair_state"] = {
         "augmented_pair_transforms": bool(getattr(clf, "augmented_pair_transforms", True)),
@@ -1470,10 +1526,35 @@ def load_model(
 # ---------------------------------------------------------------------------
 
 
+def _model_byte_limit() -> int:
+    """Maximum expanded model bytes; configurable for larger trusted models."""
+    try:
+        limit = int(os.environ.get("HUGIML_MODEL_MAX_BYTES", str(2 * 1024**3)))
+    except ValueError as exc:
+        raise HUGIMLSerializationError(
+            "HUGIML_MODEL_MAX_BYTES must be a positive integer."
+        ) from exc
+    if limit <= 0:
+        raise HUGIMLSerializationError("HUGIML_MODEL_MAX_BYTES must be a positive integer.")
+    return limit
+
+
+def _check_archive(zf: zipfile.ZipFile, limit: int) -> None:
+    infos = zf.infolist()
+    names = [info.filename for info in infos]
+    if len(infos) > 100_000 or len(names) != len(set(names)):
+        raise HUGIMLSerializationError("Model archive has too many or duplicate members.")
+    if any(info.flag_bits & 1 for info in infos):
+        raise HUGIMLSerializationError("Encrypted model members are not supported.")
+    if sum(info.file_size for info in infos) > limit:
+        raise HUGIMLSerializationError("Expanded model exceeds HUGIML_MODEL_MAX_BYTES.")
+
+
 def _load_v3(path: str | os.PathLike) -> Any:
     """Deserialize a v3 ZIP model archive."""
     try:
         with zipfile.ZipFile(path, "r") as zf:
+            _check_archive(zf, _model_byte_limit())
             members: dict[str, bytes] = {name: zf.read(name) for name in zf.namelist()}
     except (zipfile.BadZipFile, KeyError, OSError) as exc:
         raise HUGIMLSerializationError(f"Failed to read ZIP archive {path}: {exc}") from exc
@@ -1526,10 +1607,35 @@ def _load_v3(path: str | os.PathLike) -> Any:
             path,
         )
 
+    remaining = _model_byte_limit()
+
     def _load_npz(name: str) -> dict[str, np.ndarray]:
+        nonlocal remaining
         buf = io.BytesIO(members[name])
-        loaded = np.load(buf, allow_pickle=False)
-        return dict(loaded)
+        with zipfile.ZipFile(buf) as nested:
+            _check_archive(nested, remaining)
+            remaining -= sum(info.file_size for info in nested.infolist())
+            for info in nested.infolist():
+                with nested.open(info) as member:
+                    version = np.lib.format.read_magic(member)
+                    if version == (1, 0):
+                        shape, _, dtype = np.lib.format.read_array_header_1_0(member)
+                    elif version == (2, 0):
+                        shape, _, dtype = np.lib.format.read_array_header_2_0(member)
+                    else:
+                        raise HUGIMLSerializationError("Unsupported NumPy member format version.")
+                    count = math.prod(shape)
+                    if (
+                        dtype.hasobject
+                        or any(dim < 0 for dim in shape)
+                        or count * dtype.itemsize != info.file_size - member.tell()
+                    ):
+                        raise HUGIMLSerializationError(
+                            "Invalid NumPy member shape, dtype, or byte length."
+                        )
+        buf.seek(0)
+        with np.load(buf, allow_pickle=False) as loaded:
+            return dict(loaded)
 
     # ── Reconstruct the classifier ────────────────────────────────────────────
     from hugiml.classifier import FitMetadata, HUGIMLClassifier
@@ -1748,6 +1854,27 @@ def _load_v3(path: str | os.PathLike) -> Any:
         }
         # Rebuild the integer-code → original-label map that is derived from
         # _bin_edges_ but not stored separately in the .hugiml format.
+    typed_state = clf_fit.get("column_keyed_binning_state")
+    if typed_state is not None:
+        try:
+            for field in ("_missing_col_edges_", "_bin_edges_", "per_feature_b_", "ig_scores_"):
+                restored = {}
+                for key, value in typed_state[field]:
+                    if not isinstance(key, (str, int, float, bool, type(None))):
+                        raise ValueError("Unsupported column key type")
+                    if isinstance(key, float) and not np.isfinite(key):
+                        raise ValueError("Non-finite column key")
+                    if key in restored:
+                        raise ValueError("Duplicate column key")
+                    if field in ("_missing_col_edges_", "_bin_edges_"):
+                        value = np.asarray(value, dtype=np.float64)
+                    elif field == "ig_scores_":
+                        value = {int(b): float(score) for b, score in value.items()}
+                    restored[key] = value
+                setattr(clf, field, restored)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise HUGIMLSerializationError("Invalid column-keyed binning state.") from exc
+    if adap:
         clf._rebuild_adaptive_code_label_map()
     else:
         clf._adaptive_code_label_map_ = {}
@@ -1951,7 +2078,9 @@ def _load_legacy(path: str | os.PathLike) -> Any:
                     f"Minimum supported: {MIN_SCHEMA_VERSION}.  Re-fit the model."
                 )
             stored_tag = fh.read(_HMAC_LEN)
-            payload = fh.read()
+            payload = fh.read(_model_byte_limit() + 1)
+            if len(payload) > _model_byte_limit():
+                raise HUGIMLSerializationError("Legacy model exceeds HUGIML_MODEL_MAX_BYTES.")
     except (OSError, struct.error) as exc:
         raise HUGIMLSerializationError(f"Failed to read legacy model {path}: {exc}") from exc
 
@@ -1986,15 +2115,19 @@ def _load_legacy(path: str | os.PathLike) -> Any:
 
 
 def _safe_unpickle(payload: bytes) -> Any:
-    """Deserialize a pickle payload through a module- and type-restricting Unpickler."""
+    """Deserialize a pickle payload using an exact set of permitted globals."""
     import io
     import pickle  # nosec B403 – module-and-type-restricted Unpickler
+    import pickletools
+
+    # Extension opcodes can reuse a process-wide cache without find_class.
+    for opcode, _, _ in pickletools.genops(payload):
+        if opcode.name in {"EXT1", "EXT2", "EXT4"}:
+            raise pickle.UnpicklingError("Pickle extension opcodes are not supported.")
 
     class _RestrictedUnpickler(pickle.Unpickler):
         def find_class(self, module: str, name: str) -> Any:
-            if any(module == m or module.startswith(m + ".") for m in _SAFE_MODULES):
-                return super().find_class(module, name)
-            if name in _SAFE_TYPES:
+            if (module, name) in _PICKLE_GLOBALS:
                 return super().find_class(module, name)
             raise pickle.UnpicklingError(
                 f"Global '{module}.{name}' is not allowed during restricted deserialization."

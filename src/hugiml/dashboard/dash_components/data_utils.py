@@ -247,10 +247,10 @@ def fingerprint(df):
     }
     try:
         p["sd"] = hashlib.sha256(
-            pd.util.hash_pandas_object(df.head(1000), index=True).values.tobytes()
+            pd.util.hash_pandas_object(df, index=True).values.tobytes()
         ).hexdigest()
     except Exception:
-        p["sd"] = str(df.head(20).to_json(default_handler=str))
+        p["sd"] = str(df.to_json(default_handler=str))
     return hashlib.sha256(json.dumps(p, sort_keys=True, default=str).encode()).hexdigest()
 
 

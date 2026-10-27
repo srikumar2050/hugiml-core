@@ -21,17 +21,8 @@ Why HUGIML?
 Current release focus
 ---------------------
 
-The 1.1.22 release focuses on benchmark updates and control of the final
-linear/logistic representation:
-
-* ``lr_source_policy`` controls how original features and generated components
-  reuse raw input sources in the final linear/logistic representation.
-* Benchmark and scalability workflows and published results are refreshed, with
-  expanded automated test coverage and support for parallel benchmark execution.
-* Large-data handling now includes wider sparse-index support and fit-time memory
-  checks.
-* Multiclass linear-model solver selection and RuleFit one-vs-rest complexity
-  aggregation are updated.
+The 1.1.23 release adds model-loading safeguards and input validation.
+Training algorithms and defaults are unchanged. See :doc:`changelog`.
 
 The complete 1.1.x documentation remains in this guide, including execution
 modes, adaptive binning, feature modes, augmented-pair features, RPTE,
