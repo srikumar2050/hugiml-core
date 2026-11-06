@@ -27,6 +27,7 @@ include render.yaml
 recursive-include deployment/public-dashboard *.py *.css *.txt *.md Dockerfile Dockerfile.dockerignore
 recursive-include docs *.md *.rst *.py *.css *.png *.txt
 recursive-include docker Dockerfile* *.py *.yml
+include docker/.env.example
 recursive-include kubernetes *.yaml
 recursive-include scripts *.py *.sh
 

@@ -101,3 +101,5 @@ native/*.gch
 native/*.o
 # Local secrets
 docker/.env
+
+!docker/.env.example

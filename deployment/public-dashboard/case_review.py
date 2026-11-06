@@ -6,7 +6,7 @@ import random
 import zlib
 
 MAX_CASE_BYTES = 128 * 1024
-MAX_REVIEW_CASES = 100
+MAX_REVIEW_CASES = 20
 
 
 def sample_indices(labels, limit=MAX_REVIEW_CASES):

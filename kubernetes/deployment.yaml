@@ -12,14 +12,23 @@
 #          HorizontalPodAutoscaler, PodDisruptionBudget,
 #          NetworkPolicy, PersistentVolumeClaim
 #
-# Prerequisites:
-#   1. Create the HUGIML_API_KEYS secret before applying:
+# Prerequisites (from the repository root):
+#   1. Create the namespace, then supply authentication and model-signing secrets:
+#        kubectl create namespace hugiml
 #        kubectl -n hugiml create secret generic hugiml-auth \
 #          --from-literal=api-keys="<key1>,<key2>"
 #        kubectl -n hugiml create secret generic hugiml-hmac \
 #          --from-literal=hmac-key="<hex-encoded-32-byte-key>"
-#   2. Replace <YOUR_REGISTRY>/hugiml-core:<TAG> with your image.
-#   3. Adjust storageClassName and storage to match your cluster.
+#   2. Replace the image and storage class placeholders below. The storage
+#      class must support ReadWriteMany across nodes for multiple replicas.
+#   3. Apply the manifest, then populate the claim with model.hugiml using a
+#      temporary writer pod or your storage provider. Sign the model with
+#      save_model using the same HUGIML_MODEL_HMAC_KEY; make it readable by
+#      UID/GID 1001. Pods remain unready until the signed model is available.
+#      After uploading, run: kubectl -n hugiml rollout restart deployment/hugiml-server
+#   4. Autoscaling requires the resource metrics API (usually Metrics Server).
+#      NetworkPolicy requires a supporting CNI. The Service is cluster-internal;
+#      configure an authenticated TLS ingress separately for external access.
 #
 #   kubectl apply -f kubernetes/deployment.yaml
 
@@ -94,7 +103,7 @@ spec:
       containers:
         - name: hugiml-server
           # Replace with your registry image and pin to a digest, e.g.:
-          # image: ghcr.io/srikumar2050/hugiml-core:2.1.0@sha256:<digest>
+          # image: <YOUR_REGISTRY>/hugiml-core@sha256:<digest>
           image: <YOUR_REGISTRY>/hugiml-core:<TAG>
           imagePullPolicy: Always
           ports:
@@ -122,6 +131,13 @@ spec:
             limits:
               cpu: "2"
               memory: "2Gi"
+          startupProbe:
+            httpGet:
+              path: /ready
+              port: 8080
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 30
           readinessProbe:
             httpGet:
               path: /ready
@@ -236,8 +252,7 @@ spec:
           protocol: UDP
         - port: 53
           protocol: TCP
-    # Allow outbound to Prometheus scrape targets and model storage if needed.
-    # Restrict further to specific CIDR blocks in production.
+    # Other outbound traffic is denied. Prometheus scrapes arrive via ingress.
 
 ---
 apiVersion: v1
@@ -247,8 +262,8 @@ metadata:
   namespace: hugiml
 spec:
   accessModes:
-    - ReadOnlyMany
-  storageClassName: standard
+    - ReadWriteMany
+  storageClassName: <YOUR_SHARED_STORAGE_CLASS>
   resources:
     requests:
       storage: 1Gi

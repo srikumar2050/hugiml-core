@@ -253,7 +253,7 @@ def test_real_worker(dataset, mode, topk, order, monkeypatch):
     from case_review import unpack
 
     cases = pages["__cases"]
-    assert len(cases) == min(100, pages["__pruning"]["train_rows"])
+    assert len(cases) == min(20, pages["__pruning"]["train_rows"])
     assert unpack(cases[0]) != unpack(cases[-1])
 
 

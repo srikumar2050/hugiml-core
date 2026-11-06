@@ -38,7 +38,7 @@ GET  /health           Liveness probe — returns 200 when the process is alive
                        and the model loaded without error; 503 otherwise.
 GET  /ready            Readiness probe — returns 200 when warm.
 POST /predict          Batch prediction endpoint (JSON).
-POST /predict/explain  Prediction + top pattern explanations.
+POST /predict/explain  Prediction + matched HUG patterns for each input row.
 GET  /model/info       Redacted model summary (no raw feature data).
 GET  /metrics          Prometheus metrics (if enabled).
 """
@@ -122,13 +122,12 @@ if not _hmac_key_set and not _AUTH_DISABLED:
 # Model loading
 # ---------------------------------------------------------------------------
 _clf: Any = None
-_explainer: Any = None
 _load_time: float | None = None
 _load_error: str | None = None
 
 
 def _load_model_at_startup() -> None:
-    global _clf, _explainer, _load_time, _load_error
+    global _clf, _load_time, _load_error
     if not MODEL_PATH.exists():
         _load_error = f"Model file not found: {MODEL_PATH}"
         logger.error(_load_error)
@@ -138,13 +137,6 @@ def _load_model_at_startup() -> None:
         t0 = time.perf_counter()
         _clf = load_model(MODEL_PATH)
         _clf.enable_monitoring(window_size=10_000)
-        try:
-            from hugiml.explainability import HUGPatternExplainer
-
-            _explainer = HUGPatternExplainer(_clf)
-        except Exception:
-            logger.exception("Explainer initialization failed")
-            _explainer = None
         _load_time = time.perf_counter() - t0
         logger.info("Model loaded in %.3fs", _load_time)
     except Exception as exc:
@@ -341,16 +333,12 @@ async def predict_explain(
         X = pd.DataFrame(req.instances)
         preds = clf.predict(X).tolist()
         proba = clf.predict_proba(X).tolist() if req.return_proba else None
-        if _explainer is None:
-            raise RuntimeError("Explainer is not available")
-        raw = _explainer.explain(X)
-
-        if hasattr(raw, "patterns"):
-            explanations = [{"patterns": raw.patterns}] * len(preds)
-        elif isinstance(raw, list):
-            explanations = [e if isinstance(e, dict) else {"patterns": e} for e in raw]
-        else:
-            explanations = [{"patterns": str(raw)}] * len(preds)
+        matrix = clf.transform_patterns(X).tocsr()
+        labels = clf.get_hug_features()
+        explanations = [
+            {"patterns": [str(labels[j]) for j in matrix.getrow(i).nonzero()[1]]}
+            for i in range(len(preds))
+        ]
     except Exception as exc:
         logger.exception("Explain error")
         raise HTTPException(status_code=400, detail="Invalid explanation request.") from exc

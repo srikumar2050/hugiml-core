@@ -30,11 +30,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /build
 
+ARG HUGIML_BUILD_JOBS=2
+ENV HUGIML_BUILD_JOBS=${HUGIML_BUILD_JOBS}
+
 # Upgrade pip/setuptools/wheel to fix CVEs in base image vendored copies
 RUN pip install --no-cache-dir --upgrade "pip>=26.1" "setuptools>=78.0" "wheel>=0.46.2"
 
 # Copy only the files needed to build the wheel
 COPY pyproject.toml setup.py MANIFEST.in README.md LICENSE NOTICE ./
+COPY THIRD_PARTY_LICENSES/ ./THIRD_PARTY_LICENSES/
 COPY src/ ./src/
 COPY native/ ./native/
 
@@ -99,6 +103,7 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
     CMD curl -f http://localhost:8080/health || exit 1
 
+ENV HUGIML_HOST=0.0.0.0
 ENV HUGIML_MODEL_PATH=/models/model.hugiml
 ENV HUGIML_OTEL_ENABLED=false
 ENV HUGIML_PROMETHEUS_ENABLED=true

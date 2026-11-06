@@ -1595,13 +1595,17 @@ With strict budgeting enabled, HUGIML applies the TopK budget during feature con
 ## Inference Server
 
 A FastAPI-based inference server is included for containerised deployments.
+Copy `docker/.env.example` to `docker/.env` and supply an API token and the HMAC
+key used by `save_model` when saving `model.hugiml`. Set `HUGIML_MODEL_DIR` to
+the model directory (relative paths are resolved from `docker/`). The model
+must be readable by container user 1001. Keep `docker/.env` private.
 
 ```bash
-docker build -t hugiml-core:latest -f docker/Dockerfile .
+docker compose --env-file docker/.env -f docker/docker-compose.yml up --build -d
 
-docker run -p 8080:8080 -v /path/to/models:/models hugiml-core:latest
-
+# Set HUGIML_API_KEY to one of the configured bearer tokens.
 curl -s -X POST http://localhost:8080/predict \
+  -H "Authorization: Bearer ${HUGIML_API_KEY}" \
   -H "Content-Type: application/json" \
   -d '{"instances": [{"age": 35, "savings": "moderate"}]}'
 ```

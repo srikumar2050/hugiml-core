@@ -1,34 +1,11 @@
 # Copyright 2026 Srikumar Krishnamoorthy
 # Apache-2.0 License
 #
-# Production-ready docker-compose for hugiml-core inference server.
-#
-# REQUIRED before first run
-# ─────────────────────────
-# Copy the example env file and fill in real values:
-#
-#   cp docker/.env.example docker/.env
-#
-# Mandatory variables in .env (unless HUGIML_AUTH_DISABLED=1):
-#   HUGIML_API_KEYS      – comma-separated Bearer tokens.
-#   HUGIML_MODEL_HMAC_KEY – 64-char hex HMAC key for model integrity check.
-#
-# Generate secure values with:
-#   python3 -c "import secrets; print(secrets.token_hex(32))"
-#
-# ── Quick local smoke-test (auth disabled) ────────────────────────────────────
-# Models directory must contain model.hugiml.
-#
-#   HUGIML_AUTH_DISABLED=1 HUGIML_MODEL_DIR=./models docker compose up
-#
-# Note: server.py checks HUGIML_AUTH_DISABLED (not HUGIML_DISABLE_AUTH).
-# Setting HUGIML_DISABLE_AUTH has no effect.
-#
-# ── Production deployment ─────────────────────────────────────────────────────
-#
-#   docker compose --env-file docker/.env up -d
-
-version: "3.9"
+# Inference service with API authentication and signed model loading.
+# From the repository root, copy docker/.env.example to docker/.env,
+# supply the API token and the key used when saving model.hugiml, then run:
+#   docker compose --env-file docker/.env -f docker/docker-compose.yml up --build -d
+# Add --profile monitoring before up to enable Prometheus.
 
 services:
   hugiml-server:
@@ -48,8 +25,6 @@ services:
       # For production, leave unset or "0" and supply HUGIML_API_KEYS.
       HUGIML_AUTH_DISABLED: "${HUGIML_AUTH_DISABLED:-0}"
       # Required when HUGIML_AUTH_DISABLED != "1".
-      # The :? syntax makes docker compose fail immediately with a clear error
-      # if the variable is absent and auth is not disabled.
       HUGIML_API_KEYS: "${HUGIML_API_KEYS:-}"
       # ── Model HMAC signing ────────────────────────────────────────────────
       HUGIML_MODEL_HMAC_KEY: "${HUGIML_MODEL_HMAC_KEY:-}"
@@ -68,7 +43,7 @@ services:
     restart: unless-stopped
     cap_drop:
       - ALL
-    user: "1000:1000"
+    user: "1001:1001"
     read_only: true
     tmpfs:
       - /tmp:size=64m,mode=1777
