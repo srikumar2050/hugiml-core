@@ -46,3 +46,5 @@ The video collection includes:
 
 - [HUGIML documentation](https://hugiml-core.readthedocs.io/)
 - [IEEE Access 2024 paper](https://doi.org/10.1109/ACCESS.2024.3455563)
+
+Benchmark data and coverage are documented in the [package benchmark definitions](https://github.com/srikumar2050/hugiml-core/blob/main/experiments/benchmark/README.md#published-result-definitions). Each dashboard methodology describes its validation protocol; external result files include task coverage and exclusions. Model-inspection units are benchmark accounting units, not measured interpretation time.
