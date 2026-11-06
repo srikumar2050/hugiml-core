@@ -127,6 +127,8 @@ def check(base, dataset="credit", mode="auto"):
         state=[{"id": "demo-case-revision", "property": "data", "value": None}],
     )
     first_case = update(case_payload)
+    assert first_case["demo-case-index"]["max"] == 99
+    assert first_case["demo-case-count"]["children"] == "100 sampled training cases"
     case_payload["state"][0]["value"] = first_case["demo-case-revision"]["data"]
     case_payload["inputs"][0]["value"] = first_case["demo-case-index"]["max"]
     case_payload["changedPropIds"] = ["demo-case-index.value"]

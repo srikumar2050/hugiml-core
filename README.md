@@ -3,12 +3,7 @@
 > **High-performance interpretable rule-based ML infrastructure** built on the
 > HUG-IML algorithm published in IEEE Access (2024).
 
-[![CI](https://github.com/srikumar2050/hugiml-core/actions/workflows/ci.yml/badge.svg)](https://github.com/srikumar2050/hugiml-core/actions/workflows/ci.yml)
-[![PyPI](https://img.shields.io/pypi/v/hugiml-core.svg)](https://pypi.org/project/hugiml-core/)
-[![Docs](https://readthedocs.org/projects/hugiml-core/badge/?version=latest)](https://hugiml-core.readthedocs.io/en/latest/?badge=latest)
-[![Python](https://img.shields.io/pypi/pyversions/hugiml-core.svg)](https://pypi.org/project/hugiml-core/)
-[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE)
-[![DOI](https://img.shields.io/badge/DOI-10.1109%2FACCESS.2024.3455563-blue)](https://doi.org/10.1109/ACCESS.2024.3455563)
+[![CI](https://github.com/srikumar2050/hugiml-core/actions/workflows/ci.yml/badge.svg)](https://github.com/srikumar2050/hugiml-core/actions/workflows/ci.yml) [![PyPI](https://img.shields.io/pypi/v/hugiml-core.svg)](https://pypi.org/project/hugiml-core/) [![Live Demo](https://img.shields.io/badge/Live_Demo-Render-46E3B7?logo=render&logoColor=white)](https://hugiml-live-demo.onrender.com) [![Docs](https://readthedocs.org/projects/hugiml-core/badge/?version=latest)](https://hugiml-core.readthedocs.io/en/latest/?badge=latest) [![Python](https://img.shields.io/pypi/pyversions/hugiml-core.svg)](https://pypi.org/project/hugiml-core/) [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](LICENSE) [![DOI](https://img.shields.io/badge/DOI-10.1109%2FACCESS.2024.3455563-blue)](https://doi.org/10.1109/ACCESS.2024.3455563)
 
 <p align="left">
   <img src="docs/images/header-hugiml.png" alt="HUGIML: interpretable tabular ML through compact human-readable patterns" width="800" height="370">
@@ -32,7 +27,7 @@ checking_status=no_checking          coef= +1.12     support=0.39
 
 See HUGIML in action through interactive benchmark dashboards, Governance Studio, guided video demos, and LLM examples.
 
-**[Interactive Demos](https://srikumar2050.github.io/hugiml-core/)** · **[Open in Colab](https://colab.research.google.com/github/srikumar2050/hugiml-core/blob/gh-pages/quickstart.ipynb)** · **[Documentation](https://hugiml-core.readthedocs.io/)** · **[PyPI](https://pypi.org/project/hugiml-core/)**
+**[Interactive Demos](https://srikumar2050.github.io/hugiml-core/)** · **[Live Demo](https://hugiml-live-demo.onrender.com)** · **[Open in Colab](https://colab.research.google.com/github/srikumar2050/hugiml-core/blob/gh-pages/quickstart.ipynb)** · **[Documentation](https://hugiml-core.readthedocs.io/)** · **[PyPI](https://pypi.org/project/hugiml-core/)**
 
 
 ---

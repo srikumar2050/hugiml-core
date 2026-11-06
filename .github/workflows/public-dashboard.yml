@@ -25,7 +25,7 @@ jobs:
         shell: bash
         run: |
           export HUGIML_DEMO_SECRET="$(python -c 'import secrets; print(secrets.token_urlsafe(48))')"
-          docker run -d --name hugiml-demo -p 10000:10000 --memory=512m --cpus=1 -e HUGIML_DEMO_SECRET -e HUGIML_DEMO_LOCAL_HTTP=1 hugiml-demo
+          docker run -d --name hugiml-demo -p 10000:10000 --memory=512m --cpus=0.1 -e HUGIML_DEMO_SECRET -e HUGIML_DEMO_LOCAL_HTTP=1 hugiml-demo
           for dataset in credit churn claims; do
             python deployment/public-dashboard/smoke_test.py http://localhost:10000 "$dataset" auto
           done

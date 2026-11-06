@@ -253,7 +253,7 @@ def test_real_worker(dataset, mode, topk, order, monkeypatch):
     from case_review import unpack
 
     cases = pages["__cases"]
-    assert len(cases) == pages["__pruning"]["train_rows"]
+    assert len(cases) == min(100, pages["__pruning"]["train_rows"])
     assert unpack(cases[0]) != unpack(cases[-1])
 
 
@@ -599,3 +599,19 @@ def test_pruning_failure_and_expiry_preserve_isolation(monkeypatch):
     finally:
         gate.set()
         jobs.close()
+
+
+def test_case_sample_is_bounded_reproducible_and_stratified():
+    from case_review import sample_indices
+
+    labels = [0] * 500 + [1] * 100
+    original = labels.copy()
+    for limit in (20, 100):
+        indices = sample_indices(labels, limit)
+        assert indices == sample_indices(labels, limit)
+        assert len(indices) == len(set(indices)) == limit
+        assert abs(sum(labels[i] for i in indices) - limit / 6) <= 1
+    assert labels == original
+    assert sample_indices([0, 1, 0]) == [0, 1, 2]
+    assert sample_indices([]) == []
+    assert len(sample_indices([0] * 599 + [1], 100)) == 100

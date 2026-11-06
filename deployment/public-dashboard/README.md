@@ -6,7 +6,7 @@ A fixed stratified split reserves 25% of the examples for pruning comparisons. T
 
 Automatic selection evaluates the bounded LR and RPTE candidates and chooses the largest mean three-fold CV ROC-AUC; ties select LR. These are selection scores, not an independent test estimate. Advanced allows a manual estimator choice.
 
-Charts support browser interaction. Numeric table columns and chart axes use concise display formatting while retaining their values. Case Review supports row-index and previous/next navigation across the training cases. Case evidence is prepared during training; navigation does not refit the model. Other embedded governance controls are read-only. Uploads and arbitrary training settings are not exposed.
+Charts support browser interaction. Numeric table columns and chart axes use concise display formatting while retaining their values. Case Review supports row-index and previous/next navigation across up to 100 training cases, selected deterministically in proportion to observed target classes. Case evidence is prepared during training; navigation does not refit the model. Other embedded governance controls are read-only. Uploads and arbitrary training settings are not exposed.
 
 ## Pruning
 

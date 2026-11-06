@@ -628,7 +628,7 @@ def create_app(*, coordinator=None, secret=None, testing=False):
                 not count,
                 not count or index == 0,
                 not count or index == count - 1,
-                f"{count} training cases",
+                f"{count} sampled training cases",
                 current,
                 {} if count else {"display": "none"},
             )
