@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import Any
 
 import pandas as pd
-import streamlit as st
 
 from hugiml.dashboard.display import dataframe_for_display
 from hugiml.dashboard.runner import fit_hugiml_config
@@ -83,6 +82,8 @@ def _result_row(label: str, result: Any, X: pd.DataFrame | None = None) -> dict:
 
 
 def _explain_failure(result: Any) -> None:
+    import streamlit as st
+
     status = getattr(result, "status_", "ok")
     if status == "ok":
         return
@@ -103,6 +104,8 @@ def _explain_failure(result: Any) -> None:
 
 
 def render_config_comparison(ctx: dict, *args, **kwargs) -> None:
+    import streamlit as st
+
     st.subheader("Configuration Comparison")
     st.markdown(
         """

@@ -7,7 +7,6 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-import streamlit as st
 
 from hugiml.dashboard.components.patterns import format_conjunction
 from hugiml.dashboard.display import dataframe_for_display
@@ -310,6 +309,8 @@ def _activated_patterns(model: Any, row: pd.DataFrame) -> pd.DataFrame:
 
 
 def render_prediction(model: Any = None, X: pd.DataFrame | None = None, case_ids: Any = None, *args, **kwargs) -> None:
+    import streamlit as st
+
     st.subheader("Case Review")
     st.markdown(
         """

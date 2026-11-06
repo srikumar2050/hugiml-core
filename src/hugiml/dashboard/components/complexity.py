@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import Any
 
 import pandas as pd
-import streamlit as st
 
 from hugiml.compute_complexity import get_complexity, get_complexity_report
 from hugiml.dashboard.display import dataframe_for_display
@@ -40,6 +39,8 @@ def _base_estimator_structure(model: Any) -> dict[str, Any] | None:
 
 
 def render_complexity(model: Any = None, *args, **kwargs) -> None:
+    import streamlit as st
+
     st.markdown("### Complexity and Budget Evidence")
     if model is None:
         st.info("No model loaded.")

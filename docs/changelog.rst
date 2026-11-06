@@ -6,6 +6,12 @@ The canonical release notes live in ``CHANGELOG.md`` at the repository root. Kee
 Recent releases
 ---------------
 
+1.1.24 — 2026-11-06
+~~~~~~~~~~~~~~~~~~~
+
+* Added a bounded live dashboard (Render) with sample datasets, estimator selection, and pruning comparisons.
+* Updated benchmark summaries.
+
 1.1.23 — 2026-10-27
 ~~~~~~~~~~~~~~~~~~~
 

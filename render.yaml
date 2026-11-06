@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: hugiml-live-demo
+    runtime: docker
+    plan: free
+    dockerfilePath: ./deployment/public-dashboard/Dockerfile
+    dockerContext: .
+    healthCheckPath: /healthz
+    autoDeployTrigger: checksPass
+    envVars:
+      - key: HUGIML_DEMO_SECRET
+        generateValue: true

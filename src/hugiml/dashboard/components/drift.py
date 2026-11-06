@@ -14,7 +14,6 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-import streamlit as st
 
 from hugiml.dashboard.components.patterns import _get_rpte_feature_flow_audit
 from hugiml.dashboard.display import dataframe_for_display
@@ -256,6 +255,8 @@ def _pattern_activation_summary(model: Any, X: pd.DataFrame | None) -> pd.DataFr
 
 
 def render_drift(model: Any = None, X: pd.DataFrame | None = None, y: Any = None, *args, **kwargs) -> None:
+    import streamlit as st
+
     st.subheader("Monitoring")
     st.markdown(
         """
@@ -460,6 +461,8 @@ def _cv_metadata_frame(report: dict[str, Any]) -> pd.DataFrame:
 
 def render_cv_monitoring(model: Any = None, X: pd.DataFrame | None = None, y: Any = None, cv: int = 5) -> dict[str, Any] | None:
     """Render cross-validated monitoring stability evidence."""
+    import streamlit as st
+
     st.markdown("#### Cross-Validation Monitoring")
     st.caption(
         "Evaluates whether prediction behaviour, fold-level PSI, fit timing, and HUG source-pattern counts remain stable across CV folds. Under RPTE, these pattern counts describe construction inputs rather than final LR terms."

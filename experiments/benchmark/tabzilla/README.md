@@ -4,6 +4,8 @@ This workflow evaluates the 36 classification tasks in the TabZilla suite using 
 
 ## Protocol
 
+The published panel contains 35 completed datasets and 140 model records. The remaining catalog entry is albert (189356): dense baseline one-hot encoding exceeds available memory. Each completed dataset includes all four models and ten successful folds per model. See the [published result definitions](../README.md#published-result-definitions).
+
 - Dataset cache: `datasetsTabzilla/`
 - Results: `experiments/benchmark/tabzilla/tabzilla_results/`
 - Default validation: nested cross-validation

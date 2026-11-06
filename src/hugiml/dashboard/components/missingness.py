@@ -4,12 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-import matplotlib
 import pandas as pd
-import streamlit as st
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 
 from hugiml.dashboard.display import dataframe_for_display
 
@@ -45,6 +40,11 @@ def missingness_frame(X: pd.DataFrame | None = None, model: Any = None) -> pd.Da
 
 
 def render_missingness(X: pd.DataFrame | None = None, model: Any = None, *args, **kwargs) -> None:
+    import matplotlib
+    import streamlit as st
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
     st.markdown("### Missingness Evidence")
     df = missingness_frame(X, model=model)
     if df.empty:

@@ -4,13 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
-import matplotlib
 import numpy as np
 import pandas as pd
-import streamlit as st
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 
 from hugiml.dashboard.display import dataframe_for_display
 from hugiml.rpte_interpretability import rpte_rule_tree_sections
@@ -550,6 +545,8 @@ def render_rpte_flat_tree_view(
     key_prefix: str = "rpte_flat_tree",
 ) -> list[dict[str, Any]]:
     """Render one RPTE tree as an indented DT-style structure plus coefficients."""
+    import streamlit as st
+
     sections = _rpte_flat_tree_sections(rows, frame)
     st.markdown("#### Flat RPTE tree view")
     st.caption(
@@ -595,6 +592,8 @@ def render_rpte_flat_tree_view(
 
 def render_rpte_rule_conjunctions(model: Any = None) -> pd.DataFrame:
     """Render RPTE leaf indicators and direct source terms."""
+    import streamlit as st
+
     rows = _get_rpte_final_term_rows(model, include_zero_direct=True)
     if not rows:
         return pd.DataFrame()
@@ -784,6 +783,8 @@ def _patterns_to_frame(model: Any) -> pd.DataFrame:
 
 
 def render_patterns(model: Any = None, *args, **kwargs) -> None:
+    import streamlit as st
+
     df = _patterns_to_frame(model)
     final_rows = _get_rpte_final_term_rows(model, include_zero_direct=True)
     audit = _get_rpte_feature_flow_audit(model)
@@ -934,6 +935,11 @@ def population_coverage_frame(model: Any) -> pd.DataFrame:
 
 def render_pattern_support_coverage_audit(model: Any, pattern_df: pd.DataFrame) -> dict[str, pd.DataFrame]:
     """Render model-level pattern support and population-coverage evidence."""
+    import matplotlib
+    import streamlit as st
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
     st.markdown("### Pattern Support Distribution & Population Coverage")
     st.caption(
         "Audits whether mined patterns are broadly grounded in the training population or concentrated in sparse subgroups."

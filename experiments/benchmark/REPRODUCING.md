@@ -1,10 +1,10 @@
-﻿# Reproducing the HUGIML benchmarks
+ï»¿# Reproducing the HUGIML benchmarks
 
 This guide provides a common entry point for the internal and external HUGIML benchmark evaluations. The benchmark-specific README files describe dataset definitions, model grids, validation protocols, metrics, and output schemas in greater detail.
 
 ## Reference environment
 
-The published evaluations use Python 3.12 on 64-bit Windows with fixed benchmark seeds and single-threaded model execution unless a benchmark states otherwise. The accompanying constraints file records a tested CPython 3.12 benchmark environment. Results produced by parallel numerical libraries or different hardware may differ slightly because of floating-point ordering. Comparisons should use the stored metric precision rather than require bit-for-bit identity.
+The published evaluations use Python 3.12 on 64-bit Windows with fixed benchmark seeds. Worker allocations are recorded per dataset/model; internal individual fits use one worker while outer and inner validation can run concurrently. The accompanying constraints file records a tested CPython 3.12 benchmark environment. Results produced by parallel numerical libraries or different hardware may differ slightly because of floating-point ordering. Comparisons should use the stored metric precision rather than require bit-for-bit identity.
 
 The instructions are release-neutral. The repository installation reads the package version from the selected source checkout. When referring to a published artifact, `hugiml-core==x.y.z` denotes the release being evaluated; the checkout, installed package, and recorded benchmark metadata should identify the same `x.y.z` release.
 
@@ -92,7 +92,7 @@ See `tabzilla/README.md` for the 36-dataset panel, official folds, multiclass sc
 .\.venv-hugiml\Scripts\python.exe experiments\benchmark\tabarena\run_tabarena_offline_benchmark.py --models all --validation-protocol tabarena --fresh
 ```
 
-TabArena is substantially more computationally demanding. The packaged analysis currently covers 32 of the 38 classification datasets. It uses official outer splits, retained eight-fold inner ensembles, model-agnostic preprocessing fitted independently within each child, and official leaderboard comparisons. See `tabarena/README.md` for details.
+TabArena is substantially more computationally demanding. The packaged analysis currently covers all 38 classification datasets. It uses official outer splits, retained eight-fold inner ensembles, model-agnostic preprocessing fitted independently within each child, and official leaderboard comparisons. See `tabarena/README.md` for details.
 
 ## Resume behavior
 
@@ -117,4 +117,3 @@ Each external dataset folder contains a manifest describing task and dataset ide
 ## Reproducibility scope
 
 Published checkpoint JSON files contain fold-level metrics, timing information, model-selection details, HUGIML route telemetry, RPTE structure fields, and complexity measurements. Dashboards are derived views of these artifacts. Exact wall-clock durations depend on hardware and system load, while predictive metrics should reproduce within normal numerical tolerance when the constrained environment, fixed seeds, stored datasets, and specified splits are used.
-

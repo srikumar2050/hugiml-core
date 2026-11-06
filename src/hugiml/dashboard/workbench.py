@@ -25,7 +25,6 @@ if not hasattr(np, "int"):
 if not hasattr(np, "bool"):
     np.bool = bool  # type: ignore[attr-defined]
 import pandas as pd
-import streamlit as st
 from sklearn.base import clone
 from sklearn.ensemble import GradientBoostingClassifier, RandomForestClassifier
 from sklearn.linear_model import LogisticRegression
@@ -1203,6 +1202,8 @@ def run_experiments(
 
 
 def _render_intro(ctx: dict[str, Any]) -> None:
+    import streamlit as st
+
     st.markdown(
         f"""
         <div class="hugiml-hero hugiml-workbench-hero">
@@ -1223,6 +1224,8 @@ def _render_intro(ctx: dict[str, Any]) -> None:
 
 
 def _render_workbench_workflow() -> None:
+    import streamlit as st
+
     st.markdown(
         """
         <div class="hugiml-workflow">
@@ -1253,6 +1256,8 @@ def _render_workbench_workflow() -> None:
 
 
 def _render_model_picker() -> dict[str, list[str]]:
+    import streamlit as st
+
     st.markdown("### 1. Select models")
     st.caption("Compact names are used to conserve space; hover or read the helper text for full names.")
     selected: dict[str, list[str]] = {}
@@ -1283,6 +1288,8 @@ def _render_model_picker() -> dict[str, list[str]]:
     return selected
 
 def _render_hugiml_config() -> list[dict[str, Any]]:
+    import streamlit as st
+
     st.markdown("#### HUGIML")
     mode = st.radio(
         "Configuration mode",
@@ -1607,6 +1614,8 @@ def _render_hugiml_config() -> list[dict[str, Any]]:
     return configs
 
 def _render_generic_config(model_name: str) -> list[dict[str, Any]]:
+    import streamlit as st
+
     st.markdown(f"#### {_model_short(model_name)}")
     st.caption(model_name)
     params = _default_model_params(model_name)
@@ -1721,6 +1730,8 @@ def _render_generic_config(model_name: str) -> list[dict[str, Any]]:
 
 
 def _render_configs(selected: dict[str, list[str]]) -> dict[str, list[dict[str, Any]]]:
+    import streamlit as st
+
     st.markdown("### 2. Configure parameters")
     all_models = [m for models in selected.values() for m in models]
     if not all_models:
@@ -1814,6 +1825,8 @@ def _successful_runs(runs: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _render_curve_comparison(runs: list[dict[str, Any]], y: np.ndarray) -> None:
+    import streamlit as st
+
     ok_runs = _successful_runs(runs)
     if not ok_runs:
         st.info("Curves are available after at least one successful run.")
@@ -1865,6 +1878,8 @@ def _render_curve_comparison(runs: list[dict[str, Any]], y: np.ndarray) -> None:
 
 
 def _render_ordered_feature_importance(fi: Any, limit: int = 20) -> None:
+    import streamlit as st
+
     if not isinstance(fi, pd.DataFrame) or fi.empty:
         st.info("No feature-importance artifact was exposed by this model.")
         return
@@ -2076,6 +2091,8 @@ def _safe_stringify_objects(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def _filter_text_table(label: str, df: pd.DataFrame, key: str, *, columns: list[str] | None = None, limit: int = 300) -> None:
+    import streamlit as st
+
     if df.empty:
         st.info(f"No {label.lower()} artifact is available for this HUGIML run.")
         return
@@ -2094,6 +2111,8 @@ def _filter_text_table(label: str, df: pd.DataFrame, key: str, *, columns: list[
 
 def _render_hugiml_artifacts(model: Any, run_id: str = "hugiml", key_prefix: str = "") -> None:
     """Render fitted HUGIML artifacts without mixing RPTE stages."""
+    import streamlit as st
+
     patterns = _hugiml_patterns_frame(model)
     features = _hugiml_features_frame(model)
 
@@ -2311,6 +2330,8 @@ def _render_hugiml_artifacts(model: Any, run_id: str = "hugiml", key_prefix: str
                 st.json(composition)
 
 def _render_lr_artifacts(model: Any, X: pd.DataFrame | None, key_prefix: str = "") -> None:
+    import streamlit as st
+
     coef_df = _coefficient_frame(model, X)
     if coef_df.empty:
         st.info("No coefficient artifact is available for this LR run.")
@@ -2321,6 +2342,8 @@ def _render_lr_artifacts(model: Any, X: pd.DataFrame | None, key_prefix: str = "
 
 
 def _render_dt_artifacts(model: Any, X: pd.DataFrame | None, key_prefix: str = "") -> None:
+    import streamlit as st
+
     if X is None:
         st.info("No feature frame is available for tree inspection.")
         return
@@ -2349,6 +2372,8 @@ def _ebm_terms_frame(model: Any) -> pd.DataFrame:
 
 
 def _render_ebm_artifacts(model: Any, key_prefix: str = "") -> None:
+    import streamlit as st
+
     terms = _ebm_terms_frame(model)
     if terms.empty:
         st.info("No EBM term artifact is available from this package/version.")
@@ -2411,6 +2436,8 @@ def _rulefit_rules_frame(model: Any, max_rows: int | None = 50) -> pd.DataFrame:
 
 
 def _render_rulefit_artifacts(model: Any, implementation: str | None, key_prefix: str = "") -> None:
+    import streamlit as st
+
     if implementation == "sklearn-rulefit-style":
         st.info("This is labelled as RuleFit-style fallback, not official imodels.RuleFitClassifier.")
     elif implementation == "imodels-rulefit":
@@ -2429,6 +2456,8 @@ def _render_interpretable_artifacts(selected_run: dict[str, Any], key_prefix: st
     ``key_prefix`` scopes all Streamlit widget keys within this call so that
     multiple tabs can render the same run without widget ID conflicts.
     """
+    import streamlit as st
+
     artifact = selected_run.get("artifact") if isinstance(selected_run.get("artifact"), dict) else {}
     model = artifact.get("model") if isinstance(artifact, dict) else None
     X_model = artifact.get("feature_frame") if isinstance(artifact, dict) else None
@@ -2486,6 +2515,8 @@ def _successful_model_runs(runs: list[dict[str, Any]], model_name: str) -> list[
 
 
 def _select_base_alt_runs(model_runs: list[dict[str, Any]], *, key_prefix: str, model_label: str) -> tuple[dict[str, Any], dict[str, Any]] | tuple[None, None]:
+    import streamlit as st
+
     if len(model_runs) < 2:
         st.info(f"Run at least two successful {model_label} configurations to compare artifacts.")
         return None, None
@@ -2513,6 +2544,8 @@ def _select_base_alt_runs(model_runs: list[dict[str, Any]], *, key_prefix: str, 
 
 def _render_selected_config_pair(base_run: dict[str, Any], alt_run: dict[str, Any]) -> None:
     """Show selected configs as field rows with Base/Alternate value columns."""
+    import streamlit as st
+
     base_df = _run_config_frame(base_run, "Base")
     alt_df = _run_config_frame(alt_run, "Alternate")
     cfg_df = pd.concat([base_df, alt_df], ignore_index=True)
@@ -2572,6 +2605,8 @@ def _normalised_rule_inventory(run: dict[str, Any]) -> pd.DataFrame:
 
 
 def _render_rulefit_rule_delta(runs: list[dict[str, Any]]) -> None:
+    import streamlit as st
+
     rule_runs = _successful_model_runs(runs, "RuleFit")
     base_run, alt_run = _select_base_alt_runs(rule_runs, key_prefix="wb_rulefit_delta", model_label="RuleFit")
     if base_run is None or alt_run is None:
@@ -2636,6 +2671,8 @@ def _run_model_and_frame(run: dict[str, Any]) -> tuple[Any, pd.DataFrame | None]
 
 
 def _render_lr_coefficient_comparison(runs: list[dict[str, Any]]) -> None:
+    import streamlit as st
+
     lr_runs = _successful_model_runs(runs, "Logistic Regression")
     base_run, alt_run = _select_base_alt_runs(lr_runs, key_prefix="wb_lr_compare", model_label="LR")
     if base_run is None or alt_run is None:
@@ -2674,6 +2711,8 @@ def _decision_tree_text(run: dict[str, Any], max_depth: int = 10) -> str:
 
 
 def _render_dt_tree_comparison(runs: list[dict[str, Any]]) -> None:
+    import streamlit as st
+
     dt_runs = _successful_model_runs(runs, "Decision Tree")
     base_run, alt_run = _select_base_alt_runs(dt_runs, key_prefix="wb_dt_compare", model_label="DT")
     if base_run is None or alt_run is None:
@@ -2697,6 +2736,8 @@ def _render_dt_tree_comparison(runs: list[dict[str, Any]]) -> None:
 
 
 def _render_artifact_comparison(runs: list[dict[str, Any]]) -> None:
+    import streamlit as st
+
     choices: list[tuple[str, str]] = []
     model_counts = {name: len(_successful_model_runs(runs, name)) for name in ("HUGIML", "RuleFit", "Logistic Regression", "Decision Tree")}
     if model_counts.get("HUGIML", 0) >= 2:
@@ -2744,6 +2785,8 @@ def _render_artifact_comparison(runs: list[dict[str, Any]]) -> None:
 
 
 def _render_hugiml_pattern_delta(runs: list[dict[str, Any]]) -> None:
+    import streamlit as st
+
     hug_runs = [r for r in _successful_runs(runs) if r.get("model") == "HUGIML"]
     if len(hug_runs) < 2:
         st.info("Run at least two successful HUGIML configurations to compare pattern additions and removals.")
@@ -2872,6 +2915,8 @@ def _normalised_rpte_rule_inventory(run: dict[str, Any]) -> pd.DataFrame:
 
 
 def _render_rpte_rule_delta(runs: list[dict[str, Any]]) -> None:
+    import streamlit as st
+
     rpte_runs = _hugiml_runs_using_rpte(runs)
     if len(rpte_runs) < 2:
         st.info("Run at least two successful HUGIML configurations with an RPTE downstream estimator to compare rule additions and removals.")
@@ -2955,6 +3000,8 @@ def _render_rpte_rule_delta(runs: list[dict[str, Any]]) -> None:
 
 
 def _render_interpretability_comparison(runs: list[dict[str, Any]]) -> None:
+    import streamlit as st
+
     ok_runs = _successful_runs(runs)
     interpretable = [r for r in ok_runs if r.get("model") in {"HUGIML", "Logistic Regression", "Decision Tree", "EBM", "RuleFit"}]
     if not interpretable:
@@ -3005,6 +3052,8 @@ def _render_interpretability_comparison(runs: list[dict[str, Any]]) -> None:
             _render_interpretable_artifacts(run, key_prefix=f"interp_{run.get('run_id', '')}_")
 
 def _render_selected_run_details(selected_run: dict[str, Any], y: np.ndarray) -> None:
+    import streamlit as st
+
     artifact = selected_run.get("artifact") or {}
     y_proba = artifact.get("y_proba") if isinstance(artifact, dict) else None
     y_pred = artifact.get("y_pred") if isinstance(artifact, dict) else None
@@ -3077,6 +3126,8 @@ def _promoted_evaluation_bundle(selected_run: dict[str, Any], y: Any) -> dict[st
 
 def _render_promotion(selected_run: dict[str, Any], ctx: dict[str, Any]) -> None:
     # Only HUGIML runs can be promoted to Governance.
+    import streamlit as st
+
     if selected_run.get("model") != "HUGIML":
         return
     if not st.button("Promote this HUGIML run to Governance", type="primary", width="stretch"):
@@ -3128,6 +3179,8 @@ def _render_promotion(selected_run: dict[str, Any], ctx: dict[str, Any]) -> None
 
 def _request_results_drilldown_tab() -> None:
     """Keep the Workbench on Results → Model drill-down after model selection."""
+    import streamlit as st
+
     st.session_state["hugiml_jump_to_results_tab"] = True
     st.session_state["hugiml_nav_section"] = "Results"
     st.session_state["hugiml_results_inner_section"] = "Model drill-down"
@@ -3135,6 +3188,8 @@ def _request_results_drilldown_tab() -> None:
 
 def _request_results_pattern_delta_tab() -> None:
     """Keep the Workbench on Results → Artifact comparison."""
+    import streamlit as st
+
     st.session_state["hugiml_jump_to_results_tab"] = True
     st.session_state["hugiml_nav_section"] = "Results"
     st.session_state["hugiml_results_inner_section"] = "Artifact comparison"
@@ -3222,6 +3277,8 @@ def _run_config_frame(run: dict[str, Any], label: str) -> pd.DataFrame:
 
 
 def _render_results(ctx: dict[str, Any]) -> None:
+    import streamlit as st
+
     runs = st.session_state.get("hugiml_workbench_runs", [])
     if not runs:
         st.info("Run experiments to populate the leaderboard and comparison plots.")
@@ -3357,6 +3414,8 @@ def _fmt(value: Any) -> str:
 
 
 def render_workbench(ctx: dict[str, Any], section: str = "Setup") -> None:
+    import streamlit as st
+
     message = st.session_state.pop("hugiml_workbench_last_message", None)
     if message:
         st.success(message)

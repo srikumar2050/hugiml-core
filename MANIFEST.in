@@ -22,6 +22,9 @@ include experiments/benchmark/openml_cc18/openml_cc18_results/benchmark_results.
 include experiments/benchmark/pmlbmini/pmlbmini_results/benchmark_results.json
 include experiments/benchmark/tabzilla/tabzilla_results/benchmark_results.json
 include experiments/benchmark/tabarena/tabarena_results/benchmark_results.json
+include experiments/scalability/scalability_results/scalability_data.json
+include render.yaml
+recursive-include deployment/public-dashboard *.py *.css *.txt *.md Dockerfile Dockerfile.dockerignore
 recursive-include docs *.md *.rst *.py *.css *.png *.txt
 recursive-include docker Dockerfile* *.py *.yml
 recursive-include kubernetes *.yaml

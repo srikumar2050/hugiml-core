@@ -10,10 +10,8 @@ from __future__ import annotations
 
 from typing import Any
 
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
-import streamlit as st
 
 from hugiml.dashboard.components.patterns import (
     _get_rpte_feature_flow_audit,
@@ -103,6 +101,8 @@ def _extract_figure(value: Any) -> Any | None:
 
 
 def _render_model_figure(model: Any, method_name: str, title: str) -> bool:
+    import streamlit as st
+
     method = getattr(model, method_name, None)
     if not callable(method):
         st.info(f"{title} is not available for this installed model version.")
@@ -401,6 +401,8 @@ def feature_shape_frame(model: Any, feature: str, X: Any = None) -> pd.DataFrame
 
 def plot_feature_shape(model: Any, X: Any, feature: str) -> Any | None:
     """Plot an EBM-like HUGIML feature shape using singleton log-odds coefficients."""
+    import matplotlib.pyplot as plt
+
     df = feature_shape_frame(model, feature, X)
     if df.empty:
         return None
@@ -440,6 +442,9 @@ def render_feature_effect_profiles(model: Any = None, X: Any = None, *args: Any,
     contribution of being in that bin, which is the HUGIML analogue of an EBM
     shape value. Compound patterns are excluded by design.
     """
+    import matplotlib.pyplot as plt
+    import streamlit as st
+
     st.markdown("### Feature Effect Profiles")
     st.caption(
         "EBM-style one-dimensional HUGIML shape profiles: x = feature bin/range, "
@@ -481,6 +486,8 @@ def render_feature_effect_profiles(model: Any = None, X: Any = None, *args: Any,
 
 def render_adaptive_binning_evidence(model: Any = None, X: Any = None, *args: Any, **kwargs: Any) -> pd.DataFrame:
     """Render bin-profile/IG evidence for adaptive binning decisions."""
+    import streamlit as st
+
     st.markdown("### Adaptive Binning Evidence")
     st.caption(
         "Shows the selected per-feature bin count and information-gain evidence used to make "
@@ -578,6 +585,8 @@ def survivor_led_patterns_frame(model: Any) -> pd.DataFrame:
 
 def render_survivor_led_pattern_audit(model: Any = None, *args: Any, **kwargs: Any) -> pd.DataFrame:
     """Render audit evidence for patterns surfaced by interaction-relaxed mining."""
+    import streamlit as st
+
     st.markdown("### Survivor-Led Pattern Audit")
     st.caption(
         "Shows ordinary HUG pattern rows whose source features were admitted through "
@@ -622,6 +631,8 @@ def rpte_rule_evidence_frame(model: Any) -> pd.DataFrame:
 
 def render_rpte_rule_evidence(model: Any = None, *args: Any, **kwargs: Any) -> pd.DataFrame:
     """Render leaf-tree and direct-source evidence separately."""
+    import streamlit as st
+
     st.markdown("### RPTE Final LR Evidence")
     st.caption(
         "The final logistic regression contains RPTE leaf indicators followed by HUGIML "
@@ -718,6 +729,9 @@ def augmented_pair_effects_frame(model: Any) -> pd.DataFrame:
 
 def render_augmented_pair_traceability(model: Any = None, *args: Any, **kwargs: Any) -> pd.DataFrame:
     """Render audit traceability for augmented pair features."""
+    import matplotlib.pyplot as plt
+    import streamlit as st
+
     st.markdown("### Augmented Pair Effect Traceability")
     st.caption(
         "Surfaces raw formulas, raw-scale coefficients, missingness/eligibility rates, "

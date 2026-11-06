@@ -84,6 +84,8 @@ jobs:
       # Git Bash is always available on GitHub Windows runners.
       - name: Run tests
         shell: bash
+        env:
+          PYTEST_ADDOPTS: ${{ runner.os == 'Windows' && '--capture=sys' || '' }}
         run: |
           pytest tests/ \
             --cov=hugiml \

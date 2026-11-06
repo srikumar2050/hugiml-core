@@ -4,13 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
-import matplotlib
 import numpy as np
 import pandas as pd
-import streamlit as st
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 
 from hugiml.dashboard.display import dataframe_for_display
 
@@ -260,6 +255,11 @@ def render_performance(
     *args,
     **kwargs,
 ) -> None:
+    import matplotlib
+    import streamlit as st
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
     st.subheader("Validation Evidence")
     st.markdown(
         """

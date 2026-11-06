@@ -6,7 +6,6 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-import streamlit as st
 
 from hugiml.dashboard.components.patterns import _get_rpte_feature_flow_audit
 from hugiml.dashboard.components.rpte_governance import (
@@ -254,6 +253,8 @@ def _result_summary_row(label: str, score: float | None, input_features: int, re
 
 
 def _render_standard_pruning_analysis(ctx: dict, *args, **kwargs) -> None:
+    import streamlit as st
+
     st.subheader("Representation Pruning")
     st.markdown(
         """
@@ -486,6 +487,8 @@ def _render_standard_pruning_analysis(ctx: dict, *args, **kwargs) -> None:
 
 def _render_rpte_rebuild_analysis(ctx: dict) -> None:
     """Render RPTE-aware final-term review and full-pipeline sensitivity controls."""
+    import streamlit as st
+
     X = ctx["X"]
     y = ctx["y"]
     model = ctx["model"]

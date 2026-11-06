@@ -40,3 +40,5 @@ continues incomplete pairs.
 The assembled CSV, JSON, and HTML files report predictive metrics, split and
 pair timing, complexity units, statistical comparisons, and optional RPTE
 structure distributions.
+
+The published panel contains 44 PMLBmini datasets × 7 models (308 records), using repeated rotating splits. See the [published result definitions](../README.md#published-result-definitions) for dataset-balanced aggregation and timing.

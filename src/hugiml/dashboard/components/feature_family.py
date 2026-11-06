@@ -4,14 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
-import matplotlib
 import numpy as np
 import pandas as pd
-import streamlit as st
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
-from matplotlib.lines import Line2D
 
 from hugiml.dashboard.components.patterns import (
     _RPTE_LEAF_DIRECT_REPRESENTATIONS,
@@ -299,6 +293,8 @@ def _render_rpte_feature_family_audit(
     X: pd.DataFrame | None,
 ) -> dict[str, pd.DataFrame]:
     """Render the fitted leaf-plus-direct-source RPTE representation by role."""
+    import streamlit as st
+
     flow = _get_rpte_feature_flow_audit(model)
     flow_frame = rpte_representation_flow_frame(model, X)
     final_terms = _rpte_rules_to_frame(_get_rpte_final_term_rows(model, include_zero_direct=True))
@@ -424,6 +420,12 @@ def _render_standard_feature_family_audit(
     excluded_columns: list[str] | None = None,
     id_column: str | None = None,
 ) -> dict[str, pd.DataFrame]:
+    import matplotlib
+    import streamlit as st
+    from matplotlib.lines import Line2D
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
     st.markdown("### Feature Family Audit")
     flow = _get_rpte_feature_flow_audit(model)
     if flow:

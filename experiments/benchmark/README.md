@@ -97,3 +97,13 @@ RuleFit uses stratified internal regularization validation with up to five folds
 bounded by the smallest class in the training data passed to each fit. At least
 two examples per class are required. This internal selection is separate from
 the benchmark's five outer folds and three inner folds.
+
+## Published result definitions
+
+Headline means give each completed dataset equal weight. Internal HUGIML summaries require an explicit scenario filter: `augmented_pair` and `interaction_relaxed` each contain 100 records and must not be pooled into one 100-dataset estimate.
+
+Model-inspection units use [`compute_complexity.py`](../../src/hugiml/compute_complexity.py): active source contributions for linear models, conditions along active tree paths for tree models, active rule literals for RuleFit, and active score cells expanded by source arity for EBM. RPTE includes tree-path conditions and active direct terms. These are accounting units, not standardized feature counts or measured human review time.
+
+Dataset-level outcomes are the units of statistical comparison. Fold metrics are averaged within repeat and then across repeats; undefined multiclass fold AUC uses the documented pooled out-of-fold fallback. Only complete matched model sets enter cross-model summaries. Task exclusions are recorded in each external result file's metadata.
+
+Timing comparisons are within-suite. `tune_seconds` includes selected fitting when `fit_time_included_in_tuning` is true; do not add that fit time twice. A separately recorded zero fit time can mean that the fitted model was retained during tuning. `split_seconds` includes the measured split phases and evaluation overhead; `pair_seconds` measures the dataset/model execution. Parallel allocations and validation protocols must also match before making speed comparisons.

@@ -6,7 +6,6 @@ import json
 from typing import Any
 
 import pandas as pd
-import streamlit as st
 
 from hugiml.dashboard.display import dataframe_for_display
 from hugiml.serialization import generate_sbom
@@ -134,6 +133,8 @@ def evidence_status_frame(model: Any = None, result: Any = None, X: Any = None, 
 
 
 def render_overview(model: Any = None, result: Any = None, roles: dict | None = None, meta: dict | None = None, X: Any = None, y: Any = None) -> None:
+    import streamlit as st
+
     roles = roles or {}
     meta = meta or {}
 

@@ -10,6 +10,8 @@ and the complete internal and external benchmark workflows.
 
 ## Protocol
 
+Headline HUGIML results use `augmented_pair`; `interaction_relaxed` is a separate dashboard selection. See the [published result definitions](README.md#published-result-definitions) for matching, inspection units, and timing.
+
 - Outer evaluation: five-fold shuffled stratified cross-validation
 - Inner selection: three-fold stratified cross-validation
 - Random seed: 42

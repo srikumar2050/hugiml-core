@@ -6,7 +6,6 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-import streamlit as st
 
 from hugiml.dashboard.components.feature_family import pattern_feature_audit
 from hugiml.dashboard.components.patterns import (
@@ -142,6 +141,8 @@ def render_fairness(
     *args,
     **kwargs,
 ) -> None:
+    import streamlit as st
+
     st.markdown("### Sensitive / Proxy Feature Review")
     sensitive_columns = list(sensitive_columns or [])
 

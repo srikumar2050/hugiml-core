@@ -21,6 +21,8 @@ Static `B` values are evaluated through the `B` parameter sweep. The saga and SG
 
 ## Datasets
 
+The published file contains 308 measurement rows across row, feature, and hyperparameter sweeps on two synthetic generators and eight model/scenario identifiers. The largest row counts and the 10,000-feature maximum belong to different measurements. Memory is peak process-tree RSS (`peak_process_tree_rss_mb`), reported as GiB after conversion.
+
 The scalability benchmark uses two deterministic synthetic binary-classification datasets.
 
 | Dataset | Purpose | Signal structure |
@@ -214,7 +216,7 @@ The HTML dashboard embeds its results and loads Chart.js from a CDN. It includes
 - Interactive charts for fit time, test AUC, peak memory, and pattern count
 - Ratio chart for p-scaling fit time relative to XGBoost
 - Grouped tables by model
-- Peak RSS displayed in GB
+- Peak RSS displayed in GiB
 
 ### Parameter sweep sections
 

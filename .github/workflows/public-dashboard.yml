@@ -1,0 +1,37 @@
+name: Public dashboard container
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  container:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Lint deployment
+        run: |
+          pip install ruff
+          ruff check deployment/public-dashboard
+      - name: Build image
+        run: docker build -f deployment/public-dashboard/Dockerfile -t hugiml-demo .
+      - name: Exercise HTTP service
+        shell: bash
+        run: |
+          export HUGIML_DEMO_SECRET="$(python -c 'import secrets; print(secrets.token_urlsafe(48))')"
+          docker run -d --name hugiml-demo -p 10000:10000 --memory=512m --cpus=1 -e HUGIML_DEMO_SECRET -e HUGIML_DEMO_LOCAL_HTTP=1 hugiml-demo
+          for dataset in credit churn claims; do
+            python deployment/public-dashboard/smoke_test.py http://localhost:10000 "$dataset" auto
+          done
+      - name: Container diagnostics
+        if: always()
+        run: |
+          docker logs hugiml-demo || true
+          docker inspect hugiml-demo --format '{{.State.OOMKilled}}' || true
+          docker rm -f hugiml-demo || true

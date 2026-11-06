@@ -3566,36 +3566,13 @@ def methodology_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
                 grid = get_hugiml_grid(grid_name)
                 grid.update(dict(spec.get("overrides", {})))
             lr_C = float((grid.get("lr_C") or [0.5 if model == "HUGIML" else 0.1])[0])
-            solver_note = (
-                "Direct logistic branch: L1 penalty with binary liblinear "
-                f"(max_iter=300) or multiclass SAGA (max_iter=500), C={lr_C:g}. "
-                "RPTE downstream fits use L1/liblinear with max_iter=300."
-            )
             notes = [
                 "execution_mode=production",
                 f"lr_source_policy={metadata.get('lr_source_policy', 'standard')}",
                 "n_jobs=1",
-                solver_note,
-                "Downstream redundancy uses one training-only VIF analysis; generated terms with VIF greater than 5 are reduced when an earlier preferred term explains at least 80 percent of their variance, while originals are preserved and patterns precede augmented pairs.",
+                "lr_solver=adaptive_l1",
+                f"lr_C={lr_C:g}",
             ]
-            if scenario_id == "augmented_pair":
-                notes.extend(
-                    [
-                        "Inner cross-validation selects between the stated logistic-regression base estimator and one-vs-rest RPTE.",
-                        "Numeric 0/1 columns remain numeric and eligible for augmented-pair transforms.",
-                        "RPTE uses leaf indicators together with downstream inputs not selected in accepted tree splits.",
-                        "RPTE lookahead is adaptive for this path.",
-                    ]
-                )
-            else:
-                notes.extend(
-                    [
-                        "Inner cross-validation selects between the stated logistic-regression base estimator and one-vs-rest RPTE.",
-                        "Numeric 0/1 indicators are treated categorically for the pattern-mining surface.",
-                        "Interaction relaxation is performed by the pattern miner; augmented pairs are disabled.",
-                        "RPTE uses the sequential backend with lookahead inactive for this path.",
-                    ]
-                )
             hugiml_models.append(
                 {
                     "model": f'{model} - {spec["label"]}',
