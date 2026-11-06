@@ -18,11 +18,11 @@ Why HUGIML?
 * **Python ergonomics:** the estimator follows the scikit-learn API and works with pandas DataFrames or NumPy arrays.
 
 
-Current release focus
----------------------
+Live dashboard
+--------------
 
-The 1.1.23 release adds model-loading safeguards and input validation.
-Training algorithms and defaults are unchanged. See :doc:`changelog`.
+The bounded live dashboard provides sample datasets, estimator selection,
+and pruning comparisons. `Try the live dashboard <https://hugiml-live-demo.onrender.com>`_.
 
 The complete 1.1.x documentation remains in this guide, including execution
 modes, adaptive binning, feature modes, augmented-pair features, RPTE,
